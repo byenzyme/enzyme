@@ -1,8 +1,38 @@
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const DEFAULT_MODEL: &str = "google/gemini-2.5-flash-lite";
+const FREE_CONFIG_URL: &str =
+    "https://enzyme-server-production.up.railway.app/enzyme-python/free-config";
+
+/// Where the resolved API configuration came from.
+#[derive(Debug, Clone)]
+pub enum ConfigProvider {
+    OpenAiEnv,
+    AuthFile,
+    ServerFallback,
+}
+
+/// Fully resolved LLM configuration (key, URL, model, source).
+#[derive(Debug, Clone)]
+pub struct ResolvedConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    pub provider: ConfigProvider,
+}
+
+/// Shape of the JSON returned by the free-config endpoint.
+#[derive(Deserialize)]
+struct FreeConfigResponse {
+    api_key: String,
+    base_url: String,
+    model: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -88,7 +118,7 @@ struct ChoiceMessage {
 
 #[derive(Deserialize)]
 struct AuthConfig {
-    openrouter_api_key: String,
+    api_key: String,
 }
 
 impl LlmClient {
@@ -169,32 +199,59 @@ impl LlmClient {
     }
 }
 
-/// Resolve the API key and base URL for LLM requests.
+/// Fetch a free shared API key from the Enzyme server.
+async fn fetch_free_config() -> Result<ResolvedConfig> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    debug!("Fetching free config from {}", FREE_CONFIG_URL);
+
+    let resp: FreeConfigResponse = client
+        .get(FREE_CONFIG_URL)
+        .send()
+        .await
+        .context("failed to reach Enzyme server for free config")?
+        .error_for_status()
+        .context("Enzyme server returned an error for free config")?
+        .json()
+        .await
+        .context("failed to parse free config response")?;
+
+    info!("Resolved API config from Enzyme server (model={})", resp.model);
+
+    Ok(ResolvedConfig {
+        api_key: resp.api_key,
+        base_url: resp.base_url,
+        model: resp.model,
+        provider: ConfigProvider::ServerFallback,
+    })
+}
+
+/// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
 /// 1. `OPENAI_API_KEY` env var + `OPENAI_BASE_URL` (defaults to OpenRouter)
-/// 2. `OPENROUTER_API_KEY` env var (legacy, uses OpenRouter base URL)
-/// 3. `~/.enzyme/auth.json`
-pub fn resolve_api_config() -> Result<(String, String)> {
+/// 2. `~/.enzyme/auth.json` → `{"api_key": "..."}`
+/// 3. Enzyme server free-config endpoint (shared key for first-time users)
+pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     // 1. OPENAI_API_KEY + optional OPENAI_BASE_URL (primary)
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
         if !key.is_empty() {
             let base_url = std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
             debug!("Resolved API key from OPENAI_API_KEY (base_url={})", base_url);
-            return Ok((key, base_url));
+            return Ok(ResolvedConfig {
+                api_key: key,
+                base_url,
+                model: DEFAULT_MODEL.to_string(),
+                provider: ConfigProvider::OpenAiEnv,
+            });
         }
     }
 
-    // 2. OPENROUTER_API_KEY (legacy fallback)
-    if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
-        if !key.is_empty() {
-            debug!("Resolved API key from OPENROUTER_API_KEY environment variable");
-            return Ok((key, DEFAULT_BASE_URL.to_string()));
-        }
-    }
-
-    // 3. Fall back to ~/.enzyme/auth.json
+    // 2. Fall back to ~/.enzyme/auth.json
     let home_dir = dirs::home_dir().context("Could not determine home directory")?;
     let auth_path = home_dir.join(".enzyme").join("auth.json");
 
@@ -205,19 +262,33 @@ pub fn resolve_api_config() -> Result<(String, String)> {
         let config: AuthConfig = serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse auth config at {}", auth_path.display()))?;
 
-        if !config.openrouter_api_key.is_empty() {
+        if !config.api_key.is_empty() {
             debug!("Resolved API key from {}", auth_path.display());
-            return Ok((config.openrouter_api_key, DEFAULT_BASE_URL.to_string()));
+            return Ok(ResolvedConfig {
+                api_key: config.api_key,
+                base_url: DEFAULT_BASE_URL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
+                provider: ConfigProvider::AuthFile,
+            });
+        }
+    }
+
+    // 3. Fetch shared key from Enzyme server
+    match fetch_free_config().await {
+        Ok(cfg) => return Ok(cfg),
+        Err(e) => {
+            warn!("Failed to fetch free config from server: {}", e);
         }
     }
 
     bail!(
-        "No API key found. Set OPENAI_API_KEY (+ OPENAI_BASE_URL), OPENROUTER_API_KEY, \
-         or create ~/.enzyme/auth.json with {{\"openrouter_api_key\": \"...\"}}"
+        "No API key found. Checked: OPENAI_API_KEY, \
+         ~/.enzyme/auth.json, and Enzyme server. Set one of the above or \
+         ensure network access for the free tier."
     )
 }
 
 /// Backward-compatible: resolve just the API key.
-pub fn resolve_api_key() -> Result<String> {
-    resolve_api_config().map(|(key, _)| key)
+pub async fn resolve_api_key() -> Result<String> {
+    resolve_api_config().await.map(|c| c.api_key)
 }

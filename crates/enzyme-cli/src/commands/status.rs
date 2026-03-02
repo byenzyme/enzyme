@@ -46,7 +46,7 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
     }
 
     // Check for API key
-    match enzyme_core::llm::resolve_api_key() {
+    match enzyme_core::llm::resolve_api_key().await {
         Ok(_) => println!("API key:    configured"),
         Err(_) => println!("API key:    not configured"),
     }

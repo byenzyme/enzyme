@@ -13,7 +13,7 @@ use crate::db::{Database, Repository};
 use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
     parse_catalyst_response, get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
-    catalyst_response_format,
+    catalyst_response_format, DEFAULT_MODEL,
 };
 use crate::models::{Catalyst, Entity};
 
@@ -47,6 +47,8 @@ pub struct CatalystConfig<'a> {
     pub guide_signal: Option<&'a str>,
     /// Optional ENZYME_GUIDE content for vault context.
     pub vault_guide: Option<&'a str>,
+    /// LLM model to use for catalyst generation.
+    pub model: &'a str,
 }
 
 impl<'a> Default for CatalystConfig<'a> {
@@ -64,6 +66,7 @@ impl<'a> Default for CatalystConfig<'a> {
             custom_guidance: None,
             guide_signal: None,
             vault_guide: None,
+            model: DEFAULT_MODEL,
         }
     }
 }
@@ -225,8 +228,10 @@ impl<'a> CatalystPipeline<'a> {
         let llm = Arc::new(self.llm.clone());
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
 
+        let model = config.model.to_string();
         for job in jobs {
             let llm = Arc::clone(&llm);
+            let model = model.clone();
             join_set.spawn(async move {
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
@@ -236,7 +241,7 @@ impl<'a> CatalystPipeline<'a> {
                 for attempt in 0..3u32 {
                     match llm
                         .chat_completion(
-                            "google/gemini-2.5-flash-lite",
+                            &model,
                             job.messages.clone(),
                             GenerationParams {
                                 response_format: Some(catalyst_response_format()),

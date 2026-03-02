@@ -69,7 +69,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
         }
     };
 
-    let api_config = match resolve_api_config() {
+    let api_config = match resolve_api_config().await {
         Ok(cfg) => Some(cfg),
         Err(e) => {
             tracing::warn!("API config resolution failed: {}", e);
@@ -98,11 +98,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
     // Load enzyme config for catalyst profile/format settings
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
 
-    let cat_stats = if let Some((api_key, base_url)) = api_config {
+    let cat_stats = if let Some(resolved) = api_config {
         let total = sel_result.entities.len();
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
 
-        let llm = LlmClient::with_base_url(&api_key, &base_url);
+        let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
         let cat_pipeline = CatalystPipeline::new(&db, &llm);
         let tx_cat = tx.clone();
 
@@ -120,6 +120,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
             custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
             guide_signal: enzyme_config.guide_signal.as_deref(),
             vault_guide,
+            model: &resolved.model,
         };
 
         let stats = cat_pipeline.run(
@@ -183,7 +184,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
         Some(stats)
     } else {
         tx.send(DisplayEvent::ApiSkipped(
-            "No OpenRouter API key — skipping catalyst generation. Set OPENROUTER_API_KEY or create ~/.enzyme/auth.json.".to_string()
+            "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string()
         )).ok();
         None
     };
