@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -35,6 +36,10 @@ enum Commands {
         /// Run in background
         #[arg(long)]
         detached: bool,
+
+        /// Vault guide content (or pass via stdin)
+        #[arg(long)]
+        guide: Option<String>,
     },
 
     /// Refresh the vault index (alias for init)
@@ -44,6 +49,10 @@ enum Commands {
 
         #[arg(long)]
         detached: bool,
+
+        /// Vault guide content (or pass via stdin)
+        #[arg(long)]
+        guide: Option<String>,
     },
 
     /// Search using catalyst-based approximate matching
@@ -100,6 +109,23 @@ fn init_tracing(verbose: u8) {
         .init();
 }
 
+/// Read vault guide from --guide flag or stdin (if piped).
+fn resolve_vault_guide(flag: Option<String>) -> Option<String> {
+    if let Some(guide) = flag {
+        if guide.is_empty() { None } else { Some(guide) }
+    } else if !atty::is(atty::Stream::Stdin) {
+        // stdin is piped — read it
+        let mut buf = String::new();
+        if std::io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
+            Some(buf)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     match vault {
         Some(p) => Ok(p),
@@ -121,12 +147,13 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached } => {
-            commands::init::run_init(&vault_path, full, detached).await?;
+        Commands::Init { full, detached, guide } => {
+            let vault_guide = resolve_vault_guide(guide);
+            commands::init::run_init(&vault_path, full, detached, vault_guide.as_deref()).await?;
         }
-        Commands::Refresh { full, detached } => {
-            // Refresh is an alias for init
-            commands::init::run_init(&vault_path, full, detached).await?;
+        Commands::Refresh { full, detached, guide } => {
+            let vault_guide = resolve_vault_guide(guide);
+            commands::init::run_init(&vault_path, full, detached, vault_guide.as_deref()).await?;
         }
         Commands::Catalyze { query, limit } => {
             commands::catalyze::run_catalyze(&vault_path, &query, limit).await?;

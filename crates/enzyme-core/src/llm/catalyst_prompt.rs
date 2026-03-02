@@ -40,7 +40,7 @@ struct CatalystPayload {
 pub fn build_system_prompt(
     format_key: Option<&str>,
     custom_guidance: Option<&CustomProfileGuidance>,
-    enzyme_guide: Option<&str>,
+    vault_guide: Option<&str>,
 ) -> String {
     let fmt = format_key
         .and_then(get_format)
@@ -87,7 +87,7 @@ Always respond with valid JSON that includes the catalysts and topic names.",
     let mut prompt = format!("{base}\n\n{profiles_section}");
 
     // Optional vault overview
-    if let Some(guide) = enzyme_guide {
+    if let Some(guide) = vault_guide {
         prompt.push_str(&format!(
             "\n\n<vault_overview>\n\
 The following is the ENZYME_GUIDE for this vault, providing an overview of all tracked \
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_system_prompt_with_enzyme_guide() {
+    fn test_build_system_prompt_with_vault_guide() {
         let prompt = build_system_prompt(None, None, Some("My vault guide content"));
         assert!(prompt.contains("<vault_overview>"));
         assert!(prompt.contains("My vault guide content"));

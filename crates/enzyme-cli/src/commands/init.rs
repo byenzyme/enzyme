@@ -17,7 +17,7 @@ use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
 use crate::display::{DisplayEvent, InitDisplay};
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<()> {
+pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guide: Option<&str>) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -91,10 +91,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
     // Load enzyme config for catalyst profile/format settings
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
 
-    // Load ENZYME_GUIDE.md if it exists
-    let enzyme_guide_path = vault_path.join("ENZYME_GUIDE.md");
-    let enzyme_guide = fs::read_to_string(&enzyme_guide_path).ok();
-
     let cat_stats = if let Some((api_key, base_url)) = api_config {
         let total = sel_result.entities.len();
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
@@ -116,7 +112,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
                 .unwrap_or(DEFAULT_FORMAT_KEY),
             custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
             guide_signal: enzyme_config.guide_signal.as_deref(),
-            enzyme_guide: enzyme_guide.as_deref(),
+            vault_guide,
         };
 
         let stats = cat_pipeline.run(

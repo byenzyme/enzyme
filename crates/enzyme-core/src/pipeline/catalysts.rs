@@ -43,7 +43,7 @@ pub struct CatalystConfig<'a> {
     /// Optional guide signal for calibrating catalyst generation.
     pub guide_signal: Option<&'a str>,
     /// Optional ENZYME_GUIDE content for vault context.
-    pub enzyme_guide: Option<&'a str>,
+    pub vault_guide: Option<&'a str>,
 }
 
 impl<'a> Default for CatalystConfig<'a> {
@@ -60,7 +60,7 @@ impl<'a> Default for CatalystConfig<'a> {
             format_key: DEFAULT_FORMAT_KEY,
             custom_guidance: None,
             guide_signal: None,
-            enzyme_guide: None,
+            vault_guide: None,
         }
     }
 }
@@ -141,7 +141,7 @@ impl<'a> CatalystPipeline<'a> {
         let system_prompt = build_system_prompt(
             Some(config.format_key),
             config.custom_guidance,
-            config.enzyme_guide,
+            config.vault_guide,
         );
 
         // Resolve the default profile once
