@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,7 +13,7 @@ use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
     parse_catalyst_response,
 };
-use crate::models::Catalyst;
+use crate::models::{Catalyst, Entity};
 
 pub struct CatalystPipeline<'a> {
     repo: Repository<'a>,
@@ -26,15 +27,48 @@ pub struct CatalystStats {
     pub duration_ms: u64,
 }
 
+/// Progress event emitted during catalyst generation.
+#[derive(Debug, Clone)]
+pub enum CatalystEvent {
+    /// An entity is being processed. Contains (entity_name, entity_type, completed, total).
+    EntityStarted {
+        entity_name: String,
+        entity_type: String,
+    },
+    /// An entity finished with generated catalyst texts.
+    EntityCompleted {
+        entity_name: String,
+        entity_type: String,
+        catalyst_texts: Vec<String>,
+        completed: usize,
+        total: usize,
+    },
+    /// An entity was skipped (no context samples).
+    EntitySkipped {
+        entity_name: String,
+        completed: usize,
+        total: usize,
+    },
+    /// An entity failed.
+    EntityFailed {
+        entity_name: String,
+        error: String,
+        completed: usize,
+        total: usize,
+    },
+}
+
 /// Per-entity context needed for an LLM call.
 struct EntityJob {
     entity_name: String,
+    entity_type: String,
     messages: Vec<Message>,
 }
 
 /// Result of a single entity's catalyst generation.
 struct EntityResult {
     entity_name: String,
+    entity_type: String,
     catalysts: Option<Vec<(String, String)>>,
     error: Option<String>,
 }
@@ -47,11 +81,19 @@ impl<'a> CatalystPipeline<'a> {
         }
     }
 
+    /// Run catalyst generation for the given pre-selected entities.
+    ///
+    /// `entities` — pre-selected from the selection pipeline.
+    /// `entity_profiles` — per-entity catalyst profile overrides (currently passed
+    ///   through for future prompt customization).
+    /// `catalysts_per_entity` — number of catalysts to generate per entity.
+    /// `on_event` — callback for progress events.
     pub async fn run(
         &self,
-        top_entities: usize,
+        entities: &[Entity],
+        _entity_profiles: &HashMap<String, String>,
         catalysts_per_entity: usize,
-        on_progress: impl Fn(&str, usize, usize),
+        on_event: impl Fn(CatalystEvent),
     ) -> Result<CatalystStats> {
         let start = Instant::now();
         let mut stats = CatalystStats {
@@ -61,9 +103,8 @@ impl<'a> CatalystPipeline<'a> {
             duration_ms: 0,
         };
 
-        let entities = self.repo.get_top_entities(top_entities, "recency_score")?;
         let total = entities.len();
-        info!(total, "generating catalysts for top entities");
+        info!(total, "generating catalysts for selected entities");
 
         let system_prompt = build_system_prompt();
 
@@ -71,7 +112,7 @@ impl<'a> CatalystPipeline<'a> {
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
 
-        for entity in &entities {
+        for entity in entities {
             let entity_id = entity.id.unwrap_or(0);
             let entity_name = &entity.name;
 
@@ -93,6 +134,7 @@ impl<'a> CatalystPipeline<'a> {
 
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
+                entity_type: entity.entity_type.as_str().to_string(),
                 messages: vec![
                     Message {
                         role: "system".to_string(),
@@ -106,9 +148,13 @@ impl<'a> CatalystPipeline<'a> {
             });
         }
 
-        // Report skipped entities (folders like Articles, Books, Tweets, etc.)
-        for name in &skipped {
-            on_progress(name, 0, total);
+        // Report skipped entities
+        for (i, name) in skipped.iter().enumerate() {
+            on_event(CatalystEvent::EntitySkipped {
+                entity_name: name.clone(),
+                completed: i + 1,
+                total,
+            });
         }
 
         // Phase 2: Fire all LLM calls concurrently
@@ -119,6 +165,7 @@ impl<'a> CatalystPipeline<'a> {
             let llm = Arc::clone(&llm);
             join_set.spawn(async move {
                 let entity_name = job.entity_name.clone();
+                let entity_type = job.entity_type.clone();
 
                 // Retry loop: 3 attempts with exponential backoff
                 let mut response = None;
@@ -155,6 +202,7 @@ impl<'a> CatalystPipeline<'a> {
                 let Some(response_text) = response else {
                     return EntityResult {
                         entity_name,
+                        entity_type,
                         catalysts: None,
                         error: Some("all retry attempts failed".to_string()),
                     };
@@ -163,11 +211,13 @@ impl<'a> CatalystPipeline<'a> {
                 match parse_catalyst_response(&response_text) {
                     Ok(pairs) => EntityResult {
                         entity_name,
+                        entity_type,
                         catalysts: Some(pairs),
                         error: None,
                     },
                     Err(e) => EntityResult {
                         entity_name,
+                        entity_type,
                         catalysts: None,
                         error: Some(format!("parse error: {e}")),
                     },
@@ -188,17 +238,21 @@ impl<'a> CatalystPipeline<'a> {
                 }
             };
 
-            on_progress(&entity_result.entity_name, completed, total);
-
-            if let Some(error) = entity_result.error {
+            if let Some(ref error) = entity_result.error {
                 warn!(
                     entity_name = entity_result.entity_name.as_str(),
                     "catalyst generation failed: {}",
                     error
                 );
+                on_event(CatalystEvent::EntityFailed {
+                    entity_name: entity_result.entity_name.clone(),
+                    error: error.clone(),
+                    completed,
+                    total,
+                });
                 stats
                     .errors
-                    .push((entity_result.entity_name, error));
+                    .push((entity_result.entity_name, error.clone()));
                 continue;
             }
 
@@ -206,6 +260,8 @@ impl<'a> CatalystPipeline<'a> {
                 // Delete old catalysts and insert new ones
                 self.repo
                     .delete_catalysts_for_entity(&entity_result.entity_name)?;
+
+                let catalyst_texts: Vec<String> = pairs.iter().map(|(t, _)| t.clone()).collect();
 
                 let catalysts: Vec<Catalyst> = pairs
                     .into_iter()
@@ -222,6 +278,15 @@ impl<'a> CatalystPipeline<'a> {
                 let count = catalysts.len();
                 self.repo.insert_catalysts(&catalysts)?;
                 stats.catalysts_generated += count;
+
+                on_event(CatalystEvent::EntityCompleted {
+                    entity_name: entity_result.entity_name.clone(),
+                    entity_type: entity_result.entity_type,
+                    catalyst_texts,
+                    completed,
+                    total,
+                });
+
                 info!(
                     entity_name = entity_result.entity_name.as_str(),
                     count,

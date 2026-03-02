@@ -426,6 +426,130 @@ impl<'a> Repository<'a> {
         Ok(rows)
     }
 
+    /// Get trending entities with guaranteed type diversity.
+    ///
+    /// Phase 1: Take guaranteed minimums from each type bucket (tags, links, folders).
+    /// Phase 2: Merge remaining entities, sort by recency, fill to total_limit.
+    /// Only includes root-level entities (no `/` in name for links/folders).
+    pub fn get_trending_entities(
+        &self,
+        min_tags: usize,
+        min_links: usize,
+        min_folders: usize,
+        total_limit: usize,
+    ) -> Result<Vec<Entity>> {
+        let all = self.get_all_entities()?;
+
+        // Filter to root-level only (no path separators in name)
+        // Tags can have nested paths like "enzyme/pmf" — those are allowed
+        let is_root_level = |e: &Entity| -> bool {
+            match e.entity_type {
+                EntityType::Tag => true, // tags can be nested (e.g. #enzyme/pmf)
+                EntityType::Link | EntityType::Folder => !e.name.contains('/'),
+            }
+        };
+
+        let root_entities: Vec<Entity> = all
+            .into_iter()
+            .filter(|e| is_root_level(e))
+            .collect();
+
+        // Separate by type and sort each by recency_score descending
+        let mut tags: Vec<Entity> = root_entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Tag)
+            .cloned()
+            .collect();
+        let mut links: Vec<Entity> = root_entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Link)
+            .cloned()
+            .collect();
+        let mut folders: Vec<Entity> = root_entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Folder)
+            .cloned()
+            .collect();
+
+        let sort_by_recency = |a: &Entity, b: &Entity| -> std::cmp::Ordering {
+            b.trends
+                .recency_score
+                .partial_cmp(&a.trends.recency_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+
+        tags.sort_by(sort_by_recency);
+        links.sort_by(sort_by_recency);
+        folders.sort_by(sort_by_recency);
+
+        // Phase 1: guaranteed minimums
+        let mut selected: Vec<Entity> = Vec::new();
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for entity in tags.iter().take(min_tags) {
+            used.insert(entity.name.clone());
+            selected.push(entity.clone());
+        }
+        for entity in links.iter().take(min_links) {
+            used.insert(entity.name.clone());
+            selected.push(entity.clone());
+        }
+        for entity in folders.iter().take(min_folders) {
+            used.insert(entity.name.clone());
+            selected.push(entity.clone());
+        }
+
+        // Phase 2: fill remaining slots from all types
+        if selected.len() < total_limit {
+            let mut remaining: Vec<Entity> = root_entities
+                .into_iter()
+                .filter(|e| !used.contains(&e.name))
+                .collect();
+            remaining.sort_by(sort_by_recency);
+
+            for entity in remaining {
+                if selected.len() >= total_limit {
+                    break;
+                }
+                selected.push(entity);
+            }
+        }
+
+        // Final sort by recency descending
+        selected.sort_by(sort_by_recency);
+        selected.truncate(total_limit);
+
+        Ok(selected)
+    }
+
+    /// Look up entities by their (name, type) pairs.
+    ///
+    /// Returns only entities that exist in the database. The order may differ
+    /// from the input.
+    pub fn get_entities_by_names(&self, names: &[(&str, EntityType)]) -> Result<Vec<Entity>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+
+        for (name, entity_type) in names {
+            let rows = self.db.query_read(
+                "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
+                 FROM entities WHERE name = ?1 AND type = ?2",
+                &[
+                    &name.to_lowercase() as &dyn rusqlite::types::ToSql,
+                    &entity_type.as_str(),
+                ],
+                map_entity_row,
+            )?;
+
+            results.extend(rows);
+        }
+
+        Ok(results)
+    }
+
     /// Retrieve every entity in the database.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.db.query_read(

@@ -58,6 +58,10 @@ sha2 = "0.10"
 # ndarray (used by ort for tensor I/O)
 ndarray = "0.17"
 
+# Terminal
+crossterm = "0.28"
+atty = "0.2"
+
 # Utilities
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }

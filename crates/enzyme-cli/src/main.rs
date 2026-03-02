@@ -6,6 +6,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod display;
 
 #[derive(Parser)]
 #[command(name = "enzyme", about = "Local-first knowledge indexing and approximate search")]

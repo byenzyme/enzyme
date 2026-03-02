@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::fs;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -9,10 +10,14 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{LlmClient, resolve_api_config};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
-use enzyme_core::pipeline::catalysts::CatalystPipeline;
+use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystEvent};
+use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
+use crate::display::{DisplayEvent, InitDisplay};
+
 pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<()> {
+    let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
     // Ensure .enzyme directory exists
@@ -24,99 +29,146 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
     // Open database
     let db = Database::open(&paths.vault_db)?;
 
+    // Start animated display
+    let display = InitDisplay::start();
+    let tx = display.sender();
+
     // ── Step 1: Indexing ───────────────────────────────────────────────────
-    println!("Indexing vault...");
+    tx.send(DisplayEvent::IndexingStart).ok();
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+    let tx_idx = tx.clone();
     let idx_stats = indexing.run(full, |msg| {
-        println!("  {}", msg);
+        tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
     })?;
 
-    println!(
-        "  Indexed: {} discovered, {} new, {} updated, {} deleted, {} entities",
-        idx_stats.files_discovered,
-        idx_stats.files_new,
-        idx_stats.files_updated,
-        idx_stats.files_deleted,
-        idx_stats.entities_extracted,
-    );
+    tx.send(DisplayEvent::IndexingComplete {
+        files_discovered: idx_stats.files_discovered,
+        files_new: idx_stats.files_new,
+        files_updated: idx_stats.files_updated,
+        files_deleted: idx_stats.files_deleted,
+        entities_extracted: idx_stats.entities_extracted,
+    }).ok();
 
-    // ── Step 2: Resolve resources upfront ──────────────────────────────────
-    // Check both embedding model and API config before launching either task
-    // so we can run them concurrently.
+    // ── Step 2: Entity selection ──────────────────────────────────────────
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+
+    tx.send(DisplayEvent::SelectionComplete {
+        count: sel_result.entities.len(),
+        source: sel_result.source.clone(),
+    }).ok();
+
+    // ── Step 3: Resolve resources upfront ─────────────────────────────────
     let service = match get_embedding_service(&paths.home) {
         Ok(svc) => Some(svc),
         Err(e) => {
-            println!("Embedding model not found — skipping embeddings.");
-            println!("  {}", e);
+            tx.send(DisplayEvent::EmbeddingSkipped(format!("model not found: {}", e))).ok();
             None
         }
     };
 
     let api_config = resolve_api_config().ok();
 
-    // ── Step 3: Launch doc embedding in background ─────────────────────────
-    // Embedding is CPU/GPU-bound (ONNX inference). It runs in spawn_blocking
-    // with its own Database connection (SQLite WAL allows concurrent writers
-    // with busy_timeout serialization).
+    // ── Step 4: Launch doc embedding in background ────────────────────────
     let embedding_handle = if let Some(svc) = service {
         let db_path = paths.vault_db.clone();
         let embeddings_dir = paths.embeddings_dir.clone();
-        println!("Generating embeddings...");
+        let tx_emb = tx.clone();
+        tx.send(DisplayEvent::EmbeddingStart).ok();
         Some(tokio::task::spawn_blocking(move || {
             let bg_db = Database::open(&db_path)?;
             let pipeline = EmbeddingPipeline::new(&bg_db, svc, embeddings_dir);
             pipeline.run(|done, total| {
-                if total > 0 {
-                    println!("  [embed] {}/{} documents", done, total);
-                }
+                tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
             })
         }))
     } else {
         None
     };
 
-    // ── Step 4: Catalyst generation in foreground ──────────────────────────
-    // Catalysts are IO-bound (HTTP API calls) and already use tokio JoinSet
-    // internally for per-entity concurrency. Running concurrently with
-    // embedding hides the embedding latency behind LLM wait time.
+    // ── Step 5: Catalyst generation in foreground ─────────────────────────
     let cat_stats = if let Some((api_key, base_url)) = api_config {
-        println!("Generating catalysts...");
+        let total = sel_result.entities.len();
+        tx.send(DisplayEvent::DiscoveryStart { total }).ok();
+
         let llm = LlmClient::with_base_url(&api_key, &base_url);
         let cat_pipeline = CatalystPipeline::new(&db, &llm);
-        let stats = cat_pipeline.run(30, 7, |entity, i, total| {
-            println!("  [catalyst] [{}/{}] {}", i, total, entity);
-        }).await?;
+        let tx_cat = tx.clone();
+        let stats = cat_pipeline.run(
+            &sel_result.entities,
+            &sel_result.entity_profiles,
+            7,
+            move |event| {
+                match event {
+                    CatalystEvent::EntityCompleted {
+                        entity_name,
+                        entity_type,
+                        catalyst_texts,
+                        completed,
+                        total,
+                    } => {
+                        tx_cat.send(DisplayEvent::EntityDiscovered {
+                            entity_name,
+                            entity_type: parse_entity_type(&entity_type),
+                            catalyst_texts,
+                            completed,
+                            total,
+                        }).ok();
+                    }
+                    CatalystEvent::EntitySkipped {
+                        entity_name,
+                        completed,
+                        total,
+                    } => {
+                        tx_cat.send(DisplayEvent::EntitySkipped {
+                            entity_name,
+                            completed,
+                            total,
+                        }).ok();
+                    }
+                    CatalystEvent::EntityFailed {
+                        entity_name,
+                        error,
+                        completed,
+                        total,
+                    } => {
+                        tx_cat.send(DisplayEvent::EntityFailed {
+                            entity_name,
+                            error,
+                            completed,
+                            total,
+                        }).ok();
+                    }
+                    CatalystEvent::EntityStarted { .. } => {}
+                }
+            },
+        ).await?;
 
-        println!(
-            "  Catalysts: {} entities processed, {} catalysts generated",
-            stats.entities_processed,
-            stats.catalysts_generated,
-        );
-
-        if !stats.errors.is_empty() {
-            println!("  Catalyst errors: {}", stats.errors.len());
-        }
+        tx.send(DisplayEvent::DiscoveryComplete {
+            entities_processed: stats.entities_processed,
+            catalysts_generated: stats.catalysts_generated,
+        }).ok();
 
         Some(stats)
     } else {
-        println!("No OpenRouter API key found — skipping catalyst generation.");
-        println!("Set OPENROUTER_API_KEY or create ~/.enzyme/auth.json to enable.");
+        tx.send(DisplayEvent::ApiSkipped(
+            "No OpenRouter API key — skipping catalyst generation. Set OPENROUTER_API_KEY or create ~/.enzyme/auth.json.".to_string()
+        )).ok();
         None
     };
 
-    // ── Step 5: Wait for background embedding ──────────────────────────────
+    // ── Step 6: Wait for background embedding ─────────────────────────────
     let emb_completed = if let Some(handle) = embedding_handle {
         match handle.await.context("embedding task panicked")? {
             Ok(stats) => {
-                println!(
-                    "  Embedded: {} documents, {} chunks",
-                    stats.documents_embedded,
-                    stats.chunks_embedded,
-                );
+                tx.send(DisplayEvent::EmbeddingComplete {
+                    documents: stats.documents_embedded,
+                    chunks: stats.chunks_embedded,
+                }).ok();
                 true
             }
             Err(e) => {
-                println!("  Embedding failed: {}", e);
+                tx.send(DisplayEvent::EmbeddingFailed(format!("{}", e))).ok();
                 false
             }
         }
@@ -124,26 +176,36 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
         false
     };
 
-    // ── Step 6: Similarity computation ─────────────────────────────────────
-    // Needs both embeddings on disk and catalysts in DB.
-    // Reuses the same &'static EmbeddingService for catalyst text embedding.
+    // ── Step 7: Similarity computation ────────────────────────────────────
     if emb_completed && cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
-        println!("Computing similarities...");
+        tx.send(DisplayEvent::SimilarityStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
         let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+        let tx_sim = tx.clone();
         let sim_stats = sim_pipeline.run(|done, total| {
-            if total > 0 && done % 10 == 0 {
-                println!("  [{}/{}] catalysts processed", done, total);
-            }
+            tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
         })?;
 
-        println!(
-            "  Similarities: {} catalysts, {} computed",
-            sim_stats.catalysts_processed,
-            sim_stats.similarities_computed,
-        );
+        tx.send(DisplayEvent::SimilarityComplete {
+            catalysts: sim_stats.catalysts_processed,
+            similarities: sim_stats.similarities_computed,
+        }).ok();
     }
 
-    println!("Done! ({}ms)", idx_stats.duration_ms);
+    let duration_ms = start.elapsed().as_millis() as u64;
+    tx.send(DisplayEvent::Done { duration_ms }).ok();
+
+    // Wait for display thread to finish rendering
+    display.finish();
+
     Ok(())
+}
+
+fn parse_entity_type(s: &str) -> enzyme_core::models::EntityType {
+    match s {
+        "tag" => enzyme_core::models::EntityType::Tag,
+        "link" => enzyme_core::models::EntityType::Link,
+        "folder" => enzyme_core::models::EntityType::Folder,
+        _ => enzyme_core::models::EntityType::Tag,
+    }
 }
