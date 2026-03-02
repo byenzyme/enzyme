@@ -13,7 +13,7 @@ use crate::models::EntityType;
 
 /// Top-level `enzyme-config.yaml` that lives at `<vault>/.enzyme/enzyme-config.yaml`
 /// (or `<vault>/enzyme-config.yaml` for backwards compat).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnzymeConfig {
     /// User-curated entities for catalyst generation.
@@ -27,6 +27,18 @@ pub struct EnzymeConfig {
     /// Trending distribution overrides.
     #[serde(default)]
     pub trending: Option<TrendingConfig>,
+
+    /// Catalyst output format (question, thesis, claim).
+    #[serde(default)]
+    pub catalyst_format: Option<String>,
+
+    /// Custom profile guidance from vault guide generator.
+    #[serde(default)]
+    pub custom_profile_guidance: Option<CustomProfileGuidance>,
+
+    /// Optional guide signal for calibrating catalyst generation.
+    #[serde(default)]
+    pub guide_signal: Option<String>,
 
     /// Tags to exclude from trending selection.
     #[serde(default)]
@@ -61,6 +73,32 @@ pub struct EntityOptions {
     pub expandable: bool,
     #[serde(default)]
     pub children: Vec<String>,
+}
+
+/// Custom profile guidance from vault guide generator.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomProfileGuidance {
+    #[serde(default)]
+    pub base_profile: Option<String>,
+    #[serde(default)]
+    pub guidance_lines: Vec<String>,
+    #[serde(default)]
+    pub domain_vocabulary: Option<DomainVocabulary>,
+    #[serde(default)]
+    pub theoretical_frame: Option<String>,
+}
+
+/// Domain-specific vocabulary for custom guidance.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainVocabulary {
+    #[serde(default)]
+    pub metaphors: Vec<String>,
+    #[serde(default)]
+    pub named_concepts: Vec<String>,
+    #[serde(default)]
+    pub structural_patterns: Vec<String>,
 }
 
 /// Override trending distribution minimums.

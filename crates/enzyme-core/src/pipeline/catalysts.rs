@@ -8,10 +8,11 @@ use tokio::task::JoinSet;
 use tracing::{info, warn, debug};
 use uuid::Uuid;
 
+use crate::config::CustomProfileGuidance;
 use crate::db::{Database, Repository};
 use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
-    parse_catalyst_response,
+    parse_catalyst_response, get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
 };
 use crate::models::{Catalyst, Entity};
 
@@ -25,6 +26,43 @@ pub struct CatalystStats {
     pub catalysts_generated: usize,
     pub errors: Vec<(String, String)>,
     pub duration_ms: u64,
+}
+
+/// Configuration for a catalyst generation run.
+pub struct CatalystConfig<'a> {
+    /// Per-entity catalyst profile overrides (entity name -> profile key).
+    pub entity_profiles: &'a HashMap<String, String>,
+    /// Number of catalysts to generate per entity.
+    pub catalysts_per_entity: usize,
+    /// Default profile key for entities without an override.
+    pub default_profile: &'a str,
+    /// Catalyst output format key (question, thesis, claim).
+    pub format_key: &'a str,
+    /// Custom profile guidance from vault guide generator.
+    pub custom_guidance: Option<&'a CustomProfileGuidance>,
+    /// Optional guide signal for calibrating catalyst generation.
+    pub guide_signal: Option<&'a str>,
+    /// Optional ENZYME_GUIDE content for vault context.
+    pub enzyme_guide: Option<&'a str>,
+}
+
+impl<'a> Default for CatalystConfig<'a> {
+    fn default() -> Self {
+        // We can't store a reference to a temporary HashMap in a default,
+        // so callers should always construct this explicitly.
+        // This exists for convenience in tests.
+        static EMPTY_MAP: std::sync::LazyLock<HashMap<String, String>> =
+            std::sync::LazyLock::new(HashMap::new);
+        Self {
+            entity_profiles: &EMPTY_MAP,
+            catalysts_per_entity: 7,
+            default_profile: DEFAULT_PROFILE_KEY,
+            format_key: DEFAULT_FORMAT_KEY,
+            custom_guidance: None,
+            guide_signal: None,
+            enzyme_guide: None,
+        }
+    }
 }
 
 /// Progress event emitted during catalyst generation.
@@ -82,17 +120,10 @@ impl<'a> CatalystPipeline<'a> {
     }
 
     /// Run catalyst generation for the given pre-selected entities.
-    ///
-    /// `entities` — pre-selected from the selection pipeline.
-    /// `entity_profiles` — per-entity catalyst profile overrides (currently passed
-    ///   through for future prompt customization).
-    /// `catalysts_per_entity` — number of catalysts to generate per entity.
-    /// `on_event` — callback for progress events.
     pub async fn run(
         &self,
         entities: &[Entity],
-        _entity_profiles: &HashMap<String, String>,
-        catalysts_per_entity: usize,
+        config: &CatalystConfig<'_>,
         on_event: impl Fn(CatalystEvent),
     ) -> Result<CatalystStats> {
         let start = Instant::now();
@@ -106,7 +137,16 @@ impl<'a> CatalystPipeline<'a> {
         let total = entities.len();
         info!(total, "generating catalysts for selected entities");
 
-        let system_prompt = build_system_prompt();
+        // Build system prompt once (shared across all entities for caching)
+        let system_prompt = build_system_prompt(
+            Some(config.format_key),
+            config.custom_guidance,
+            config.enzyme_guide,
+        );
+
+        // Resolve the default profile once
+        let default_profile = get_profile(config.default_profile)
+            .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
 
         // Phase 1: Pre-fetch all context and build LLM prompts (synchronous, DB-bound)
         let mut jobs: Vec<EntityJob> = Vec::new();
@@ -129,8 +169,27 @@ impl<'a> CatalystPipeline<'a> {
                 continue;
             }
 
-            let user_prompt =
-                build_user_prompt(entity_name, &context_samples, catalysts_per_entity);
+            // Resolve per-entity profile
+            let profile: &CatalystProfile = config
+                .entity_profiles
+                .get(entity_name)
+                .and_then(|key| get_profile(key))
+                .unwrap_or(default_profile);
+
+            let user_prompt = build_user_prompt(
+                entity_name,
+                &context_samples,
+                config.catalysts_per_entity,
+                profile,
+                config.format_key,
+                config.guide_signal,
+            );
+
+            debug!(
+                entity_name = entity_name.as_str(),
+                profile = profile.key,
+                "built prompt for entity"
+            );
 
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),

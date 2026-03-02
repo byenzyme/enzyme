@@ -4,13 +4,14 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 
+use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{LlmClient, resolve_api_config};
+use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
-use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystEvent};
+use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent};
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
@@ -87,6 +88,13 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
     };
 
     // ── Step 5: Catalyst generation in foreground ─────────────────────────
+    // Load enzyme config for catalyst profile/format settings
+    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+
+    // Load ENZYME_GUIDE.md if it exists
+    let enzyme_guide_path = vault_path.join("ENZYME_GUIDE.md");
+    let enzyme_guide = fs::read_to_string(&enzyme_guide_path).ok();
+
     let cat_stats = if let Some((api_key, base_url)) = api_config {
         let total = sel_result.entities.len();
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
@@ -94,10 +102,26 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
         let llm = LlmClient::with_base_url(&api_key, &base_url);
         let cat_pipeline = CatalystPipeline::new(&db, &llm);
         let tx_cat = tx.clone();
+
+        let cat_config = CatalystConfig {
+            entity_profiles: &sel_result.entity_profiles,
+            catalysts_per_entity: 7,
+            default_profile: enzyme_config
+                .catalyst_profile
+                .as_deref()
+                .unwrap_or(DEFAULT_PROFILE_KEY),
+            format_key: enzyme_config
+                .catalyst_format
+                .as_deref()
+                .unwrap_or(DEFAULT_FORMAT_KEY),
+            custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
+            guide_signal: enzyme_config.guide_signal.as_deref(),
+            enzyme_guide: enzyme_guide.as_deref(),
+        };
+
         let stats = cat_pipeline.run(
             &sel_result.entities,
-            &sel_result.entity_profiles,
-            7,
+            &cat_config,
             move |event| {
                 match event {
                     CatalystEvent::EntityCompleted {
