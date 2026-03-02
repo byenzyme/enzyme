@@ -51,6 +51,10 @@ Tags: #open-question marks unresolved threads, #synthesis is for connecting idea
 # Or pipe a guide from a file and initialize within the directory
 cat vault-guide.txt | enzyme init
 
+# Quiet mode — no output, just exit code (for agent/programmatic use)
+enzyme init -q -p /path/to/vault
+enzyme refresh -q -p /path/to/vault
+
 # Search using catalysts
 enzyme catalyze "tension between shipping fast and getting it right" -p /path/to/vault
 

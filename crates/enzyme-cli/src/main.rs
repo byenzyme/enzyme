@@ -40,6 +40,10 @@ enum Commands {
         /// Vault guide content (or pass via stdin)
         #[arg(long)]
         guide: Option<String>,
+
+        /// Suppress all output (for agent/programmatic use)
+        #[arg(short, long)]
+        quiet: bool,
     },
 
     /// Refresh the vault index (alias for init)
@@ -53,6 +57,10 @@ enum Commands {
         /// Vault guide content (or pass via stdin)
         #[arg(long)]
         guide: Option<String>,
+
+        /// Suppress all output (for agent/programmatic use)
+        #[arg(short, long)]
+        quiet: bool,
     },
 
     /// Search using catalyst-based approximate matching
@@ -147,13 +155,13 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached, guide } => {
+        Commands::Init { full, detached, guide, quiet } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_init(&vault_path, full, detached, vault_guide.as_deref()).await?;
+            commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
         }
-        Commands::Refresh { full, detached, guide } => {
+        Commands::Refresh { full, detached, guide, quiet } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_refresh(&vault_path, full, detached, vault_guide.as_deref()).await?;
+            commands::init::run_refresh(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
         }
         Commands::Catalyze { query, limit } => {
             commands::catalyze::run_catalyze(&vault_path, &query, limit).await?;

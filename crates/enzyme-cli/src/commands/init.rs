@@ -19,7 +19,7 @@ use enzyme_core::pipeline::staleness::{check_catalyst_staleness, store_staleness
 
 use crate::display::{DisplayEvent, InitDisplay};
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guide: Option<&str>) -> Result<()> {
+pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -32,8 +32,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
     // Open database
     let db = Database::open(&paths.vault_db)?;
 
-    // Start animated display
-    let display = InitDisplay::start();
+    // Start display (quiet mode suppresses all output)
+    let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
     let tx = display.sender();
 
     // ── Step 1: Indexing ───────────────────────────────────────────────────
@@ -237,7 +237,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
 ///
 /// After a successful init, stores bookkeeping (config hash + entity doc counts)
 /// so the next refresh can detect whether anything changed.
-pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, vault_guide: Option<&str>) -> Result<()> {
+pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // If the DB doesn't exist yet, fall through to full init.
@@ -257,7 +257,7 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, vault_gu
     }
 
     // Run the full pipeline.
-    run_init(vault_path, full, detached, vault_guide).await?;
+    run_init(vault_path, full, detached, quiet, vault_guide).await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;

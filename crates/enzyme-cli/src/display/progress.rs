@@ -168,6 +168,22 @@ impl InitDisplay {
         }
     }
 
+    /// Start in quiet mode — drains all events without any output.
+    pub fn start_quiet() -> Self {
+        let (tx, rx) = mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            // Drain events silently until the channel closes
+            while rx.recv().is_ok() {}
+        });
+
+        Self {
+            sender: Some(tx),
+            handle: Some(handle),
+            is_tty: false,
+        }
+    }
+
     /// Get a clone of the sender for sending events.
     pub fn sender(&self) -> mpsc::Sender<DisplayEvent> {
         self.sender.as_ref().expect("display already finished").clone()
