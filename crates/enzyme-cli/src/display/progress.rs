@@ -31,7 +31,6 @@ pub enum DisplayEvent {
         files_new: usize,
         files_updated: usize,
         files_deleted: usize,
-        entities_extracted: usize,
     },
 
     // Selection
@@ -75,7 +74,7 @@ pub enum DisplayEvent {
     },
     EmbeddingComplete {
         documents: usize,
-        chunks: usize,
+        duration_ms: u64,
     },
     EmbeddingSkipped(String),
     EmbeddingFailed(String),
@@ -88,7 +87,7 @@ pub enum DisplayEvent {
     },
     SimilarityComplete {
         catalysts: usize,
-        similarities: usize,
+        documents: usize,
     },
 
     // API
@@ -231,7 +230,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         files_new,
                         files_updated,
                         files_deleted,
-                        entities_extracted,
                     } => {
                         // Clear animated lines and print final indexing summary
                         clear_lines(&mut out, lines_written);
@@ -239,14 +237,13 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
 
                         let _ = writeln!(
                             out,
-                            "  {}Indexed:{} {} discovered, {} new, {} updated, {} deleted, {} entities",
+                            "  {}Indexed:{} {} discovered, {} new, {} updated, {} deleted",
                             crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                             crossterm::style::ResetColor,
                             files_discovered,
                             files_new,
                             files_updated,
                             files_deleted,
-                            entities_extracted,
                         );
                     }
                     DisplayEvent::SelectionComplete { count, source } => {
@@ -333,7 +330,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         }
                     }
                     DisplayEvent::DiscoveryComplete {
-                        entities_processed,
+                        entities_processed: _,
                         catalysts_generated,
                     } => {
                         clear_lines(&mut out, lines_written);
@@ -342,10 +339,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
 
                         let _ = writeln!(
                             out,
-                            "  {}Catalysts:{} {} entities, {} catalysts generated",
+                            "  {}Catalysts:{} {} generated",
                             crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
                             crossterm::style::ResetColor,
-                            entities_processed,
                             catalysts_generated,
                         );
                     }
@@ -369,16 +365,18 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             lines_written = 1;
                         }
                     }
-                    DisplayEvent::EmbeddingComplete { documents, chunks } => {
+                    DisplayEvent::EmbeddingComplete { documents, duration_ms } => {
                         clear_lines(&mut out, lines_written);
                         lines_written = 0;
+                        let secs = duration_ms as f64 / 1000.0;
+                        let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
                         let _ = writeln!(
                             out,
-                            "  {}Embedded:{} {} documents, {} chunks",
+                            "  {}Embedded:{} {} recent documents ({:.0} docs/sec)",
                             crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                             crossterm::style::ResetColor,
                             documents,
-                            chunks,
+                            docs_per_sec,
                         );
                     }
                     DisplayEvent::EmbeddingSkipped(reason) => {
@@ -430,27 +428,28 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     }
                     DisplayEvent::SimilarityComplete {
                         catalysts,
-                        similarities,
+                        documents,
                     } => {
                         clear_lines(&mut out, lines_written);
                         lines_written = 0;
                         let _ = writeln!(
                             out,
-                            "  {}Similarities:{} {} catalysts, {} computed",
+                            "  {}Similarities:{} {} catalysts \u{00d7} {} documents",
                             crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                             crossterm::style::ResetColor,
                             catalysts,
-                            similarities,
+                            documents,
                         );
                     }
                     DisplayEvent::Done { duration_ms } => {
                         clear_lines(&mut out, lines_written);
+                        let secs = duration_ms as f64 / 1000.0;
                         let _ = writeln!(
                             out,
-                            "  {}Done!{} ({}ms)",
+                            "  {}Done!{} ({:.1}s)",
                             crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                             crossterm::style::ResetColor,
-                            duration_ms,
+                            secs,
                         );
                         let _ = out.flush();
                         return;
@@ -538,11 +537,10 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     files_new,
                     files_updated,
                     files_deleted,
-                    entities_extracted,
                 } => {
                     println!(
-                        "  Indexed: {} discovered, {} new, {} updated, {} deleted, {} entities",
-                        files_discovered, files_new, files_updated, files_deleted, entities_extracted
+                        "  Indexed: {} discovered, {} new, {} updated, {} deleted",
+                        files_discovered, files_new, files_updated, files_deleted
                     );
                 }
                 DisplayEvent::SelectionComplete { count, source } => {
@@ -579,12 +577,12 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     println!("  [catalyst] [{}/{}] {} (failed: {})", completed, total, entity_name, error);
                 }
                 DisplayEvent::DiscoveryComplete {
-                    entities_processed,
+                    entities_processed: _,
                     catalysts_generated,
                 } => {
                     println!(
-                        "  Catalysts: {} entities processed, {} catalysts generated",
-                        entities_processed, catalysts_generated
+                        "  Catalysts: {} generated",
+                        catalysts_generated
                     );
                 }
                 DisplayEvent::EmbeddingStart => {
@@ -595,8 +593,10 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         println!("  [embed] {}/{} documents", done, total);
                     }
                 }
-                DisplayEvent::EmbeddingComplete { documents, chunks } => {
-                    println!("  Embedded: {} documents, {} chunks", documents, chunks);
+                DisplayEvent::EmbeddingComplete { documents, duration_ms } => {
+                    let secs = duration_ms as f64 / 1000.0;
+                    let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
+                    println!("  Embedded: {} recent documents ({:.0} docs/sec)", documents, docs_per_sec);
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
                     println!("  Embedding skipped: {}", reason);
@@ -617,15 +617,16 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 }
                 DisplayEvent::SimilarityComplete {
                     catalysts,
-                    similarities,
+                    documents,
                 } => {
                     println!(
-                        "  Similarities: {} catalysts, {} computed",
-                        catalysts, similarities
+                        "  Similarities: {} catalysts \u{00d7} {} documents",
+                        catalysts, documents
                     );
                 }
                 DisplayEvent::Done { duration_ms } => {
-                    println!("Done! ({}ms)", duration_ms);
+                    let secs = duration_ms as f64 / 1000.0;
+                    println!("Done! ({:.1}s)", secs);
                     return;
                 }
             },

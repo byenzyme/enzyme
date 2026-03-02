@@ -20,6 +20,7 @@ pub struct SimilarityPipeline<'a> {
 pub struct SimilarityStats {
     pub catalysts_processed: usize,
     pub similarities_computed: usize,
+    pub documents_compared: usize,
     pub duration_ms: u64,
 }
 
@@ -47,6 +48,7 @@ impl<'a> SimilarityPipeline<'a> {
             return Ok(SimilarityStats {
                 catalysts_processed: 0,
                 similarities_computed: 0,
+                documents_compared: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
             });
         }
@@ -65,9 +67,19 @@ impl<'a> SimilarityPipeline<'a> {
             return Ok(SimilarityStats {
                 catalysts_processed: 0,
                 similarities_computed: 0,
+                documents_compared: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
             });
         }
+
+        // Count unique documents
+        let documents_compared = {
+            let mut unique: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for emb in &chunk_embeddings {
+                unique.insert(&emb.file_path);
+            }
+            unique.len()
+        };
 
         let total = catalysts.len();
         let mut similarities_computed = 0usize;
@@ -115,6 +127,7 @@ impl<'a> SimilarityPipeline<'a> {
         Ok(SimilarityStats {
             catalysts_processed: total,
             similarities_computed,
+            documents_compared,
             duration_ms,
         })
     }

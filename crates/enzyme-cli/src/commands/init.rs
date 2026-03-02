@@ -47,7 +47,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
         files_new: idx_stats.files_new,
         files_updated: idx_stats.files_updated,
         files_deleted: idx_stats.files_deleted,
-        entities_extracted: idx_stats.entities_extracted,
     }).ok();
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
@@ -189,7 +188,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
             Ok(stats) => {
                 tx.send(DisplayEvent::EmbeddingComplete {
                     documents: stats.documents_embedded,
-                    chunks: stats.chunks_embedded,
+                    duration_ms: stats.duration_ms,
                 }).ok();
                 true
             }
@@ -214,7 +213,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
 
         tx.send(DisplayEvent::SimilarityComplete {
             catalysts: sim_stats.catalysts_processed,
-            similarities: sim_stats.similarities_computed,
+            documents: sim_stats.documents_compared,
         }).ok();
     }
 
