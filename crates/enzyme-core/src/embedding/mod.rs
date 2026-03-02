@@ -23,7 +23,16 @@
 //! let query_vec = service.embed_query("search term")?;
 //! ```
 
+use std::path::Path;
+use std::sync::OnceLock;
+
+use anyhow::Result;
+use tracing::{info, warn};
+
 mod backend;
+mod daemon_client;
+pub mod daemon_protocol;
+pub mod daemon_server;
 pub mod model_files;
 mod normalize;
 mod ort_backend;
@@ -31,8 +40,50 @@ mod rten_backend;
 mod service;
 
 pub use backend::EmbeddingBackend;
+pub use daemon_client::DaemonClient;
+pub use daemon_server::DaemonServer;
 pub use model_files::{ModelFiles, resolve_model_files};
 pub use normalize::{l2_normalize, mean_pool};
 pub use ort_backend::OrtBackend;
 pub use rten_backend::RtenBackend;
 pub use service::EmbeddingService;
+
+static EMBEDDING_SERVICE: OnceLock<EmbeddingService> = OnceLock::new();
+
+/// Return a cached [`EmbeddingService`], preferring the embedding daemon for
+/// warm-model reuse across invocations.
+///
+/// On the first call this function tries to connect to (or auto-start) the
+/// daemon. If that fails it falls back to loading the model in-process via
+/// [`OrtBackend`].
+pub fn get_embedding_service(enzyme_home: &Path) -> Result<&'static EmbeddingService> {
+    if let Some(service) = EMBEDDING_SERVICE.get() {
+        return Ok(service);
+    }
+
+    let service = match try_daemon_backend(enzyme_home) {
+        Ok(backend) => {
+            info!("using daemon embedding backend");
+            EmbeddingService::new(backend)
+        }
+        Err(e) => {
+            warn!("daemon unavailable, falling back to in-process OrtBackend: {e}");
+            let model_files = resolve_model_files(enzyme_home)?;
+            let backend =
+                OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
+            EmbeddingService::new(Box::new(backend))
+        }
+    };
+
+    // Benign race: if another thread set it first, our instance is dropped.
+    let _ = EMBEDDING_SERVICE.set(service);
+    Ok(EMBEDDING_SERVICE.get().unwrap())
+}
+
+/// Try to connect to the daemon, auto-starting it if necessary.
+fn try_daemon_backend(enzyme_home: &Path) -> Result<Box<dyn EmbeddingBackend>> {
+    let socket_path = enzyme_home.join(daemon_protocol::SOCKET_FILENAME);
+    let client = DaemonClient::new(socket_path, enzyme_home.to_path_buf());
+    client.ensure_running()?;
+    Ok(Box::new(client))
+}

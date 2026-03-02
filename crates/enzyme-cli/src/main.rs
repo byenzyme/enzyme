@@ -88,6 +88,10 @@ enum Commands {
 
     /// Show vault status and configuration
     Status,
+
+    /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
+    #[command(name = "__daemon", hide = true)]
+    Daemon,
 }
 
 fn init_tracing(verbose: u8) {
@@ -116,6 +120,11 @@ fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
+
+    // The __daemon command doesn't need a vault path.
+    if matches!(cli.command, Commands::Daemon) {
+        return commands::daemon::run_daemon().await;
+    }
 
     let vault_path = resolve_vault_path(cli.vault)?;
     info!(?vault_path, "resolved vault path");
@@ -148,6 +157,7 @@ async fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
         }
+        Commands::Daemon => unreachable!(),
     }
 
     Ok(())

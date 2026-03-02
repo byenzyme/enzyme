@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::embedding::{EmbeddingService, OrtBackend, resolve_model_files};
+use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::search::context::ContextSearch;
 
@@ -18,15 +18,12 @@ pub async fn run_context(vault_path: &Path, query: &str, limit: usize) -> Result
 
     let db = Database::open(&paths.vault_db)?;
 
-    // Load model and build indices
-    let model_files = resolve_model_files(&paths.home)?;
-    let backend = OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
-    let service = EmbeddingService::new(Box::new(backend));
+    let service = get_embedding_service(&paths.home)?;
 
-    let emb_pipeline = EmbeddingPipeline::new(&db, &service, paths.embeddings_dir.clone());
+    let emb_pipeline = EmbeddingPipeline::new(&db, service, paths.embeddings_dir.clone());
     let (hnsw, bm25) = emb_pipeline.build_search_indices()?;
 
-    let search = ContextSearch::new(&db, &hnsw, &bm25, &service);
+    let search = ContextSearch::new(&db, &hnsw, &bm25, service);
     let results = search.hybrid_search(query, limit)?;
 
     if results.is_empty() {

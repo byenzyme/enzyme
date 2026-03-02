@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::db::{Database, Repository};
 use crate::embedding::EmbeddingService;
@@ -16,6 +17,31 @@ pub struct ContextResult {
     pub score: f64,
     pub content: String,
     pub catalyst_text: Option<String>,
+}
+
+/// Structured response from catalyst-based search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalyzeResponse {
+    pub results: Vec<CatalyzeResultItem>,
+    pub top_contributing_catalysts: Vec<TopCatalyst>,
+}
+
+/// A single result from catalyst-based search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalyzeResultItem {
+    pub file_path: String,
+    pub content: String,
+}
+
+/// A catalyst that contributed to search results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopCatalyst {
+    pub id: String,
+    pub text: String,
+    pub entity: String,
+    pub topic_name: Option<String>,
+    pub relevance_score: f64,
+    pub contribution_count: usize,
 }
 
 /// Orchestrates hybrid search using HNSW + BM25 + catalyst pre-filtering.
@@ -47,13 +73,17 @@ impl<'a> ContextSearch<'a> {
     /// 2. Find top relevant catalysts (embed all catalysts, compare)
     /// 3. For each relevant catalyst, get pre-computed chunk similarities
     /// 4. Aggregate, boost by multi-catalyst and recency, deduplicate, sort
-    pub fn catalyze_search(&self, query: &str, limit: usize) -> Result<Vec<ContextResult>> {
+    /// 5. Compute top contributing catalysts with contribution counts
+    pub fn catalyze_search(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
         let query_vec = self.service.embed_query(query)?;
 
         // Get all catalysts and embed them
         let catalysts = self.repo.get_all_catalysts()?;
         if catalysts.is_empty() {
-            return Ok(Vec::new());
+            return Ok(CatalyzeResponse {
+                results: Vec::new(),
+                top_contributing_catalysts: Vec::new(),
+            });
         }
 
         let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
@@ -68,9 +98,24 @@ impl<'a> ContextSearch<'a> {
         cat_sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         cat_sims.truncate(8);
 
-        // For each relevant catalyst, get pre-computed chunk similarities
-        // Track per-chunk: (max_similarity, catalyst_count, catalyst_text)
-        let mut chunk_scores: HashMap<String, (f64, usize, String)> = HashMap::new();
+        // Build catalyst metadata lookup for the top catalysts
+        let catalyst_meta: HashMap<String, (&str, &str, f64)> = cat_sims
+            .iter()
+            .map(|(idx, sim)| {
+                let c = &catalysts[*idx];
+                (c.id.clone(), (c.text.as_str(), c.entity.as_str(), *sim as f64))
+            })
+            .collect();
+
+        // For each relevant catalyst, get pre-computed chunk similarities.
+        // Track per-chunk: (max_similarity, catalyst_count, best_catalyst_id)
+        struct ChunkScore {
+            max_similarity: f64,
+            catalyst_count: usize,
+            best_catalyst_id: String,
+        }
+
+        let mut chunk_scores: HashMap<String, ChunkScore> = HashMap::new();
 
         for (cat_idx, _cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
@@ -78,19 +123,30 @@ impl<'a> ContextSearch<'a> {
 
             for sim in &sims {
                 let key = format!("{}:{}", sim.file_path, sim.chunk_index);
-                let entry = chunk_scores.entry(key).or_insert((0.0, 0, String::new()));
-                if sim.similarity > entry.0 {
-                    entry.0 = sim.similarity;
-                    entry.2 = catalyst.text.clone();
+                let entry = chunk_scores.entry(key).or_insert(ChunkScore {
+                    max_similarity: 0.0,
+                    catalyst_count: 0,
+                    best_catalyst_id: String::new(),
+                });
+                if sim.similarity > entry.max_similarity {
+                    entry.max_similarity = sim.similarity;
+                    entry.best_catalyst_id = catalyst.id.clone();
                 }
-                entry.1 += 1;
+                entry.catalyst_count += 1;
             }
         }
 
-        // Score and rank
-        let mut results: Vec<ContextResult> = Vec::new();
+        // Score, rank, and build results
+        struct ScoredChunk {
+            file_path: String,
+            chunk_index: i64,
+            score: f64,
+            best_catalyst_id: String,
+        }
 
-        for (key, (max_sim, cat_count, catalyst_text)) in &chunk_scores {
+        let mut scored: Vec<ScoredChunk> = Vec::new();
+
+        for (key, cs) in &chunk_scores {
             let parts: Vec<&str> = key.rsplitn(2, ':').collect();
             if parts.len() != 2 {
                 continue;
@@ -99,7 +155,7 @@ impl<'a> ContextSearch<'a> {
             let file_path = parts[1].to_string();
 
             // Multi-catalyst boost
-            let multi_boost = 1.0 + (*cat_count as f64 - 1.0) * 0.2;
+            let multi_boost = 1.0 + (cs.catalyst_count as f64 - 1.0) * 0.2;
 
             // Recency boost (from document modified_at)
             let mut recency_boost = 1.0;
@@ -109,25 +165,59 @@ impl<'a> ContextSearch<'a> {
                 recency_boost = 1.0 + (-0.693147 / 30.0 * age_days).exp();
             }
 
-            let score = max_sim * multi_boost * recency_boost;
-
-            let content = self.repo.get_chunk_content(&file_path, chunk_index)?
-                .unwrap_or_default();
-
-            results.push(ContextResult {
+            scored.push(ScoredChunk {
                 file_path,
                 chunk_index,
-                score,
-                content,
-                catalyst_text: Some(catalyst_text.clone()),
+                score: cs.max_similarity * multi_boost * recency_boost,
+                best_catalyst_id: cs.best_catalyst_id.clone(),
             });
         }
 
-        // Sort by score descending
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
 
-        Ok(results)
+        // Count catalyst contributions across final results
+        let mut contribution_counts: HashMap<&str, usize> = HashMap::new();
+        for s in &scored {
+            *contribution_counts.entry(&s.best_catalyst_id).or_insert(0) += 1;
+        }
+
+        // Build top contributing catalysts (top 3 by contribution count)
+        let mut top_catalysts: Vec<TopCatalyst> = catalyst_meta
+            .iter()
+            .filter_map(|(id, (text, entity, relevance_score))| {
+                let count = contribution_counts.get(id.as_str()).copied().unwrap_or(0);
+                if count == 0 {
+                    return None;
+                }
+                Some(TopCatalyst {
+                    id: id.clone(),
+                    text: text.to_string(),
+                    entity: entity.to_string(),
+                    topic_name: None,
+                    relevance_score: (*relevance_score * 1000.0).round() / 1000.0,
+                    contribution_count: count,
+                })
+            })
+            .collect();
+        top_catalysts.sort_by(|a, b| b.contribution_count.cmp(&a.contribution_count));
+        top_catalysts.truncate(3);
+
+        // Build result items with content
+        let mut results = Vec::with_capacity(scored.len());
+        for s in &scored {
+            let content = self.repo.get_chunk_content(&s.file_path, s.chunk_index)?
+                .unwrap_or_default();
+            results.push(CatalyzeResultItem {
+                file_path: s.file_path.clone(),
+                content,
+            });
+        }
+
+        Ok(CatalyzeResponse {
+            results,
+            top_contributing_catalysts: top_catalysts,
+        })
     }
 
     /// Direct hybrid search (used by `enzyme context`).

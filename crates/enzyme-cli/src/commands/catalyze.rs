@@ -1,10 +1,12 @@
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Result;
+use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::embedding::{EmbeddingService, OrtBackend, resolve_model_files};
+use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::search::context::ContextSearch;
 
@@ -12,38 +14,38 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Resul
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
-        println!("Vault not initialized. Run 'enzyme init' first.");
+        let output = json!({
+            "error": "Vault not initialized. Run 'enzyme init' first.",
+            "query": query,
+            "results": []
+        });
+        println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
 
     let db = Database::open(&paths.vault_db)?;
 
-    // Load model and build indices
-    let model_files = resolve_model_files(&paths.home)?;
-    let backend = OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
-    let service = EmbeddingService::new(Box::new(backend));
+    let service = get_embedding_service(&paths.home)?;
 
-    let emb_pipeline = EmbeddingPipeline::new(&db, &service, paths.embeddings_dir.clone());
+    let emb_pipeline = EmbeddingPipeline::new(&db, service, paths.embeddings_dir.clone());
     let (hnsw, bm25) = emb_pipeline.build_search_indices()?;
 
-    let search = ContextSearch::new(&db, &hnsw, &bm25, &service);
-    let results = search.catalyze_search(query, limit)?;
+    let search = ContextSearch::new(&db, &hnsw, &bm25, service);
 
-    if results.is_empty() {
-        println!("No results found for: {:?}", query);
-        return Ok(());
-    }
+    let start = Instant::now();
+    let response = search.catalyze_search(query, limit)?;
+    let processing_time = start.elapsed().as_secs_f64();
 
-    for (i, result) in results.iter().enumerate() {
-        println!("{}. {} (score: {:.4})", i + 1, result.file_path, result.score);
-        if let Some(ref cat) = result.catalyst_text {
-            println!("   catalyst: {}", cat);
-        }
-        // Print first 200 chars of content as snippet
-        let snippet: String = result.content.chars().take(200).collect();
-        println!("   {}", snippet.replace('\n', " "));
-        println!();
-    }
+    let output = json!({
+        "query": query,
+        "search_strategy": "catalyze",
+        "processing_time": (processing_time * 1000.0).round() / 1000.0,
+        "total_results": response.results.len(),
+        "results": response.results,
+        "top_contributing_catalysts": response.top_contributing_catalysts,
+    });
+
+    println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
 }

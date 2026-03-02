@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::embedding::{EmbeddingService, OrtBackend, resolve_model_files};
+use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{LlmClient, resolve_api_config};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
@@ -41,13 +41,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
     );
 
     // Step 2: Embeddings
-    match resolve_model_files(&paths.home) {
-        Ok(model_files) => {
+    match get_embedding_service(&paths.home) {
+        Ok(service) => {
             println!("Generating embeddings...");
-            let backend = OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
-            let service = EmbeddingService::new(Box::new(backend));
 
-            let emb_pipeline = EmbeddingPipeline::new(&db, &service, paths.embeddings_dir.clone());
+            let emb_pipeline = EmbeddingPipeline::new(&db, service, paths.embeddings_dir.clone());
             let emb_stats = emb_pipeline.run(|done, total| {
                 if total > 0 {
                     println!("  Embedded {}/{} documents", done, total);
@@ -82,7 +80,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool) -> Result<
 
                     // Step 4: Similarity computation
                     println!("Computing similarities...");
-                    let sim_pipeline = SimilarityPipeline::new(&db, &service, paths.embeddings_dir.clone());
+                    let sim_pipeline = SimilarityPipeline::new(&db, service, paths.embeddings_dir.clone());
                     let sim_stats = sim_pipeline.run(|done, total| {
                         if total > 0 && done % 10 == 0 {
                             println!("  [{}/{}] catalysts processed", done, total);

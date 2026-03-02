@@ -68,7 +68,7 @@ impl EnzymePaths {
     /// Resolve the Enzyme home directory.
     ///
     /// Precedence: `$ENZYME_HOME` > `~/.enzyme`.
-    pub(crate) fn enzyme_home() -> Result<PathBuf> {
+    pub fn enzyme_home() -> Result<PathBuf> {
         if let Ok(home) = env::var("ENZYME_HOME") {
             if !home.is_empty() {
                 return Ok(PathBuf::from(home));
@@ -122,6 +122,21 @@ impl EnzymePaths {
     /// Path to the auth token file.
     pub fn auth_token(&self) -> PathBuf {
         self.home.join("auth.json")
+    }
+
+    /// Path to the embedding daemon Unix socket.
+    pub fn daemon_socket(&self) -> PathBuf {
+        self.home.join("embedding_daemon.sock")
+    }
+
+    /// Path to the embedding daemon PID file.
+    pub fn daemon_pid(&self) -> PathBuf {
+        self.home.join("embedding_daemon.pid")
+    }
+
+    /// Path to the embedding daemon log file.
+    pub fn daemon_log(&self) -> PathBuf {
+        self.home.join("embedding_daemon.log")
     }
 }
 
