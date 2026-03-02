@@ -346,6 +346,33 @@ pub fn parse_catalyst_response(response: &str) -> Result<Vec<(String, String)>> 
         .collect())
 }
 
+/// Build a strict `json_schema` response format for catalyst generation.
+pub fn catalyst_response_format() -> super::client::ResponseFormat {
+    use super::client::{JsonSchemaSpec, ResponseFormat};
+
+    ResponseFormat::JsonSchema {
+        json_schema: JsonSchemaSpec {
+            name: "catalysts_payload".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "catalysts": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "topicNames": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["catalysts", "topicNames"]
+            }),
+            strict: true,
+        },
+    }
+}
+
 /// Strip markdown code fences from a response.
 fn strip_code_fences(response: &str) -> &str {
     let trimmed = response.trim();

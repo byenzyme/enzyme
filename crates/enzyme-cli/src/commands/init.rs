@@ -68,7 +68,13 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
         }
     };
 
-    let api_config = resolve_api_config().ok();
+    let api_config = match resolve_api_config() {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::warn!("API config resolution failed: {}", e);
+            None
+        }
+    };
 
     // ── Step 4: Launch doc embedding in background ────────────────────────
     let embedding_handle = if let Some(svc) = service {

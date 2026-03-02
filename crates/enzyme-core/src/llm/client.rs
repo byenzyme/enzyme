@@ -16,6 +16,28 @@ pub struct GenerationParams {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: u32,
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// OpenAI-compatible `response_format` for structured outputs.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseFormat {
+    /// `{"type": "json_object"}` — model must return valid JSON.
+    #[serde(rename = "json_object")]
+    JsonObject,
+    /// `{"type": "json_schema", "json_schema": { ... }}` — strict schema.
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        json_schema: JsonSchemaSpec,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonSchemaSpec {
+    pub name: String,
+    pub schema: serde_json::Value,
+    pub strict: bool,
 }
 
 impl Default for GenerationParams {
@@ -25,6 +47,7 @@ impl Default for GenerationParams {
             temperature: 0.7,
             top_p: 0.8,
             top_k: 20,
+            response_format: None,
         }
     }
 }
@@ -44,6 +67,8 @@ struct ChatCompletionRequest {
     temperature: f32,
     top_p: f32,
     top_k: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +123,7 @@ impl LlmClient {
             temperature: params.temperature,
             top_p: params.top_p,
             top_k: params.top_k,
+            response_format: params.response_format,
         };
 
         debug!("Sending chat completion request to {} with model {}", url, model);

@@ -62,6 +62,12 @@ pub fn extract_highlights(content: &str) -> Vec<ReadwiseHighlight> {
                 .unwrap_or(prev_pos + 3)
         };
 
+        // block_start can exceed pos when ^rw markers appear inside code
+        // blocks or on the same line — skip these malformed ranges.
+        if block_start > pos {
+            continue;
+        }
+
         let block = highlights_section[block_start..pos].trim();
 
         if block.is_empty() {
@@ -319,6 +325,35 @@ Second highlight
     fn test_chunk_readwise_highlights_empty() {
         let chunks = chunk_readwise_highlights(&[], 5, 10);
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_extract_highlights_with_embedded_code_blocks() {
+        // Reproduces panic when ^rw markers appear inside enzyme/reason code blocks,
+        // causing block_start > pos on the slice at line 65.
+        let content = "\
+## Highlights
+Some highlight text
+^rw100
+```enzyme
+Readwise/Books/<10 Readwise/Articles/<10
+```
+
+The notes highlight a clear tension ^rw200
+Another normal highlight
+^rw300
+";
+        // Should not panic; gracefully skips malformed ranges
+        let highlights = extract_highlights(content);
+        assert!(!highlights.is_empty());
+    }
+
+    #[test]
+    fn test_extract_highlights_markers_on_same_line() {
+        // ^rw markers back to back on same line — block_start will exceed pos
+        let content = "## Highlights\nText before\n^rw100 ^rw200\nMore text\n^rw300\n";
+        let highlights = extract_highlights(content);
+        assert!(!highlights.is_empty());
     }
 
     #[test]

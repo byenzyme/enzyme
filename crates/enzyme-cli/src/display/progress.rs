@@ -310,16 +310,22 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     }
                     DisplayEvent::EntityFailed {
                         entity_name,
-                        error: _,
+                        error,
                         completed,
                         total,
                     } => {
                         discovery_completed = completed;
                         discovery_total = total;
+                        // Truncate error for display
+                        let short_err = if error.len() > 80 {
+                            format!("{}…", &error[..80])
+                        } else {
+                            error
+                        };
                         rolling_window.push(DiscoveryEntry {
                             entity_name,
                             entity_type: EntityType::Tag,
-                            catalyst_text: Some("(failed)".to_string()),
+                            catalyst_text: Some(format!("(failed: {})", short_err)),
                             failed: true,
                         });
                         if rolling_window.len() > ROLLING_WINDOW_SIZE {
@@ -566,11 +572,11 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 }
                 DisplayEvent::EntityFailed {
                     entity_name,
+                    error,
                     completed,
                     total,
-                    ..
                 } => {
-                    println!("  [catalyst] [{}/{}] {} (failed)", completed, total, entity_name);
+                    println!("  [catalyst] [{}/{}] {} (failed: {})", completed, total, entity_name, error);
                 }
                 DisplayEvent::DiscoveryComplete {
                     entities_processed,

@@ -13,6 +13,7 @@ use crate::db::{Database, Repository};
 use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
     parse_catalyst_response, get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
+    catalyst_response_format,
 };
 use crate::models::{Catalyst, Entity};
 
@@ -231,9 +232,12 @@ impl<'a> CatalystPipeline<'a> {
                 for attempt in 0..3u32 {
                     match llm
                         .chat_completion(
-                            "anthropic/claude-sonnet-4",
+                            "google/gemini-2.5-flash-lite",
                             job.messages.clone(),
-                            GenerationParams::default(),
+                            GenerationParams {
+                                response_format: Some(catalyst_response_format()),
+                                ..Default::default()
+                            },
                         )
                         .await
                     {
@@ -267,6 +271,13 @@ impl<'a> CatalystPipeline<'a> {
                     };
                 };
 
+                debug!(
+                    entity_name = entity_name.as_str(),
+                    response_len = response_text.len(),
+                    response_preview = %&response_text[..response_text.len().min(300)],
+                    "LLM response received"
+                );
+
                 match parse_catalyst_response(&response_text) {
                     Ok(pairs) => EntityResult {
                         entity_name,
@@ -274,12 +285,20 @@ impl<'a> CatalystPipeline<'a> {
                         catalysts: Some(pairs),
                         error: None,
                     },
-                    Err(e) => EntityResult {
-                        entity_name,
-                        entity_type,
-                        catalysts: None,
-                        error: Some(format!("parse error: {e}")),
-                    },
+                    Err(e) => {
+                        warn!(
+                            entity_name = entity_name.as_str(),
+                            response_preview = %&response_text[..response_text.len().min(500)],
+                            "failed to parse catalyst response: {}",
+                            e
+                        );
+                        EntityResult {
+                            entity_name,
+                            entity_type,
+                            catalysts: None,
+                            error: Some(format!("parse error: {e}")),
+                        }
+                    }
                 }
             });
         }
