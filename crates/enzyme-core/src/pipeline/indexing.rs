@@ -313,3 +313,382 @@ impl<'a> IndexingPipeline<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Repository;
+    use crate::models::EntityType;
+    use crate::pipeline::staleness::{
+        check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult, StaleReason,
+    };
+    use crate::models::Catalyst;
+    use std::path::Path;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().expect("failed to open in-memory database")
+    }
+
+    /// Create a vault directory with 5 sample markdown files containing tags,
+    /// links, and frontmatter.
+    fn create_test_vault() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_md(
+            dir.path(),
+            "note-a.md",
+            "---\ntitle: Note A\ntags:\n  - alpha\n  - shared\n---\n# Note A\nSome content about [[Topic One]].\n",
+        );
+        write_md(
+            dir.path(),
+            "note-b.md",
+            "---\ntitle: Note B\n---\n# Note B\nReferences [[Topic Two]] and #beta.\n",
+        );
+        write_md(
+            dir.path(),
+            "note-c.md",
+            "# Note C\nPlain file with #gamma and [[Topic One]].\n",
+        );
+        write_md(
+            dir.path(),
+            "note-d.md",
+            "---\ntitle: Note D\ntags:\n  - delta\n---\n# Note D\nAnother document with #shared tag.\n",
+        );
+        write_md(
+            dir.path(),
+            "note-e.md",
+            "# Note E\nFinal file with [[Topic Three]] and #alpha.\n",
+        );
+        dir
+    }
+
+    fn write_md(vault: &Path, name: &str, content: &str) {
+        let path = vault.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, content).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Full first-run indexes everything
+    // -----------------------------------------------------------------------
+    #[test]
+    fn full_first_run_indexes_everything() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        let stats = pipeline.run(true, |_| {}).unwrap();
+
+        assert_eq!(stats.files_discovered, 5);
+        assert_eq!(stats.files_new, 5);
+
+        let repo = Repository::new(&db);
+        assert_eq!(repo.get_document_count().unwrap(), 5);
+
+        let entities = repo.get_all_entities().unwrap();
+        assert!(!entities.is_empty(), "entities should have been extracted");
+
+        // Trending scores should be non-zero for at least some entities
+        let has_nonzero = entities
+            .iter()
+            .any(|e| e.trends.recency_score > 0.0);
+        assert!(has_nonzero, "at least one entity should have a non-zero recency score");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Incremental no-op when nothing changed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn incremental_noop_when_nothing_changed() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let stats = pipeline.run(false, |_| {}).unwrap();
+
+        assert_eq!(stats.files_discovered, 5);
+        assert_eq!(stats.files_new, 0);
+        assert_eq!(stats.files_updated, 0);
+        assert_eq!(stats.entities_extracted, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Incremental detects new files
+    // -----------------------------------------------------------------------
+    #[test]
+    fn incremental_detects_new_files() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let repo = Repository::new(&db);
+        let count_before = repo.get_document_count().unwrap();
+
+        write_md(vault.path(), "new-one.md", "# New One\nContent with #newtag.\n");
+        write_md(
+            vault.path(),
+            "new-two.md",
+            "# New Two\nContent referencing [[New Link]].\n",
+        );
+
+        let stats = pipeline.run(false, |_| {}).unwrap();
+
+        assert_eq!(stats.files_new, 2);
+        assert_eq!(stats.files_updated, 0);
+        assert_eq!(repo.get_document_count().unwrap(), count_before + 2);
+
+        // New entities from the new files should exist
+        let entities = repo.get_all_entities().unwrap();
+        let entity_names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            entity_names.contains(&"newtag"),
+            "newtag entity should exist after indexing new file"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Incremental detects changed files
+    // -----------------------------------------------------------------------
+    #[test]
+    fn incremental_detects_changed_files() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let repo = Repository::new(&db);
+        let hash_before = repo
+            .get_document_by_path("note-a.md")
+            .unwrap()
+            .unwrap()
+            .content_hash
+            .clone();
+
+        // Modify the file content so the hash changes
+        write_md(
+            vault.path(),
+            "note-a.md",
+            "---\ntitle: Note A Modified\ntags:\n  - alpha\n  - shared\n---\n# Note A\nThis content is completely different now.\n",
+        );
+
+        let stats = pipeline.run(false, |_| {}).unwrap();
+
+        assert_eq!(stats.files_updated, 1);
+        assert_eq!(stats.files_new, 0);
+
+        let hash_after = repo
+            .get_document_by_path("note-a.md")
+            .unwrap()
+            .unwrap()
+            .content_hash;
+        assert_ne!(hash_before, hash_after, "content hash should change after modification");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Incremental detects deleted files
+    // -----------------------------------------------------------------------
+    #[test]
+    fn incremental_detects_deleted_files() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let repo = Repository::new(&db);
+        let count_before = repo.get_document_count().unwrap();
+
+        std::fs::remove_file(vault.path().join("note-e.md")).unwrap();
+
+        let stats = pipeline.run(false, |_| {}).unwrap();
+
+        assert_eq!(stats.files_deleted, 1);
+        assert_eq!(repo.get_document_count().unwrap(), count_before - 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Entity occurrences accumulate across incremental runs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn entity_occurrences_accumulate() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let repo = Repository::new(&db);
+
+        // Find the "alpha" tag entity and record its frequency
+        let entities_before = repo.get_all_entities().unwrap();
+        let alpha_before = entities_before
+            .iter()
+            .find(|e| e.name == "alpha" && e.entity_type == EntityType::Tag)
+            .expect("alpha tag should exist");
+        let freq_before = alpha_before.frequency;
+        let alpha_id = alpha_before.id.unwrap();
+        let occs_before = repo.get_entity_occurrences(alpha_id).unwrap().len();
+
+        // Add a new file that also uses #alpha
+        write_md(
+            vault.path(),
+            "extra.md",
+            "# Extra\nThis file also uses #alpha.\n",
+        );
+        pipeline.run(false, |_| {}).unwrap();
+
+        let entities_after = repo.get_all_entities().unwrap();
+        let alpha_after = entities_after
+            .iter()
+            .find(|e| e.name == "alpha" && e.entity_type == EntityType::Tag)
+            .unwrap();
+
+        assert!(
+            alpha_after.frequency > freq_before,
+            "alpha frequency should increase: {} -> {}",
+            freq_before,
+            alpha_after.frequency
+        );
+
+        let occs_after = repo.get_entity_occurrences(alpha_id).unwrap().len();
+        assert!(
+            occs_after > occs_before,
+            "alpha occurrences should increase: {} -> {}",
+            occs_before,
+            occs_after
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Staleness: new content triggers stale
+    // -----------------------------------------------------------------------
+    #[test]
+    fn staleness_new_content_triggers_stale() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        // Insert a fake catalyst so staleness check doesn't short-circuit with NoCatalysts
+        let repo = Repository::new(&db);
+        let fake_catalyst = Catalyst {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "test catalyst".to_string(),
+            entity: "alpha".to_string(),
+            context: "test".to_string(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        };
+        repo.insert_catalysts(&[fake_catalyst]).unwrap();
+
+        // Store bookkeeping with current entity doc counts
+        let entity_names = vec!["alpha".to_string()];
+        store_staleness_bookkeeping(&db, vault.path(), &entity_names).unwrap();
+
+        // Add 3+ files that mention alpha (the threshold is 3 new mentions)
+        for i in 0..4 {
+            write_md(
+                vault.path(),
+                &format!("stale-{}.md", i),
+                &format!("# Stale {}\nContent with #alpha.\n", i),
+            );
+        }
+
+        // Re-index so the DB counts update
+        pipeline.run(false, |_| {}).unwrap();
+
+        let result = check_catalyst_staleness(&db, vault.path()).unwrap();
+        assert!(result.is_stale(), "should be stale after adding 4 new files mentioning alpha");
+        match result {
+            StalenessResult::Stale(StaleReason::NewContent { entity, delta }) => {
+                assert_eq!(entity, "alpha");
+                assert!(delta >= 3, "delta should be >= 3, got {}", delta);
+            }
+            other => panic!("expected NewContent, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Staleness: fresh when nothing changed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn staleness_fresh_when_nothing_changed() {
+        let db = test_db();
+        let vault = create_test_vault();
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        // Insert a fake catalyst
+        let repo = Repository::new(&db);
+        let fake_catalyst = Catalyst {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "test catalyst".to_string(),
+            entity: "alpha".to_string(),
+            context: "test".to_string(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        };
+        repo.insert_catalysts(&[fake_catalyst]).unwrap();
+
+        // Store bookkeeping
+        let entity_names = vec!["alpha".to_string()];
+        store_staleness_bookkeeping(&db, vault.path(), &entity_names).unwrap();
+
+        // Check staleness without making any changes
+        let result = check_catalyst_staleness(&db, vault.path()).unwrap();
+        assert!(
+            !result.is_stale(),
+            "should be fresh when nothing changed, got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Incremental is faster than full re-index
+    // -----------------------------------------------------------------------
+    #[test]
+    fn incremental_faster_than_full() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // Create ~200 files
+        for i in 0..200 {
+            write_md(
+                vault.path(),
+                &format!("doc-{:04}.md", i),
+                &format!(
+                    "---\ntitle: Document {}\ntags:\n  - bulk\n---\n# Document {}\nSome content for document number {}. References [[Ref {}]].\n",
+                    i, i, i, i % 10
+                ),
+            );
+        }
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        let full_stats = pipeline.run(true, |_| {}).unwrap();
+
+        // Add 1 file, run incremental
+        write_md(
+            vault.path(),
+            "doc-new.md",
+            "# New Doc\nOne new file with #newtag.\n",
+        );
+
+        let inc_stats = pipeline.run(false, |_| {}).unwrap();
+
+        assert_eq!(inc_stats.files_new, 1);
+        assert!(
+            inc_stats.duration_ms < full_stats.duration_ms,
+            "incremental ({} ms) should be faster than full ({} ms)",
+            inc_stats.duration_ms,
+            full_stats.duration_ms
+        );
+    }
+}
