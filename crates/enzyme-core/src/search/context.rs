@@ -1,23 +1,14 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::db::{Database, Repository};
 use crate::embedding::EmbeddingService;
 use crate::models::Embedding;
-use crate::search::hnsw::HnswIndex;
-use crate::search::bm25::Bm25Index;
-
-/// A combined search result with content and optional catalyst provenance.
-#[derive(Debug, Clone)]
-pub struct ContextResult {
-    pub file_path: String,
-    pub chunk_index: i64,
-    pub score: f64,
-    pub content: String,
-    pub catalyst_text: Option<String>,
-}
+use crate::pipeline::similarity::load_catalyst_embeddings;
 
 /// Structured response from catalyst-based search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,40 +35,37 @@ pub struct TopCatalyst {
     pub contribution_count: usize,
 }
 
-/// Orchestrates hybrid search using HNSW + BM25 + catalyst pre-filtering.
+/// Catalyst-based search over pre-computed similarities.
 pub struct ContextSearch<'a> {
     repo: Repository<'a>,
-    hnsw: &'a HnswIndex,
-    bm25: &'a Bm25Index,
     service: &'a EmbeddingService,
+    embeddings_dir: PathBuf,
 }
 
 impl<'a> ContextSearch<'a> {
     pub fn new(
         db: &'a Database,
-        hnsw: &'a HnswIndex,
-        bm25: &'a Bm25Index,
         service: &'a EmbeddingService,
+        embeddings_dir: impl AsRef<Path>,
     ) -> Self {
         Self {
             repo: Repository::new(db),
-            hnsw,
-            bm25,
             service,
+            embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
     }
 
     /// Catalyst-based search (used by `enzyme catalyze`).
     ///
     /// 1. Embed query
-    /// 2. Find top relevant catalysts (embed all catalysts, compare)
+    /// 2. Find top relevant catalysts (from cached embeddings)
     /// 3. For each relevant catalyst, get pre-computed chunk similarities
     /// 4. Aggregate, boost by multi-catalyst and recency, deduplicate, sort
     /// 5. Compute top contributing catalysts with contribution counts
     pub fn catalyze_search(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
         let query_vec = self.service.embed_query(query)?;
 
-        // Get all catalysts and embed them
+        // Get all catalysts
         let catalysts = self.repo.get_all_catalysts()?;
         if catalysts.is_empty() {
             return Ok(CatalyzeResponse {
@@ -86,8 +74,42 @@ impl<'a> ContextSearch<'a> {
             });
         }
 
-        let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
-        let cat_embeddings = self.service.embed_documents(&cat_texts)?;
+        // Load cached catalyst embeddings, falling back to re-embedding
+        let cat_embeddings = match load_catalyst_embeddings(&self.embeddings_dir)? {
+            Some(cached) => {
+                // Build a lookup from catalyst ID to cached vector
+                let cache_map: HashMap<&str, &Vec<f32>> = cached
+                    .iter()
+                    .map(|c| (c.id.as_str(), &c.vector))
+                    .collect();
+
+                // Map each catalyst to its cached vector; if any are missing, re-embed all
+                let mut vecs = Vec::with_capacity(catalysts.len());
+                let mut all_hit = true;
+                for cat in &catalysts {
+                    if let Some(vec) = cache_map.get(cat.id.as_str()) {
+                        vecs.push((*vec).clone());
+                    } else {
+                        all_hit = false;
+                        break;
+                    }
+                }
+
+                if all_hit {
+                    debug!("using cached catalyst embeddings ({} vectors)", vecs.len());
+                    vecs
+                } else {
+                    debug!("catalyst cache stale, re-embedding {} catalysts", catalysts.len());
+                    let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+                    self.service.embed_documents(&cat_texts)?
+                }
+            }
+            None => {
+                debug!("no catalyst cache, embedding {} catalysts", catalysts.len());
+                let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+                self.service.embed_documents(&cat_texts)?
+            }
+        };
 
         // Find top relevant catalysts (top 8)
         let mut cat_sims: Vec<(usize, f32)> = cat_embeddings
@@ -218,76 +240,5 @@ impl<'a> ContextSearch<'a> {
             results,
             top_contributing_catalysts: top_catalysts,
         })
-    }
-
-    /// Direct hybrid search (used by `enzyme context`).
-    ///
-    /// 1. Embed query -> HNSW search
-    /// 2. BM25 lexical search
-    /// 3. Merge with weighted combination (0.7 semantic + 0.3 lexical)
-    /// 4. Deduplicate, sort, return top limit
-    pub fn hybrid_search(&self, query: &str, limit: usize) -> Result<Vec<ContextResult>> {
-        let k = limit * 3;
-
-        // HNSW semantic search
-        let query_vec = self.service.embed_query(query)?;
-        let hnsw_results = if self.hnsw.is_built() {
-            self.hnsw.search(&query_vec, k)?
-        } else {
-            Vec::new()
-        };
-
-        // BM25 lexical search
-        let bm25_results = self.bm25.search(query, k);
-
-        // Normalize scores to [0, 1]
-        let hnsw_max = hnsw_results.iter().map(|r| r.similarity).fold(0.0f32, f32::max);
-        let hnsw_min = hnsw_results.iter().map(|r| r.similarity).fold(f32::MAX, f32::min);
-        let hnsw_range = if (hnsw_max - hnsw_min).abs() > 1e-6 { hnsw_max - hnsw_min } else { 1.0 };
-
-        let bm25_max = bm25_results.iter().map(|r| r.score).fold(0.0f32, f32::max);
-        let bm25_min = bm25_results.iter().map(|r| r.score).fold(f32::MAX, f32::min);
-        let bm25_range = if (bm25_max - bm25_min).abs() > 1e-6 { bm25_max - bm25_min } else { 1.0 };
-
-        // Combine into a single map: key -> score
-        let mut combined: HashMap<String, f64> = HashMap::new();
-
-        for r in &hnsw_results {
-            let norm = ((r.similarity - hnsw_min) / hnsw_range) as f64;
-            *combined.entry(r.id.clone()).or_insert(0.0) += 0.7 * norm;
-        }
-
-        for r in &bm25_results {
-            let norm = ((r.score - bm25_min) / bm25_range) as f64;
-            *combined.entry(r.doc_id.clone()).or_insert(0.0) += 0.3 * norm;
-        }
-
-        // Build results
-        let mut results: Vec<ContextResult> = Vec::new();
-
-        for (key, score) in &combined {
-            let parts: Vec<&str> = key.rsplitn(2, ':').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let chunk_index: i64 = parts[0].parse().unwrap_or(0);
-            let file_path = parts[1].to_string();
-
-            let content = self.repo.get_chunk_content(&file_path, chunk_index)?
-                .unwrap_or_default();
-
-            results.push(ContextResult {
-                file_path,
-                chunk_index,
-                score: *score,
-                content,
-                catalyst_text: None,
-            });
-        }
-
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-
-        Ok(results)
     }
 }

@@ -76,16 +76,6 @@ enum Commands {
         detached: bool,
     },
 
-    /// Search vault content
-    Context {
-        /// Search query
-        query: String,
-
-        /// Maximum number of results
-        #[arg(short = 'n', long, default_value = "5")]
-        limit: usize,
-    },
-
     /// Show vault status and configuration
     Status,
 
@@ -150,9 +140,6 @@ async fn main() -> Result<()> {
         } => {
             let source_path = source.as_deref().unwrap_or(&vault_path);
             commands::apply::run_apply(source_path, &target, detached).await?;
-        }
-        Commands::Context { query, limit } => {
-            commands::context::run_context(&vault_path, &query, limit).await?;
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;

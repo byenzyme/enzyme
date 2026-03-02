@@ -132,6 +132,7 @@ impl HnswIndex {
     pub fn is_built(&self) -> bool {
         self.map.is_some()
     }
+
 }
 
 impl Default for HnswIndex {

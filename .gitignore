@@ -16,8 +16,9 @@ Cargo.lock
 # Environment
 .env
 
-# Model files (too large for git)
-*.onnx
+# Model binaries (too large for git — tokenizer.json is tracked)
+models/*.onnx
+models/*.rten
 *.mlpackage/
 
 # Test vault

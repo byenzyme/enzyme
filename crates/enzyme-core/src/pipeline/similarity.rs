@@ -1,4 +1,4 @@
-use std::io::{Read as IoRead, BufReader};
+use std::io::{BufWriter, Read as IoRead, Write as IoWrite, BufReader};
 use std::path::PathBuf;
 use std::time::Instant;
 use std::fs;
@@ -54,6 +54,10 @@ impl<'a> SimilarityPipeline<'a> {
         // Embed all catalyst texts
         let catalyst_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
         let catalyst_embeddings = self.service.embed_documents(&catalyst_texts)?;
+
+        // Cache catalyst embeddings to disk for fast reuse in catalyze_search
+        let cat_ids: Vec<&str> = catalysts.iter().map(|c| c.id.as_str()).collect();
+        self.save_catalyst_embeddings(&cat_ids, &catalyst_embeddings)?;
 
         // Load all chunk embeddings from disk
         let chunk_embeddings = self.load_embeddings()?;
@@ -161,4 +165,85 @@ impl<'a> SimilarityPipeline<'a> {
 
         Ok(embeddings)
     }
+
+    /// Save catalyst embeddings to disk for reuse in `catalyze_search`.
+    ///
+    /// Format: `[count: u32 LE]` then per entry:
+    /// `[id_len: u32 LE][id_bytes][vector: f32 * EMBEDDING_DIMENSION LE]`
+    fn save_catalyst_embeddings(&self, ids: &[&str], embeddings: &[Vec<f32>]) -> Result<()> {
+        let path = self.embeddings_dir.join("catalyst_embeddings.bin");
+        fs::create_dir_all(&self.embeddings_dir)?;
+        let file = fs::File::create(&path)
+            .with_context(|| format!("failed to create catalyst embeddings file: {}", path.display()))?;
+        let mut writer = BufWriter::new(file);
+
+        writer.write_all(&(ids.len() as u32).to_le_bytes())?;
+
+        for (id, vec) in ids.iter().zip(embeddings.iter()) {
+            let id_bytes = id.as_bytes();
+            writer.write_all(&(id_bytes.len() as u32).to_le_bytes())?;
+            writer.write_all(id_bytes)?;
+
+            let vector_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    vec.as_ptr() as *const u8,
+                    vec.len() * std::mem::size_of::<f32>(),
+                )
+            };
+            writer.write_all(vector_bytes)?;
+        }
+
+        writer.flush()?;
+        info!(count = ids.len(), path = %path.display(), "saved catalyst embeddings to disk");
+        Ok(())
+    }
+}
+
+/// A cached catalyst embedding loaded from disk.
+pub struct CachedCatalystEmbedding {
+    pub id: String,
+    pub vector: Vec<f32>,
+}
+
+/// Load cached catalyst embeddings from `catalyst_embeddings.bin`.
+///
+/// Returns `None` if the file doesn't exist (not yet computed).
+pub fn load_catalyst_embeddings(embeddings_dir: &std::path::Path) -> Result<Option<Vec<CachedCatalystEmbedding>>> {
+    let path = embeddings_dir.join("catalyst_embeddings.bin");
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = fs::File::open(&path)
+        .with_context(|| format!("failed to open catalyst embeddings: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+
+    let mut buf4 = [0u8; 4];
+    reader.read_exact(&mut buf4)?;
+    let count = u32::from_le_bytes(buf4) as usize;
+
+    let mut result = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        reader.read_exact(&mut buf4)?;
+        let id_len = u32::from_le_bytes(buf4) as usize;
+
+        let mut id_bytes = vec![0u8; id_len];
+        reader.read_exact(&mut id_bytes)?;
+        let id = String::from_utf8(id_bytes).context("invalid UTF-8 in catalyst id")?;
+
+        let mut vector = vec![0f32; EMBEDDING_DIMENSION];
+        let vector_bytes: &mut [u8] = unsafe {
+            std::slice::from_raw_parts_mut(
+                vector.as_mut_ptr() as *mut u8,
+                EMBEDDING_DIMENSION * std::mem::size_of::<f32>(),
+            )
+        };
+        reader.read_exact(vector_bytes)?;
+
+        result.push(CachedCatalystEmbedding { id, vector });
+    }
+
+    info!(count = result.len(), "loaded cached catalyst embeddings");
+    Ok(Some(result))
 }

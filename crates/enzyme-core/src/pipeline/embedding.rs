@@ -9,7 +9,6 @@ use tracing::{debug, info, warn};
 use crate::db::{Database, Repository};
 use crate::embedding::EmbeddingService;
 use crate::models::{Timestamp, EMBEDDING_DIMENSION};
-use crate::search::{Bm25Index, HnswIndex};
 
 // ---------------------------------------------------------------------------
 // EmbeddingPipeline
@@ -17,10 +16,6 @@ use crate::search::{Bm25Index, HnswIndex};
 
 /// Orchestrates embedding generation for document chunks and persists the
 /// resulting vectors to a compact binary file on disk.
-///
-/// The pipeline also provides [`build_search_indices`](Self::build_search_indices)
-/// which loads stored embeddings and constructs both an HNSW (dense vector) index
-/// and a BM25 (lexical) index ready for hybrid search.
 pub struct EmbeddingPipeline<'a> {
     repo: Repository<'a>,
     service: &'a EmbeddingService,
@@ -162,45 +157,6 @@ impl<'a> EmbeddingPipeline<'a> {
             chunks_embedded,
             duration_ms,
         })
-    }
-
-    /// Build HNSW and BM25 search indices from the stored embeddings and DB
-    /// chunks.
-    ///
-    /// This is intended to be called at startup (or after an embedding run) to
-    /// prepare the search subsystem. Both indices are built entirely in memory.
-    pub fn build_search_indices(&self) -> Result<(HnswIndex, Bm25Index)> {
-        info!("Building search indices...");
-
-        // Load embeddings from disk
-        let embeddings = self.load_embeddings()?;
-
-        // Build HNSW index
-        let mut hnsw = HnswIndex::new();
-        if !embeddings.is_empty() {
-            let points: Vec<(Vec<f32>, String)> = embeddings
-                .iter()
-                .map(|e| {
-                    let id = format!("{}:{}", e.file_path, e.chunk_index);
-                    (e.vector.clone(), id)
-                })
-                .collect();
-
-            hnsw.build(points)?;
-            info!("HNSW index built with {} points", embeddings.len());
-        }
-
-        // Build BM25 index from chunks in DB
-        let mut bm25 = Bm25Index::new();
-        let chunks = self.repo.get_all_chunks_with_embeddings()?;
-        for (source_ref, chunk_index, content) in &chunks {
-            let doc_id = format!("{}:{}", source_ref, chunk_index);
-            bm25.add_document(doc_id, content);
-        }
-        bm25.build();
-        info!(num_documents = bm25.num_documents(), "BM25 index built");
-
-        Ok((hnsw, bm25))
     }
 
     // -----------------------------------------------------------------------

@@ -115,18 +115,25 @@ impl DaemonServer {
         self.touch();
 
         match request {
-            DaemonRequest::Ping => DaemonResponse::Ping {
-                status: "ok".into(),
-                model_loaded: true,
-                backend: self.backend.name().into(),
-            },
-            DaemonRequest::Embed { text } => match self.backend.embed(&text) {
-                Ok(embedding) => DaemonResponse::Embed { embedding },
-                Err(e) => DaemonResponse::Error {
-                    error: e.to_string(),
-                },
-            },
+            DaemonRequest::Ping => {
+                debug!("dispatch: ping");
+                DaemonResponse::Ping {
+                    status: "ok".into(),
+                    model_loaded: true,
+                    backend: self.backend.name().into(),
+                }
+            }
+            DaemonRequest::Embed { text } => {
+                info!("dispatch: embed (len={})", text.len());
+                match self.backend.embed(&text) {
+                    Ok(embedding) => DaemonResponse::Embed { embedding },
+                    Err(e) => DaemonResponse::Error {
+                        error: e.to_string(),
+                    },
+                }
+            }
             DaemonRequest::EmbedBatch { texts } => {
+                info!("dispatch: embed_batch (count={})", texts.len());
                 let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
                 match self.backend.embed_batch(&text_refs) {
                     Ok(embeddings) => DaemonResponse::EmbedBatch { embeddings },

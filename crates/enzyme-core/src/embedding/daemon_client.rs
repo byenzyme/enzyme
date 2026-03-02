@@ -114,6 +114,10 @@ impl DaemonClient {
         let exe = std::env::current_exe().context("failed to determine current executable")?;
         let log_path = self.enzyme_home.join(LOG_FILENAME);
 
+        // Ensure enzyme home directory exists.
+        std::fs::create_dir_all(&self.enzyme_home)
+            .with_context(|| format!("failed to create enzyme home: {}", self.enzyme_home.display()))?;
+
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -123,7 +127,7 @@ impl DaemonClient {
         let stderr_file = log_file.try_clone()?;
 
         let mut cmd = Command::new(exe);
-        cmd.arg("__daemon")
+        cmd.args(["__daemon", "-v"])
             .stdout(log_file)
             .stderr(stderr_file);
 

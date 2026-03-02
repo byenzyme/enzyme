@@ -7,7 +7,6 @@ use serde_json::json;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::search::context::ContextSearch;
 
 pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Result<()> {
@@ -27,10 +26,7 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Resul
 
     let service = get_embedding_service(&paths.home)?;
 
-    let emb_pipeline = EmbeddingPipeline::new(&db, service, paths.embeddings_dir.clone());
-    let (hnsw, bm25) = emb_pipeline.build_search_indices()?;
-
-    let search = ContextSearch::new(&db, &hnsw, &bm25, service);
+    let search = ContextSearch::new(&db, service, &paths.embeddings_dir);
 
     let start = Instant::now();
     let response = search.catalyze_search(query, limit)?;
