@@ -22,6 +22,7 @@ pub struct CatalyzeResponse {
 pub struct CatalyzeResultItem {
     pub file_path: String,
     pub content: String,
+    pub similarity: f64,
 }
 
 /// A catalyst that contributed to search results.
@@ -164,6 +165,7 @@ impl<'a> ContextSearch<'a> {
             chunk_index: i64,
             score: f64,
             best_catalyst_id: String,
+            content: String,
         }
 
         let mut scored: Vec<ScoredChunk> = Vec::new();
@@ -192,10 +194,54 @@ impl<'a> ContextSearch<'a> {
                 chunk_index,
                 score: cs.max_similarity * multi_boost * recency_boost,
                 best_catalyst_id: cs.best_catalyst_id.clone(),
+                content: String::new(), // filled below
             });
         }
 
         scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Fetch content for top limit*3 candidates BEFORE dedup/truncation
+        let fetch_count = (limit * 3).min(scored.len());
+        for s in scored.iter_mut().take(fetch_count) {
+            s.content = self
+                .repo
+                .get_chunk_content(&s.file_path, s.chunk_index)?
+                .unwrap_or_default();
+        }
+        // Drop candidates without content (beyond fetch_count)
+        scored.truncate(fetch_count);
+
+        // Content-based deduplication: keep highest-scoring chunk per normalized content
+        {
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            let mut keep = vec![false; scored.len()];
+            for (i, s) in scored.iter().enumerate() {
+                let normalized: String = s.content.split_whitespace().collect::<Vec<_>>().join(" ");
+                match seen.get(&normalized) {
+                    Some(&existing_idx) => {
+                        // Already have this content — keep whichever has higher score
+                        if s.score > scored[existing_idx].score {
+                            keep[existing_idx] = false;
+                            keep[i] = true;
+                            seen.insert(normalized, i);
+                        }
+                        // else: existing is better, skip this one
+                    }
+                    None => {
+                        keep[i] = true;
+                        seen.insert(normalized, i);
+                    }
+                }
+            }
+            let mut idx = 0;
+            scored.retain(|_| {
+                let k = keep[idx];
+                idx += 1;
+                k
+            });
+        }
+
+        // Now truncate to requested limit
         scored.truncate(limit);
 
         // Count catalyst contributions across final results
@@ -225,16 +271,15 @@ impl<'a> ContextSearch<'a> {
         top_catalysts.sort_by(|a, b| b.contribution_count.cmp(&a.contribution_count));
         top_catalysts.truncate(3);
 
-        // Build result items with content
-        let mut results = Vec::with_capacity(scored.len());
-        for s in &scored {
-            let content = self.repo.get_chunk_content(&s.file_path, s.chunk_index)?
-                .unwrap_or_default();
-            results.push(CatalyzeResultItem {
+        // Build result items using already-fetched content
+        let results: Vec<CatalyzeResultItem> = scored
+            .iter()
+            .map(|s| CatalyzeResultItem {
                 file_path: s.file_path.clone(),
-                content,
-            });
-        }
+                content: s.content.clone(),
+                similarity: (s.score * 1000.0).round() / 1000.0,
+            })
+            .collect();
 
         Ok(CatalyzeResponse {
             results,

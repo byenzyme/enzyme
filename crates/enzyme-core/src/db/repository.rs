@@ -709,6 +709,20 @@ impl<'a> Repository<'a> {
         Ok(rows)
     }
 
+    /// Get tags for a document by its source_ref (relative vault path).
+    pub fn get_tags_for_document(&self, source_ref: &str) -> Result<Vec<String>> {
+        let rows = self.db.query_read(
+            "SELECT dt.tag
+             FROM doc_tags dt
+             JOIN docs d ON d.id = dt.doc_id
+             WHERE d.source_ref = ?1
+             ORDER BY dt.tag",
+            &[&source_ref as &dyn rusqlite::types::ToSql],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows)
+    }
+
     /// Get the content of a specific chunk by file path and chunk index.
     pub fn get_chunk_content(
         &self,

@@ -11,6 +11,7 @@ use crate::models::DateSource;
 use super::chunking::{chunk_document, DEFAULT_CHUNK_SIZE_CHARS};
 use super::extract::{extract_entities, ExtractedEntities};
 use super::frontmatter::{parse_frontmatter, strip_frontmatter, Frontmatter};
+use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -102,8 +103,17 @@ impl DocumentProcessor {
             folders,
         } = extract_entities(body, path, &frontmatter_tags);
 
-        // Chunks
-        let chunks = chunk_document(body, self.chunk_size);
+        // Chunks — use Readwise-aware chunking for highlight-based content
+        let chunks = if is_readwise_content(body) {
+            let highlights = extract_highlights(body);
+            if highlights.is_empty() {
+                chunk_document(body, self.chunk_size)
+            } else {
+                chunk_readwise_highlights(&highlights, 5, 15)
+            }
+        } else {
+            chunk_document(body, self.chunk_size)
+        };
 
         // Word and char counts (from body, not frontmatter YAML)
         let word_count = body.split_whitespace().count() as i64;
