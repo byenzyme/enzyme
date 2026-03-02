@@ -86,61 +86,78 @@ impl<'a> EmbeddingPipeline<'a> {
         // Load existing embeddings so we can merge
         let mut all_embeddings = self.load_embeddings()?;
 
-        let mut chunks_embedded = 0usize;
-        let mut documents_embedded = 0usize;
+        // Step 2: Collect all chunks across documents into one flat list so the
+        // embedding service can fill every model batch to capacity.
+        // Track (doc_index, chunk_count) so we can scatter results back.
+        let mut flat_chunks: Vec<&str> = Vec::new();
+        let mut doc_chunk_ranges: Vec<(usize, usize)> = Vec::new(); // (start, count)
+        let mut non_empty_docs: Vec<usize> = Vec::new(); // indices into docs_needing
 
-        // Step 2: Embed each document's chunks
-        for (doc_id, source_ref, chunks) in &docs_needing {
+        for (i, (_doc_id, _source_ref, chunks)) in docs_needing.iter().enumerate() {
             if chunks.is_empty() {
                 continue;
             }
+            let start_idx = flat_chunks.len();
+            for chunk in chunks {
+                flat_chunks.push(chunk.as_str());
+            }
+            doc_chunk_ranges.push((start_idx, chunks.len()));
+            non_empty_docs.push(i);
+        }
 
-            let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+        let total_chunks = flat_chunks.len();
+        info!(total_chunks, total_docs = non_empty_docs.len(), "embedding all chunks in cross-document batches");
 
-            match self.service.embed_documents(&chunk_refs) {
-                Ok(vectors) => {
-                    // Remove old embeddings for this source_ref
-                    all_embeddings.retain(|e| e.file_path != *source_ref);
+        // Step 3: Embed all chunks at once — the service handles batching internally.
+        let all_vectors = self.service.embed_documents_with_progress(
+            &flat_chunks,
+            |completed, total| on_progress(completed, total),
+        )?;
 
-                    // Add new embeddings
-                    for (i, vector) in vectors.into_iter().enumerate() {
-                        all_embeddings.push(StoredEmbedding {
-                            file_path: source_ref.clone(),
-                            chunk_index: i as u32,
-                            vector,
-                        });
-                    }
+        // Step 4: Scatter results back to documents and update DB.
+        let mut chunks_embedded = 0usize;
+        let mut documents_embedded = 0usize;
 
-                    // Mark as embedded in DB — use the document's current content_hash
-                    let now: Timestamp = chrono::Utc::now().timestamp_millis();
-                    match self.repo.get_document_by_path(source_ref) {
-                        Ok(Some(doc)) => {
-                            self.repo
-                                .mark_document_embedded(*doc_id, &doc.content_hash, now)?;
-                        }
-                        Ok(None) => {
-                            warn!(
-                                source_ref,
-                                "document disappeared from DB before marking embedded"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(source_ref, "failed to look up document for hash: {}", e);
-                        }
-                    }
+        for (range_idx, &doc_idx) in non_empty_docs.iter().enumerate() {
+            let (doc_id, source_ref, _chunks) = &docs_needing[doc_idx];
+            let (start_idx, count) = doc_chunk_ranges[range_idx];
+            let vectors = &all_vectors[start_idx..start_idx + count];
 
-                    chunks_embedded += chunk_refs.len();
-                    documents_embedded += 1;
+            // Remove old embeddings for this source_ref
+            all_embeddings.retain(|e| e.file_path != *source_ref);
+
+            // Add new embeddings
+            for (i, vector) in vectors.iter().enumerate() {
+                all_embeddings.push(StoredEmbedding {
+                    file_path: source_ref.clone(),
+                    chunk_index: i as u32,
+                    vector: vector.clone(),
+                });
+            }
+
+            // Mark as embedded in DB
+            let now: Timestamp = chrono::Utc::now().timestamp_millis();
+            match self.repo.get_document_by_path(source_ref) {
+                Ok(Some(doc)) => {
+                    self.repo
+                        .mark_document_embedded(*doc_id, &doc.content_hash, now)?;
+                }
+                Ok(None) => {
+                    warn!(
+                        source_ref,
+                        "document disappeared from DB before marking embedded"
+                    );
                 }
                 Err(e) => {
-                    warn!(source_ref, "failed to embed document: {}", e);
+                    warn!(source_ref, "failed to look up document for hash: {}", e);
                 }
             }
 
-            on_progress(documents_embedded, total_docs);
+            chunks_embedded += count;
+            documents_embedded += 1;
         }
 
-        // Step 3: Save all embeddings to disk
+        // Step 5: Save all embeddings to disk
         self.save_embeddings(&all_embeddings)?;
 
         let duration_ms = start.elapsed().as_millis() as u64;

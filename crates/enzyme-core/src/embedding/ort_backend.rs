@@ -8,7 +8,7 @@ use tokenizers::Tokenizer;
 use tracing::debug;
 
 use super::backend::EmbeddingBackend;
-use super::normalize::{l2_normalize, mean_pool};
+use super::normalize::{l2_normalize, mean_pool_flat};
 use crate::models::EMBEDDING_DIMENSION;
 
 /// Maximum sequence length for the model. Inputs are padded/truncated to this length.
@@ -93,7 +93,8 @@ impl OrtBackend {
     }
 
     /// Post-process model output: mean pool token embeddings using the
-    /// attention mask, then L2-normalize.
+    /// attention mask, then L2-normalize.  Operates directly on the flat
+    /// buffers to avoid per-token `Vec` allocations.
     fn pool_and_normalize(
         hidden_states_flat: &[f32],
         mask_flat: &[f32],
@@ -104,17 +105,14 @@ impl OrtBackend {
         let mut results = Vec::with_capacity(batch_size);
 
         for b in 0..batch_size {
-            let mut token_embeddings = Vec::with_capacity(seq_len);
-            for s in 0..seq_len {
-                let offset = b * seq_len * hidden_dim + s * hidden_dim;
-                token_embeddings.push(hidden_states_flat[offset..offset + hidden_dim].to_vec());
-            }
+            let hs_offset = b * seq_len * hidden_dim;
+            let hs_slice = &hidden_states_flat[hs_offset..hs_offset + seq_len * hidden_dim];
 
             let mask_offset = b * MAX_SEQ_LEN;
             let mask_end = (mask_offset + seq_len).min(mask_flat.len());
             let mask_slice = &mask_flat[mask_offset..mask_end];
 
-            let mut pooled = mean_pool(&token_embeddings, mask_slice);
+            let mut pooled = mean_pool_flat(hs_slice, mask_slice, seq_len, hidden_dim);
             l2_normalize(&mut pooled);
             results.push(pooled);
         }
@@ -213,6 +211,7 @@ mod tests {
 
     #[test]
     fn test_pool_and_normalize_basic() {
+        // batch=1, seq_len=4, hidden_dim=3
         let hidden = vec![
             1.0, 2.0, 3.0, // token 0
             4.0, 5.0, 6.0, // token 1
@@ -229,6 +228,7 @@ mod tests {
         let v = &results[0];
         assert_eq!(v.len(), 3);
 
+        // Mean of attended tokens: [2.5, 3.5, 4.5]
         let expected_norm = (2.5f32.powi(2) + 3.5f32.powi(2) + 4.5f32.powi(2)).sqrt();
         assert!((v[0] - 2.5 / expected_norm).abs() < 1e-5);
         assert!((v[1] - 3.5 / expected_norm).abs() < 1e-5);
@@ -240,6 +240,7 @@ mod tests {
 
     #[test]
     fn test_pool_and_normalize_batch() {
+        // batch=2, seq_len=2, hidden_dim=2
         let hidden = vec![
             3.0, 4.0, // batch 0, token 0
             0.0, 0.0, // batch 0, token 1 (pad)
@@ -255,9 +256,11 @@ mod tests {
 
         assert_eq!(results.len(), 2);
 
+        // Batch 0: mean = [3, 4], normalized = [0.6, 0.8]
         assert!((results[0][0] - 0.6).abs() < 1e-5);
         assert!((results[0][1] - 0.8).abs() < 1e-5);
 
+        // Batch 1: mean = [0.5, 0.5], normalized = [1/sqrt(2), 1/sqrt(2)]
         let inv_sqrt2 = 1.0 / 2.0f32.sqrt();
         assert!((results[1][0] - inv_sqrt2).abs() < 1e-5);
         assert!((results[1][1] - inv_sqrt2).abs() < 1e-5);

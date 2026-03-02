@@ -3,11 +3,16 @@
 //!
 //! If the daemon is not running, [`DaemonClient::ensure_running`] will
 //! auto-spawn it transparently.
+//!
+//! The client reuses a single persistent connection across requests to avoid
+//! per-batch connect/teardown overhead. If the connection breaks it reconnects
+//! transparently on the next request.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -18,9 +23,15 @@ use super::daemon_protocol::*;
 use crate::models::EMBEDDING_DIMENSION;
 
 /// An [`EmbeddingBackend`] that delegates to the embedding daemon.
+///
+/// Keeps a cached Unix socket connection behind a [`Mutex`] so sequential
+/// `embed_batch` calls reuse the same connection instead of reconnecting.
 pub struct DaemonClient {
     socket_path: PathBuf,
     enzyme_home: PathBuf,
+    /// Cached persistent connection. `None` means no connection yet or the
+    /// previous one was broken and cleared.
+    conn: Mutex<Option<BufReader<UnixStream>>>,
 }
 
 impl DaemonClient {
@@ -29,11 +40,12 @@ impl DaemonClient {
         Self {
             socket_path,
             enzyme_home,
+            conn: Mutex::new(None),
         }
     }
 
-    /// Try to connect to the daemon socket.
-    fn try_connect(&self) -> Result<UnixStream> {
+    /// Open a new connection to the daemon socket.
+    fn connect(&self) -> Result<BufReader<UnixStream>> {
         let stream = UnixStream::connect(&self.socket_path)
             .with_context(|| format!("failed to connect to daemon socket: {}", self.socket_path.display()))?;
         stream
@@ -42,22 +54,23 @@ impl DaemonClient {
         stream
             .set_write_timeout(Some(Duration::from_secs(REQUEST_TIMEOUT_SECS)))
             .context("failed to set write timeout")?;
-        Ok(stream)
+        Ok(BufReader::new(stream))
     }
 
-    /// Send a request and read the response.
-    fn send_request(&self, request: &DaemonRequest) -> Result<DaemonResponse> {
-        let mut stream = self.try_connect()?;
-
+    /// Send a request on an existing buffered stream and read the response.
+    fn send_on_stream(
+        reader: &mut BufReader<UnixStream>,
+        request: &DaemonRequest,
+    ) -> Result<DaemonResponse> {
         let json = serde_json::to_string(request)?;
 
-        // Write Content-Length framed request.
+        // Write Content-Length framed request on the underlying stream.
+        let stream = reader.get_mut();
         write!(stream, "Content-Length: {}\n", json.len())?;
         stream.write_all(json.as_bytes())?;
         stream.flush()?;
 
         // Read newline-terminated JSON response.
-        let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line)?;
 
@@ -66,9 +79,41 @@ impl DaemonClient {
         Ok(response)
     }
 
-    /// Check whether the daemon is alive.
+    /// Send a request, reusing the cached connection when possible.
+    /// Reconnects transparently if the cached connection is broken.
+    fn send_request(&self, request: &DaemonRequest) -> Result<DaemonResponse> {
+        let mut guard = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("connection lock poisoned: {e}"))?;
+
+        // Try the cached connection first.
+        if let Some(ref mut reader) = *guard {
+            match Self::send_on_stream(reader, request) {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    debug!("cached connection failed ({e}), reconnecting");
+                    *guard = None;
+                }
+            }
+        }
+
+        // (Re)connect.
+        let mut reader = self.connect()?;
+        let resp = Self::send_on_stream(&mut reader, request)?;
+        *guard = Some(reader);
+        Ok(resp)
+    }
+
+    /// Check whether the daemon is alive (uses a throwaway connection so it
+    /// does not disturb the cached one).
     pub fn ping(&self) -> bool {
-        self.send_request(&DaemonRequest::Ping).is_ok()
+        match self.connect() {
+            Ok(mut reader) => {
+                Self::send_on_stream(&mut reader, &DaemonRequest::Ping).is_ok()
+            }
+            Err(_) => false,
+        }
     }
 
     /// Ensure the daemon is running, spawning it if necessary.
