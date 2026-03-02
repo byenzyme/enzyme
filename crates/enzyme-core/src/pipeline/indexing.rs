@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::db::{Database, Repository};
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
@@ -119,13 +119,9 @@ impl<'a> IndexingPipeline<'a> {
             }
         }
 
-        // Step 6: Upsert processed documents into the database
+        // Step 6: Upsert processed documents into the database (single transaction)
         on_progress("Upserting documents...");
-        for doc in &processed_docs {
-            if let Err(e) = self.repo.upsert_document(doc) {
-                warn!(source_ref = %doc.source_ref, "Failed to upsert document: {}", e);
-            }
-        }
+        self.repo.upsert_documents_batch(&processed_docs)?;
 
         // Step 7: Delete removed files from the database
         if !deleted_paths.is_empty() {
@@ -133,14 +129,19 @@ impl<'a> IndexingPipeline<'a> {
             self.repo.delete_documents_by_paths(&deleted_paths)?;
         }
 
-        // Step 8: Extract entities from processed documents
+        // Step 8: Extract entities from processed documents (single transaction)
         on_progress("Extracting entities...");
-        let mut entities_extracted = 0usize;
-        for doc in &processed_docs {
-            entities_extracted += self.extract_entities_from_doc(doc);
+        let entity_entries = Self::collect_entity_entries(&processed_docs);
+        let entities_extracted = entity_entries.len();
+        {
+            let refs: Vec<(&str, &EntityType, &EntityOccurrence)> = entity_entries
+                .iter()
+                .map(|(name, etype, occ)| (name.as_str(), etype, occ))
+                .collect();
+            self.repo.upsert_entities_batch(&refs)?;
         }
 
-        // Step 9: Compute trending scores for all entities
+        // Step 9: Compute trending scores for all entities (bulk fetch)
         on_progress("Computing trending scores...");
         self.compute_trending_scores()?;
 
@@ -166,125 +167,148 @@ impl<'a> IndexingPipeline<'a> {
         })
     }
 
-    /// Extract tags, links, and folders from a processed document and upsert
-    /// them as entity occurrences. Returns the number of entities extracted.
-    fn extract_entities_from_doc(&self, doc: &ProcessedDocument) -> usize {
+    /// Collect all entity entries from processed documents into a flat list
+    /// suitable for `upsert_entities_batch`.
+    fn collect_entity_entries(
+        docs: &[ProcessedDocument],
+    ) -> Vec<(String, EntityType, EntityOccurrence)> {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut count = 0usize;
+        let mut entries = Vec::new();
 
-        // A short context snippet from the first chunk (if available)
-        let context_snippet: Option<String> = doc
-            .chunks
-            .first()
-            .map(|c| c.chars().take(200).collect());
+        for doc in docs {
+            let context_snippet: Option<String> = doc
+                .chunks
+                .first()
+                .map(|c| c.chars().take(200).collect());
 
-        // Tags
-        for tag in &doc.tags {
-            let occ = EntityOccurrence {
-                id: None,
-                entity_id: 0, // set by upsert_entity
-                file_path: doc.source_ref.clone(),
-                context: context_snippet.clone(),
-                created_at: now,
-                effective_date: Some(doc.modified_at),
-                date_source: doc.modified_source.as_str().to_string(),
-            };
-            if let Err(e) = self.repo.upsert_entity(tag, &EntityType::Tag, &occ) {
-                debug!("Failed to upsert tag entity '{}': {}", tag, e);
+            for tag in &doc.tags {
+                entries.push((
+                    tag.clone(),
+                    EntityType::Tag,
+                    EntityOccurrence {
+                        id: None,
+                        entity_id: 0,
+                        file_path: doc.source_ref.clone(),
+                        context: context_snippet.clone(),
+                        created_at: now,
+                        effective_date: Some(doc.modified_at),
+                        date_source: doc.modified_source.as_str().to_string(),
+                    },
+                ));
             }
-            count += 1;
+
+            for link in &doc.links {
+                entries.push((
+                    link.clone(),
+                    EntityType::Link,
+                    EntityOccurrence {
+                        id: None,
+                        entity_id: 0,
+                        file_path: doc.source_ref.clone(),
+                        context: context_snippet.clone(),
+                        created_at: now,
+                        effective_date: Some(doc.modified_at),
+                        date_source: doc.modified_source.as_str().to_string(),
+                    },
+                ));
+            }
+
+            for folder in &doc.folders {
+                entries.push((
+                    folder.clone(),
+                    EntityType::Folder,
+                    EntityOccurrence {
+                        id: None,
+                        entity_id: 0,
+                        file_path: doc.source_ref.clone(),
+                        context: None,
+                        created_at: now,
+                        effective_date: Some(doc.modified_at),
+                        date_source: doc.modified_source.as_str().to_string(),
+                    },
+                ));
+            }
         }
 
-        // Links
-        for link in &doc.links {
-            let occ = EntityOccurrence {
-                id: None,
-                entity_id: 0,
-                file_path: doc.source_ref.clone(),
-                context: context_snippet.clone(),
-                created_at: now,
-                effective_date: Some(doc.modified_at),
-                date_source: doc.modified_source.as_str().to_string(),
-            };
-            if let Err(e) = self.repo.upsert_entity(link, &EntityType::Link, &occ) {
-                debug!("Failed to upsert link entity '{}': {}", link, e);
-            }
-            count += 1;
-        }
-
-        // Folders
-        for folder in &doc.folders {
-            let occ = EntityOccurrence {
-                id: None,
-                entity_id: 0,
-                file_path: doc.source_ref.clone(),
-                context: None,
-                created_at: now,
-                effective_date: Some(doc.modified_at),
-                date_source: doc.modified_source.as_str().to_string(),
-            };
-            if let Err(e) = self.repo.upsert_entity(folder, &EntityType::Folder, &occ) {
-                debug!("Failed to upsert folder entity '{}': {}", folder, e);
-            }
-            count += 1;
-        }
-
-        count
+        entries
     }
 
     /// Recompute trending scores for every entity in the database.
     ///
-    /// For each entity, we fetch all occurrences and compute:
-    /// - `frequency_recent`: count of occurrences within the last 365 days.
-    /// - `recency_score`: exponentially-weighted sum (half-life = 30 days),
-    ///   boosted by `(1 + ln(1 + total_frequency))`.
-    /// - `timeline_buckets`: occurrence counts per month (`YYYY-MM`).
+    /// Fetches all occurrence dates in a **single query**, groups by entity_id
+    /// in memory, then batch-updates all trends in one transaction.
     fn compute_trending_scores(&self) -> Result<()> {
         let entities = self.repo.get_all_entities()?;
         let now_millis = chrono::Utc::now().timestamp_millis();
 
-        for entity in &entities {
-            let entity_id = entity.id.unwrap_or(0);
-            let occurrences = self.repo.get_entity_occurrences(entity_id)?;
+        // Build entity_id -> frequency lookup
+        let entity_freq: HashMap<i64, i64> = entities
+            .iter()
+            .filter_map(|e| e.id.map(|id| (id, e.frequency)))
+            .collect();
 
-            let mut weighted_sum = 0.0f64;
-            let mut timeline_buckets: HashMap<String, i64> = HashMap::new();
-            let mut frequency_recent = 0i64;
+        // Single bulk fetch of all occurrence dates
+        let all_occ_dates = self.repo.get_all_occurrence_dates()?;
 
-            for occ in &occurrences {
-                let effective_date = occ.effective_date.unwrap_or(occ.created_at);
-                let age_days =
-                    ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+        // Group by entity_id and compute scores in one pass
+        // (rows are ordered by entity_id from the query)
+        struct Accum {
+            weighted_sum: f64,
+            frequency_recent: i64,
+            timeline_buckets: HashMap<String, i64>,
+        }
 
-                // Exponential decay with a half-life of 30 days:
-                // weight = exp(-ln(2) / 30 * age_days)
-                let weight = (-0.693_147 / 30.0 * age_days).exp();
-                weighted_sum += weight;
+        let mut accums: HashMap<i64, Accum> = HashMap::new();
 
-                // Count occurrences within the last year
-                if age_days <= 365.0 {
-                    frequency_recent += 1;
-                }
+        for (entity_id, effective_date_opt, created_at) in &all_occ_dates {
+            let effective_date = effective_date_opt.unwrap_or(*created_at);
+            let age_days =
+                ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
 
-                // Bucket by month
-                if let Some(dt) = chrono::DateTime::from_timestamp_millis(effective_date) {
-                    let bucket = dt.format("%Y-%m").to_string();
-                    *timeline_buckets.entry(bucket).or_insert(0) += 1;
-                }
+            let acc = accums.entry(*entity_id).or_insert_with(|| Accum {
+                weighted_sum: 0.0,
+                frequency_recent: 0,
+                timeline_buckets: HashMap::new(),
+            });
+
+            // Exponential decay with a half-life of 30 days
+            let weight = (-0.693_147 / 30.0 * age_days).exp();
+            acc.weighted_sum += weight;
+
+            if age_days <= 365.0 {
+                acc.frequency_recent += 1;
             }
 
-            // Frequency-boosted recency score
-            let frequency = entity.frequency as f64;
-            let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
-
-            let trends = EntityTrends {
-                frequency_recent,
-                recency_score,
-                timeline_buckets,
-            };
-
-            self.repo.update_entity_trends(entity_id, &trends)?;
+            if let Some(dt) = chrono::DateTime::from_timestamp_millis(effective_date) {
+                let bucket = dt.format("%Y-%m").to_string();
+                *acc.timeline_buckets.entry(bucket).or_insert(0) += 1;
+            }
         }
+
+        // Build batch update
+        let updates: Vec<(i64, EntityTrends)> = entities
+            .iter()
+            .filter_map(|e| {
+                let entity_id = e.id?;
+                let frequency = entity_freq.get(&entity_id).copied().unwrap_or(0) as f64;
+
+                let acc = accums.remove(&entity_id);
+                let (weighted_sum, frequency_recent, timeline_buckets) = match acc {
+                    Some(a) => (a.weighted_sum, a.frequency_recent, a.timeline_buckets),
+                    None => (0.0, 0, HashMap::new()),
+                };
+
+                let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
+
+                Some((entity_id, EntityTrends {
+                    frequency_recent,
+                    recency_score,
+                    timeline_buckets,
+                }))
+            })
+            .collect();
+
+        self.repo.update_entity_trends_batch(&updates)?;
 
         Ok(())
     }

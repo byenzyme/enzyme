@@ -73,41 +73,30 @@ impl<'a> Repository<'a> {
     // Document operations
     // -----------------------------------------------------------------------
 
-    /// Insert or replace a document and its associated tags, links, and chunks.
+    /// Insert or replace documents and their associated tags, links, and chunks.
     ///
-    /// Uses a transaction on the write connection.  Returns the `doc_id`.
-    pub fn upsert_document(&self, doc: &ProcessedDocument) -> Result<i64> {
-        let conn = self.db.write_conn();
-        let indexed_at = chrono::Utc::now().timestamp_millis();
-
-        let metadata = doc
-            .frontmatter
-            .as_ref()
-            .map(|fm| serde_json::to_string(&fm.extra).unwrap_or_else(|_| "{}".to_string()))
-            .unwrap_or_else(|| "{}".to_string());
-
-        let tx = conn.unchecked_transaction()
-            .context("failed to begin transaction for upsert_document")?;
-
-        // Look up existing doc_id so we can delete children first.
-        let existing_id: Option<i64> = {
-            let mut stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
-            let mut rows = stmt.query(params![doc.source_ref])?;
-            match rows.next()? {
-                Some(row) => Some(row.get(0)?),
-                None => None,
-            }
-        };
-
-        // Delete old children if the document already exists.
-        if let Some(old_id) = existing_id {
-            tx.execute("DELETE FROM doc_tags WHERE doc_id = ?1", params![old_id])?;
-            tx.execute("DELETE FROM doc_links WHERE doc_id = ?1", params![old_id])?;
-            tx.execute("DELETE FROM chunks WHERE doc_id = ?1", params![old_id])?;
+    /// All documents are written inside a **single transaction** so that SQLite
+    /// only fsyncs once. Prepared statements are reused across all documents.
+    pub fn upsert_documents_batch(&self, docs: &[ProcessedDocument]) -> Result<Vec<i64>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // INSERT OR REPLACE the document row.
-        tx.execute(
+        let conn = self.db.write_conn();
+        let indexed_at = chrono::Utc::now().timestamp_millis();
+        let chunk_now = chrono::Utc::now().timestamp_millis();
+
+        let tx = conn.unchecked_transaction()
+            .context("failed to begin transaction for upsert_documents_batch")?;
+
+        let mut doc_ids = Vec::with_capacity(docs.len());
+
+        // Prepare all statements once, reuse for every document.
+        let mut lookup_stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
+        let mut del_tags_stmt = tx.prepare("DELETE FROM doc_tags WHERE doc_id = ?1")?;
+        let mut del_links_stmt = tx.prepare("DELETE FROM doc_links WHERE doc_id = ?1")?;
+        let mut del_chunks_stmt = tx.prepare("DELETE FROM chunks WHERE doc_id = ?1")?;
+        let mut insert_doc_stmt = tx.prepare(
             "INSERT OR REPLACE INTO docs (
                 source_ref, title, content, content_hash,
                 word_count, char_count,
@@ -115,7 +104,37 @@ impl<'a> Repository<'a> {
                 modified_at, modified_source,
                 indexed_at, metadata
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
+        )?;
+        let mut get_id_stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
+        let mut tag_stmt = tx.prepare("INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?1, ?2)")?;
+        let mut link_stmt = tx.prepare("INSERT OR IGNORE INTO doc_links (doc_id, link) VALUES (?1, ?2)")?;
+        let mut chunk_stmt = tx.prepare(
+            "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+
+        for doc in docs {
+            let metadata = doc
+                .frontmatter
+                .as_ref()
+                .map(|fm| serde_json::to_string(&fm.extra).unwrap_or_else(|_| "{}".to_string()))
+                .unwrap_or_else(|| "{}".to_string());
+
+            // Delete old children if the document already exists.
+            let existing_id: Option<i64> = {
+                let mut rows = lookup_stmt.query(params![doc.source_ref])?;
+                match rows.next()? {
+                    Some(row) => Some(row.get(0)?),
+                    None => None,
+                }
+            };
+            if let Some(old_id) = existing_id {
+                del_tags_stmt.execute(params![old_id])?;
+                del_links_stmt.execute(params![old_id])?;
+                del_chunks_stmt.execute(params![old_id])?;
+            }
+
+            insert_doc_stmt.execute(params![
                 doc.source_ref,
                 doc.title,
                 doc.content,
@@ -128,48 +147,36 @@ impl<'a> Repository<'a> {
                 doc.modified_source.as_str(),
                 indexed_at,
                 metadata,
-            ],
-        )?;
+            ])?;
 
-        // Retrieve the doc_id (may be new or the same after REPLACE).
-        let doc_id: i64 = {
-            let mut stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
-            stmt.query_row(params![doc.source_ref], |row| row.get(0))?
-        };
+            let doc_id: i64 = get_id_stmt.query_row(params![doc.source_ref], |row| row.get(0))?;
 
-        // Insert tags.
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?1, ?2)")?;
             for tag in &doc.tags {
-                stmt.execute(params![doc_id, tag])?;
+                tag_stmt.execute(params![doc_id, tag])?;
             }
-        }
-
-        // Insert links.
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR IGNORE INTO doc_links (doc_id, link) VALUES (?1, ?2)")?;
             for link in &doc.links {
-                stmt.execute(params![doc_id, link])?;
+                link_stmt.execute(params![doc_id, link])?;
             }
-        }
-
-        // Insert chunks.
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            let now = chrono::Utc::now().timestamp_millis();
             for (i, chunk_content) in doc.chunks.iter().enumerate() {
                 let word_count = chunk_content.split_whitespace().count() as i64;
-                stmt.execute(params![doc_id, i as i64, chunk_content, word_count, now])?;
+                chunk_stmt.execute(params![doc_id, i as i64, chunk_content, word_count, chunk_now])?;
             }
+
+            doc_ids.push(doc_id);
         }
 
-        tx.commit().context("failed to commit upsert_document")?;
-        Ok(doc_id)
+        drop(lookup_stmt);
+        drop(del_tags_stmt);
+        drop(del_links_stmt);
+        drop(del_chunks_stmt);
+        drop(insert_doc_stmt);
+        drop(get_id_stmt);
+        drop(tag_stmt);
+        drop(link_stmt);
+        drop(chunk_stmt);
+
+        tx.commit().context("failed to commit upsert_documents_batch")?;
+        Ok(doc_ids)
     }
 
     /// Retrieve a single document by its `source_ref` (relative vault path).
@@ -329,63 +336,89 @@ impl<'a> Repository<'a> {
     // Entity operations
     // -----------------------------------------------------------------------
 
-    /// Insert or update an entity and record an occurrence.
+    /// Batch-insert or update entities and record occurrences.
     ///
-    /// If the entity does not exist, it is created.  If it does, its frequency
-    /// is incremented and `last_seen` is updated to the maximum of its current
-    /// value and the occurrence's `effective_date`.  Returns the `entity_id`.
-    pub fn upsert_entity(
+    /// All operations run inside a **single transaction** with prepared
+    /// statements reused across all entries.  Each entry is a
+    /// `(name, EntityType, EntityOccurrence)` tuple.
+    pub fn upsert_entities_batch(
         &self,
-        name: &str,
-        entity_type: &EntityType,
-        occurrence: &EntityOccurrence,
-    ) -> Result<i64> {
+        entries: &[(&str, &EntityType, &EntityOccurrence)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
         let conn = self.db.write_conn();
         let tx = conn
             .unchecked_transaction()
-            .context("failed to begin transaction for upsert_entity")?;
+            .context("failed to begin transaction for upsert_entities_batch")?;
 
-        let effective_date = occurrence.effective_date;
-        let type_str = entity_type.as_str();
-
-        // INSERT OR IGNORE — creates the row only if it doesn't exist yet.
-        tx.execute(
+        let mut insert_ignore_stmt = tx.prepare(
             "INSERT OR IGNORE INTO entities (name, type, frequency, first_seen, last_seen)
              VALUES (?1, ?2, 0, ?3, ?4)",
-            params![name, type_str, effective_date, effective_date],
         )?;
-
-        // UPDATE — increment frequency, refresh last_seen.
-        tx.execute(
+        let mut update_stmt = tx.prepare(
             "UPDATE entities
              SET frequency = frequency + 1,
                  last_seen = MAX(COALESCE(last_seen, 0), COALESCE(?1, 0))
              WHERE name = ?2 AND type = ?3",
-            params![effective_date, name, type_str],
         )?;
-
-        // Retrieve the entity id.
-        let entity_id: i64 = {
-            let mut stmt = tx.prepare("SELECT id FROM entities WHERE name = ?1 AND type = ?2")?;
-            stmt.query_row(params![name, type_str], |row| row.get(0))?
-        };
-
-        // Insert the occurrence.
-        tx.execute(
+        let mut lookup_stmt = tx.prepare(
+            "SELECT id FROM entities WHERE name = ?1 AND type = ?2",
+        )?;
+        let mut occ_stmt = tx.prepare(
             "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at, effective_date, date_source)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
+        )?;
+
+        for &(name, entity_type, occurrence) in entries {
+            let effective_date = occurrence.effective_date;
+            let type_str = entity_type.as_str();
+
+            insert_ignore_stmt.execute(params![name, type_str, effective_date, effective_date])?;
+            update_stmt.execute(params![effective_date, name, type_str])?;
+
+            let entity_id: i64 = lookup_stmt.query_row(params![name, type_str], |row| row.get(0))?;
+
+            occ_stmt.execute(params![
                 entity_id,
                 occurrence.file_path,
                 occurrence.context,
                 occurrence.created_at,
                 occurrence.effective_date,
                 occurrence.date_source,
-            ],
-        )?;
+            ])?;
+        }
 
-        tx.commit().context("failed to commit upsert_entity")?;
-        Ok(entity_id)
+        drop(insert_ignore_stmt);
+        drop(update_stmt);
+        drop(lookup_stmt);
+        drop(occ_stmt);
+
+        tx.commit().context("failed to commit upsert_entities_batch")?;
+        Ok(())
+    }
+
+    /// Get all occurrences for a given entity.
+    pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
+        let rows = self.db.query_read(
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+             FROM entity_occurrences WHERE entity_id = ?1",
+            &[&entity_id as &dyn rusqlite::types::ToSql],
+            |row| {
+                Ok(EntityOccurrence {
+                    id: Some(row.get(0)?),
+                    entity_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    context: row.get(3)?,
+                    created_at: row.get(4)?,
+                    effective_date: row.get(5)?,
+                    date_source: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                })
+            },
+        )?;
+        Ok(rows)
     }
 
     /// Get the top entities, ordered by the given column.
@@ -416,37 +449,39 @@ impl<'a> Repository<'a> {
         }
     }
 
-    /// Update the trends JSON blob for an entity.
-    pub fn update_entity_trends(&self, entity_id: i64, trends: &EntityTrends) -> Result<()> {
-        let trends_json =
-            serde_json::to_string(trends).context("failed to serialize EntityTrends")?;
-        self.db.execute_write(
-            "UPDATE entities SET trends = ?1 WHERE id = ?2",
-            &[
-                &trends_json as &dyn rusqlite::types::ToSql,
-                &entity_id,
-            ],
-        )?;
+    /// Batch-update trends JSON blobs for multiple entities in a single transaction.
+    pub fn update_entity_trends_batch(&self, updates: &[(i64, EntityTrends)]) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let conn = self.db.write_conn();
+        let tx = conn
+            .unchecked_transaction()
+            .context("failed to begin transaction for update_entity_trends_batch")?;
+
+        let mut stmt = tx.prepare("UPDATE entities SET trends = ?1 WHERE id = ?2")?;
+        for (entity_id, trends) in updates {
+            let trends_json =
+                serde_json::to_string(trends).context("failed to serialize EntityTrends")?;
+            stmt.execute(params![trends_json, entity_id])?;
+        }
+
+        drop(stmt);
+        tx.commit().context("failed to commit update_entity_trends_batch")?;
         Ok(())
     }
 
-    /// Get all occurrences for a given entity.
-    pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
+    /// Fetch all occurrence timestamps in one query, grouped by entity_id.
+    ///
+    /// Returns `(entity_id, effective_date, created_at)` for every occurrence,
+    /// ordered by entity_id so the caller can stream-group.
+    pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64)>> {
         let rows = self.db.query_read(
-            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
-             FROM entity_occurrences WHERE entity_id = ?1",
-            &[&entity_id as &dyn rusqlite::types::ToSql],
-            |row| {
-                Ok(EntityOccurrence {
-                    id: Some(row.get(0)?),
-                    entity_id: row.get(1)?,
-                    file_path: row.get(2)?,
-                    context: row.get(3)?,
-                    created_at: row.get(4)?,
-                    effective_date: row.get(5)?,
-                    date_source: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                })
-            },
+            "SELECT entity_id, effective_date, created_at
+             FROM entity_occurrences
+             ORDER BY entity_id",
+            &[],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         Ok(rows)
     }
