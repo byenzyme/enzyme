@@ -1,0 +1,66 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/jshph/enzyme-rust"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Web server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Embedding inference
+ort = "2.0.0-rc.11"
+rten = "0.24"
+rten-tensor = "0.24"
+tokenizers = "0.21"
+
+# HNSW
+instant-distance = "0.6"
+
+# Document processing
+pulldown-cmark = "0.12"
+
+# Parallelism & file traversal
+rayon = "1"
+walkdir = "2"
+ignore = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Crypto
+sha2 = "0.10"
+
+# ndarray (used by ort for tensor I/O)
+ndarray = "0.17"
+
+# Utilities
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }

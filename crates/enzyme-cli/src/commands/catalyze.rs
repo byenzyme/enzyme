@@ -1,0 +1,49 @@
+use std::path::Path;
+
+use anyhow::Result;
+
+use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::db::Database;
+use enzyme_core::embedding::{EmbeddingService, OrtBackend, resolve_model_files};
+use enzyme_core::pipeline::embedding::EmbeddingPipeline;
+use enzyme_core::search::context::ContextSearch;
+
+pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+
+    if !paths.vault_db.exists() {
+        println!("Vault not initialized. Run 'enzyme init' first.");
+        return Ok(());
+    }
+
+    let db = Database::open(&paths.vault_db)?;
+
+    // Load model and build indices
+    let model_files = resolve_model_files(&paths.home)?;
+    let backend = OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
+    let service = EmbeddingService::new(Box::new(backend));
+
+    let emb_pipeline = EmbeddingPipeline::new(&db, &service, paths.embeddings_dir.clone());
+    let (hnsw, bm25) = emb_pipeline.build_search_indices()?;
+
+    let search = ContextSearch::new(&db, &hnsw, &bm25, &service);
+    let results = search.catalyze_search(query, limit)?;
+
+    if results.is_empty() {
+        println!("No results found for: {:?}", query);
+        return Ok(());
+    }
+
+    for (i, result) in results.iter().enumerate() {
+        println!("{}. {} (score: {:.4})", i + 1, result.file_path, result.score);
+        if let Some(ref cat) = result.catalyst_text {
+            println!("   catalyst: {}", cat);
+        }
+        // Print first 200 chars of content as snippet
+        let snippet: String = result.content.chars().take(200).collect();
+        println!("   {}", snippet.replace('\n', " "));
+        println!();
+    }
+
+    Ok(())
+}

@@ -1,0 +1,33 @@
+[package]
+name = "enzyme-core"
+version.workspace = true
+edition.workspace = true
+description = "Core library for Enzyme — local-first knowledge indexing and approximate search"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+rusqlite = { workspace = true }
+ort = { workspace = true }
+ndarray = { workspace = true }
+rten = { workspace = true }
+rten-tensor = { workspace = true }
+tokenizers = { workspace = true }
+instant-distance = { workspace = true }
+pulldown-cmark = { workspace = true }
+rayon = { workspace = true }
+walkdir = { workspace = true }
+ignore = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

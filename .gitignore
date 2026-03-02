@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+
+# Model files (too large for git)
+*.onnx
+*.mlpackage/
+
+# Test vault
+vault/
+
+# Enzyme runtime
+.enzyme/
+.enzyme-embeddings/
