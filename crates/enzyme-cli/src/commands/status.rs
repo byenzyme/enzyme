@@ -27,7 +27,7 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
     let catalyst_count = catalysts.len();
 
     // Check how many docs are embedded
-    let docs_needing = repo.get_documents_needing_embedding()?;
+    let docs_needing = repo.get_documents_needing_embedding(None)?;
     let embedded_count = doc_count - docs_needing.len() as i64;
 
     println!("Vault: {}", vault_path.display());

@@ -11,6 +11,14 @@ use crate::embedding::EmbeddingService;
 use crate::models::{Timestamp, EMBEDDING_DIMENSION};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of documents to embed per run (most recent by `created_at`).
+/// Mirrors `MAX_EMBEDDING_FILES` from the Python implementation.
+pub const MAX_EMBEDDING_FILES: usize = 1024;
+
+// ---------------------------------------------------------------------------
 // EmbeddingPipeline
 // ---------------------------------------------------------------------------
 
@@ -65,8 +73,8 @@ impl<'a> EmbeddingPipeline<'a> {
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
-        // Step 1: Find documents needing embedding
-        let docs_needing = self.repo.get_documents_needing_embedding()?;
+        // Step 1: Find documents needing embedding (capped to most recent N by created_at)
+        let docs_needing = self.repo.get_documents_needing_embedding(Some(MAX_EMBEDDING_FILES))?;
         if docs_needing.is_empty() {
             info!("No documents need embedding");
             return Ok(EmbeddingStats {
@@ -109,9 +117,22 @@ impl<'a> EmbeddingPipeline<'a> {
         info!(total_chunks, total_docs = non_empty_docs.len(), "embedding all chunks in cross-document batches");
 
         // Step 3: Embed all chunks at once — the service handles batching internally.
+        // Convert chunk-level progress into document-level progress so the UI
+        // displays a document count rather than a chunk count.
+        let total_non_empty = non_empty_docs.len();
         let all_vectors = self.service.embed_documents_with_progress(
             &flat_chunks,
-            |completed, total| on_progress(completed, total),
+            |completed_chunks, _total_chunks| {
+                let mut docs_done = 0;
+                for (start, count) in &doc_chunk_ranges {
+                    if start + count <= completed_chunks {
+                        docs_done += 1;
+                    } else {
+                        break;
+                    }
+                }
+                on_progress(docs_done, total_non_empty);
+            },
         )?;
 
         // Step 4: Scatter results back to documents and update DB.

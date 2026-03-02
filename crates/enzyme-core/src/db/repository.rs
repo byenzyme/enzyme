@@ -228,15 +228,40 @@ impl<'a> Repository<'a> {
     ///
     /// Returns `(doc_id, source_ref, chunk_contents)` for each document
     /// where `embedded_content_hash != content_hash` or `embedded_at IS NULL`.
-    pub fn get_documents_needing_embedding(&self) -> Result<Vec<(i64, String, Vec<String>)>> {
-        let docs = self.db.query_read(
-            "SELECT id, source_ref FROM docs
-             WHERE embedded_content_hash IS NULL
-                OR embedded_content_hash != content_hash
-                OR embedded_at IS NULL",
-            &[],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-        )?;
+    ///
+    /// When `max_count` is `Some(n)`, returns at most `n` documents ordered by
+    /// `created_at DESC` (most recent first), matching the Python behaviour of
+    /// capping embedding runs to the N most recent documents.
+    pub fn get_documents_needing_embedding(
+        &self,
+        max_count: Option<usize>,
+    ) -> Result<Vec<(i64, String, Vec<String>)>> {
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match max_count {
+            Some(n) => (
+                "SELECT id, source_ref FROM docs
+                 WHERE embedded_content_hash IS NULL
+                    OR embedded_content_hash != content_hash
+                    OR embedded_at IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT ?1"
+                    .to_string(),
+                vec![Box::new(n as i64)],
+            ),
+            None => (
+                "SELECT id, source_ref FROM docs
+                 WHERE embedded_content_hash IS NULL
+                    OR embedded_content_hash != content_hash
+                    OR embedded_at IS NULL
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let docs = self.db.query_read(&sql, &param_refs, |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
 
         let mut results = Vec::with_capacity(docs.len());
         for (doc_id, source_ref) in docs {

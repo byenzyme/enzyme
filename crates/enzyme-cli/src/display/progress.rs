@@ -359,7 +359,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             let frame = spinner.tick();
                             let _ = writeln!(
                                 out,
-                                "  {}{}{} Embedding [{}/{}]",
+                                "  {}{}{} Embedding [{}/{} docs]",
                                 crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
                                 frame,
                                 crossterm::style::ResetColor,
