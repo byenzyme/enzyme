@@ -93,6 +93,9 @@ pub enum DisplayEvent {
     // API
     ApiSkipped(String),
 
+    // Starter prompt
+    StarterPrompt(String),
+
     // Done
     Done {
         duration_ms: u64,
@@ -406,6 +409,30 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             reason,
                         );
                     }
+                    DisplayEvent::StarterPrompt(prompt) => {
+                        let _ = writeln!(out);
+                        let _ = writeln!(
+                            out,
+                            "  {}Try this prompt:{}",
+                            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+                            crossterm::style::ResetColor,
+                        );
+                        // Build full prompt with citation suffix, escape for shell
+                        let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
+                        let escaped = full
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .replace('"', "\\\"")
+                            .replace('!', "\\!");
+                        let _ = writeln!(
+                            out,
+                            "    {}claude \"{}\"{}\n",
+                            crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                            escaped,
+                            crossterm::style::ResetColor,
+                        );
+                    }
                     DisplayEvent::SimilarityStart => {
                         stage = DisplayStage::Similarity;
                     }
@@ -606,6 +633,19 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 }
                 DisplayEvent::ApiSkipped(reason) => {
                     println!("  {}", reason);
+                }
+                DisplayEvent::StarterPrompt(prompt) => {
+                    let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
+                    let escaped = full
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .replace('"', "\\\"")
+                        .replace('!', "\\!");
+                    println!();
+                    println!("  Try this prompt:");
+                    println!("    claude \"{}\"", escaped);
+                    println!();
                 }
                 DisplayEvent::SimilarityStart => {
                     println!("Computing similarities...");

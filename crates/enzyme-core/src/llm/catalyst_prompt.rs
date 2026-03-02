@@ -18,13 +18,15 @@ struct CatalystEntry {
     topic: String,
 }
 
-/// New object format: `{ "catalysts": [...], "topicNames": [...] }`.
+/// New object format: `{ "catalysts": [...], "topicNames": [...], "starterPrompt": "..." }`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CatalystPayload {
     catalysts: Vec<String>,
     #[serde(default)]
     topic_names: Vec<String>,
+    #[serde(default)]
+    starter_prompt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +271,10 @@ Attend to the excerpts and:\n\
 1. For EACH catalyst: First ground in specific excerpts — what does {entity_name} mean in THIS vault based on what you're reading? Quote a phrase. Do NOT default to generic definitions.\n\
 2. {periphery_instruction}\n\
 3. {format_instruction}\n\
-4. Create precise topic names (3-5 words, lowercase, space-separated) capturing each inquiry. Examples: \"craft negotiation perfection\", \"enzyme validation authenticity\", \"tools reveal conceal needs\", \"physical knowledge embodiment\", \"ai human voice missions\"\n\n\
+4. Create precise topic names (3-5 words, lowercase, space-separated) capturing each inquiry. Examples: \"craft negotiation perfection\", \"enzyme validation authenticity\", \"tools reveal conceal needs\", \"physical knowledge embodiment\", \"ai human voice missions\"\n\
+5. Write a starterPrompt: a single 10-20 word question that surfaces a pattern or tension the user hasn't noticed. \
+It should name something the user is doing (saving, returning to, avoiding), not just list topics. \
+Avoid \"connect\", \"intersect\", \"relate\", \"explore\". Use direct, personal phrasing.\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -277,7 +282,8 @@ Return a JSON object with:\n\
   ],\n\
   \"topicNames\": [\n\
 {topic_placeholders}\n\
-  ]\n\
+  ],\n\
+  \"starterPrompt\": \"[personal question about what this entity reveals]\"\n\
 }}"
     ));
 
@@ -310,12 +316,18 @@ fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'s
 // Response parsing
 // ---------------------------------------------------------------------------
 
-/// Parse the LLM response into `(catalyst_text, topic_name)` pairs.
+/// Parsed catalyst response: catalyst pairs + optional starter prompt.
+pub struct CatalystResponse {
+    pub pairs: Vec<(String, String)>,
+    pub starter_prompt: Option<String>,
+}
+
+/// Parse the LLM response into catalyst pairs and an optional starter prompt.
 ///
 /// Supports two formats:
-/// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...] }`
+/// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...], "starterPrompt": "..." }`
 /// 2. **Legacy array format**: `[{ "catalyst": "...", "topic": "..." }, ...]`
-pub fn parse_catalyst_response(response: &str) -> Result<Vec<(String, String)>> {
+pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
     let json_str = strip_code_fences(response);
 
     // Try the new object format first
@@ -333,17 +345,23 @@ pub fn parse_catalyst_response(response: &str) -> Result<Vec<(String, String)>> 
                 (text, topic)
             })
             .collect();
-        return Ok(pairs);
+        return Ok(CatalystResponse {
+            pairs,
+            starter_prompt: payload.starter_prompt,
+        });
     }
 
     // Fall back to legacy array format
     let entries: Vec<CatalystEntry> =
         serde_json::from_str(json_str).context("Failed to parse catalyst response as JSON")?;
 
-    Ok(entries
-        .into_iter()
-        .map(|entry| (entry.catalyst, entry.topic))
-        .collect())
+    Ok(CatalystResponse {
+        pairs: entries
+            .into_iter()
+            .map(|entry| (entry.catalyst, entry.topic))
+            .collect(),
+        starter_prompt: None,
+    })
 }
 
 /// Build a strict `json_schema` response format for catalyst generation.
@@ -364,9 +382,13 @@ pub fn catalyst_response_format() -> super::client::ResponseFormat {
                     "topicNames": {
                         "type": "array",
                         "items": { "type": "string" }
+                    },
+                    "starterPrompt": {
+                        "type": "string",
+                        "description": "A 10-20 word personal question derived from the vault context that surfaces a pattern the user hasn't noticed."
                     }
                 },
-                "required": ["catalysts", "topicNames"]
+                "required": ["catalysts", "topicNames", "starterPrompt"]
             }),
             strict: true,
         },
@@ -413,6 +435,21 @@ fn generate_fallback_topic(text: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Obsidian citation suffix appended to the starter prompt for Claude CLI context.
+const OBSIDIAN_CITATION_SUFFIX: &str =
+    "Cite passages using Obsidian block embeds like \
+     ![[Note#^blockid]] or ![[Note#Heading]]. \
+     Save the response as a new note in the most fitting folder.";
+
+/// Get the Obsidian citation suffix.
+pub fn obsidian_citation_suffix() -> &'static str {
+    OBSIDIAN_CITATION_SUFFIX
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -424,38 +461,40 @@ mod tests {
 
     #[test]
     fn test_parse_object_format() {
-        let json = r#"{"catalysts":["Where does X?","What about Y?"],"topicNames":["topic a","topic b"]}"#;
-        let pairs = parse_catalyst_response(json).unwrap();
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(pairs[0].0, "Where does X?");
-        assert_eq!(pairs[0].1, "topic a");
-        assert_eq!(pairs[1].0, "What about Y?");
-        assert_eq!(pairs[1].1, "topic b");
+        let json = r#"{"catalysts":["Where does X?","What about Y?"],"topicNames":["topic a","topic b"],"starterPrompt":"Why does X?"}"#;
+        let resp = parse_catalyst_response(json).unwrap();
+        assert_eq!(resp.pairs.len(), 2);
+        assert_eq!(resp.pairs[0].0, "Where does X?");
+        assert_eq!(resp.pairs[0].1, "topic a");
+        assert_eq!(resp.pairs[1].0, "What about Y?");
+        assert_eq!(resp.pairs[1].1, "topic b");
+        assert_eq!(resp.starter_prompt.as_deref(), Some("Why does X?"));
     }
 
     #[test]
     fn test_parse_object_format_missing_topics() {
-        let json = r#"{"catalysts":["Where does X?","What about Y?"]}"#;
-        let pairs = parse_catalyst_response(json).unwrap();
-        assert_eq!(pairs.len(), 2);
+        let json = r#"{"catalysts":["Where does X?","What about Y?"],"starterPrompt":""}"#;
+        let resp = parse_catalyst_response(json).unwrap();
+        assert_eq!(resp.pairs.len(), 2);
         // Should generate fallback topics
-        assert!(!pairs[0].1.is_empty());
+        assert!(!resp.pairs[0].1.is_empty());
     }
 
     #[test]
     fn test_parse_legacy_array_format() {
         let json = r#"[{"catalyst":"Where does X?","topic":"topic a"}]"#;
-        let pairs = parse_catalyst_response(json).unwrap();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, "Where does X?");
-        assert_eq!(pairs[0].1, "topic a");
+        let resp = parse_catalyst_response(json).unwrap();
+        assert_eq!(resp.pairs.len(), 1);
+        assert_eq!(resp.pairs[0].0, "Where does X?");
+        assert_eq!(resp.pairs[0].1, "topic a");
+        assert!(resp.starter_prompt.is_none());
     }
 
     #[test]
     fn test_parse_with_code_fences() {
         let response = "```json\n[{\"catalyst\":\"A?\",\"topic\":\"t\"}]\n```";
-        let pairs = parse_catalyst_response(response).unwrap();
-        assert_eq!(pairs.len(), 1);
+        let resp = parse_catalyst_response(response).unwrap();
+        assert_eq!(resp.pairs.len(), 1);
     }
 
     #[test]

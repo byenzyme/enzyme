@@ -174,6 +174,10 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
             catalysts_generated: stats.catalysts_generated,
         }).ok();
 
+        if let Some(ref prompt) = stats.starter_prompt {
+            tx.send(DisplayEvent::StarterPrompt(prompt.clone())).ok();
+        }
+
         Some(stats)
     } else {
         tx.send(DisplayEvent::ApiSkipped(
