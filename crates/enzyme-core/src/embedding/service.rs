@@ -4,7 +4,12 @@ use tracing::{debug, info};
 use super::backend::EmbeddingBackend;
 
 /// Default number of texts to embed per model invocation.
-const DEFAULT_BATCH_SIZE: usize = 32;
+///
+/// MiniLM (384-dim, seq_len=128) at batch=128 uses ~25 MB for the output
+/// tensor — well within reason on any modern machine. Larger batches
+/// amortise per-batch overhead (ONNX Runtime thread-pool scheduling,
+/// daemon socket round-trips).
+const DEFAULT_BATCH_SIZE: usize = 128;
 
 /// High-level embedding service that wraps an [`EmbeddingBackend`] with batching
 /// and optional progress reporting.

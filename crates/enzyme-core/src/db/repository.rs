@@ -641,6 +641,31 @@ impl<'a> Repository<'a> {
         Ok(rows)
     }
 
+    /// Get the most recent `generated_at` timestamp across all catalysts.
+    pub fn get_latest_catalyst_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
+        let rows = self.db.query_read(
+            "SELECT MAX(generated_at) FROM catalysts",
+            &[],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        Ok(rows.into_iter().next().flatten().map(|s| parse_datetime_utc(&s)))
+    }
+
+    /// Count distinct documents that mention a given entity (by entity name).
+    ///
+    /// Uses `entity_occurrences` to count unique file paths.
+    pub fn get_entity_doc_count(&self, entity_name: &str) -> Result<usize> {
+        let rows = self.db.query_read(
+            "SELECT COUNT(DISTINCT eo.file_path)
+             FROM entity_occurrences eo
+             JOIN entities e ON e.id = eo.entity_id
+             WHERE e.name = ?1",
+            &[&entity_name as &dyn rusqlite::types::ToSql],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(rows.into_iter().next().unwrap_or(0) as usize)
+    }
+
     /// Delete all catalysts for a given entity name.
     pub fn delete_catalysts_for_entity(&self, entity: &str) -> Result<()> {
         self.db

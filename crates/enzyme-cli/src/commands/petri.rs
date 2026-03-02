@@ -5,7 +5,7 @@ use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::{Database, Repository};
-use enzyme_core::pipeline::check_vault_stale;
+use enzyme_core::pipeline::staleness::check_catalyst_staleness;
 
 pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
@@ -16,7 +16,7 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
     }
 
     let db = Database::open(&paths.vault_db)?;
-    let stale = check_vault_stale(vault_path, &db);
+    let stale = check_catalyst_staleness(&db, vault_path)?.is_stale();
     let repo = Repository::new(&db);
 
     let entities = repo.get_top_entities(top, "recency_score")?;

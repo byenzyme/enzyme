@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
         }
         Commands::Refresh { full, detached, guide } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_init(&vault_path, full, detached, vault_guide.as_deref()).await?;
+            commands::init::run_refresh(&vault_path, full, detached, vault_guide.as_deref()).await?;
         }
         Commands::Catalyze { query, limit } => {
             commands::catalyze::run_catalyze(&vault_path, &query, limit).await?;

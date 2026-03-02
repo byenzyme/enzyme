@@ -1,38 +1,111 @@
-# enzyme-rust
+# Enzyme
 
-Rust rewrite of [Enzyme](https://github.com/jshph/enzyme) — catalyst generation and semantic search for Obsidian vaults.
+Local-first knowledge indexing for Obsidian vaults. Generates semantic handles ("catalysts") that match the way you think, not just the words you used.
 
-## Setup
+## Why not just point Claude at a vault?
 
-Requires the [mdbr-leaf-ir](https://huggingface.co/MongoDB/mdbr-leaf-ir) embedding model (int4 quantized ONNX, 52 MB). The binary is stored locally in `models/` but gitignored — `tokenizer.json` is tracked.
+An Obsidian vault is a pile of markdown files. Giving an LLM raw file access works, but it searches by keywords and has no sense of what matters to you right now. Enzyme sits between your vault and the LLM, providing structure that makes retrieval meaningfully better:
+
+**Semantic handles, not keyword search.** Enzyme generates *catalysts* — thematic questions and tensions derived from your actual writing. When you search, your query is matched against these catalysts, which softly map to the conceptual territory of your vault rather than requiring exact keyword hits. A search for "feeling stuck on the project" finds notes about creative blocks, momentum, and resistance — even if none of those words appear in the query or the notes together.
+
+**Temporal awareness.** Recent ideas are weighted more heavily. Enzyme uses a 30-day half-life decay so that what you've been thinking about *this week* surfaces before notes from two years ago. Your vault has a pulse; Enzyme reads it.
+
+**Vault guide.** You can pass Enzyme a description of how your vault is *structured* — what the folders mean, how tags are used, what the organizational logic is. Enzyme takes that structure and derives what the vault is about on its own. It bootstraps around the shape of your system rather than needing you to summarize your ideas.
+
+**Runs on your machine.** The embedding model is a 52 MB quantized ONNX file that runs entirely on-device. No data leaves your machine. A background daemon keeps the model warm across CLI invocations and auto-exits after 5 minutes of idle.
+
+## Performance
+
+Benchmarks on an M5 MacBook Pro:
+
+| Vault | Files | Full init |
+|-------|-------|-----------|
+| 4 years of notes | ~1,000 files | **~15s** |
+
+- **Indexing** — file discovery, entity extraction, and trending score computation happen in-process with no network calls.
+- **Embeddings** — computed locally on the ONNX runtime at zero API cost. The model is 23M parameters (BERT variant, int4 quantized) running on 4 threads. The daemon keeps it loaded across invocations so repeat runs skip model load time.
+- **Catalysts** — the only network call. Uses a small, fast model (Gemini Flash Lite via OpenRouter). Concurrent generation across all entities. A full vault refresh costs a few cents.
+- **Search** — catalyst-mediated retrieval against precomputed similarities. Sub-second.
+- **Disk footprint** — single binary + 52 MB model file. Vault data lives in a SQLite database and a compact binary embeddings file alongside your vault. No Docker, no server.
+
+## Install
 
 ```bash
-# Install model to ~/.enzyme/models/ and build the CLI
+# Build and install (requires Rust toolchain)
 make install
 
-# Or just the model
-make install-model
-
-# Verify model is in place
-make check-model
+# This copies the embedding model to ~/.enzyme/models/ and builds the CLI
 ```
 
-If `models/model.onnx` is missing (fresh clone), see [`models/README.md`](models/README.md) for re-download instructions.
+## Usage
 
-## Codebase
+```bash
+# Initialize a vault (discovers, indexes, embeds, generates catalysts)
+enzyme init -p /path/to/vault
 
-~8,800 lines of Rust, ~33% tests.
+# Pass a vault guide describing how the vault is structured
+enzyme init -p /path/to/vault --guide "Folders: journal/ is daily logs,
+projects/ has one subfolder per active project, people/ tracks relationships.
+Tags: #open-question marks unresolved threads, #synthesis is for connecting ideas."
 
+# Or pipe a guide from a file and initialize within the directory
+cat vault-guide.txt | enzyme init
+
+# Search using catalysts
+enzyme catalyze "tension between shipping fast and getting it right" -p /path/to/vault
+
+# See trending entities and their catalysts
+enzyme petri -p /path/to/vault
+
+# Check vault status
+enzyme status -p /path/to/vault
 ```
-enzyme-core   8,254 loc
-  document      1,985    frontmatter, chunking, extraction, discovery
-  db            1,588    sqlite repository, schema, migrations
-  embedding     1,268    ort/rten backends, normalization
-  search        1,054    bm25, hnsw
-  pipeline      1,028    catalyst generation, indexing, similarity
-  config          797    vault + global config, paths
-  llm             278    api client, prompt templates
-  models          246    entity, document, catalyst, embedding
-enzyme-cli      505 loc  clap commands (init, catalyze, status, etc.)
-enzyme-api        1 loc  stub
+
+## Configuration
+
+**`<vault>/enzyme-config.yaml`** — Entity and catalyst configuration:
+
+```yaml
+catalystProfile: dialectical    # or synthesis, relational, operational, strategic, reflective
+
+catalyzedEntities:
+  - entity: "#distributed-systems"
+  - entity: "[[Raft Consensus]]"
+  - entity: "folder:journal"
+    catalystProfile: reflective  # per-entity profile override
 ```
+
+If no entities are configured, Enzyme selects from trending analysis automatically.
+
+## API keys
+
+Enzyme needs an API key only for catalyst generation. Resolution order:
+
+1. `OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL` for custom endpoints)
+2. `OPENROUTER_API_KEY` env var
+3. `~/.enzyme/auth.json` → `{"openrouter_api_key": "..."}`
+
+If no key is found, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
+
+## MCP integration
+
+Enzyme's CLI outputs structured JSON, designed to be consumed by an MCP server. The `catalyze` and `petri` commands include a `stale` flag so upstream tools know when to trigger a refresh. The [Enzyme MCP server](https://github.com/jshph/enzyme) wraps the CLI and exposes vault exploration, semantic search, and artifact creation as MCP tools for Claude Code and Claude Desktop.
+
+## Architecture
+
+~12,800 lines of Rust, ~33% tests.
+
+| Component | Detail |
+|-----------|--------|
+| Embedding model | MongoDB/mdbr-leaf-ir, 23M params, 384d, ONNX int4 quantized (52 MB) |
+| Embedding runtime | ONNX Runtime, 4 threads, Unix socket daemon |
+| Search | HNSW + BM25, catalyst-mediated |
+| Database | SQLite with WAL mode |
+| LLM | Gemini Flash Lite via OpenRouter (structured output) |
+| Catalyst profiles | dialectical, synthesis, relational, operational, strategic, reflective |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
+
+## License
+
+MIT

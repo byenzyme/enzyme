@@ -3,6 +3,7 @@ use std::fs;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use tracing::debug;
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
@@ -14,6 +15,7 @@ use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent};
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
+use enzyme_core::pipeline::staleness::{check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult};
 
 use crate::display::{DisplayEvent, InitDisplay};
 
@@ -226,6 +228,42 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, vault_guid
 
     // Wait for display thread to finish rendering
     display.finish();
+
+    Ok(())
+}
+
+/// Lightweight refresh: check staleness first, only run full init if stale.
+///
+/// After a successful init, stores bookkeeping (config hash + entity doc counts)
+/// so the next refresh can detect whether anything changed.
+pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, vault_guide: Option<&str>) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+
+    // If the DB doesn't exist yet, fall through to full init.
+    if paths.vault_db.exists() {
+        let db = Database::open(&paths.vault_db)?;
+        let staleness = check_catalyst_staleness(&db, vault_path)?;
+
+        match staleness {
+            StalenessResult::Fresh => {
+                debug!("catalysts are fresh — nothing to do");
+                return Ok(());
+            }
+            StalenessResult::Stale(reason) => {
+                debug!(?reason, "catalysts are stale — running full init");
+            }
+        }
+    }
+
+    // Run the full pipeline.
+    run_init(vault_path, full, detached, vault_guide).await?;
+
+    // Store bookkeeping for next staleness check.
+    let db = Database::open(&paths.vault_db)?;
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+    let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
+    store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
 
     Ok(())
 }

@@ -7,7 +7,7 @@ use serde_json::json;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::pipeline::check_vault_stale;
+use enzyme_core::pipeline::staleness::check_catalyst_staleness;
 use enzyme_core::search::context::ContextSearch;
 
 pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Result<()> {
@@ -24,7 +24,7 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Resul
     }
 
     let db = Database::open(&paths.vault_db)?;
-    let stale = check_vault_stale(vault_path, &db);
+    let stale = check_catalyst_staleness(&db, vault_path)?.is_stale();
 
     let service = get_embedding_service(&paths.home)?;
 

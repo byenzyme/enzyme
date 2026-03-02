@@ -13,6 +13,3 @@ pub type Timestamp = i64;
 
 /// Embedding vectors are 384-dimensional f32 (mdbr-leaf-ir / MiniLM architecture).
 pub const EMBEDDING_DIMENSION: usize = 384;
-
-/// Default batch size for embedding generation.
-pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 2048;
