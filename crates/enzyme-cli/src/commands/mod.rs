@@ -3,4 +3,5 @@ pub mod catalyze;
 pub mod daemon;
 pub mod init;
 pub mod petri;
+pub mod setup;
 pub mod status;

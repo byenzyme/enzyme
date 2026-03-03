@@ -1,0 +1,6 @@
+{
+  "name": "enzyme",
+  "description": "Local-first knowledge indexing — explore your Obsidian vault by concept, not keyword",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

@@ -97,6 +97,13 @@ enum Commands {
     /// Show vault status and configuration
     Status,
 
+    /// Download the embedding model to ~/.enzyme/models/
+    Setup {
+        /// Check if model is present (exit 0) or missing (exit 1)
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
     #[command(name = "__daemon", hide = true)]
     Daemon,
@@ -146,9 +153,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
-    // The __daemon command doesn't need a vault path.
+    // These commands don't need a vault path.
     if matches!(cli.command, Commands::Daemon) {
         return commands::daemon::run_daemon().await;
+    }
+    if let Commands::Setup { check } = cli.command {
+        return commands::setup::run_setup(check).await;
     }
 
     let vault_path = resolve_vault_path(cli.vault)?;
@@ -180,7 +190,7 @@ async fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
         }
-        Commands::Daemon => unreachable!(),
+        Commands::Setup { .. } | Commands::Daemon => unreachable!(),
     }
 
     Ok(())
