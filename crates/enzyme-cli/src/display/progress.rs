@@ -74,6 +74,7 @@ pub enum DisplayEvent {
     },
     EmbeddingComplete {
         documents: usize,
+        pruned: usize,
         duration_ms: u64,
     },
     EmbeddingSkipped(String),
@@ -384,17 +385,23 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             lines_written = 1;
                         }
                     }
-                    DisplayEvent::EmbeddingComplete { documents, duration_ms } => {
+                    DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
                         clear_lines(&mut out, lines_written);
                         lines_written = 0;
                         let secs = duration_ms as f64 / 1000.0;
                         let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
+                        let pruned_suffix = if pruned > 0 {
+                            format!(", {} pruned", pruned)
+                        } else {
+                            String::new()
+                        };
                         let _ = writeln!(
                             out,
-                            "  {}Embedded:{} {} recent documents ({:.0} docs/sec)",
+                            "  {}Embedded:{} {} recent documents{} ({:.0} docs/sec)",
                             crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                             crossterm::style::ResetColor,
                             documents,
+                            pruned_suffix,
                             docs_per_sec,
                         );
                     }
@@ -636,10 +643,15 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         println!("  [embed] {}/{} documents", done, total);
                     }
                 }
-                DisplayEvent::EmbeddingComplete { documents, duration_ms } => {
+                DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
                     let secs = duration_ms as f64 / 1000.0;
                     let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
-                    println!("  Embedded: {} recent documents ({:.0} docs/sec)", documents, docs_per_sec);
+                    let pruned_suffix = if pruned > 0 {
+                        format!(", {} pruned", pruned)
+                    } else {
+                        String::new()
+                    };
+                    println!("  Embedded: {} recent documents{} ({:.0} docs/sec)", documents, pruned_suffix, docs_per_sec);
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
                     println!("  Embedding skipped: {}", reason);

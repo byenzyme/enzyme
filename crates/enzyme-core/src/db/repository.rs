@@ -324,6 +324,14 @@ impl<'a> Repository<'a> {
         Ok(count)
     }
 
+    /// Return all `source_ref` values from the docs table.
+    pub fn get_all_source_refs(&self) -> Result<Vec<String>> {
+        Ok(self.db
+            .query_read("SELECT source_ref FROM docs", &[], |row| {
+                row.get::<_, String>(0)
+            })?)
+    }
+
     /// Return the total number of documents in the database.
     pub fn get_document_count(&self) -> Result<i64> {
         let rows = self

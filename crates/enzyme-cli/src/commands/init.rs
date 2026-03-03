@@ -195,6 +195,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             Ok(stats) => {
                 tx.send(DisplayEvent::EmbeddingComplete {
                     documents: stats.documents_embedded,
+                    pruned: stats.documents_pruned,
                     duration_ms: stats.duration_ms,
                 }).ok();
                 true

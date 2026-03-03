@@ -36,6 +36,8 @@ pub struct EmbeddingStats {
     pub documents_embedded: usize,
     /// Total number of chunks embedded across all documents.
     pub chunks_embedded: usize,
+    /// Number of stale documents pruned from the embedding store.
+    pub documents_pruned: usize,
     /// Wall-clock time for the entire pipeline run, in milliseconds.
     pub duration_ms: u64,
 }
@@ -73,26 +75,33 @@ impl<'a> EmbeddingPipeline<'a> {
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
-        // Step 1: Find documents needing embedding (capped to most recent N by created_at)
+        // Ensure the embeddings directory exists
+        fs::create_dir_all(&self.embeddings_dir)
+            .context("failed to create embeddings directory")?;
+
+        // Step 1: Load existing embeddings and prune stale entries for deleted docs.
+        // embeddings.bin is a materialized view of the docs table — deletions must
+        // propagate here so similarity computation doesn't reference ghost documents.
+        let mut all_embeddings = self.load_embeddings()?;
+        let documents_pruned = self.prune_stale(&mut all_embeddings)?;
+
+        // Step 2: Find documents needing embedding (capped to most recent N by created_at)
         let docs_needing = self.repo.get_documents_needing_embedding(Some(MAX_EMBEDDING_FILES))?;
         if docs_needing.is_empty() {
+            if documents_pruned > 0 {
+                self.save_embeddings(&all_embeddings)?;
+            }
             info!("No documents need embedding");
             return Ok(EmbeddingStats {
                 documents_embedded: 0,
                 chunks_embedded: 0,
+                documents_pruned,
                 duration_ms: start.elapsed().as_millis() as u64,
             });
         }
 
         let total_docs = docs_needing.len();
         info!(total_docs, "documents need embedding");
-
-        // Ensure the embeddings directory exists
-        fs::create_dir_all(&self.embeddings_dir)
-            .context("failed to create embeddings directory")?;
-
-        // Load existing embeddings so we can merge
-        let mut all_embeddings = self.load_embeddings()?;
 
         // Step 2: Collect all chunks across documents into one flat list so the
         // embedding service can fill every model batch to capacity.
@@ -193,8 +202,40 @@ impl<'a> EmbeddingPipeline<'a> {
         Ok(EmbeddingStats {
             documents_embedded,
             chunks_embedded,
+            documents_pruned,
             duration_ms,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Pruning
+    // -----------------------------------------------------------------------
+
+    /// Remove embeddings whose `file_path` no longer appears in the docs table.
+    /// Returns the number of unique documents pruned.
+    fn prune_stale(&self, embeddings: &mut Vec<StoredEmbedding>) -> Result<usize> {
+        if embeddings.is_empty() {
+            return Ok(0);
+        }
+
+        let valid: std::collections::HashSet<String> =
+            self.repo.get_all_source_refs()?.into_iter().collect();
+
+        let before: std::collections::HashSet<&str> =
+            embeddings.iter().map(|e| e.file_path.as_str()).collect();
+        let docs_before = before.len();
+
+        embeddings.retain(|e| valid.contains(&e.file_path));
+
+        let after: std::collections::HashSet<&str> =
+            embeddings.iter().map(|e| e.file_path.as_str()).collect();
+        let pruned = docs_before - after.len();
+
+        if pruned > 0 {
+            info!(pruned, "pruned stale embeddings for deleted documents");
+        }
+
+        Ok(pruned)
     }
 
     // -----------------------------------------------------------------------
