@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::Result;
 use chrono::Utc;
 use tokio::task::JoinSet;
-use tracing::{info, warn, debug};
+use tracing::{info, debug};
 use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
@@ -296,7 +296,7 @@ impl<'a> CatalystPipeline<'a> {
                             break;
                         }
                         Err(e) => {
-                            warn!(
+                            debug!(
                                 entity_name = entity_name.as_str(),
                                 attempt,
                                 "LLM call failed: {}",
@@ -338,7 +338,7 @@ impl<'a> CatalystPipeline<'a> {
                         error: None,
                     },
                     Err(e) => {
-                        warn!(
+                        debug!(
                             entity_name = entity_name.as_str(),
                             response_preview = %&response_text[..response_text.len().min(500)],
                             "failed to parse catalyst response: {}",
@@ -379,7 +379,7 @@ impl<'a> CatalystPipeline<'a> {
                             completed += 1;
 
                             if let Some(ref error) = entity_result.error {
-                                warn!(
+                                debug!(
                                     entity_name = entity_result.entity_name.as_str(),
                                     "catalyst generation failed: {}",
                                     error
@@ -448,7 +448,7 @@ impl<'a> CatalystPipeline<'a> {
                             stats.entities_processed += 1;
                         }
                         Some(Err(e)) => {
-                            warn!("tokio task panicked: {e}");
+                            debug!("tokio task panicked: {e}");
                         }
                         None => {
                             // All tasks completed — drain any remaining partials

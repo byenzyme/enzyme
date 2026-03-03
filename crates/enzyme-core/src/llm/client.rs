@@ -291,7 +291,7 @@ impl LlmClient {
                     line_buf.push_str(&text);
                 }
                 Ok(Some(Err(e))) => {
-                    warn!("Error reading stream chunk: {}", e);
+                    debug!("Error reading stream chunk: {}", e);
                     break;
                 }
                 Ok(None) => {
@@ -299,7 +299,7 @@ impl LlmClient {
                     break;
                 }
                 Err(_) => {
-                    warn!("Stream chunk timeout after {}s", chunk_timeout.as_secs());
+                    debug!("Stream chunk timeout after {}s", chunk_timeout.as_secs());
                     break;
                 }
             }

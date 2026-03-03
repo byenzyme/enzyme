@@ -291,20 +291,8 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     files_deleted,
                 );
             }
-            DisplayEvent::SelectionComplete { count, source } => {
+            DisplayEvent::SelectionComplete { count: _, source: _ } => {
                 *stage = DisplayStage::Selecting;
-                let source_label = match source {
-                    SelectionSource::Config => "config",
-                    SelectionSource::Trending => "trending",
-                };
-                let _ = writeln!(
-                    out,
-                    "  {}Selected:{} {} entities ({})",
-                    crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
-                    crossterm::style::ResetColor,
-                    count,
-                    source_label,
-                );
             }
             DisplayEvent::DiscoveryStart { total } => {
                 *stage = DisplayStage::Discovery;
@@ -701,12 +689,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         files_discovered, files_new, files_updated, files_deleted
                     );
                 }
-                DisplayEvent::SelectionComplete { count, source } => {
-                    let source_label = match source {
-                        SelectionSource::Config => "config",
-                        SelectionSource::Trending => "trending",
-                    };
-                    println!("  Selected: {} entities ({})", count, source_label);
+                DisplayEvent::SelectionComplete { .. } => {
                 }
                 DisplayEvent::DiscoveryStart { total } => {
                     println!("Generating catalysts for {} entities...", total);
