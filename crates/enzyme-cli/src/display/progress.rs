@@ -47,11 +47,6 @@ pub enum DisplayEvent {
         entity_name: String,
         entity_type: EntityType,
     },
-    CatalystPartial {
-        entity_name: String,
-        catalyst_text: String,
-        catalyst_index: usize,
-    },
     EntityDiscovered {
         entity_name: String,
         entity_type: EntityType,
@@ -117,18 +112,11 @@ pub enum DisplayEvent {
 // Rolling window entry for discovery display
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
-enum EntryStatus {
-    Completed,
-    Failed,
-}
-
 #[derive(Debug, Clone)]
 struct DiscoveryEntry {
     entity_name: String,
     entity_type: EntityType,
     catalysts: Vec<String>,
-    status: EntryStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,16 +295,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 // Don't add to window yet — wait for first catalyst partial
                 // or completion so entities appear when they have content.
             }
-            DisplayEvent::CatalystPartial {
-                entity_name,
-                catalyst_text,
-                catalyst_index: _,
-            } => {
-                if let Some(entry) = rolling_window.iter_mut().find(|e| e.entity_name == entity_name) {
-                    entry.catalysts.push(catalyst_text);
-                }
-                // Entity not in window yet — it will appear on EntityDiscovered/EntityFailed
-            }
             DisplayEvent::EntityDiscovered {
                 entity_name,
                 entity_type,
@@ -326,22 +304,13 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             } => {
                 *discovery_completed = completed;
                 *discovery_total = total;
-                if let Some(entry) = rolling_window.iter_mut().find(|e| e.entity_name == entity_name) {
-                    if entry.catalysts.is_empty() {
-                        entry.catalysts = catalyst_texts;
-                    }
-                    entry.status = EntryStatus::Completed;
-                } else {
-                    // Entity wasn't in window yet — add it now with final texts
-                    rolling_window.push(DiscoveryEntry {
-                        entity_name,
-                        entity_type,
-                        catalysts: catalyst_texts,
-                        status: EntryStatus::Completed,
-                    });
-                    if rolling_window.len() > ROLLING_WINDOW_SIZE {
-                        rolling_window.remove(0);
-                    }
+                rolling_window.push(DiscoveryEntry {
+                    entity_name,
+                    entity_type,
+                    catalysts: catalyst_texts,
+                });
+                if rolling_window.len() > ROLLING_WINDOW_SIZE {
+                    rolling_window.remove(0);
                 }
             }
             DisplayEvent::EntitySkipped {
@@ -367,19 +336,13 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     error
                 };
                 let fail_text = format!("(failed: {})", short_err);
-                if let Some(entry) = rolling_window.iter_mut().find(|e| e.entity_name == entity_name) {
-                    entry.catalysts = vec![fail_text];
-                    entry.status = EntryStatus::Failed;
-                } else {
-                    rolling_window.push(DiscoveryEntry {
-                        entity_name,
-                        entity_type,
-                        catalysts: vec![fail_text],
-                        status: EntryStatus::Failed,
-                    });
-                    if rolling_window.len() > ROLLING_WINDOW_SIZE {
-                        rolling_window.remove(0);
-                    }
+                rolling_window.push(DiscoveryEntry {
+                    entity_name,
+                    entity_type,
+                    catalysts: vec![fail_text],
+                });
+                if rolling_window.len() > ROLLING_WINDOW_SIZE {
+                    rolling_window.remove(0);
                 }
             }
             DisplayEvent::DiscoveryComplete {
@@ -615,8 +578,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 let display_text = if entry.catalysts.is_empty() {
                     None
                 } else {
-                    // Cycle through catalysts for completed/failed entities
-                    Some(entry.catalysts[frame_counter % entry.catalysts.len()].as_str())
+                    // Offset by position so each entity cycles independently
+                    let idx = (frame_counter + i * 3) % entry.catalysts.len();
+                    Some(entry.catalysts[idx].as_str())
                 };
                 let _ = tree::render_entity_node(
                     &mut out,
@@ -695,9 +659,6 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     println!("Generating catalysts for {} entities...", total);
                 }
                 DisplayEvent::EntityStarted { .. } => {
-                    // Not shown in plain mode
-                }
-                DisplayEvent::CatalystPartial { .. } => {
                     // Not shown in plain mode
                 }
                 DisplayEvent::EntityDiscovered {

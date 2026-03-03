@@ -198,18 +198,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                             entity_type: parse_entity_type(&entity_type),
                         }).ok();
                     }
-                    CatalystEvent::CatalystPartial {
-                        entity_name,
-                        entity_type: _,
-                        catalyst_text,
-                        catalyst_index,
-                    } => {
-                        tx_cat.send(DisplayEvent::CatalystPartial {
-                            entity_name,
-                            catalyst_text,
-                            catalyst_index,
-                        }).ok();
-                    }
                 }
             },
         ).await?;
