@@ -179,12 +179,14 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                     }
                     CatalystEvent::EntityFailed {
                         entity_name,
+                        entity_type,
                         error,
                         completed,
                         total,
                     } => {
                         tx_cat.send(DisplayEvent::EntityFailed {
                             entity_name,
+                            entity_type: parse_entity_type(&entity_type),
                             error,
                             completed,
                             total,

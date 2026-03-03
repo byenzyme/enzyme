@@ -104,6 +104,7 @@ pub enum CatalystEvent {
     /// An entity failed.
     EntityFailed {
         entity_name: String,
+        entity_type: String,
         error: String,
         completed: usize,
         total: usize,
@@ -385,6 +386,7 @@ impl<'a> CatalystPipeline<'a> {
                                 );
                                 on_event(CatalystEvent::EntityFailed {
                                     entity_name: entity_result.entity_name.clone(),
+                                    entity_type: entity_result.entity_type.clone(),
                                     error: error.clone(),
                                     completed,
                                     total,

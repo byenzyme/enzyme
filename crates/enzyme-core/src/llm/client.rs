@@ -279,11 +279,30 @@ impl LlmClient {
         let mut stream = response.bytes_stream();
         let mut line_buf = String::new();
 
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk.context("Error reading stream chunk")?;
-            let text = String::from_utf8_lossy(&bytes);
+        // Timeout per chunk: if no data arrives for 30s, assume stream is done
+        let chunk_timeout = Duration::from_secs(30);
 
-            line_buf.push_str(&text);
+        loop {
+            let chunk_result = tokio::time::timeout(chunk_timeout, stream.next()).await;
+
+            match chunk_result {
+                Ok(Some(Ok(bytes))) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    line_buf.push_str(&text);
+                }
+                Ok(Some(Err(e))) => {
+                    warn!("Error reading stream chunk: {}", e);
+                    break;
+                }
+                Ok(None) => {
+                    // Stream ended
+                    break;
+                }
+                Err(_) => {
+                    warn!("Stream chunk timeout after {}s", chunk_timeout.as_secs());
+                    break;
+                }
+            }
 
             // Process complete SSE lines
             while let Some(newline_pos) = line_buf.find('\n') {
@@ -309,6 +328,29 @@ impl LlmClient {
                             accumulated.push_str(&content);
                             on_delta(&accumulated);
                         }
+                    }
+                }
+            }
+        }
+
+        // Process any remaining content in the line buffer (no trailing newline)
+        let remaining = line_buf.trim();
+        if !remaining.is_empty() {
+            if let Some(data) = remaining.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                    for choice in chunk.choices {
+                        if let Some(content) = choice.delta.content {
+                            accumulated.push_str(&content);
+                            on_delta(&accumulated);
+                        }
+                    }
+                }
+            } else if accumulated.is_empty() {
+                // Not SSE at all — provider may have returned a regular JSON response.
+                // Try to extract content from a standard ChatCompletionResponse.
+                if let Ok(resp) = serde_json::from_str::<ChatCompletionResponse>(remaining) {
+                    if let Some(choice) = resp.choices.into_iter().next() {
+                        accumulated = choice.message.content;
                     }
                 }
             }
