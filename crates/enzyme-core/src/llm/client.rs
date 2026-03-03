@@ -38,7 +38,75 @@ struct FreeConfigResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
+}
+
+/// Message content: either a plain string or an array of content parts
+/// (used for OpenRouter prompt caching with `cache_control`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentPart {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: String,
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
+impl Message {
+    /// Simple text message.
+    pub fn text(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: MessageContent::Text(content.into()),
+        }
+    }
+
+    /// Message with a cached static prefix and dynamic suffix (for OpenRouter).
+    /// Packs both into a single content array with `cache_control: ephemeral` on the prefix.
+    pub fn cached(role: &str, cached_prefix: impl Into<String>, dynamic: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: MessageContent::Parts(vec![
+                ContentPart {
+                    content_type: "text".to_string(),
+                    text: cached_prefix.into(),
+                    cache_control: Some(CacheControl {
+                        control_type: "ephemeral".to_string(),
+                    }),
+                },
+                ContentPart {
+                    content_type: "text".to_string(),
+                    text: dynamic.into(),
+                    cache_control: None,
+                },
+            ]),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +234,11 @@ impl LlmClient {
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
         }
+    }
+
+    /// Whether this client targets OpenRouter (enables prompt caching via cache_control).
+    pub fn is_openrouter(&self) -> bool {
+        self.base_url.contains("openrouter.ai")
     }
 
     pub async fn chat_completion(

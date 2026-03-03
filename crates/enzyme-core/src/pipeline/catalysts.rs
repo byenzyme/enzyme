@@ -201,19 +201,21 @@ impl<'a> CatalystPipeline<'a> {
                 "built prompt for entity"
             );
 
+            // For OpenRouter: single user message with cached static prefix + dynamic suffix.
+            // For other providers: standard system + user message format.
+            let messages = if self.llm.is_openrouter() {
+                vec![Message::cached("user", system_prompt.clone(), user_prompt)]
+            } else {
+                vec![
+                    Message::text("system", system_prompt.clone()),
+                    Message::text("user", user_prompt),
+                ]
+            };
+
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
                 entity_type: entity.entity_type.as_str().to_string(),
-                messages: vec![
-                    Message {
-                        role: "system".to_string(),
-                        content: system_prompt.clone(),
-                    },
-                    Message {
-                        role: "user".to_string(),
-                        content: user_prompt,
-                    },
-                ],
+                messages,
             });
         }
 
