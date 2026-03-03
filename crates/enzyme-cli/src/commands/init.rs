@@ -225,6 +225,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         }).ok();
     }
 
+    // ── Step 8: Generate CLAUDE.md ───────────────────────────────────────
+    if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
+        tracing::warn!("failed to update CLAUDE.md: {}", e);
+    }
+
     let duration_ms = start.elapsed().as_millis() as u64;
     tx.send(DisplayEvent::Done { duration_ms }).ok();
 

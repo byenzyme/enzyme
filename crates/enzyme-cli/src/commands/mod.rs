@@ -1,5 +1,6 @@
 pub mod apply;
 pub mod catalyze;
+pub mod claude_md;
 pub mod daemon;
 pub mod init;
 pub mod petri;
