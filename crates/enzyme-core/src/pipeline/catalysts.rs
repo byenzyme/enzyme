@@ -12,7 +12,8 @@ use crate::config::CustomProfileGuidance;
 use crate::db::{Database, Repository};
 use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
-    parse_catalyst_response, get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
+    parse_catalyst_response, try_extract_catalysts,
+    get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
     catalyst_response_format, DEFAULT_MODEL,
 };
 use crate::models::{Catalyst, Entity};
@@ -74,10 +75,17 @@ impl<'a> Default for CatalystConfig<'a> {
 /// Progress event emitted during catalyst generation.
 #[derive(Debug, Clone)]
 pub enum CatalystEvent {
-    /// An entity is being processed. Contains (entity_name, entity_type, completed, total).
+    /// An entity is being processed.
     EntityStarted {
         entity_name: String,
         entity_type: String,
+    },
+    /// A single catalyst was extracted from the streaming response.
+    CatalystPartial {
+        entity_name: String,
+        entity_type: String,
+        catalyst_text: String,
+        catalyst_index: usize,
     },
     /// An entity finished with generated catalyst texts.
     EntityCompleted {
@@ -100,6 +108,14 @@ pub enum CatalystEvent {
         completed: usize,
         total: usize,
     },
+}
+
+/// Partial catalyst extracted from a streaming LLM response.
+struct PartialCatalyst {
+    entity_name: String,
+    entity_type: String,
+    text: String,
+    index: usize,
 }
 
 /// Per-entity context needed for an LLM call.
@@ -224,14 +240,20 @@ impl<'a> CatalystPipeline<'a> {
             });
         }
 
-        // Phase 2: Fire all LLM calls concurrently
+        // Phase 2: Fire all LLM calls concurrently with streaming
         let llm = Arc::new(self.llm.clone());
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<PartialCatalyst>(100);
 
         let model = config.model.to_string();
         for job in jobs {
+            on_event(CatalystEvent::EntityStarted {
+                entity_name: job.entity_name.clone(),
+                entity_type: job.entity_type.clone(),
+            });
             let llm = Arc::clone(&llm);
             let model = model.clone();
+            let stream_tx = stream_tx.clone();
             join_set.spawn(async move {
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
@@ -239,17 +261,35 @@ impl<'a> CatalystPipeline<'a> {
                 // Retry loop: 3 attempts with exponential backoff
                 let mut response = None;
                 for attempt in 0..3u32 {
-                    match llm
-                        .chat_completion(
+                    let mut extracted_count = 0usize;
+                    let en = entity_name.clone();
+                    let et = entity_type.clone();
+                    let tx = stream_tx.clone();
+
+                    let result = llm
+                        .chat_completion_stream(
                             &model,
                             job.messages.clone(),
                             GenerationParams {
                                 response_format: Some(catalyst_response_format()),
                                 ..Default::default()
                             },
+                            move |accumulated| {
+                                let catalysts = try_extract_catalysts(accumulated);
+                                for i in extracted_count..catalysts.len() {
+                                    let _ = tx.try_send(PartialCatalyst {
+                                        entity_name: en.clone(),
+                                        entity_type: et.clone(),
+                                        text: catalysts[i].clone(),
+                                        index: i,
+                                    });
+                                }
+                                extracted_count = catalysts.len();
+                            },
                         )
-                        .await
-                    {
+                        .await;
+
+                    match result {
                         Ok(r) => {
                             response = Some(r);
                             break;
@@ -314,86 +354,115 @@ impl<'a> CatalystPipeline<'a> {
                 }
             });
         }
+        // Drop our copy so the channel closes when all tasks finish
+        drop(stream_tx);
 
-        // Phase 3: Collect results as they arrive and write to DB
+        // Phase 3: Interleave streaming partial updates and task completions
         let mut completed = skipped.len();
-        while let Some(result) = join_set.join_next().await {
-            completed += 1;
-
-            let entity_result = match result {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("tokio task panicked: {e}");
-                    continue;
+        loop {
+            tokio::select! {
+                biased;
+                // Handle streaming partial catalysts first (higher priority)
+                Some(partial) = stream_rx.recv() => {
+                    on_event(CatalystEvent::CatalystPartial {
+                        entity_name: partial.entity_name,
+                        entity_type: partial.entity_type,
+                        catalyst_text: partial.text,
+                        catalyst_index: partial.index,
+                    });
                 }
-            };
+                // Handle task completions
+                result = join_set.join_next() => {
+                    match result {
+                        Some(Ok(entity_result)) => {
+                            completed += 1;
 
-            if let Some(ref error) = entity_result.error {
-                warn!(
-                    entity_name = entity_result.entity_name.as_str(),
-                    "catalyst generation failed: {}",
-                    error
-                );
-                on_event(CatalystEvent::EntityFailed {
-                    entity_name: entity_result.entity_name.clone(),
-                    error: error.clone(),
-                    completed,
-                    total,
-                });
-                stats
-                    .errors
-                    .push((entity_result.entity_name, error.clone()));
-                continue;
-            }
+                            if let Some(ref error) = entity_result.error {
+                                warn!(
+                                    entity_name = entity_result.entity_name.as_str(),
+                                    "catalyst generation failed: {}",
+                                    error
+                                );
+                                on_event(CatalystEvent::EntityFailed {
+                                    entity_name: entity_result.entity_name.clone(),
+                                    error: error.clone(),
+                                    completed,
+                                    total,
+                                });
+                                stats
+                                    .errors
+                                    .push((entity_result.entity_name, error.clone()));
+                                continue;
+                            }
 
-            if let Some(pairs) = entity_result.catalysts {
-                // Delete old catalysts and insert new ones
-                self.repo
-                    .delete_catalysts_for_entity(&entity_result.entity_name)?;
+                            if let Some(pairs) = entity_result.catalysts {
+                                // Delete old catalysts and insert new ones
+                                self.repo
+                                    .delete_catalysts_for_entity(&entity_result.entity_name)?;
 
-                let catalyst_texts: Vec<String> = pairs.iter().map(|(t, _)| t.clone()).collect();
+                                let catalyst_texts: Vec<String> =
+                                    pairs.iter().map(|(t, _)| t.clone()).collect();
 
-                let catalysts: Vec<Catalyst> = pairs
-                    .into_iter()
-                    .map(|(text, topic)| Catalyst {
-                        id: Uuid::new_v4().to_string(),
-                        text,
-                        entity: entity_result.entity_name.clone(),
-                        context: topic,
-                        generated_at: Utc::now(),
-                        metadata: serde_json::json!({}),
-                    })
-                    .collect();
+                                let catalysts: Vec<Catalyst> = pairs
+                                    .into_iter()
+                                    .map(|(text, topic)| Catalyst {
+                                        id: Uuid::new_v4().to_string(),
+                                        text,
+                                        entity: entity_result.entity_name.clone(),
+                                        context: topic,
+                                        generated_at: Utc::now(),
+                                        metadata: serde_json::json!({}),
+                                    })
+                                    .collect();
 
-                let count = catalysts.len();
-                self.repo.insert_catalysts(&catalysts)?;
-                stats.catalysts_generated += count;
+                                let count = catalysts.len();
+                                self.repo.insert_catalysts(&catalysts)?;
+                                stats.catalysts_generated += count;
 
-                // Capture the first starter prompt we see
-                if stats.starter_prompt.is_none() {
-                    if let Some(prompt) = entity_result.starter_prompt {
-                        if !prompt.is_empty() {
-                            stats.starter_prompt = Some(prompt);
+                                // Capture the first starter prompt we see
+                                if stats.starter_prompt.is_none() {
+                                    if let Some(prompt) = entity_result.starter_prompt {
+                                        if !prompt.is_empty() {
+                                            stats.starter_prompt = Some(prompt);
+                                        }
+                                    }
+                                }
+
+                                on_event(CatalystEvent::EntityCompleted {
+                                    entity_name: entity_result.entity_name.clone(),
+                                    entity_type: entity_result.entity_type,
+                                    catalyst_texts,
+                                    completed,
+                                    total,
+                                });
+
+                                info!(
+                                    entity_name = entity_result.entity_name.as_str(),
+                                    count,
+                                    "generated catalysts"
+                                );
+                            }
+
+                            stats.entities_processed += 1;
+                        }
+                        Some(Err(e)) => {
+                            warn!("tokio task panicked: {e}");
+                        }
+                        None => {
+                            // All tasks completed — drain any remaining partials
+                            while let Ok(partial) = stream_rx.try_recv() {
+                                on_event(CatalystEvent::CatalystPartial {
+                                    entity_name: partial.entity_name,
+                                    entity_type: partial.entity_type,
+                                    catalyst_text: partial.text,
+                                    catalyst_index: partial.index,
+                                });
+                            }
+                            break;
                         }
                     }
                 }
-
-                on_event(CatalystEvent::EntityCompleted {
-                    entity_name: entity_result.entity_name.clone(),
-                    entity_type: entity_result.entity_type,
-                    catalyst_texts,
-                    completed,
-                    total,
-                });
-
-                info!(
-                    entity_name = entity_result.entity_name.as_str(),
-                    count,
-                    "generated catalysts"
-                );
             }
-
-            stats.entities_processed += 1;
         }
 
         stats.duration_ms = start.elapsed().as_millis() as u64;

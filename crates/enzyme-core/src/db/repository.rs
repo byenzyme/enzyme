@@ -10,6 +10,26 @@ use crate::models::*;
 use super::Database;
 
 // ---------------------------------------------------------------------------
+// Context query types
+// ---------------------------------------------------------------------------
+
+/// Stats for a top-level vault folder derived from document paths.
+#[derive(Debug, Clone)]
+pub struct FolderStats {
+    pub name: String,
+    pub file_count: i64,
+    pub most_recent: Option<i64>,
+    pub subfolders: Vec<SubfolderStats>,
+}
+
+/// Stats for a subfolder within a top-level folder.
+#[derive(Debug, Clone)]
+pub struct SubfolderStats {
+    pub name: String,
+    pub file_count: i64,
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -625,6 +645,151 @@ impl<'a> Repository<'a> {
              FROM entities",
             &[],
             map_entity_row,
+        )?;
+        Ok(rows)
+    }
+
+    // -----------------------------------------------------------------------
+    // Context queries (for XML context builder)
+    // -----------------------------------------------------------------------
+
+    /// Derive folder structure from document `source_ref` paths.
+    ///
+    /// Returns `(folder_name, file_count, most_recent_modified_at)` for each
+    /// top-level folder, ordered by file count descending.
+    pub fn get_folder_structure(&self) -> Result<Vec<FolderStats>> {
+        // Top-level folders: first path segment of source_ref
+        let top_folders = self.db.query_read(
+            "SELECT
+                CASE
+                    WHEN INSTR(source_ref, '/') > 0
+                        THEN SUBSTR(source_ref, 1, INSTR(source_ref, '/') - 1)
+                    ELSE '__root__'
+                END AS folder,
+                COUNT(*) AS file_count,
+                MAX(modified_at) AS most_recent
+             FROM docs
+             GROUP BY folder
+             ORDER BY file_count DESC",
+            &[],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )?;
+
+        let mut results = Vec::new();
+        for (name, file_count, most_recent) in top_folders {
+            if name == "__root__"
+                || name == ".enzyme"
+                || name == ".obsidian"
+                || name == ".git"
+                || name == ".trash"
+                || name.starts_with('.')
+            {
+                continue;
+            }
+
+            // Get subfolders for this parent
+            let subfolders = self.db.query_read(
+                "SELECT
+                    SUBSTR(
+                        source_ref,
+                        LENGTH(?1) + 2,
+                        CASE
+                            WHEN INSTR(SUBSTR(source_ref, LENGTH(?1) + 2), '/') > 0
+                                THEN INSTR(SUBSTR(source_ref, LENGTH(?1) + 2), '/') - 1
+                            ELSE LENGTH(source_ref)
+                        END
+                    ) AS subfolder,
+                    COUNT(*) AS file_count
+                 FROM docs
+                 WHERE source_ref LIKE ?1 || '/%'
+                   AND INSTR(SUBSTR(source_ref, LENGTH(?1) + 2), '/') > 0
+                 GROUP BY subfolder
+                 ORDER BY file_count DESC
+                 LIMIT 10",
+                &[&name as &dyn rusqlite::types::ToSql],
+                |row| {
+                    Ok(SubfolderStats {
+                        name: row.get::<_, String>(0)?,
+                        file_count: row.get::<_, i64>(1)?,
+                    })
+                },
+            )?;
+
+            results.push(FolderStats {
+                name,
+                file_count,
+                most_recent,
+                subfolders,
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Get immediate child entities of a parent entity.
+    ///
+    /// For tags: children of `#enzyme` are `#enzyme/pmf`, `#enzyme/search`, etc.
+    /// Returns at most `limit` children, ordered by frequency descending.
+    pub fn get_child_entities(
+        &self,
+        parent_name: &str,
+        entity_type: &str,
+        limit: usize,
+    ) -> Result<Vec<Entity>> {
+        let like_pattern = format!("{}/%", parent_name);
+        let not_like_pattern = format!("{}/%/%", parent_name);
+
+        let rows = self.db.query_read(
+            "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
+             FROM entities
+             WHERE name LIKE ?1 AND name NOT LIKE ?2 AND type = ?3
+             ORDER BY frequency DESC
+             LIMIT ?4",
+            &[
+                &like_pattern as &dyn rusqlite::types::ToSql,
+                &not_like_pattern,
+                &entity_type,
+                &(limit as i64),
+            ],
+            map_entity_row,
+        )?;
+
+        Ok(rows)
+    }
+
+    /// Get recent occurrences for an entity, ordered by effective_date descending.
+    pub fn get_recent_occurrences(
+        &self,
+        entity_id: i64,
+        limit: usize,
+    ) -> Result<Vec<EntityOccurrence>> {
+        let rows = self.db.query_read(
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+             FROM entity_occurrences
+             WHERE entity_id = ?1
+             ORDER BY effective_date DESC
+             LIMIT ?2",
+            &[
+                &entity_id as &dyn rusqlite::types::ToSql,
+                &(limit as i64),
+            ],
+            |row| {
+                Ok(EntityOccurrence {
+                    id: Some(row.get(0)?),
+                    entity_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    context: row.get(3)?,
+                    created_at: row.get(4)?,
+                    effective_date: row.get(5)?,
+                    date_source: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                })
+            },
         )?;
         Ok(rows)
     }

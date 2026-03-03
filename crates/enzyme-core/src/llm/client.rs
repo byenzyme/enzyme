@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -116,6 +117,35 @@ struct ChoiceMessage {
     content: String,
 }
 
+// SSE streaming response types
+#[derive(Serialize)]
+struct ChatCompletionStreamRequest {
+    model: String,
+    messages: Vec<Message>,
+    max_tokens: u32,
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+#[derive(Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct AuthConfig {
     api_key: String,
@@ -196,6 +226,96 @@ impl LlmClient {
         info!("Received chat completion response ({} chars)", content.len());
 
         Ok(content)
+    }
+
+    /// Streaming chat completion that calls `on_delta` with accumulated text after each SSE chunk.
+    ///
+    /// Returns the full accumulated text when the stream completes.
+    pub async fn chat_completion_stream(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        params: GenerationParams,
+        mut on_delta: impl FnMut(&str) + Send,
+    ) -> Result<String> {
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let request_body = ChatCompletionStreamRequest {
+            model: model.to_string(),
+            messages,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            top_k: params.top_k,
+            stream: true,
+            response_format: params.response_format,
+        };
+
+        debug!("Sending streaming chat completion request to {} with model {}", url, model);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
+            .header("X-Title", "Enzyme")
+            .json(&request_body)
+            .send()
+            .await
+            .context("Failed to send streaming request to LLM API")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            warn!("LLM API returned error status {}: {}", status, error_body);
+            bail!("LLM API returned status {}: {}", status, error_body);
+        }
+
+        let mut accumulated = String::new();
+        let mut stream = response.bytes_stream();
+        let mut line_buf = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("Error reading stream chunk")?;
+            let text = String::from_utf8_lossy(&bytes);
+
+            line_buf.push_str(&text);
+
+            // Process complete SSE lines
+            while let Some(newline_pos) = line_buf.find('\n') {
+                let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+
+                if data == "[DONE]" {
+                    info!("Stream complete ({} chars)", accumulated.len());
+                    return Ok(accumulated);
+                }
+
+                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
+                    for choice in chunk.choices {
+                        if let Some(content) = choice.delta.content {
+                            accumulated.push_str(&content);
+                            on_delta(&accumulated);
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Stream ended ({} chars)", accumulated.len());
+        Ok(accumulated)
     }
 }
 

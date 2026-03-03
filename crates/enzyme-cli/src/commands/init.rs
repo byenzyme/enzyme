@@ -13,6 +13,7 @@ use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAU
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent};
+use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::pipeline::staleness::{check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult};
@@ -60,6 +61,22 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         source: sel_result.source.clone(),
     }).ok();
 
+    // ── Step 2b: Build XML context from DB ───────────────────────────────
+    let vault_context = {
+        let ctx_builder = ContextBuilder::new(&db);
+        match ctx_builder.build(&sel_result.entities, 5, 300) {
+            Ok(ctx) => {
+                debug!("built vault context XML ({} bytes, {} entities)",
+                    ctx.xml.len(), ctx.entity_contexts.len());
+                Some(ctx)
+            }
+            Err(e) => {
+                tracing::warn!("failed to build vault context: {}", e);
+                None
+            }
+        }
+    };
+
     // ── Step 3: Resolve resources upfront ─────────────────────────────────
     let service = match get_embedding_service(&paths.home) {
         Ok(svc) => Some(svc),
@@ -106,6 +123,12 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         let cat_pipeline = CatalystPipeline::new(&db, &llm);
         let tx_cat = tx.clone();
 
+        // Prefer built context XML; fall back to externally provided vault_guide
+        let effective_vault_guide = vault_context
+            .as_ref()
+            .map(|ctx| ctx.xml.as_str())
+            .or(vault_guide);
+
         let cat_config = CatalystConfig {
             entity_profiles: &sel_result.entity_profiles,
             catalysts_per_entity: 7,
@@ -119,7 +142,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                 .unwrap_or(DEFAULT_FORMAT_KEY),
             custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
             guide_signal: enzyme_config.guide_signal.as_deref(),
-            vault_guide,
+            vault_guide: effective_vault_guide,
             model: &resolved.model,
         };
 
@@ -167,7 +190,24 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                             total,
                         }).ok();
                     }
-                    CatalystEvent::EntityStarted { .. } => {}
+                    CatalystEvent::EntityStarted { entity_name, entity_type } => {
+                        tx_cat.send(DisplayEvent::EntityStarted {
+                            entity_name,
+                            entity_type: parse_entity_type(&entity_type),
+                        }).ok();
+                    }
+                    CatalystEvent::CatalystPartial {
+                        entity_name,
+                        entity_type: _,
+                        catalyst_text,
+                        catalyst_index,
+                    } => {
+                        tx_cat.send(DisplayEvent::CatalystPartial {
+                            entity_name,
+                            catalyst_text,
+                            catalyst_index,
+                        }).ok();
+                    }
                 }
             },
         ).await?;

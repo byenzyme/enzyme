@@ -27,7 +27,8 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
 
 # Embedding inference
 ort = "2.0.0-rc.11"
