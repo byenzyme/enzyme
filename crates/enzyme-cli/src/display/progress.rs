@@ -583,8 +583,12 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 let is_last = i == window_len - 1;
                 let display_text = if entry.catalysts.is_empty() {
                     None
-                } else {
+                } else if entry.status == EntryStatus::Completed || entry.status == EntryStatus::Failed {
+                    // Cycle through catalysts once entity is done
                     Some(entry.catalysts[frame_counter % entry.catalysts.len()].as_str())
+                } else {
+                    // While streaming, show the most recently arrived catalyst
+                    entry.catalysts.last().map(|s| s.as_str())
                 };
                 let _ = tree::render_entity_node(
                     &mut out,

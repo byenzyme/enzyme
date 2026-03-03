@@ -14,7 +14,7 @@ use crate::llm::{
     LlmClient, Message, GenerationParams, build_system_prompt, build_user_prompt,
     parse_catalyst_response, try_extract_catalysts,
     get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
-    catalyst_response_format, DEFAULT_MODEL,
+    DEFAULT_MODEL,
 };
 use crate::models::{Catalyst, Entity};
 
@@ -266,14 +266,14 @@ impl<'a> CatalystPipeline<'a> {
                     let et = entity_type.clone();
                     let tx = stream_tx.clone();
 
+                    // Note: response_format is omitted for streaming requests
+                    // because many providers don't support json_schema + stream.
+                    // The prompt already instructs JSON output.
                     let result = llm
                         .chat_completion_stream(
                             &model,
                             job.messages.clone(),
-                            GenerationParams {
-                                response_format: Some(catalyst_response_format()),
-                                ..Default::default()
-                            },
+                            GenerationParams::default(),
                             move |accumulated| {
                                 let catalysts = try_extract_catalysts(accumulated);
                                 for i in extracted_count..catalysts.len() {
