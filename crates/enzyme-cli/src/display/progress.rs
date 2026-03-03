@@ -246,6 +246,8 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut discovery_total: usize = 0;
     let mut lines_written: u16 = 0;
     let mut frame_counter: usize = 0;
+    let mut catalysts_generated: Option<usize> = None;
+    let mut embedding_status: Option<String> = None;
 
     // Keep indexing messages for display
     let mut _indexing_messages: Vec<String> = Vec::new();
@@ -259,7 +261,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             discovery_completed: &mut usize,
                             discovery_total: &mut usize,
                             lines_written: &mut u16,
-                            spinner: &mut HelixSpinner|
+                            spinner: &mut HelixSpinner,
+                            catalysts_generated: &mut Option<usize>,
+                            embedding_status: &mut Option<String>|
      -> bool {
         match event {
             DisplayEvent::IndexingStart => {
@@ -392,42 +396,36 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             }
             DisplayEvent::DiscoveryComplete {
                 entities_processed: _,
-                catalysts_generated,
+                catalysts_generated: count,
             } => {
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
-                *stage = DisplayStage::Embedding;
-                let _ = writeln!(
-                    out,
-                    "  {}Catalysts:{} {} generated",
-                    crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
-                    crossterm::style::ResetColor,
-                    catalysts_generated,
-                );
+                catalysts_generated.replace(count);
+                // Stay in Discovery stage — entity tree keeps cycling
             }
             DisplayEvent::EmbeddingStart => {
-                *stage = DisplayStage::Embedding;
+                embedding_status.replace("Embedding...".to_string());
             }
             DisplayEvent::EmbeddingProgress { done, total } => {
                 if total > 0 {
-                    clear_lines(out, *lines_written);
-                    *lines_written = 0;
-                    let frame = spinner.tick();
-                    let _ = writeln!(
-                        out,
-                        "  {}{}{} Embedding [{}/{} docs]",
-                        crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
-                        frame,
-                        crossterm::style::ResetColor,
-                        done,
-                        total,
-                    );
-                    *lines_written = 1;
+                    embedding_status.replace(format!("Embedding [{}/{} docs]", done, total));
                 }
             }
             DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
+                // Flush the cycling entity display and print final summary lines
                 clear_lines(out, *lines_written);
                 *lines_written = 0;
+                *stage = DisplayStage::Embedding;
+                embedding_status.take();
+
+                if let Some(count) = catalysts_generated.take() {
+                    let _ = writeln!(
+                        out,
+                        "  {}Catalysts:{} {} generated",
+                        crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
+                        crossterm::style::ResetColor,
+                        count,
+                    );
+                }
+
                 let secs = duration_ms as f64 / 1000.0;
                 let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
                 let pruned_suffix = if pruned > 0 {
@@ -446,6 +444,13 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 );
             }
             DisplayEvent::EmbeddingSkipped(reason) => {
+                // EmbeddingSkipped fires early (before discovery), so flush
+                // any cycling display if it's active.
+                if *stage == DisplayStage::Discovery && !rolling_window.is_empty() {
+                    clear_lines(out, *lines_written);
+                    *lines_written = 0;
+                }
+                embedding_status.take();
                 let _ = writeln!(
                     out,
                     "  {}Embedding skipped:{} {}",
@@ -455,6 +460,21 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 );
             }
             DisplayEvent::EmbeddingFailed(err) => {
+                clear_lines(out, *lines_written);
+                *lines_written = 0;
+                *stage = DisplayStage::Embedding;
+                embedding_status.take();
+
+                if let Some(count) = catalysts_generated.take() {
+                    let _ = writeln!(
+                        out,
+                        "  {}Catalysts:{} {} generated",
+                        crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
+                        crossterm::style::ResetColor,
+                        count,
+                    );
+                }
+
                 let _ = writeln!(
                     out,
                     "  {}Embedding failed:{} {}",
@@ -555,6 +575,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     event, &mut out, &mut stage, &mut rolling_window,
                     &mut discovery_completed, &mut discovery_total,
                     &mut lines_written, &mut spinner,
+                    &mut catalysts_generated, &mut embedding_status,
                 ) {
                     return;
                 }
@@ -564,6 +585,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         event, &mut out, &mut stage, &mut rolling_window,
                         &mut discovery_completed, &mut discovery_total,
                         &mut lines_written, &mut spinner,
+                        &mut catalysts_generated, &mut embedding_status,
                     ) {
                         return;
                     }
@@ -586,17 +608,22 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             lines_written = 0;
 
             let frame = spinner.tick();
-            let _ = tree::render_discovery_header(
-                &mut out,
-                discovery_completed,
-                discovery_total,
-                frame,
-            );
-            lines_written += 1;
+
+            // Show discovery header while entities are still generating,
+            // otherwise show the catalysts summary
+            if catalysts_generated.is_none() {
+                let _ = tree::render_discovery_header(
+                    &mut out,
+                    discovery_completed,
+                    discovery_total,
+                    frame,
+                );
+                lines_written += 1;
+            }
 
             let window_len = rolling_window.len();
             for (i, entry) in rolling_window.iter().enumerate() {
-                let is_last = i == window_len - 1;
+                let is_last = i == window_len - 1 && embedding_status.is_none();
                 let display_text = if entry.catalysts.is_empty() {
                     None
                 } else {
@@ -611,6 +638,20 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     i,
                     window_len,
                     is_last,
+                );
+                lines_written += 1;
+            }
+
+            // Show embedding progress below the entity tree
+            if let Some(ref status) = embedding_status {
+                let _ = writeln!(
+                    &mut out,
+                    "  {} {}{}{} {}",
+                    tree::PIPE,
+                    crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                    frame,
+                    crossterm::style::ResetColor,
+                    status,
                 );
                 lines_written += 1;
             }
