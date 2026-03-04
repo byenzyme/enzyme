@@ -19,7 +19,7 @@ enzyme setup
 Then add the Claude Code plugin:
 
 ```bash
-claude marketplace add jshph/enzyme
+claude plugin marketplace add jshph/enzyme
 claude plugin install enzyme
 ```
 

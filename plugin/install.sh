@@ -9,7 +9,10 @@ INSTALL_DIR="$HOME/.local/bin"
 
 # Detect platform
 case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64|Darwin-x86_64) TARGET="aarch64-apple-darwin" ;;
+    Darwin-arm64)               TARGET="aarch64-apple-darwin" ;;
+    Darwin-x86_64)
+        echo "Intel Macs are not supported. Install via Cargo: cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme" >&2
+        exit 1 ;;
     Linux-x86_64)               TARGET="x86_64-unknown-linux-gnu" ;;
     Linux-aarch64)              TARGET="aarch64-unknown-linux-gnu" ;;
     *)
@@ -33,6 +36,9 @@ mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/enzyme" "$INSTALL_DIR/enzyme"
 chmod +x "$INSTALL_DIR/enzyme"
 
+# Clear previous data (models, indices) for clean slate
+rm -rf "$HOME/.enzyme"
+
 echo "Installed to ${INSTALL_DIR}/enzyme"
 
 # Check PATH
@@ -42,4 +48,10 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "Next: enzyme setup && cd /path/to/vault && enzyme init"
+echo "Next steps:"
+echo "  enzyme setup                        # download embedding model (~52 MB)"
+echo "  cd /path/to/vault && enzyme init    # initialize your vault"
+echo ""
+echo "Add the Claude Code plugin:"
+echo "  claude plugin marketplace add jshph/enzyme"
+echo "  claude plugin install enzyme"
