@@ -17,10 +17,9 @@ detect_target() {
   arch="$(uname -m)"
 
   case "${os}-${arch}" in
-    darwin-arm64)   echo "aarch64-apple-darwin" ;;
-    darwin-x86_64)  echo "x86_64-apple-darwin" ;;
-    linux-x86_64)   echo "x86_64-unknown-linux-gnu" ;;
-    linux-aarch64)  echo "aarch64-unknown-linux-gnu" ;;
+    darwin-arm64|darwin-x86_64)  echo "aarch64-apple-darwin" ;;
+    linux-x86_64)               echo "x86_64-unknown-linux-gnu" ;;
+    linux-aarch64)              echo "aarch64-unknown-linux-gnu" ;;
     *) echo "enzyme: unsupported platform ${os}-${arch}" >&2; return 1 ;;
   esac
 }
