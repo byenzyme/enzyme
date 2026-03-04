@@ -24,29 +24,11 @@ Content retrieval works by **resonance with catalyst questions**, not keyword ma
 
 ## Prerequisites
 
-### 1. Install the binary
+The `enzyme` binary must be in PATH. If `enzyme` is not found, tell the user:
 
-```bash
-# Check if enzyme is installed
-command -v enzyme
-```
+> Install enzyme: `curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash`
 
-If not installed:
-
-```bash
-# Requires Rust toolchain (https://rustup.rs)
-cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme
-```
-
-### 2. Download the embedding model
-
-```bash
-enzyme setup
-```
-
-This downloads the ONNX model (~52 MB) and tokenizer to `~/.enzyme/models/`. Only needed once. Use `enzyme setup --check` to verify without downloading.
-
-### 3. Check vault initialization
+### Check vault initialization
 
 ```bash
 ls .enzyme/enzyme.db

@@ -106,7 +106,6 @@ jobs:
           rsync -av --delete \
             --exclude '.git' \
             --exclude '.claude-plugin' \
-            --exclude 'README.md' \
             ../plugin/ ./
 
           version="${tag#v}"

@@ -4,9 +4,11 @@ Local-first knowledge indexing for Obsidian vaults. Generates semantic handles (
 
 ## Why not just point Claude at a vault?
 
-An Obsidian vault is a pile of markdown files. Giving an LLM raw file access works, but it searches by keywords and has no sense of what matters to you right now. Enzyme sits between your vault and the LLM, providing structure that makes retrieval meaningfully better:
+An Obsidian vault is a pile of markdown files. Giving an LLM raw file access works, but it searches by keywords and has no sense of what matters to you right now.
 
-**Semantic handles, not keyword search.** Enzyme generates *catalysts* — thematic questions and tensions derived from your actual writing. When you search, your query is matched against these catalysts, which softly map to the conceptual territory of your vault rather than requiring exact keyword hits. A search for "feeling stuck on the project" finds notes about creative blocks, momentum, and resistance — even if none of those words appear in the query or the notes together.
+Your vault already has a shape. The tags you chose, the links you drew, the folders you sorted things into — those aren't just organization. They're grips: evidence of how you've been thinking. Enzyme reads those signals, builds semantic clusters from them, and generates **catalysts** — thematic questions that reach content those tags alone would never surface.
+
+A search for "feeling stuck on the project" finds notes about creative blocks, momentum, and resistance — even if none of those words appear in the query or the notes.
 
 **Temporal awareness.** Recent ideas are weighted more heavily. Enzyme uses a 30-day half-life decay so that what you've been thinking about *this week* surfaces before notes from two years ago. Your vault has a pulse; Enzyme reads it.
 
@@ -91,9 +93,9 @@ Enzyme needs an API key only for catalyst generation. Resolution order:
 
 If no key is found, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
 
-## MCP integration
+## Claude Code plugin
 
-Enzyme's CLI outputs structured JSON, designed to be consumed by an MCP server. The `catalyze` and `petri` commands include a `stale` flag so upstream tools know when to trigger a refresh. The [Enzyme MCP server](https://github.com/jshph/enzyme) wraps the CLI and exposes vault exploration, semantic search, and artifact creation as MCP tools for Claude Code and Claude Desktop.
+Enzyme ships as a [Claude Code plugin](https://github.com/jshph/enzyme) that wraps the CLI. The plugin installs the binary automatically and provides a `/enzyme` skill for vault exploration, semantic search, and artifact creation.
 
 ## Architecture
 

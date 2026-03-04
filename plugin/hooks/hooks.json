@@ -6,9 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-enzyme.sh",
-            "async": true,
-            "timeout": 120
+            "command": "command -v enzyme >/dev/null 2>&1 || echo 'enzyme: binary not found. Install: curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash' >&2"
           }
         ]
       }
