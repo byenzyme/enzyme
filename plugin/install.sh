@@ -39,6 +39,59 @@ chmod +x "$INSTALL_DIR/enzyme"
 # Clear previous data (models, indices) for clean slate
 rm -rf "$HOME/.enzyme"
 
+# Clean up legacy enzyme-python installation
+legacy=""
+
+if [ -d "$HOME/.local/lib/enzyme" ]; then
+    rm -rf "$HOME/.local/lib/enzyme"
+    legacy="1"
+fi
+
+if [ -f "$HOME/.local/bin/enzyme-mcp" ]; then
+    rm -f "$HOME/.local/bin/enzyme-mcp"
+    legacy="1"
+fi
+
+# Remove old MCP server entries from Claude Code, Claude Desktop, Codex
+if command -v claude &>/dev/null; then
+    claude mcp remove enzyme -s user 2>/dev/null && legacy="1"
+fi
+
+for config in \
+    "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
+    "$HOME/.config/Claude/claude_desktop_config.json"; do
+    if [ -f "$config" ] && grep -q '"enzyme"' "$config"; then
+        python3 -c "
+import json, sys
+p = sys.argv[1]
+with open(p) as f: c = json.load(f)
+if 'mcpServers' in c and 'enzyme' in c['mcpServers']:
+    del c['mcpServers']['enzyme']
+    with open(p, 'w') as f: json.dump(c, f, indent=2)
+        " "$config" 2>/dev/null && legacy="1"
+    fi
+done
+
+codex_config="$HOME/.codex/config.toml"
+if [ -f "$codex_config" ] && grep -q 'mcp_servers\.enzyme' "$codex_config"; then
+    python3 -c "
+import sys
+lines = open(sys.argv[1]).readlines()
+skip, out = False, []
+for line in lines:
+    if line.strip() == '[mcp_servers.enzyme]':
+        skip = True
+        continue
+    if skip and line.strip().startswith('['):
+        skip = False
+    if not skip:
+        out.append(line)
+open(sys.argv[1], 'w').writelines(out)
+    " "$codex_config" 2>/dev/null && legacy="1"
+fi
+
+[ -n "$legacy" ] && echo "Cleaned up legacy enzyme-python installation."
+
 echo "Installed to ${INSTALL_DIR}/enzyme"
 
 # Check PATH
