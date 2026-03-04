@@ -60,6 +60,10 @@ jobs:
         with:
           path: artifacts
 
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: models
+
       - name: Create release on public repo
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
@@ -71,7 +75,9 @@ jobs:
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
             --generate-notes \
-            $files
+            $files \
+            models/model.onnx \
+            models/tokenizer.json
 
   sync-plugin:
     needs: publish
