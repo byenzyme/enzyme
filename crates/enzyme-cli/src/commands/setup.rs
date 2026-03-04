@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 const MODEL_URL: &str =
-    "https://github.com/jshph/enzyme-rust/releases/latest/download/model.onnx";
+    "https://github.com/jshph/enzyme/releases/latest/download/model.onnx";
 const TOKENIZER_URL: &str =
-    "https://github.com/jshph/enzyme-rust/releases/latest/download/tokenizer.json";
+    "https://github.com/jshph/enzyme/releases/latest/download/tokenizer.json";
 
 fn models_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
