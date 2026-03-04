@@ -100,9 +100,13 @@ case ":$PATH:" in
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 
+# Download embedding model
+echo ""
+echo "Downloading embedding model (~52 MB)..."
+"$INSTALL_DIR/enzyme" setup
+
 echo ""
 echo "Next steps:"
-echo "  enzyme setup                        # download embedding model (~52 MB)"
 echo "  cd /path/to/vault && enzyme init    # initialize your vault"
 echo ""
 echo "Add the Claude Code plugin:"
