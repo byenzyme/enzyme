@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 use std::fs;
 use std::time::Instant;
@@ -23,6 +24,48 @@ use crate::display::{DisplayEvent, InitDisplay};
 pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
+
+    // Check for existing enzyme data and offer hard reset
+    if !quiet && atty::is(atty::Stream::Stdin) {
+        let enzyme_dir = paths.vault_db.parent().map(|p| p.to_path_buf());
+        let embeddings_dir = &paths.embeddings_dir;
+
+        let enzyme_exists = enzyme_dir.as_ref().map_or(false, |d| d.exists());
+        let embeddings_exists = embeddings_dir.exists();
+
+        if enzyme_exists || embeddings_exists {
+            let mut dirs_found = Vec::new();
+            if enzyme_exists {
+                dirs_found.push(enzyme_dir.as_ref().unwrap().display().to_string());
+            }
+            if embeddings_exists {
+                dirs_found.push(embeddings_dir.display().to_string());
+            }
+
+            eprintln!("Found existing enzyme data:");
+            for d in &dirs_found {
+                eprintln!("  {}", d);
+            }
+            eprint!("Clear and hard reset? [y/N] ");
+            std::io::stderr().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input).ok();
+
+            if input.trim().eq_ignore_ascii_case("y") {
+                if let Some(ref dir) = enzyme_dir {
+                    if dir.exists() {
+                        fs::remove_dir_all(dir).context("failed to remove enzyme data directory")?;
+                        eprintln!("Cleared {}", dir.display());
+                    }
+                }
+                if embeddings_dir.exists() {
+                    fs::remove_dir_all(embeddings_dir).context("failed to remove embeddings directory")?;
+                    eprintln!("Cleared {}", embeddings_dir.display());
+                }
+            }
+        }
+    }
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
