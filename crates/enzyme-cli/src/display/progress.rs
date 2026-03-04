@@ -236,6 +236,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut frame_counter: usize = 0;
     let mut catalysts_generated: Option<usize> = None;
     let mut embedding_status: Option<String> = None;
+    let mut stored_starter_prompt: Option<String> = None;
 
     // Keep indexing messages for display
     let mut _indexing_messages: Vec<String> = Vec::new();
@@ -251,7 +252,8 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             lines_written: &mut u16,
                             spinner: &mut HelixSpinner,
                             catalysts_generated: &mut Option<usize>,
-                            embedding_status: &mut Option<String>|
+                            embedding_status: &mut Option<String>,
+                            stored_starter_prompt: &mut Option<String>|
      -> bool {
         match event {
             DisplayEvent::IndexingStart => {
@@ -446,27 +448,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 );
             }
             DisplayEvent::StarterPrompt(prompt) => {
-                let _ = writeln!(out);
-                let _ = writeln!(
-                    out,
-                    "  {}Try this prompt:{}",
-                    crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
-                    crossterm::style::ResetColor,
-                );
-                let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
-                let escaped = full
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .replace('"', "\\\"")
-                    .replace('!', "\\!");
-                let _ = writeln!(
-                    out,
-                    "    {}claude \"{}\"{}\n",
-                    crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
-                    escaped,
-                    crossterm::style::ResetColor,
-                );
+                // Store for rendering after Done — writing here gets cleared
+                // by the cycling discovery display and embedding progress.
+                *stored_starter_prompt = Some(prompt);
             }
             DisplayEvent::SimilarityStart => {
                 *stage = DisplayStage::Similarity;
@@ -513,6 +497,29 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     crossterm::style::ResetColor,
                     secs,
                 );
+                if let Some(prompt) = stored_starter_prompt.as_ref() {
+                    let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
+                    let escaped = full
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .replace('"', "\\\"")
+                        .replace('!', "\\!");
+                    let _ = writeln!(out);
+                    let _ = writeln!(
+                        out,
+                        "  {}Try this prompt:{}",
+                        crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+                        crossterm::style::ResetColor,
+                    );
+                    let _ = writeln!(
+                        out,
+                        "    {}claude \"{}\"{}\n",
+                        crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                        escaped,
+                        crossterm::style::ResetColor,
+                    );
+                }
                 let _ = out.flush();
                 return true;
             }
@@ -529,6 +536,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     &mut discovery_completed, &mut discovery_total,
                     &mut lines_written, &mut spinner,
                     &mut catalysts_generated, &mut embedding_status,
+                    &mut stored_starter_prompt,
                 ) {
                     return;
                 }
@@ -539,6 +547,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         &mut discovery_completed, &mut discovery_total,
                         &mut lines_written, &mut spinner,
                         &mut catalysts_generated, &mut embedding_status,
+                        &mut stored_starter_prompt,
                     ) {
                         return;
                     }
@@ -652,6 +661,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
 // ---------------------------------------------------------------------------
 
 fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
+    let mut stored_starter_prompt: Option<String> = None;
     loop {
         match rx.recv() {
             Ok(event) => match event {
@@ -741,17 +751,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     println!("  {}", reason);
                 }
                 DisplayEvent::StarterPrompt(prompt) => {
-                    let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
-                    let escaped = full
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .replace('"', "\\\"")
-                        .replace('!', "\\!");
-                    println!();
-                    println!("  Try this prompt:");
-                    println!("    claude \"{}\"", escaped);
-                    println!();
+                    stored_starter_prompt = Some(prompt);
                 }
                 DisplayEvent::SimilarityStart => {
                     println!("Computing similarities...");
@@ -773,6 +773,19 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::Done { duration_ms } => {
                     let secs = duration_ms as f64 / 1000.0;
                     println!("Done! ({:.1}s)", secs);
+                    if let Some(prompt) = stored_starter_prompt.as_ref() {
+                        let full = format!("{} {}", prompt, enzyme_core::llm::obsidian_citation_suffix());
+                        let escaped = full
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .replace('"', "\\\"")
+                            .replace('!', "\\!");
+                        println!();
+                        println!("  Try this prompt:");
+                        println!("    claude \"{}\"", escaped);
+                        println!();
+                    }
                     return;
                 }
             },
