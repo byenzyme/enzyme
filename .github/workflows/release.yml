@@ -9,7 +9,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Public repo where binaries are published
   RELEASE_REPO: jshph/enzyme
 
 jobs:
@@ -66,11 +65,8 @@ jobs:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-
-          # Collect all tarballs and checksums
           files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256')
 
-          # Create release on the public repo
           gh release create "$tag" \
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
@@ -93,19 +89,16 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${RELEASE_REPO}.git" public-repo
           cd public-repo
 
-          # Sync plugin files from enzyme-rust/plugin/ → public repo root
           rsync -av --delete \
             --exclude '.git' \
             --exclude '.claude-plugin' \
             --exclude 'README.md' \
             ../plugin/ ./
 
-          # Update version in plugin.json and marketplace.json
           version="${tag#v}"
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" .claude-plugin/plugin.json
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" .claude-plugin/marketplace.json
 
-          # Commit and push if there are changes
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
@@ -113,5 +106,78 @@ jobs:
             echo "No plugin changes to sync"
           else
             git commit -m "Sync plugin files from enzyme-rust ${tag}"
+            git push origin main
+          fi
+
+  update-homebrew:
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download macOS artifact for SHA256
+        uses: actions/download-artifact@v4
+        with:
+          name: enzyme-aarch64-apple-darwin
+          path: artifacts
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          # Read SHA256 from the build artifact
+          sha256=$(cat artifacts/enzyme-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          echo "SHA256: ${sha256}"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/homebrew-enzyme.git" tap
+          cd tap
+
+          cat > Formula/enzyme.rb << FORMULA
+          class Enzyme < Formula
+            desc "Local-first knowledge indexing for Obsidian vaults"
+            homepage "https://github.com/jshph/enzyme"
+            version "${version}"
+            license "MIT"
+
+            url "https://github.com/jshph/enzyme/releases/download/v#{version}/enzyme-aarch64-apple-darwin.tar.gz"
+            sha256 "${sha256}"
+
+            depends_on :macos
+            depends_on arch: :arm64
+
+            def install
+              bin.install "enzyme"
+            end
+
+            def caveats
+              <<~EOS
+                Enzyme installed successfully!
+
+                Next steps:
+                  cd /path/to/your/vault
+                  enzyme init
+
+                Setup guide: https://enzyme.garden/setup
+              EOS
+            end
+
+            test do
+              system "#{bin}/enzyme", "--help"
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc indentation
+          sed -i 's/^          //' Formula/enzyme.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/enzyme.rb
+          if git diff --cached --quiet; then
+            echo "No Homebrew changes"
+          else
+            git commit -m "Update enzyme to ${version}"
             git push origin main
           fi
