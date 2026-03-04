@@ -10,6 +10,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_REPO: jshph/enzyme
+  HOMEBREW_TAP_REPO: jshph/homebrew-enzyme
 
 jobs:
   build:
@@ -19,10 +20,13 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+            release_name: macos-arm64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            release_name: linux-x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+            release_name: linux-arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -39,16 +43,16 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf enzyme-${{ matrix.target }}.tar.gz enzyme
-          shasum -a 256 enzyme-${{ matrix.target }}.tar.gz > enzyme-${{ matrix.target }}.tar.gz.sha256
+          tar czf enzyme-${{ matrix.release_name }}.tar.gz enzyme
+          shasum -a 256 enzyme-${{ matrix.release_name }}.tar.gz > enzyme-${{ matrix.release_name }}.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: enzyme-${{ matrix.target }}
+          name: enzyme-${{ matrix.release_name }}
           path: |
-            target/${{ matrix.target }}/release/enzyme-${{ matrix.target }}.tar.gz
-            target/${{ matrix.target }}/release/enzyme-${{ matrix.target }}.tar.gz.sha256
+            target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz
+            target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz.sha256
 
   publish:
     needs: build
@@ -65,8 +69,11 @@ jobs:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
           mkdir -p model-files
-          gh release download --repo "$RELEASE_REPO" --pattern 'model.onnx' --dir model-files || true
-          gh release download --repo "$RELEASE_REPO" --pattern 'tokenizer.json' --dir model-files || true
+          gh release download --repo "$RELEASE_REPO" \
+            --pattern 'model.onnx' \
+            --pattern 'tokenizer.json' \
+            --dir model-files \
+            || echo "Warning: could not download model files from previous release (expected on first release)"
 
       - name: Create release on public repo
         env:
@@ -130,7 +137,7 @@ jobs:
       - name: Download macOS artifact for SHA256
         uses: actions/download-artifact@v4
         with:
-          name: enzyme-aarch64-apple-darwin
+          name: enzyme-macos-arm64
           path: artifacts
 
       - name: Update Homebrew formula
@@ -141,10 +148,10 @@ jobs:
           version="${tag#v}"
 
           # Read SHA256 from the build artifact
-          sha256=$(cat artifacts/enzyme-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          sha256=$(awk '{print $1}' artifacts/enzyme-macos-arm64.tar.gz.sha256)
           echo "SHA256: ${sha256}"
 
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/homebrew-enzyme.git" tap
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
           cd tap
 
           cat > Formula/enzyme-cli.rb << FORMULA
@@ -154,7 +161,7 @@ jobs:
             version "${version}"
             license "MIT"
 
-            url "https://github.com/jshph/enzyme/releases/download/v#{version}/enzyme-aarch64-apple-darwin.tar.gz"
+            url "https://github.com/jshph/enzyme/releases/download/v#{version}/enzyme-macos-arm64.tar.gz"
             sha256 "${sha256}"
 
             depends_on :macos

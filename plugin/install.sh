@@ -9,12 +9,12 @@ INSTALL_DIR="$HOME/.local/bin"
 
 # Detect platform
 case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64)               TARGET="aarch64-apple-darwin" ;;
+    Darwin-arm64)               TARGET="macos-arm64" ;;
     Darwin-x86_64)
         echo "Intel Macs are not supported. Install via Cargo: cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme" >&2
         exit 1 ;;
-    Linux-x86_64)               TARGET="x86_64-unknown-linux-gnu" ;;
-    Linux-aarch64)              TARGET="aarch64-unknown-linux-gnu" ;;
+    Linux-x86_64)               TARGET="linux-x86_64" ;;
+    Linux-aarch64)              TARGET="linux-arm64" ;;
     *)
         echo "Unsupported platform. Install via Cargo: cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme" >&2
         exit 1 ;;
