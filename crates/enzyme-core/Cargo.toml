@@ -25,7 +25,6 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { workspace = true }
-futures-util = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

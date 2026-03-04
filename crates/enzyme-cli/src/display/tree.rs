@@ -46,8 +46,9 @@ pub fn render_entity_node(
 
     if let Some(text) = catalyst_text {
         // Truncate long catalyst text
-        let truncated = if text.len() > 60 {
-            format!("{}{}", &text[..57], "...")
+        let truncated = if text.chars().count() > 60 {
+            let end = text.char_indices().nth(57).map_or(text.len(), |(i, _)| i);
+            format!("{}...", &text[..end])
         } else {
             text.to_string()
         };

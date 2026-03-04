@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -52,17 +51,31 @@ pub enum MessageContent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentPart {
+    /// Always "text" for now.
     #[serde(rename = "type")]
-    pub content_type: String,
+    content_type: ContentType,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+enum ContentType {
+    #[serde(rename = "text")]
+    Text,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheControl {
+    /// Always "ephemeral" for OpenRouter prompt caching.
     #[serde(rename = "type")]
-    pub control_type: String,
+    control_type: CacheControlType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum CacheControlType {
+    #[serde(rename = "ephemeral")]
+    Ephemeral,
 }
 
 impl From<String> for MessageContent {
@@ -93,14 +106,14 @@ impl Message {
             role: role.to_string(),
             content: MessageContent::Parts(vec![
                 ContentPart {
-                    content_type: "text".to_string(),
+                    content_type: ContentType::Text,
                     text: cached_prefix.into(),
                     cache_control: Some(CacheControl {
-                        control_type: "ephemeral".to_string(),
+                        control_type: CacheControlType::Ephemeral,
                     }),
                 },
                 ContentPart {
-                    content_type: "text".to_string(),
+                    content_type: ContentType::Text,
                     text: dynamic.into(),
                     cache_control: None,
                 },
@@ -183,35 +196,6 @@ struct Choice {
 #[derive(Deserialize)]
 struct ChoiceMessage {
     content: String,
-}
-
-// SSE streaming response types
-#[derive(Serialize)]
-struct ChatCompletionStreamRequest {
-    model: String,
-    messages: Vec<Message>,
-    max_tokens: u32,
-    temperature: f32,
-    top_p: f32,
-    top_k: u32,
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
-}
-
-#[derive(Deserialize)]
-struct StreamChunk {
-    choices: Vec<StreamChoice>,
-}
-
-#[derive(Deserialize)]
-struct StreamChoice {
-    delta: StreamDelta,
-}
-
-#[derive(Deserialize)]
-struct StreamDelta {
-    content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -301,136 +285,29 @@ impl LlmClient {
         Ok(content)
     }
 
-    /// Streaming chat completion that calls `on_delta` with accumulated text after each SSE chunk.
+
+
+    /// Chat completion with provider-aware prompt caching.
     ///
-    /// Returns the full accumulated text when the stream completes.
-    pub async fn chat_completion_stream(
+    /// For OpenRouter: packs system + user into a single user message with
+    /// `cache_control: ephemeral` on the system prefix so it's cached across
+    /// parallel calls. For other providers: standard system + user format.
+    pub async fn chat_completion_cached(
         &self,
         model: &str,
-        messages: Vec<Message>,
+        system_prompt: &str,
+        user_prompt: &str,
         params: GenerationParams,
-        mut on_delta: impl FnMut(&str) + Send,
     ) -> Result<String> {
-        let url = format!("{}/chat/completions", self.base_url);
-
-        let request_body = ChatCompletionStreamRequest {
-            model: model.to_string(),
-            messages,
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            top_k: params.top_k,
-            stream: true,
-            response_format: params.response_format,
+        let messages = if self.is_openrouter() {
+            vec![Message::cached("user", system_prompt, user_prompt)]
+        } else {
+            vec![
+                Message::text("system", system_prompt),
+                Message::text("user", user_prompt),
+            ]
         };
-
-        debug!("Sending streaming chat completion request to {} with model {}", url, model);
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
-            .header("X-Title", "Enzyme")
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to send streaming request to LLM API")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            warn!("LLM API returned error status {}: {}", status, error_body);
-            bail!("LLM API returned status {}: {}", status, error_body);
-        }
-
-        let mut accumulated = String::new();
-        let mut stream = response.bytes_stream();
-        let mut line_buf = String::new();
-
-        // Timeout per chunk: if no data arrives for 30s, assume stream is done
-        let chunk_timeout = Duration::from_secs(30);
-
-        loop {
-            let chunk_result = tokio::time::timeout(chunk_timeout, stream.next()).await;
-
-            match chunk_result {
-                Ok(Some(Ok(bytes))) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    line_buf.push_str(&text);
-                }
-                Ok(Some(Err(e))) => {
-                    debug!("Error reading stream chunk: {}", e);
-                    break;
-                }
-                Ok(None) => {
-                    // Stream ended
-                    break;
-                }
-                Err(_) => {
-                    debug!("Stream chunk timeout after {}s", chunk_timeout.as_secs());
-                    break;
-                }
-            }
-
-            // Process complete SSE lines
-            while let Some(newline_pos) = line_buf.find('\n') {
-                let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
-                line_buf = line_buf[newline_pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                let Some(data) = line.strip_prefix("data: ") else {
-                    continue;
-                };
-
-                if data == "[DONE]" {
-                    info!("Stream complete ({} chars)", accumulated.len());
-                    return Ok(accumulated);
-                }
-
-                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                    for choice in chunk.choices {
-                        if let Some(content) = choice.delta.content {
-                            accumulated.push_str(&content);
-                            on_delta(&accumulated);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Process any remaining content in the line buffer (no trailing newline)
-        let remaining = line_buf.trim();
-        if !remaining.is_empty() {
-            if let Some(data) = remaining.strip_prefix("data: ") {
-                if let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) {
-                    for choice in chunk.choices {
-                        if let Some(content) = choice.delta.content {
-                            accumulated.push_str(&content);
-                            on_delta(&accumulated);
-                        }
-                    }
-                }
-            } else if accumulated.is_empty() {
-                // Not SSE at all — provider may have returned a regular JSON response.
-                // Try to extract content from a standard ChatCompletionResponse.
-                if let Ok(resp) = serde_json::from_str::<ChatCompletionResponse>(remaining) {
-                    if let Some(choice) = resp.choices.into_iter().next() {
-                        accumulated = choice.message.content;
-                    }
-                }
-            }
-        }
-
-        info!("Stream ended ({} chars)", accumulated.len());
-        Ok(accumulated)
+        self.chat_completion(model, messages, params).await
     }
 }
 

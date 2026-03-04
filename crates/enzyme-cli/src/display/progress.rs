@@ -330,8 +330,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             } => {
                 *discovery_completed = completed;
                 *discovery_total = total;
-                let short_err = if error.len() > 80 {
-                    format!("{}…", &error[..80])
+                let short_err = if error.chars().count() > 80 {
+                    let end = error.char_indices().nth(80).map_or(error.len(), |(i, _)| i);
+                    format!("{}…", &error[..end])
                 } else {
                     error
                 };

@@ -364,37 +364,6 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
     })
 }
 
-/// Build a strict `json_schema` response format for catalyst generation.
-pub fn catalyst_response_format() -> super::client::ResponseFormat {
-    use super::client::{JsonSchemaSpec, ResponseFormat};
-
-    ResponseFormat::JsonSchema {
-        json_schema: JsonSchemaSpec {
-            name: "catalysts_payload".to_string(),
-            schema: serde_json::json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "catalysts": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "topicNames": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "starterPrompt": {
-                        "type": "string",
-                        "description": "A 10-20 word personal question derived from the vault context that surfaces a pattern the user hasn't noticed."
-                    }
-                },
-                "required": ["catalysts", "topicNames", "starterPrompt"]
-            }),
-            strict: true,
-        },
-    }
-}
-
 /// Strip markdown code fences from a response.
 fn strip_code_fences(response: &str) -> &str {
     let trimmed = response.trim();
@@ -432,85 +401,6 @@ fn generate_fallback_topic(text: &str) -> String {
         .take(5)
         .collect();
     words.join(" ")
-}
-
-// ---------------------------------------------------------------------------
-// Incremental catalyst extraction (for streaming)
-// ---------------------------------------------------------------------------
-
-/// Extract complete catalyst strings from a partially streamed JSON response.
-///
-/// Scans the accumulated text for the `"catalysts"` array and returns all
-/// complete `"..."` strings found so far. This is simple string scanning,
-/// not a full JSON parser.
-pub fn try_extract_catalysts(accumulated: &str) -> Vec<String> {
-    // Find the catalysts array start
-    let Some(key_pos) = accumulated.find("\"catalysts\"") else {
-        return Vec::new();
-    };
-    let after_key = &accumulated[key_pos + "\"catalysts\"".len()..];
-
-    // Find the opening bracket
-    let Some(bracket_pos) = after_key.find('[') else {
-        return Vec::new();
-    };
-    let array_content = &after_key[bracket_pos + 1..];
-
-    let mut catalysts = Vec::new();
-    let mut chars = array_content.chars().peekable();
-
-    loop {
-        // Skip whitespace and commas
-        while let Some(&c) = chars.peek() {
-            if c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == ',' {
-                chars.next();
-            } else {
-                break;
-            }
-        }
-
-        // Check for array end or end of content
-        match chars.peek() {
-            None => break,
-            Some(&']') => break,
-            Some(&'"') => {
-                chars.next(); // consume opening quote
-                let mut s = String::new();
-                let mut complete = false;
-                while let Some(c) = chars.next() {
-                    if c == '\\' {
-                        // Handle escape sequences
-                        if let Some(escaped) = chars.next() {
-                            match escaped {
-                                '"' => s.push('"'),
-                                '\\' => s.push('\\'),
-                                'n' => s.push('\n'),
-                                'r' => s.push('\r'),
-                                't' => s.push('\t'),
-                                other => {
-                                    s.push('\\');
-                                    s.push(other);
-                                }
-                            }
-                        }
-                    } else if c == '"' {
-                        complete = true;
-                        break;
-                    } else {
-                        s.push(c);
-                    }
-                }
-                if complete && !s.is_empty() {
-                    catalysts.push(s);
-                } else {
-                    break; // incomplete string, stop
-                }
-            }
-            _ => break, // unexpected character
-        }
-    }
-
-    catalysts
 }
 
 // ---------------------------------------------------------------------------
@@ -653,45 +543,6 @@ mod tests {
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
         assert!(prompt.contains("articulate what's at stake"));
         assert!(prompt.contains("Investment thesis statement"));
-    }
-
-    #[test]
-    fn test_try_extract_catalysts_partial() {
-        let partial = r#"{"catalysts": ["What is the nature of X?", "How does Y emerge from"#;
-        let result = try_extract_catalysts(partial);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], "What is the nature of X?");
-    }
-
-    #[test]
-    fn test_try_extract_catalysts_complete() {
-        let complete = r#"{"catalysts": ["First catalyst?", "Second catalyst?", "Third catalyst?"], "topicNames": ["a", "b", "c"]}"#;
-        let result = try_extract_catalysts(complete);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], "First catalyst?");
-        assert_eq!(result[1], "Second catalyst?");
-        assert_eq!(result[2], "Third catalyst?");
-    }
-
-    #[test]
-    fn test_try_extract_catalysts_empty() {
-        let empty = r#"{"catalysts": []"#;
-        let result = try_extract_catalysts(empty);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_try_extract_catalysts_no_key() {
-        let result = try_extract_catalysts("just some text");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_try_extract_catalysts_with_escapes() {
-        let json = r#"{"catalysts": ["What does \"meaning\" look like?", "Second"]}"#;
-        let result = try_extract_catalysts(json);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "What does \"meaning\" look like?");
     }
 
     #[test]

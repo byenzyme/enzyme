@@ -65,10 +65,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     let vault_context = {
         let ctx_builder = ContextBuilder::new(&db);
         match ctx_builder.build(&sel_result.entities, 5, 300) {
-            Ok(ctx) => {
-                debug!("built vault context XML ({} bytes, {} entities)",
-                    ctx.xml.len(), ctx.entity_contexts.len());
-                Some(ctx)
+            Ok(xml) => {
+                debug!("built vault context XML ({} bytes)", xml.len());
+                Some(xml)
             }
             Err(e) => {
                 tracing::warn!("failed to build vault context: {}", e);
@@ -125,8 +124,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
         // Prefer built context XML; fall back to externally provided vault_guide
         let effective_vault_guide = vault_context
-            .as_ref()
-            .map(|ctx| ctx.xml.as_str())
+            .as_deref()
             .or(vault_guide);
 
         let cat_config = CatalystConfig {

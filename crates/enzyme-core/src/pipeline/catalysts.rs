@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::config::CustomProfileGuidance;
 use crate::db::{Database, Repository};
 use crate::llm::{
-    LlmClient, Message, GenerationParams, ResponseFormat,
+    LlmClient, GenerationParams, ResponseFormat,
     build_system_prompt, build_user_prompt, parse_catalyst_response,
     get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
     DEFAULT_MODEL,
@@ -108,7 +108,7 @@ pub enum CatalystEvent {
 struct EntityJob {
     entity_name: String,
     entity_type: String,
-    messages: Vec<Message>,
+    user_prompt: String,
 }
 
 /// Result of a single entity's catalyst generation.
@@ -201,21 +201,10 @@ impl<'a> CatalystPipeline<'a> {
                 "built prompt for entity"
             );
 
-            // For OpenRouter: single user message with cached static prefix + dynamic suffix.
-            // For other providers: standard system + user message format.
-            let messages = if self.llm.is_openrouter() {
-                vec![Message::cached("user", system_prompt.clone(), user_prompt)]
-            } else {
-                vec![
-                    Message::text("system", system_prompt.clone()),
-                    Message::text("user", user_prompt),
-                ]
-            };
-
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
                 entity_type: entity.entity_type.as_str().to_string(),
-                messages,
+                user_prompt,
             });
         }
 
@@ -230,6 +219,7 @@ impl<'a> CatalystPipeline<'a> {
 
         // Phase 2: Fire all LLM calls concurrently
         let llm = Arc::new(self.llm.clone());
+        let system_prompt = Arc::new(system_prompt);
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
 
         let model = config.model.to_string();
@@ -239,6 +229,7 @@ impl<'a> CatalystPipeline<'a> {
                 entity_type: job.entity_type.clone(),
             });
             let llm = Arc::clone(&llm);
+            let system_prompt = Arc::clone(&system_prompt);
             let model = model.clone();
             join_set.spawn(async move {
                 let entity_name = job.entity_name.clone();
@@ -255,9 +246,10 @@ impl<'a> CatalystPipeline<'a> {
                     // 2 attempts (1 retry)
                     for attempt in 0..2u32 {
                         let result = llm
-                            .chat_completion(
+                            .chat_completion_cached(
                                 &model,
-                                job.messages.clone(),
+                                &system_prompt,
+                                &job.user_prompt,
                                 params.clone(),
                             )
                             .await;
