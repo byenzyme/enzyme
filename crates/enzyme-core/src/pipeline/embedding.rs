@@ -73,6 +73,16 @@ impl<'a> EmbeddingPipeline<'a> {
     /// `on_progress(completed_docs, total_docs)` is called after each document is
     /// processed so callers can drive a progress bar.
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+        self.run_inner(Some(MAX_EMBEDDING_FILES), on_progress)
+    }
+
+    /// Run embedding with no document cap — embeds all documents in the DB.
+    /// Used by `apply` where the target directory should be fully embedded.
+    pub fn run_all(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+        self.run_inner(None, on_progress)
+    }
+
+    fn run_inner(&self, max_docs: Option<usize>, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
         // Ensure the embeddings directory exists
@@ -85,8 +95,8 @@ impl<'a> EmbeddingPipeline<'a> {
         let mut all_embeddings = self.load_embeddings()?;
         let documents_pruned = self.prune_stale(&mut all_embeddings)?;
 
-        // Step 2: Find documents needing embedding (capped to most recent N by created_at)
-        let docs_needing = self.repo.get_documents_needing_embedding(Some(MAX_EMBEDDING_FILES))?;
+        // Step 2: Find documents needing embedding (optionally capped to most recent N)
+        let docs_needing = self.repo.get_documents_needing_embedding(max_docs)?;
         if docs_needing.is_empty() {
             if documents_pruned > 0 {
                 self.save_embeddings(&all_embeddings)?;

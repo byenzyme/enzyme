@@ -12,12 +12,13 @@ use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
+use crate::display::{DisplayEvent, InitDisplay};
+
 pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) -> Result<()> {
     let start = Instant::now();
     info!(?source_path, ?target_path, "enzyme apply");
 
     // ── Phase 1: Setup ─────────────────────────────────────────────────────
-    // Load embedding model and source catalysts.
     let source_paths = EnzymePaths::new(source_path)?;
     let target_paths = EnzymePaths::new(target_path)?;
 
@@ -40,74 +41,86 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         );
     }
 
+    // Print header before starting display (not animated)
     println!("enzyme apply");
     println!("  source: {} ({} catalysts)", source_path.display(), catalysts.len());
     println!("  target: {}", target_path.display());
-    println!();
+
+    // Start animated display
+    let display = InitDisplay::start();
+    let tx = display.sender();
 
     // ── Phase 2: Index target ──────────────────────────────────────────────
-    // Ensure target .enzyme directory exists
     if let Some(parent) = target_paths.vault_db.parent() {
         fs::create_dir_all(parent)
             .context("failed to create target .enzyme directory")?;
     }
 
+    tx.send(DisplayEvent::IndexingStart).ok();
     let target_db = Database::open(&target_paths.vault_db)?;
     let indexing = IndexingPipeline::new(&target_db, target_path.to_path_buf());
-    let idx_stats = indexing.run(false, |_msg| {})?;
-    println!(
-        "  indexing target... {} files discovered",
-        idx_stats.files_discovered
-    );
+    let tx_idx = tx.clone();
+    let idx_stats = indexing.run(false, |msg| {
+        tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
+    })?;
+
+    tx.send(DisplayEvent::IndexingComplete {
+        files_discovered: idx_stats.files_discovered,
+        files_new: idx_stats.files_new,
+        files_updated: idx_stats.files_updated,
+        files_deleted: idx_stats.files_deleted,
+    }).ok();
 
     // ── Phase 3: Embed target (spawn_blocking — CPU-bound ONNX) ────────────
     let target_db_path = target_paths.vault_db.clone();
     let target_embeddings_dir = target_paths.embeddings_dir.clone();
 
+    tx.send(DisplayEvent::EmbeddingStart).ok();
     let emb_stats = tokio::task::spawn_blocking({
         let target_db_path = target_db_path.clone();
         let target_embeddings_dir = target_embeddings_dir.clone();
+        let tx_emb = tx.clone();
         move || {
             let db = Database::open(&target_db_path)?;
             let pipeline = EmbeddingPipeline::new(&db, service, target_embeddings_dir);
-            pipeline.run(|done, total| {
-                print!("\r  embedding... {}/{} documents", done, total);
+            pipeline.run_all(|done, total| {
+                tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
             })
         }
     })
     .await
     .context("embedding task panicked")??;
 
-    println!(
-        "\r  embedding... {}/{} documents",
-        emb_stats.documents_embedded, emb_stats.documents_embedded
-    );
+    tx.send(DisplayEvent::EmbeddingComplete {
+        documents: emb_stats.documents_embedded,
+        pruned: emb_stats.documents_pruned,
+        duration_ms: emb_stats.duration_ms,
+    }).ok();
 
     // ── Phase 4: Similarity (spawn_blocking — CPU-bound vector math) ───────
-    let catalyst_count = catalysts.len();
-    let sim_stats = tokio::task::spawn_blocking(move || {
-        let db = Database::open(&target_db_path)?;
-        let pipeline = SimilarityPipeline::new(&db, service, target_embeddings_dir);
-        pipeline.run_with_catalysts(&catalysts, true, |done, total| {
-            print!("\r  computing similarities... {}/{} catalysts", done, total);
-        })
+    tx.send(DisplayEvent::SimilarityStart).ok();
+    let sim_stats = tokio::task::spawn_blocking({
+        let tx_sim = tx.clone();
+        move || {
+            let db = Database::open(&target_db_path)?;
+            let pipeline = SimilarityPipeline::new(&db, service, target_embeddings_dir);
+            pipeline.run_with_catalysts(&catalysts, true, |done, total| {
+                tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
+            })
+        }
     })
     .await
     .context("similarity task panicked")??;
 
-    println!(
-        "\r  computing similarities... {}/{} catalysts",
-        catalyst_count, catalyst_count
-    );
+    tx.send(DisplayEvent::SimilarityComplete {
+        catalysts: sim_stats.catalysts_processed,
+        documents: sim_stats.documents_compared,
+    }).ok();
 
-    let duration_secs = start.elapsed().as_secs_f64();
-    println!();
-    println!("  done in {:.1}s", duration_secs);
-    println!(
-        "  {} similarities stored in {}",
-        sim_stats.similarities_computed,
-        target_paths.vault_db.display()
-    );
+    let duration_ms = start.elapsed().as_millis() as u64;
+    tx.send(DisplayEvent::Done { duration_ms }).ok();
+
+    display.finish();
 
     Ok(())
 }

@@ -268,6 +268,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             } => {
                 clear_lines(out, *lines_written);
                 *lines_written = 0;
+                *stage = DisplayStage::Idle;
                 let _ = writeln!(
                     out,
                     "  {}Indexed:{} {} discovered, {} new, {} updated, {} deleted",
@@ -621,6 +622,23 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
                 frame,
                 crossterm::style::ResetColor,
+            );
+            lines_written = 1;
+
+            let _ = out.flush();
+        } else if embedding_status.is_some() {
+            // Standalone embedding spinner (no discovery tree, e.g. `apply`)
+            clear_lines(&mut out, lines_written);
+            lines_written = 0;
+
+            let frame = spinner.tick();
+            let _ = writeln!(
+                out,
+                "  {}{}{}  {}",
+                crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                frame,
+                crossterm::style::ResetColor,
+                embedding_status.as_deref().unwrap_or("Embedding..."),
             );
             lines_written = 1;
 
