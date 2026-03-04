@@ -179,5 +179,7 @@ jobs:
             echo "No Homebrew changes"
           else
             git commit -m "Update enzyme to ${version}"
-            git push origin main
+            # Push to whatever the default branch is
+            default_branch=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')
+            git push origin "HEAD:${default_branch}"
           fi
