@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::db::{Database, Repository};
 use crate::embedding::EmbeddingService;
-use crate::models::{Embedding, CatalystSimilarity, EMBEDDING_DIMENSION};
+use crate::models::{Catalyst, Embedding, CatalystSimilarity, EMBEDDING_DIMENSION};
 
 pub struct SimilarityPipeline<'a> {
     repo: Repository<'a>,
@@ -39,11 +39,25 @@ impl<'a> SimilarityPipeline<'a> {
         }
     }
 
+    /// Run similarity using catalysts from the local database.
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<SimilarityStats> {
+        let catalysts = self.repo.get_all_catalysts()?;
+        self.run_with_catalysts(&catalysts, true, on_progress)
+    }
+
+    /// Run similarity with externally-provided catalysts (e.g. from a source vault via `apply`).
+    ///
+    /// When `cache_catalyst_embeddings` is true, catalyst embeddings are saved to disk
+    /// for reuse in `catalyze_search`. Set to false when the catalysts come from an
+    /// external source and caching would be misleading.
+    pub fn run_with_catalysts(
+        &self,
+        catalysts: &[Catalyst],
+        cache_catalyst_embeddings: bool,
+        on_progress: impl Fn(usize, usize),
+    ) -> Result<SimilarityStats> {
         let start = Instant::now();
 
-        // Get all catalysts
-        let catalysts = self.repo.get_all_catalysts()?;
         if catalysts.is_empty() {
             return Ok(SimilarityStats {
                 catalysts_processed: 0,
@@ -58,8 +72,10 @@ impl<'a> SimilarityPipeline<'a> {
         let catalyst_embeddings = self.service.embed_documents(&catalyst_texts)?;
 
         // Cache catalyst embeddings to disk for fast reuse in catalyze_search
-        let cat_ids: Vec<&str> = catalysts.iter().map(|c| c.id.as_str()).collect();
-        self.save_catalyst_embeddings(&cat_ids, &catalyst_embeddings)?;
+        if cache_catalyst_embeddings {
+            let cat_ids: Vec<&str> = catalysts.iter().map(|c| c.id.as_str()).collect();
+            self.save_catalyst_embeddings(&cat_ids, &catalyst_embeddings)?;
+        }
 
         // Load all chunk embeddings from disk
         let chunk_embeddings = self.load_embeddings()?;
