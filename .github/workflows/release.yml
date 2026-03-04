@@ -55,14 +55,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: models
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Download model files from latest release
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          mkdir -p model-files
+          gh release download --repo "$RELEASE_REPO" --pattern 'model.onnx' --dir model-files || true
+          gh release download --repo "$RELEASE_REPO" --pattern 'tokenizer.json' --dir model-files || true
 
       - name: Create release on public repo
         env:
@@ -71,13 +75,17 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256')
 
+          # Include model files if available
+          model_files=""
+          [ -f model-files/model.onnx ] && model_files="$model_files model-files/model.onnx"
+          [ -f model-files/tokenizer.json ] && model_files="$model_files model-files/tokenizer.json"
+
           gh release create "$tag" \
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
             --generate-notes \
             $files \
-            models/model.onnx \
-            models/tokenizer.json
+            $model_files
 
   sync-plugin:
     needs: publish
