@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-model.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ensure-enzyme.sh",
             "async": true,
             "timeout": 120
           }
