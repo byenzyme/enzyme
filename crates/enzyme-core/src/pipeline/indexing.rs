@@ -221,7 +221,7 @@ impl<'a> IndexingPipeline<'a> {
                         id: None,
                         entity_id: 0,
                         file_path: doc.source_ref.clone(),
-                        context: None,
+                        context: context_snippet.clone(),
                         created_at: now,
                         effective_date: Some(doc.modified_at),
                         date_source: doc.modified_source.as_str().to_string(),
@@ -690,5 +690,53 @@ mod tests {
             inc_stats.duration_ms,
             full_stats.duration_ms
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Folder entities get context snippets
+    // -----------------------------------------------------------------------
+    #[test]
+    fn folder_entities_get_context() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // Create files inside a subfolder so folder entities are extracted
+        write_md(
+            vault.path(),
+            "people/alice.md",
+            "# Alice\nAlice is a researcher working on distributed systems.\n",
+        );
+        write_md(
+            vault.path(),
+            "people/bob.md",
+            "# Bob\nBob collaborates with Alice on networking protocols.\n",
+        );
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let repo = Repository::new(&db);
+        let entities = repo.get_all_entities().unwrap();
+        let folder_entity = entities
+            .iter()
+            .find(|e| e.name == "people" && e.entity_type == EntityType::Folder)
+            .expect("people folder entity should exist");
+
+        let occs = repo
+            .get_entity_occurrences(folder_entity.id.unwrap())
+            .unwrap();
+        assert_eq!(occs.len(), 2, "should have 2 occurrences (one per file)");
+
+        for occ in &occs {
+            assert!(
+                occ.context.is_some(),
+                "folder occurrence for {} should have context",
+                occ.file_path
+            );
+            assert!(
+                !occ.context.as_ref().unwrap().is_empty(),
+                "folder occurrence context should not be empty"
+            );
+        }
     }
 }

@@ -3,8 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::json;
 
+use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::{Database, Repository};
+use enzyme_core::models::EntityType;
 use enzyme_core::pipeline::staleness::check_catalyst_staleness;
 
 pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
@@ -18,6 +20,10 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
     let db = Database::open(&paths.vault_db)?;
     let stale = check_catalyst_staleness(&db, vault_path)?.is_stale();
     let repo = Repository::new(&db);
+
+    // Load config for expandable folder preferences
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let prefs = config.parse_preferences();
 
     let entities = repo.get_top_entities(top, "recency_score")?;
 
@@ -47,7 +53,7 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
             }))
             .collect();
 
-        entity_list.push(json!({
+        let mut entry = json!({
             "name": entity.name,
             "type": entity.entity_type.as_str(),
             "frequency": entity.frequency,
@@ -57,7 +63,48 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
             "days_since_last_seen": days_since_last.round() as i64,
             "activity_trend": activity_trend,
             "catalysts": catalyst_list,
-        }));
+        });
+
+        // Enrich expandable folders with sampled children
+        if entity.entity_type == EntityType::Folder {
+            if let Some(configured_children) = prefs.expandable_folders.get(&entity.name) {
+                let (children, total_count) =
+                    repo.get_folder_children_by_references(&entity.name, 10)?;
+
+                let sampled: Vec<serde_json::Value> = children
+                    .iter()
+                    .map(|c| json!({
+                        "entity": format!("[[{}]]", c.name),
+                        "reference_count": c.reference_count,
+                        "last_seen": c.last_seen,
+                    }))
+                    .collect();
+
+                // Catalyzed children: configured children that actually have catalysts
+                let catalyzed: Vec<String> = configured_children
+                    .iter()
+                    .filter(|child| {
+                        repo.get_catalysts_for_entity(&child.name)
+                            .map(|cats| !cats.is_empty())
+                            .unwrap_or(false)
+                    })
+                    .map(|child| format!("[[{}]]", child.name))
+                    .collect();
+
+                let sampled_count = sampled.len() as i64;
+                let obj = entry.as_object_mut().unwrap();
+                obj.insert("expandable".to_string(), json!(true));
+                obj.insert("total_children".to_string(), json!(total_count));
+                obj.insert("sampled_children".to_string(), json!(sampled));
+                obj.insert("catalyzed_children".to_string(), json!(catalyzed));
+                obj.insert(
+                    "additional_children_available".to_string(),
+                    json!(total_count - sampled_count),
+                );
+            }
+        }
+
+        entity_list.push(entry);
     }
 
     let output = json!({

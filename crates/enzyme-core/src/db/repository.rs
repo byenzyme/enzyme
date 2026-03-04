@@ -13,6 +13,19 @@ use super::Database;
 // Context query types
 // ---------------------------------------------------------------------------
 
+/// A child document within an expandable folder, ranked by external references.
+#[derive(Debug, Clone)]
+pub struct FolderChild {
+    /// File stem, e.g. "Person Name".
+    pub name: String,
+    /// Relative vault path, e.g. "people/Person Name.md".
+    pub source_ref: String,
+    /// Number of documents *outside* the folder that wikilink this child.
+    pub reference_count: i64,
+    /// Most recent modification timestamp (millis).
+    pub last_seen: Option<i64>,
+}
+
 /// Stats for a top-level vault folder derived from document paths.
 #[derive(Debug, Clone)]
 pub struct FolderStats {
@@ -761,6 +774,81 @@ impl<'a> Repository<'a> {
         )?;
 
         Ok(rows)
+    }
+
+    /// Get the most-referenced children of a folder, ranked by external wikilink count.
+    ///
+    /// "Children" are documents whose `source_ref` matches `{folder}/%.md` but
+    /// NOT `{folder}/%/%.md` (i.e. immediate children only).  Reference counts
+    /// come from `doc_links` rows where the linking document lives *outside*
+    /// the folder.
+    ///
+    /// Returns `(children, total_child_count)`.
+    pub fn get_folder_children_by_references(
+        &self,
+        folder_name: &str,
+        limit: usize,
+    ) -> Result<(Vec<FolderChild>, i64)> {
+        let like_pattern = format!("{}/%", folder_name);
+        let not_like_pattern = format!("{}/%/%", folder_name);
+
+        // Get all immediate children with their modified_at
+        let children_rows = self.db.query_read(
+            "SELECT source_ref, modified_at
+             FROM docs
+             WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
+            &[
+                &like_pattern as &dyn rusqlite::types::ToSql,
+                &not_like_pattern,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )?;
+
+        let total_count = children_rows.len() as i64;
+
+        // For each child, extract the file stem and count external references
+        let outside_pattern = format!("{}/%", folder_name);
+        let mut children: Vec<FolderChild> = Vec::new();
+
+        for (source_ref, modified_at) in &children_rows {
+            // Extract file stem: "people/Alice Jones.md" -> "Alice Jones"
+            let file_name = source_ref
+                .rsplit('/')
+                .next()
+                .unwrap_or(source_ref);
+            let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+
+            // Count references from documents OUTSIDE this folder
+            let ref_count = self.db.query_read(
+                "SELECT COUNT(DISTINCT dl.doc_id)
+                 FROM doc_links dl
+                 JOIN docs d ON d.id = dl.doc_id
+                 WHERE dl.link = ?1 AND d.source_ref NOT LIKE ?2",
+                &[
+                    &stem.to_lowercase() as &dyn rusqlite::types::ToSql,
+                    &outside_pattern,
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            let reference_count = ref_count.into_iter().next().unwrap_or(0);
+
+            children.push(FolderChild {
+                name: stem.to_string(),
+                source_ref: source_ref.clone(),
+                reference_count,
+                last_seen: *modified_at,
+            });
+        }
+
+        // Sort by reference_count desc, then by name for stability
+        children.sort_by(|a, b| {
+            b.reference_count
+                .cmp(&a.reference_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        children.truncate(limit);
+
+        Ok((children, total_count))
     }
 
     /// Get recent occurrences for an entity, ordered by effective_date descending.
