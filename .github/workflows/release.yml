@@ -55,14 +55,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: models
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: models
 
       - name: Create release on public repo
         env:
