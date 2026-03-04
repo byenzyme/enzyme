@@ -1112,6 +1112,42 @@ impl<'a> Repository<'a> {
         )?;
         Ok(rows.into_iter().next())
     }
+
+    // -----------------------------------------------------------------------
+    // Applied target operations
+    // -----------------------------------------------------------------------
+
+    /// Insert or update an applied target record.
+    pub fn upsert_applied_target(&self, target: &AppliedTarget) -> Result<()> {
+        let applied_at = target.applied_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        self.db.execute_write(
+            "INSERT INTO applied_targets (target_path, doc_count, catalyst_count, applied_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(target_path) DO UPDATE SET
+                 doc_count = excluded.doc_count,
+                 catalyst_count = excluded.catalyst_count,
+                 applied_at = excluded.applied_at",
+            &[
+                &target.target_path as &dyn rusqlite::types::ToSql,
+                &target.doc_count,
+                &target.catalyst_count,
+                &applied_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all applied targets.
+    pub fn get_all_applied_targets(&self) -> Result<Vec<AppliedTarget>> {
+        let rows = self.db.query_read(
+            "SELECT id, target_path, doc_count, catalyst_count, applied_at
+             FROM applied_targets
+             ORDER BY applied_at DESC",
+            &[],
+            map_applied_target_row,
+        )?;
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,5 +1210,18 @@ fn map_catalyst_similarity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Cata
         timeline_data: serde_json::from_str(&timeline_str)
             .unwrap_or(serde_json::Value::Object(Default::default())),
         created_at: parse_datetime_utc(&created_at_str),
+    })
+}
+
+/// Map a row from the `applied_targets` table to an [`AppliedTarget`].
+fn map_applied_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedTarget> {
+    let applied_at_str: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+
+    Ok(AppliedTarget {
+        id: Some(row.get(0)?),
+        target_path: row.get(1)?,
+        doc_count: row.get(2)?,
+        catalyst_count: row.get(3)?,
+        applied_at: parse_datetime_utc(&applied_at_str),
     })
 }

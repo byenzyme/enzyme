@@ -74,6 +74,16 @@ enzyme refresh
 enzyme refresh --full                 # Force full re-index
 ```
 
+### `enzyme apply <target>` — Project catalysts onto external content
+
+Indexes an external directory using the current vault's catalysts. After applying,
+search the target with `enzyme catalyze "query" --vault <target>`.
+
+```bash
+enzyme apply ./research-papers           # Apply current vault's catalysts
+enzyme apply ./papers --source ~/vault   # Explicit source vault
+```
+
 ### `enzyme setup` — Download the embedding model
 
 Downloads the embedding model to `~/.enzyme/models/`. Required before first use.

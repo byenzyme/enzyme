@@ -131,4 +131,21 @@ Good: "This thread keeps surfacing in unexpected places — it's doing more work
 
 ## Cross-Index Connections
 
-If petri themes suggest insights might span multiple indexes (e.g., vault catalysts reference ideas likely in Readwise), subtly suggest drawing connections. Be selective — only when content clearly bridges domains.
+If `applied_targets` is non-empty, the vault's catalysts have been projected onto
+external directories. Each target has a `path`, `doc_count`, and `applied_at`.
+
+**How to present:**
+- Mention applied targets naturally when relevant: "Your catalysts have also been
+  applied to research-papers (1,189 docs) — want me to search there too?"
+- Don't list them mechanically. Only surface when the current theme plausibly
+  spans the external content.
+- Use `enzyme catalyze "query" --vault <path>` to search an applied target.
+
+**When to suggest:**
+- The user asks about a topic that could exist in the external corpus
+- A petri theme bridges domains (e.g., vault has #research, target is papers/)
+- The user explicitly mentions the external content
+
+**When NOT to suggest:**
+- The user's question is clearly vault-internal
+- The applied target is stale or irrelevant to the current thread

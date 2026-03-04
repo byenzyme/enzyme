@@ -107,10 +107,22 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
         entity_list.push(entry);
     }
 
+    let applied_targets = repo.get_all_applied_targets()?;
+    let targets_json: Vec<serde_json::Value> = applied_targets
+        .iter()
+        .map(|t| json!({
+            "path": t.target_path,
+            "doc_count": t.doc_count,
+            "catalyst_count": t.catalyst_count,
+            "applied_at": t.applied_at.to_rfc3339(),
+        }))
+        .collect();
+
     let output = json!({
         "entities": entity_list,
         "total_entities": entity_list.len(),
         "stale": stale,
+        "applied_targets": targets_json,
     });
 
     println!("{}", serde_json::to_string_pretty(&output)?);

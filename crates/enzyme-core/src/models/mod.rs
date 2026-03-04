@@ -1,8 +1,10 @@
+mod applied_target;
 mod document;
 mod entity;
 mod catalyst;
 mod embedding;
 
+pub use applied_target::*;
 pub use document::*;
 pub use entity::*;
 pub use catalyst::*;

@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS config (
     value      TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Applied targets (external directories this vault's catalysts have been projected onto)
+CREATE TABLE IF NOT EXISTS applied_targets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_path     TEXT NOT NULL UNIQUE,
+    doc_count       INTEGER NOT NULL DEFAULT 0,
+    catalyst_count  INTEGER NOT NULL DEFAULT 0,
+    applied_at      TEXT DEFAULT (datetime('now'))
+);
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
@@ -131,6 +140,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "catalyst_similarities",
     "context_cache",
     "config",
+    "applied_targets",
 ];
 
 /// All indexes created by the schema (used for validation in tests).
