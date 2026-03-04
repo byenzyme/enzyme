@@ -24,17 +24,36 @@ Content retrieval works by **resonance with catalyst questions**, not keyword ma
 
 ## Prerequisites
 
-Before running enzyme commands, check that the vault is initialized:
+### 1. Install the binary
 
 ```bash
-# Check for .enzyme directory in the vault
+# Check if enzyme is installed
+command -v enzyme
+```
+
+If not installed:
+
+```bash
+# Requires Rust toolchain (https://rustup.rs)
+cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme
+```
+
+### 2. Download the embedding model
+
+```bash
+enzyme setup
+```
+
+This downloads the ONNX model (~52 MB) and tokenizer to `~/.enzyme/models/`. Only needed once. Use `enzyme setup --check` to verify without downloading.
+
+### 3. Check vault initialization
+
+```bash
 ls .enzyme/enzyme.db
 ```
 
 - If `.enzyme/enzyme.db` exists: vault is ready. Run `enzyme petri` to begin.
 - If it doesn't exist: run `enzyme init` to initialize the vault.
-- If the embedding model is missing, run `enzyme setup` to download it.
-- Ensure `enzyme` is on PATH.
 
 ## Commands
 
