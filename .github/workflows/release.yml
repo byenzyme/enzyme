@@ -134,8 +134,8 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/homebrew-enzyme.git" tap
           cd tap
 
-          cat > Formula/enzyme.rb << FORMULA
-          class Enzyme < Formula
+          cat > Formula/enzyme-cli.rb << FORMULA
+          class EnzymeCli < Formula
             desc "Local-first knowledge indexing for Obsidian vaults"
             homepage "https://github.com/jshph/enzyme"
             version "${version}"
@@ -170,11 +170,11 @@ jobs:
           FORMULA
 
           # Remove leading whitespace from heredoc indentation
-          sed -i 's/^          //' Formula/enzyme.rb
+          sed -i 's/^          //' Formula/enzyme-cli.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/enzyme.rb
+          git add Formula/enzyme-cli.rb
           if git diff --cached --quiet; then
             echo "No Homebrew changes"
           else
