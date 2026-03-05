@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::models::DateSource;
 
 use super::chunking::{chunk_document, DEFAULT_CHUNK_SIZE_CHARS};
+use super::datepath::extract_date_from_path;
 use super::extract::{extract_entities, ExtractedEntities};
 use super::frontmatter::{parse_frontmatter, strip_frontmatter, Frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
@@ -120,7 +121,7 @@ impl DocumentProcessor {
         let char_count = body.chars().count() as i64;
 
         // Dates
-        let (created_at, created_source) = resolve_created_date(&frontmatter, &abs_path)?;
+        let (created_at, created_source) = resolve_created_date(&frontmatter, path, &abs_path)?;
         let (modified_at, modified_source) = resolve_modified_date(&frontmatter, &abs_path)?;
 
         Ok(ProcessedDocument {
@@ -151,15 +152,22 @@ impl DocumentProcessor {
     }
 }
 
-/// Resolve the created-at timestamp. Prefer frontmatter, fall back to filesystem.
+/// Resolve the created-at timestamp.
+/// Priority: frontmatter → filename/path date → filesystem.
 fn resolve_created_date(
     frontmatter: &Option<Frontmatter>,
+    rel_path: &Path,
     abs_path: &Path,
 ) -> Result<(i64, DateSource)> {
     if let Some(fm) = frontmatter {
         if let Some(dt) = fm.created {
             return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
         }
+    }
+
+    // Try extracting a date from the file path/name.
+    if let Some(dt) = extract_date_from_path(rel_path) {
+        return Ok((datetime_to_millis(dt), DateSource::Filename));
     }
 
     // Fall back to filesystem creation time (or modified time on Linux).
@@ -279,6 +287,8 @@ Second paragraph here.
 
         assert_eq!(doc.source_ref, "notes/daily/2024-01-15.md");
         assert_eq!(doc.folders, vec!["notes", "notes/daily"]);
+        // Date should be extracted from the filename
+        assert_eq!(doc.created_source, DateSource::Filename);
     }
 
     #[test]
