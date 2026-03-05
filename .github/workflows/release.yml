@@ -22,10 +22,10 @@ jobs:
             os: macos-latest
             release_name: macos-arm64
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             release_name: linux-x86_64
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             release_name: linux-arm64
 
     runs-on: ${{ matrix.os }}
