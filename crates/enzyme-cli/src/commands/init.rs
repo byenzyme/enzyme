@@ -13,11 +13,12 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
-use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent};
+use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent, calculate_allocations};
 use enzyme_core::pipeline::context::ContextBuilder;
-use enzyme_core::pipeline::selection::SelectionPipeline;
+use enzyme_core::pipeline::llm_selection::LlmSelectionPipeline;
+use enzyme_core::pipeline::selection::{SelectionPipeline, SelectionSource};
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
-use enzyme_core::pipeline::staleness::{check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult};
+use enzyme_core::pipeline::staleness::{check_catalyst_staleness, load_stored_entity_names, store_staleness_bookkeeping, StalenessResult};
 
 use crate::display::{DisplayEvent, InitDisplay};
 
@@ -76,6 +77,15 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // Open database
     let db = Database::open(&paths.vault_db)?;
 
+    // Resolve API config early (needed for both LLM selection and catalyst generation)
+    let api_config = match resolve_api_config().await {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            tracing::warn!("API config resolution failed: {}", e);
+            None
+        }
+    };
+
     // Start display (quiet mode suppresses all output)
     let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
     let tx = display.sender();
@@ -97,12 +107,34 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
-    let sel_result = selection.run()?;
+    let mut sel_result = selection.run()?;
 
     tx.send(DisplayEvent::SelectionComplete {
         count: sel_result.entities.len(),
         source: sel_result.source.clone(),
     }).ok();
+
+    // ── Step 2a: LLM-assisted selection (first init only) ────────────────
+    if matches!(sel_result.source, SelectionSource::Trending) {
+        if let Some(ref resolved) = api_config {
+            tx.send(DisplayEvent::LlmSelectionStart).ok();
+            let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
+            let llm_sel = LlmSelectionPipeline::new(&db, &llm);
+            match llm_sel.run(&sel_result.entities, vault_path, &resolved.model).await {
+                Ok(result) => {
+                    tx.send(DisplayEvent::LlmSelectionComplete {
+                        entities_selected: result.entities.len(),
+                    }).ok();
+                    sel_result = result;
+                }
+                Err(e) => {
+                    tx.send(DisplayEvent::LlmSelectionSkipped(
+                        format!("LLM selection failed: {e}")
+                    )).ok();
+                }
+            }
+        }
+    }
 
     // ── Step 2b: Build XML context from DB ───────────────────────────────
     let vault_context = {
@@ -124,14 +156,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         Ok(svc) => Some(svc),
         Err(e) => {
             tx.send(DisplayEvent::EmbeddingSkipped(format!("model not found: {}", e))).ok();
-            None
-        }
-    };
-
-    let api_config = match resolve_api_config().await {
-        Ok(cfg) => Some(cfg),
-        Err(e) => {
-            tracing::warn!("API config resolution failed: {}", e);
             None
         }
     };
@@ -170,6 +194,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             .as_deref()
             .or(vault_guide);
 
+        let allocations = calculate_allocations(&sel_result.entities);
+
         let cat_config = CatalystConfig {
             entity_profiles: &sel_result.entity_profiles,
             catalysts_per_entity: 7,
@@ -185,6 +211,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             guide_signal: enzyme_config.guide_signal.as_deref(),
             vault_guide: effective_vault_guide,
             model: &resolved.model,
+            per_entity_allocations: Some(&allocations),
         };
 
         let stats = cat_pipeline.run(
@@ -317,8 +344,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
-    // If the DB doesn't exist yet, fall through to full init.
-    if paths.vault_db.exists() {
+    // Capture old entity names before init for diffing.
+    let old_entity_names = if paths.vault_db.exists() {
         let db = Database::open(&paths.vault_db)?;
         let staleness = check_catalyst_staleness(&db, vault_path)?;
 
@@ -331,7 +358,11 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
                 debug!(?reason, "catalysts are stale — running full init");
             }
         }
-    }
+
+        load_stored_entity_names(&db).ok()
+    } else {
+        None
+    };
 
     // Run the full pipeline.
     run_init(vault_path, full, detached, quiet, vault_guide).await?;
@@ -342,6 +373,32 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
     let sel_result = selection.run()?;
     let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
     store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
+
+    // Surface entity set diff if we had a previous snapshot.
+    if let Some(old_names) = old_entity_names {
+        if !old_names.is_empty() {
+            let new_names: std::collections::HashSet<String> =
+                entity_names.iter().cloned().collect();
+            let mut added: Vec<&String> = new_names.difference(&old_names).collect();
+            let mut removed: Vec<&String> = old_names.difference(&new_names).collect();
+            added.sort();
+            removed.sort();
+
+            if !added.is_empty() || !removed.is_empty() {
+                eprintln!("\n  Entity changes:");
+                for name in &added {
+                    eprintln!("    + {}", name);
+                }
+                for name in &removed {
+                    eprintln!("    - {}", name);
+                }
+                eprintln!(
+                    "    {} unchanged",
+                    old_names.intersection(&new_names).count()
+                );
+            }
+        }
+    }
 
     Ok(())
 }

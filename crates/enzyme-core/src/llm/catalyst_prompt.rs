@@ -365,7 +365,7 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
 }
 
 /// Strip markdown code fences from a response.
-fn strip_code_fences(response: &str) -> &str {
+pub(crate) fn strip_code_fences(response: &str) -> &str {
     let trimmed = response.trim();
     if trimmed.starts_with("```") {
         let without_opening = trimmed

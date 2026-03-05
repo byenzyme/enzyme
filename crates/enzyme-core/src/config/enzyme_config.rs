@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::models::EntityType;
@@ -13,7 +13,7 @@ use crate::models::EntityType;
 
 /// Top-level `enzyme-config.yaml` that lives at `<vault>/.enzyme/enzyme-config.yaml`
 /// (or `<vault>/enzyme-config.yaml` for backwards compat).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnzymeConfig {
     /// User-curated entities for catalyst generation.
@@ -58,7 +58,7 @@ pub struct EnzymeConfig {
 /// Supports two YAML forms:
 /// - Simple string: `"#tag"` or `"folder:inbox"` or `"[[Note]]"`
 /// - Map with options: `"#tag": { profile: "strategic" }`
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CatalyzedEntity {
     Simple(String),
@@ -66,17 +66,26 @@ pub enum CatalyzedEntity {
 }
 
 /// Per-entity options in the config.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityOptions {
     pub profile: Option<String>,
     #[serde(default)]
     pub expandable: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     pub children: Vec<String>,
 }
 
+/// Deserialize a `Vec<String>` that tolerates YAML `null` (treats it as `[]`).
+fn deserialize_null_as_empty_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<Vec<String>> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 /// Custom profile guidance from vault guide generator.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomProfileGuidance {
     #[serde(default)]
@@ -90,7 +99,7 @@ pub struct CustomProfileGuidance {
 }
 
 /// Domain-specific vocabulary for custom guidance.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainVocabulary {
     #[serde(default)]
@@ -102,7 +111,7 @@ pub struct DomainVocabulary {
 }
 
 /// Override trending distribution minimums.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrendingConfig {
     #[serde(default = "default_min_tags")]
     pub minimum_tags: usize,

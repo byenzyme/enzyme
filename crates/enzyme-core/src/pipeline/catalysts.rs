@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use tokio::task::JoinSet;
 use tracing::{info, debug};
 use uuid::Uuid;
@@ -50,6 +50,8 @@ pub struct CatalystConfig<'a> {
     pub vault_guide: Option<&'a str>,
     /// LLM model to use for catalyst generation.
     pub model: &'a str,
+    /// Per-entity catalyst count overrides from volume-based allocation.
+    pub per_entity_allocations: Option<&'a HashMap<String, usize>>,
 }
 
 impl<'a> Default for CatalystConfig<'a> {
@@ -68,6 +70,7 @@ impl<'a> Default for CatalystConfig<'a> {
             guide_signal: None,
             vault_guide: None,
             model: DEFAULT_MODEL,
+            per_entity_allocations: None,
         }
     }
 }
@@ -186,10 +189,14 @@ impl<'a> CatalystPipeline<'a> {
                 .and_then(|key| get_profile(key))
                 .unwrap_or(default_profile);
 
+            let num_catalysts = config.per_entity_allocations
+                .and_then(|a| a.get(entity_name).copied())
+                .unwrap_or(config.catalysts_per_entity);
+
             let user_prompt = build_user_prompt(
                 entity_name,
                 &context_samples,
-                config.catalysts_per_entity,
+                num_catalysts,
                 profile,
                 config.format_key,
                 config.guide_signal,
@@ -414,5 +421,112 @@ impl<'a> CatalystPipeline<'a> {
 
         stats.duration_ms = start.elapsed().as_millis() as u64;
         Ok(stats)
+    }
+}
+
+/// Calculate per-entity catalyst allocation from 3-month activity.
+///
+/// Bands: 0→3, 1-5→3-5, 6-10→5-7, 11-20→7-10, 20+→up to 15
+pub fn calculate_allocations(entities: &[Entity]) -> HashMap<String, usize> {
+    let now = Utc::now();
+    let month_keys: Vec<String> = (0..3)
+        .map(|i| {
+            let y = now.year();
+            let m = now.month() as i32 - i;
+            let (year, month) = if m <= 0 {
+                (y - 1, (m + 12) as u32)
+            } else {
+                (y, m as u32)
+            };
+            format!("{:04}-{:02}", year, month)
+        })
+        .collect();
+
+    entities
+        .iter()
+        .map(|e| {
+            let volume: i64 = month_keys
+                .iter()
+                .filter_map(|k| e.trends.timeline_buckets.get(k))
+                .sum();
+            let alloc = match volume {
+                0 => 3,
+                1..=5 => 3 + ((volume as usize - 1) * 2) / 4,
+                6..=10 => 5 + ((volume as usize - 5) * 2) / 5,
+                11..=20 => 7 + ((volume as usize - 10) * 3) / 10,
+                _ => (10 + (volume as usize - 20)).min(15),
+            };
+            (e.name.clone(), alloc)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EntityTrends, EntityType};
+
+    fn make_entity(name: &str, buckets: HashMap<String, i64>) -> Entity {
+        Entity {
+            id: Some(1),
+            name: name.to_string(),
+            entity_type: EntityType::Tag,
+            frequency: 10,
+            first_seen: None,
+            last_seen: None,
+            trends: EntityTrends {
+                frequency_recent: 0,
+                recency_score: 0.0,
+                timeline_buckets: buckets,
+            },
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn test_allocation_zero_volume() {
+        let entities = vec![make_entity("empty", HashMap::new())];
+        let allocs = calculate_allocations(&entities);
+        assert_eq!(allocs["empty"], 3);
+    }
+
+    #[test]
+    fn test_allocation_low_volume() {
+        let now = Utc::now();
+        let key = format!("{:04}-{:02}", now.year(), now.month());
+        let entities = vec![make_entity("low", HashMap::from([(key, 3)]))];
+        let allocs = calculate_allocations(&entities);
+        assert!(allocs["low"] >= 3 && allocs["low"] <= 5);
+    }
+
+    #[test]
+    fn test_allocation_high_volume() {
+        let now = Utc::now();
+        let key = format!("{:04}-{:02}", now.year(), now.month());
+        let entities = vec![make_entity("high", HashMap::from([(key, 30)]))];
+        let allocs = calculate_allocations(&entities);
+        assert_eq!(allocs["high"], 15);
+    }
+
+    #[test]
+    fn test_allocation_medium_volume() {
+        let now = Utc::now();
+        let key = format!("{:04}-{:02}", now.year(), now.month());
+        let entities = vec![make_entity("med", HashMap::from([(key, 15)]))];
+        let allocs = calculate_allocations(&entities);
+        assert!(allocs["med"] >= 7 && allocs["med"] <= 10);
+    }
+
+    #[test]
+    fn test_allocation_spans_months() {
+        let now = Utc::now();
+        let k1 = format!("{:04}-{:02}", now.year(), now.month());
+        let prev_month = if now.month() == 1 { 12 } else { now.month() - 1 };
+        let prev_year = if now.month() == 1 { now.year() - 1 } else { now.year() };
+        let k2 = format!("{:04}-{:02}", prev_year, prev_month);
+        let entities = vec![make_entity("span", HashMap::from([(k1, 4), (k2, 4)]))];
+        let allocs = calculate_allocations(&entities);
+        // 8 total → band 6-10 → 5-7
+        assert!(allocs["span"] >= 5 && allocs["span"] <= 7);
     }
 }

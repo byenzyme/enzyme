@@ -81,11 +81,15 @@ fn parse_ymd_prefix(s: &str) -> Option<DateTime<Utc>> {
 
 /// Find YYYY-MM-DD anywhere in a string.
 fn find_ymd_in_str(s: &str) -> Option<DateTime<Utc>> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 10 {
+    if s.len() < 10 {
         return None;
     }
-    for i in 0..=bytes.len() - 10 {
+    // Only try offsets that are valid char boundaries to avoid panicking
+    // on multi-byte UTF-8 characters.
+    for i in 0..=s.len() - 10 {
+        if !s.is_char_boundary(i) {
+            continue;
+        }
         if let Some(dt) = parse_ymd_at(s, i) {
             return Some(dt);
         }
@@ -101,7 +105,7 @@ fn parse_ymd_at(s: &str, offset: usize) -> Option<DateTime<Utc>> {
         return None;
     }
 
-    let chunk = &slice[..10];
+    let chunk = slice.get(..10)?;
     // Quick structural check: NNNN-NN-NN
     let b = chunk.as_bytes();
     if b[4] != b'-' || b[7] != b'-' {
@@ -430,5 +434,24 @@ mod tests {
     fn short_filename_no_panic() {
         let p = PathBuf::from("hi.md");
         assert_eq!(extract_date_from_path(&p), None);
+    }
+
+    #[test]
+    fn multibyte_chars_no_panic() {
+        // Filenames with multi-byte UTF-8 characters that caused panics
+        let cases = [
+            "Primer on \u{201c}Tending a Quiet Mind\u{201d} by Ada Fenwick Highlights.md",
+            "d Writing\u{2014}And Us by Nell Okafor Highlights.md",
+            "025 TALK \u{00b7} GitHub by 262588213843476 Highlights.md",
+            "A.I. Isn\u{2019}t Going to Paint the Harbor Review by Oren Vale Highlights.md",
+            "Goes Up \u{2013} The Problem With NFTs by Folding Ideas Highlights.md",
+            "Louis Ferr\u{00e9}e Highlights.md",
+            "t by Bren\u{00e9} Brown Highlights.md",
+        ];
+        for name in &cases {
+            let p = PathBuf::from(name);
+            // Should not panic, result doesn't matter
+            let _ = extract_date_from_path(&p);
+        }
     }
 }

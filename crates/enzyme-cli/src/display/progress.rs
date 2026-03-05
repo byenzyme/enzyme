@@ -39,6 +39,13 @@ pub enum DisplayEvent {
         source: SelectionSource,
     },
 
+    // LLM selection
+    LlmSelectionStart,
+    LlmSelectionComplete {
+        entities_selected: usize,
+    },
+    LlmSelectionSkipped(String),
+
     // Discovery (catalyst generation)
     DiscoveryStart {
         total: usize,
@@ -284,6 +291,27 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             }
             DisplayEvent::SelectionComplete { count: _, source: _ } => {
                 *stage = DisplayStage::Selecting;
+            }
+            DisplayEvent::LlmSelectionStart => {
+                // Will show spinner in render loop
+            }
+            DisplayEvent::LlmSelectionComplete { entities_selected } => {
+                let _ = writeln!(
+                    out,
+                    "  {}Selected:{} {} entities (LLM-assisted)",
+                    crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
+                    crossterm::style::ResetColor,
+                    entities_selected,
+                );
+            }
+            DisplayEvent::LlmSelectionSkipped(reason) => {
+                let _ = writeln!(
+                    out,
+                    "  {}Selection:{} {}",
+                    crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+                    crossterm::style::ResetColor,
+                    reason,
+                );
             }
             DisplayEvent::DiscoveryStart { total } => {
                 *stage = DisplayStage::Discovery;
@@ -683,6 +711,15 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     );
                 }
                 DisplayEvent::SelectionComplete { .. } => {
+                }
+                DisplayEvent::LlmSelectionStart => {
+                    println!("Running LLM-assisted entity selection...");
+                }
+                DisplayEvent::LlmSelectionComplete { entities_selected } => {
+                    println!("  Selected: {} entities (LLM-assisted)", entities_selected);
+                }
+                DisplayEvent::LlmSelectionSkipped(reason) => {
+                    println!("  Selection: {}", reason);
                 }
                 DisplayEvent::DiscoveryStart { total } => {
                     println!("Generating catalysts for {} entities...", total);

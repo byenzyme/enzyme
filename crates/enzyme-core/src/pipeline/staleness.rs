@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -177,6 +177,13 @@ fn compute_config_hash(vault_path: &Path) -> Result<String> {
 
     let hash = format!("{:x}", hasher.finalize());
     Ok(hash)
+}
+
+/// Load entity names from the last staleness snapshot.
+pub fn load_stored_entity_names(db: &Database) -> Result<HashSet<String>> {
+    let repo = Repository::new(db);
+    let counts = load_stored_doc_counts(&repo)?;
+    Ok(counts.into_keys().collect())
 }
 
 /// Load stored entity doc counts from the config table.
