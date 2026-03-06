@@ -119,14 +119,15 @@ jobs:
 
       - name: Bundle binaries and model into plugin
         run: |
-          mkdir -p plugin/bin plugin/models
+          mkdir -p plugin/bin plugin/models tmp-bin
 
-          # Extract platform binaries
-          tar xzf artifacts/enzyme-macos-arm64/enzyme-macos-arm64.tar.gz -C plugin/bin
-          mv plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64
+          # Extract platform binaries into a temp dir to avoid overwriting
+          # the committed wrapper script (plugin/bin/enzyme)
+          tar xzf artifacts/enzyme-macos-arm64/enzyme-macos-arm64.tar.gz -C tmp-bin
+          mv tmp-bin/enzyme plugin/bin/enzyme-darwin-arm64
 
-          tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C plugin/bin
-          mv plugin/bin/enzyme plugin/bin/enzyme-linux-arm64
+          tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
+          mv tmp-bin/enzyme plugin/bin/enzyme-linux-arm64
 
           # Copy model files
           cp model-files/model.onnx plugin/models/
