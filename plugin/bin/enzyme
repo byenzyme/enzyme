@@ -1,0 +1,44 @@
+#!/bin/sh
+# Enzyme wrapper — resolves the bundled platform binary and model directory.
+# Installed as a symlink from ~/.local/bin/enzyme → <plugin>/bin/enzyme by the
+# Claude Code SessionStart hook.
+set -e
+
+# Resolve through symlinks to find the real plugin root.
+SCRIPT="$0"
+# Follow symlinks (POSIX-portable loop).
+while [ -L "$SCRIPT" ]; do
+    link=$(ls -ld "$SCRIPT" | sed 's/.*-> //')
+    case "$link" in
+        /*) SCRIPT="$link" ;;
+        *)  SCRIPT="$(dirname "$SCRIPT")/$link" ;;
+    esac
+done
+BIN_DIR=$(cd "$(dirname "$SCRIPT")" && pwd)
+PLUGIN_ROOT=$(cd "$BIN_DIR/.." && pwd)
+
+# Detect platform.
+OS=$(uname -s)
+ARCH=$(uname -m)
+
+case "${OS}-${ARCH}" in
+    Darwin-arm64)   BINARY="enzyme-darwin-arm64" ;;
+    Linux-aarch64)  BINARY="enzyme-linux-arm64"  ;;
+    *)
+        echo "enzyme: unsupported platform ${OS}-${ARCH}" >&2
+        echo "Install a standalone binary from https://github.com/jshph/enzyme/releases" >&2
+        exit 1
+        ;;
+esac
+
+ENZYME_BIN="${BIN_DIR}/${BINARY}"
+if [ ! -x "$ENZYME_BIN" ]; then
+    echo "enzyme: bundled binary not found: ${ENZYME_BIN}" >&2
+    echo "Install a standalone binary from https://github.com/jshph/enzyme/releases" >&2
+    exit 1
+fi
+
+# Point the model resolver at the bundled model files.
+export ENZYME_MODEL_DIR="${PLUGIN_ROOT}/models"
+
+exec "$ENZYME_BIN" "$@"

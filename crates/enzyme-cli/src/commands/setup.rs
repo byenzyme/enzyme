@@ -11,6 +11,11 @@ const TOKENIZER_URL: &str =
 const MODEL_VERSION: &str = "arctic-xs-v1";
 
 fn models_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("ENZYME_MODEL_DIR") {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join(".enzyme").join("models"))
 }

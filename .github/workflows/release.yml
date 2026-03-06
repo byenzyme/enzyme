@@ -101,6 +101,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Download model files from release
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p model-files
+          gh release download "$tag" --repo "$RELEASE_REPO" \
+            --pattern 'model.onnx' \
+            --pattern 'tokenizer.json' \
+            --dir model-files
+
+      - name: Bundle binaries and model into plugin
+        run: |
+          mkdir -p plugin/bin plugin/models
+
+          # Extract platform binaries
+          tar xzf artifacts/enzyme-macos-arm64/enzyme-macos-arm64.tar.gz -C plugin/bin
+          mv plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64
+
+          tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C plugin/bin
+          mv plugin/bin/enzyme plugin/bin/enzyme-linux-arm64
+
+          # Copy model files
+          cp model-files/model.onnx plugin/models/
+          cp model-files/tokenizer.json plugin/models/
+
+          # Ensure executability
+          chmod +x plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64 plugin/bin/enzyme-linux-arm64
+
       - name: Sync plugin files to public repo
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}

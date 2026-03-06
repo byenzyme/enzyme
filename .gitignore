@@ -27,3 +27,8 @@ vault/
 # Enzyme runtime
 .enzyme/
 .enzyme-embeddings/
+
+# Plugin — CI-injected binaries and model files
+plugin/bin/enzyme-darwin-arm64
+plugin/bin/enzyme-linux-arm64
+plugin/models/

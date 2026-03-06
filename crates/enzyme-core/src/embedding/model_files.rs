@@ -30,6 +30,14 @@ pub fn resolve_model_files(enzyme_home: &Path) -> Result<ModelFiles> {
 
     let mut candidates: Vec<PathBuf> = Vec::new();
 
+    // Highest priority — explicit override via ENZYME_MODEL_DIR (used by the
+    // bundled plugin wrapper to point at plugin/models/).
+    if let Ok(model_dir) = std::env::var("ENZYME_MODEL_DIR") {
+        if !model_dir.is_empty() {
+            candidates.push(PathBuf::from(model_dir));
+        }
+    }
+
     // Primary locations — inside the given enzyme_home.
     candidates.push(enzyme_home.join("models"));
 

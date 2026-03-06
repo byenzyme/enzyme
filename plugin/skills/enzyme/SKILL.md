@@ -24,10 +24,6 @@ Content retrieval works by **resonance with catalyst questions**, not keyword ma
 
 ## Prerequisites
 
-The `enzyme` binary must be in PATH. If `enzyme` is not found, tell the user:
-
-> Install enzyme: `curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash`
-
 ### Check vault initialization
 
 ```bash
@@ -84,15 +80,6 @@ enzyme apply ./research-papers           # Apply current vault's catalysts
 enzyme apply ./papers --source ~/vault   # Explicit source vault
 ```
 
-### `enzyme setup` — Download the embedding model
-
-Downloads the embedding model to `~/.enzyme/models/`. Required before first use.
-
-```bash
-enzyme setup                  # Download model if missing
-enzyme setup --check          # Exit 0 if present, exit 1 if missing
-```
-
 ### When to use `catalyze` vs `Grep`
 
 **Use Grep when you have a concrete anchor** — something that exists verbatim in the vault:
@@ -123,4 +110,4 @@ The test: would these exact words appear in their notes? Names and tags always d
 
 6. **Check staleness.** If output includes `"stale": true`, suggest running `enzyme refresh` to pick up recent changes.
 
-7. **If the vault isn't initialized** (no `.enzyme/enzyme.db`), tell the user and offer to run `enzyme init`. If the model is missing, run `enzyme setup`.
+7. **If the vault isn't initialized** (no `.enzyme/enzyme.db`), tell the user and offer to run `enzyme init`.
