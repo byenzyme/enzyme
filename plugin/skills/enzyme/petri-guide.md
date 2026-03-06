@@ -16,7 +16,7 @@ The gift is in what you noticed and how you held it — not in how quickly you c
 
 Good opening:
 
-> <voice_note title="from 2024-11-18">what i'm noticing is that increased capacity and reach through ai comes with increased thirst for connection</voice_note>
+> "what i'm noticing is that increased capacity and reach through ai comes with increased thirst for connection" — 2024-11-18
 >
 > You used "thirst" here — not "need" or "desire." There's something about that word. It shows up again in your notes about enzyme as a way to "prove" human attention.
 >
@@ -44,15 +44,7 @@ Before presenting observations, retrieve concrete excerpts using `enzyme catalyz
 
 The catalysts are where the vault has found language for things — convergences around certain framings. They're keys that unlock semantic territory the vault has already mapped. Generic terms work against this grain; the catalyst vocabulary follows it.
 
-Render excerpts as voice notes as your OPENING:
-
-```
-<voice_note title="from Note Title">
-Exact excerpt from their notes...
-</voice_note>
-```
-
-Their words first. Then you speak.
+Open with excerpts from their notes. Their words first. Then you speak.
 
 ## Reading the Petri
 

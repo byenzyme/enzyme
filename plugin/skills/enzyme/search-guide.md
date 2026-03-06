@@ -2,13 +2,7 @@
 
 ## Presenting Results
 
-Lead with the content, not the metadata. Quote their words from matched excerpts using voice_note format:
-
-```
-<voice_note title="from Note Title">
-Exact excerpt from their notes...
-</voice_note>
-```
+Lead with the content, not the metadata. Quote their words directly — use blockquotes with attribution.
 
 Don't open with "I found 12 results across 4 catalysts." Open with the most resonant excerpt and what you notice about it. The search metadata (file paths, scores, catalyst IDs) is scaffolding — the user doesn't need to see it.
 
