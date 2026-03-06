@@ -156,7 +156,7 @@ what they actually think.",
         "Default choice when no other profile clearly matches",
     ],
     agent_guidance: &[
-        "Open with their words: 'You wrote...' then a voice note.",
+        "Open with their words: 'You wrote...' then notice something small.",
         "After surfacing their words, notice something small—a word choice, a sentiment, a tension.",
         "Don't rush to make it legible. 'There's something about how X shows up here...' is better than 'So the pattern is Y.'",
         "Use their vocabulary. Some notes carry weight—acknowledge it without dramatizing.",
