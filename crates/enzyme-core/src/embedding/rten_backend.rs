@@ -1,9 +1,9 @@
 use std::path::Path;
-use std::sync::Mutex;
 
 use anyhow::Result;
-use ort::session::Session;
-use ort::value::Tensor;
+use rten::Model;
+use rten_tensor::prelude::*;
+use rten_tensor::NdTensor;
 use tokenizers::Tokenizer;
 use tracing::debug;
 
@@ -14,25 +14,17 @@ use crate::models::EMBEDDING_DIMENSION;
 /// Maximum sequence length for the model. Inputs are padded/truncated to this length.
 const MAX_SEQ_LEN: usize = 128;
 
-/// Embedding backend powered by [ort](https://github.com/pykeio/ort),
-/// Rust bindings for ONNX Runtime.
-///
-/// This backend supports models with custom ONNX operators (e.g.
-/// `com.microsoft/MultiHeadAttention` used by MongoDB/mdbr-leaf-ir)
-/// that pure-Rust runtimes like rten cannot handle.
-pub struct OrtBackend {
-    session: Mutex<Session>,
+/// Embedding backend powered by [rten](https://github.com/nicktolhurst/rten),
+/// a pure-Rust ONNX runtime.
+pub struct RtenBackend {
+    model: Model,
     tokenizer: Tokenizer,
 }
 
-impl OrtBackend {
+impl RtenBackend {
     /// Load an ONNX model and HuggingFace `tokenizer.json`.
     pub fn load(model_path: &Path, tokenizer_path: &Path) -> Result<Self> {
-        let session = Session::builder()
-            .map_err(|e| anyhow::anyhow!("failed to create ort session builder: {e}"))?
-            .with_intra_threads(4)
-            .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
-            .commit_from_file(model_path)
+        let model = Model::load_file(model_path)
             .map_err(|e| anyhow::anyhow!("failed to load onnx model: {e}"))?;
 
         let mut tokenizer = Tokenizer::from_file(tokenizer_path)
@@ -58,17 +50,14 @@ impl OrtBackend {
             model_path = %model_path.display(),
             tokenizer_path = %tokenizer_path.display(),
             max_seq_len = MAX_SEQ_LEN,
-            "loaded OrtBackend"
+            "loaded RtenBackend"
         );
 
-        Ok(Self {
-            session: Mutex::new(session),
-            tokenizer,
-        })
+        Ok(Self { model, tokenizer })
     }
 
     /// Tokenize a batch of texts into flat `input_ids` and `attention_mask` vectors.
-    fn tokenize(&self, texts: &[&str]) -> Result<(Vec<i64>, Vec<i64>)> {
+    fn tokenize(&self, texts: &[&str]) -> Result<(Vec<i32>, Vec<i32>)> {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
@@ -76,16 +65,16 @@ impl OrtBackend {
 
         let batch_size = encodings.len();
 
-        let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * MAX_SEQ_LEN);
-        let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * MAX_SEQ_LEN);
+        let mut input_ids: Vec<i32> = Vec::with_capacity(batch_size * MAX_SEQ_LEN);
+        let mut attention_mask: Vec<i32> = Vec::with_capacity(batch_size * MAX_SEQ_LEN);
 
         for encoding in &encodings {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
 
             for i in 0..MAX_SEQ_LEN {
-                input_ids.push(if i < ids.len() { ids[i] as i64 } else { 0 });
-                attention_mask.push(if i < mask.len() { mask[i] as i64 } else { 0 });
+                input_ids.push(if i < ids.len() { ids[i] as i32 } else { 0 });
+                attention_mask.push(if i < mask.len() { mask[i] as i32 } else { 0 });
             }
         }
 
@@ -121,7 +110,7 @@ impl OrtBackend {
     }
 }
 
-impl EmbeddingBackend for OrtBackend {
+impl EmbeddingBackend for RtenBackend {
     fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
@@ -133,62 +122,64 @@ impl EmbeddingBackend for OrtBackend {
         // Keep attention mask as f32 for pooling.
         let mask_f32: Vec<f32> = attention_mask.iter().map(|&v| v as f32).collect();
 
-        // Create owned ort Tensor values from (shape, data) tuples.
-        let ids_tensor = Tensor::from_array(
-            ([batch_size, MAX_SEQ_LEN], input_ids.into_boxed_slice()),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to create input_ids tensor: {e}"))?;
-
-        let mask_tensor = Tensor::from_array(
-            ([batch_size, MAX_SEQ_LEN], attention_mask.into_boxed_slice()),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to create attention_mask tensor: {e}"))?;
-
-        // BERT models require token_type_ids (all zeros for single-sentence encoding).
-        let token_type_ids = vec![0i64; batch_size * MAX_SEQ_LEN];
-        let type_tensor = Tensor::from_array(
-            ([batch_size, MAX_SEQ_LEN], token_type_ids.into_boxed_slice()),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to create token_type_ids tensor: {e}"))?;
-
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|e| anyhow::anyhow!("session lock poisoned: {e}"))?;
-
-        let outputs = session
-            .run(ort::inputs![
-                "input_ids" => ids_tensor,
-                "attention_mask" => mask_tensor,
-                "token_type_ids" => type_tensor
-            ])
-            .map_err(|e| anyhow::anyhow!("ort inference failed: {e}"))?;
-
-        // The first output is last_hidden_state with shape [batch, seq_len, hidden_dim].
-        // outputs is indexed by name or position; get the first value.
-        let output_value = outputs
-            .iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("model returned no outputs"))?
-            .1;
-
-        // try_extract_tensor returns (&Shape, &[f32])
-        // Shape derefs to &[i64]
-        let (shape, hs_data) = output_value
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("failed to extract f32 output: {e}"))?;
-
-        anyhow::ensure!(
-            shape.len() == 3,
-            "expected 3D output [batch, seq_len, hidden], got shape {:?}",
-            &**shape
+        // Build rten tensors (i32, shape [batch, seq_len]).
+        let ids_tensor = NdTensor::from_data(
+            [batch_size, MAX_SEQ_LEN],
+            input_ids,
         );
 
-        let seq_len = shape[1] as usize;
-        let hidden_dim = shape[2] as usize;
+        let mask_tensor = NdTensor::from_data(
+            [batch_size, MAX_SEQ_LEN],
+            attention_mask,
+        );
+
+        // BERT models require token_type_ids (all zeros for single-sentence encoding).
+        let token_type_ids = vec![0i32; batch_size * MAX_SEQ_LEN];
+        let type_tensor = NdTensor::from_data(
+            [batch_size, MAX_SEQ_LEN],
+            token_type_ids,
+        );
+
+        // Look up input/output node IDs by name.
+        let input_ids_id = self
+            .model
+            .node_id("input_ids")
+            .map_err(|e| anyhow::anyhow!("missing input_ids node: {e}"))?;
+        let attention_mask_id = self
+            .model
+            .node_id("attention_mask")
+            .map_err(|e| anyhow::anyhow!("missing attention_mask node: {e}"))?;
+        let token_type_ids_id = self
+            .model
+            .node_id("token_type_ids")
+            .map_err(|e| anyhow::anyhow!("missing token_type_ids node: {e}"))?;
+
+        // Use the first output node.
+        let output_id = self.model.output_ids()[0];
+
+        let inputs = vec![
+            (input_ids_id, ids_tensor.into()),
+            (attention_mask_id, mask_tensor.into()),
+            (token_type_ids_id, type_tensor.into()),
+        ];
+
+        let [output] = self
+            .model
+            .run_n(inputs, [output_id], None)
+            .map_err(|e| anyhow::anyhow!("rten inference failed: {e}"))?;
+
+        // Output shape: [batch, seq_len, hidden_dim].
+        let hs: NdTensor<f32, 3> = output
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("failed to extract f32 output: {e}"))?;
+
+        let shape = hs.shape();
+        let seq_len = shape[1];
+        let hidden_dim = shape[2];
+        let hs_data = hs.into_data();
 
         Ok(Self::pool_and_normalize(
-            hs_data,
+            &hs_data,
             &mask_f32,
             batch_size,
             seq_len,
@@ -201,7 +192,7 @@ impl EmbeddingBackend for OrtBackend {
     }
 
     fn name(&self) -> &str {
-        "ort"
+        "rten"
     }
 }
 
@@ -222,7 +213,7 @@ mod tests {
         mask[0] = 1.0;
         mask[1] = 1.0;
 
-        let results = OrtBackend::pool_and_normalize(&hidden, &mask, 1, 4, 3);
+        let results = RtenBackend::pool_and_normalize(&hidden, &mask, 1, 4, 3);
 
         assert_eq!(results.len(), 1);
         let v = &results[0];
@@ -252,7 +243,7 @@ mod tests {
         mask[MAX_SEQ_LEN] = 1.0;
         mask[MAX_SEQ_LEN + 1] = 1.0;
 
-        let results = OrtBackend::pool_and_normalize(&hidden, &mask, 2, 2, 2);
+        let results = RtenBackend::pool_and_normalize(&hidden, &mask, 2, 2, 2);
 
         assert_eq!(results.len(), 2);
 

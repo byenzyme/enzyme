@@ -7,13 +7,23 @@ const MODEL_URL: &str =
 const TOKENIZER_URL: &str =
     "https://github.com/jshph/enzyme/releases/latest/download/tokenizer.json";
 
+/// Bump this when swapping to a new model so existing installs re-download.
+const MODEL_VERSION: &str = "arctic-xs-v1";
+
 fn models_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join(".enzyme").join("models"))
 }
 
 fn model_present(dir: &Path) -> bool {
-    dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists()
+    if !dir.join("model.onnx").exists() || !dir.join("tokenizer.json").exists() {
+        return false;
+    }
+    // Check version marker — forces re-download when model changes.
+    match std::fs::read_to_string(dir.join(".model_version")) {
+        Ok(v) => v.trim() == MODEL_VERSION,
+        Err(_) => false,
+    }
 }
 
 async fn download_file(url: &str, dest: &Path) -> Result<()> {
@@ -71,6 +81,10 @@ pub async fn run_setup(check: bool) -> Result<()> {
 
     download_file(MODEL_URL, &dir.join("model.onnx")).await?;
     download_file(TOKENIZER_URL, &dir.join("tokenizer.json")).await?;
+
+    // Write version marker so future upgrades can detect stale models.
+    std::fs::write(dir.join(".model_version"), MODEL_VERSION)
+        .context("Failed to write model version marker")?;
 
     println!("Model OK — {}", dir.display());
 

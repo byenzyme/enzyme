@@ -13,5 +13,5 @@ pub use embedding::*;
 /// Enzyme stores all timestamps as milliseconds since Unix epoch.
 pub type Timestamp = i64;
 
-/// Embedding vectors are 384-dimensional f32 (mdbr-leaf-ir / MiniLM architecture).
+/// Embedding vectors are 384-dimensional f32 (snowflake-arctic-embed-xs).
 pub const EMBEDDING_DIMENSION: usize = 384;

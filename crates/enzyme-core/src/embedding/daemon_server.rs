@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use super::backend::EmbeddingBackend;
 use super::daemon_protocol::*;
 use super::model_files::resolve_model_files;
-use super::OrtBackend;
+use super::RtenBackend;
 
 /// Shared daemon state.
 pub struct DaemonServer {
@@ -29,8 +29,8 @@ impl DaemonServer {
     /// Create a new server, loading the embedding model from `enzyme_home`.
     pub fn new(enzyme_home: &Path) -> Result<Self> {
         let model_files = resolve_model_files(enzyme_home)?;
-        let backend = OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
-        info!("daemon: loaded OrtBackend");
+        let backend = RtenBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
+        info!("daemon: loaded RtenBackend");
 
         Ok(Self {
             backend: Box::new(backend),

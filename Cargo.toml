@@ -30,7 +30,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Embedding inference
-ort = { version = "2.0.0-rc.11", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls", "tracing"] }
+rten = "0.24"
+rten-tensor = "0.24"
 tokenizers = "0.21"
 
 # HNSW
@@ -55,9 +56,6 @@ thiserror = "2"
 # Crypto
 sha2 = "0.10"
 
-# ndarray (used by ort for tensor I/O)
-ndarray = "0.17"
-
 # Terminal
 crossterm = "0.28"
 atty = "0.2"
@@ -66,3 +64,9 @@ atty = "0.2"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"

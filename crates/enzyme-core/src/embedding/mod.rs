@@ -5,7 +5,7 @@
 //! The module uses a two-layer design:
 //!
 //! 1. **[`EmbeddingBackend`]** trait — pluggable inference backends that convert
-//!    text to vectors. The current implementation is [`OrtBackend`] (ONNX Runtime).
+//!    text to vectors. The current implementation is [`RtenBackend`] (pure-Rust ONNX runtime).
 //!
 //! 2. **[`EmbeddingService`]** — high-level orchestrator that adds batching and
 //!    progress reporting on top of any backend.
@@ -13,9 +13,9 @@
 //! ## Quick start
 //!
 //! ```ignore
-//! use enzyme_core::embedding::{EmbeddingService, OrtBackend};
+//! use enzyme_core::embedding::{EmbeddingService, RtenBackend};
 //!
-//! let backend = OrtBackend::load(&model_path, &tokenizer_path)?;
+//! let backend = RtenBackend::load(&model_path, &tokenizer_path)?;
 //! let service = EmbeddingService::new(Box::new(backend));
 //!
 //! let embeddings = service.embed_documents(&["hello world", "foo bar"])?;
@@ -34,7 +34,7 @@ pub mod daemon_protocol;
 pub mod daemon_server;
 pub mod model_files;
 mod normalize;
-mod ort_backend;
+mod rten_backend;
 mod service;
 
 pub use backend::EmbeddingBackend;
@@ -42,7 +42,7 @@ pub use daemon_client::DaemonClient;
 pub use daemon_server::DaemonServer;
 pub use model_files::{ModelFiles, resolve_model_files};
 pub use normalize::{l2_normalize, mean_pool};
-pub use ort_backend::OrtBackend;
+pub use rten_backend::RtenBackend;
 pub use service::EmbeddingService;
 
 static EMBEDDING_SERVICE: OnceLock<EmbeddingService> = OnceLock::new();
@@ -52,7 +52,7 @@ static EMBEDDING_SERVICE: OnceLock<EmbeddingService> = OnceLock::new();
 ///
 /// On the first call this function tries to connect to (or auto-start) the
 /// daemon. If that fails it falls back to loading the model in-process via
-/// [`OrtBackend`].
+/// [`RtenBackend`].
 pub fn get_embedding_service(enzyme_home: &Path) -> Result<&'static EmbeddingService> {
     if let Some(service) = EMBEDDING_SERVICE.get() {
         return Ok(service);
@@ -64,10 +64,10 @@ pub fn get_embedding_service(enzyme_home: &Path) -> Result<&'static EmbeddingSer
             EmbeddingService::new(backend)
         }
         Err(e) => {
-            warn!("daemon unavailable, falling back to in-process OrtBackend: {e}");
+            warn!("daemon unavailable, falling back to in-process RtenBackend: {e}");
             let model_files = resolve_model_files(enzyme_home)?;
             let backend =
-                OrtBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
+                RtenBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
             EmbeddingService::new(Box::new(backend))
         }
     };
