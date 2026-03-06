@@ -36,6 +36,12 @@ mkdir -p "$INSTALL_DIR"
 mv "$tmpdir/enzyme" "$INSTALL_DIR/enzyme"
 chmod +x "$INSTALL_DIR/enzyme"
 
+# Install bundled libraries (Linux builds include lib/ with libstdc++)
+if [ -d "$tmpdir/lib" ]; then
+    mkdir -p "$INSTALL_DIR/lib"
+    cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
+fi
+
 # Clear previous data (models, indices) for clean slate
 rm -rf "$HOME/.enzyme"
 
