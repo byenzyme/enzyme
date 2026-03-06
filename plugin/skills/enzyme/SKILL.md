@@ -111,9 +111,13 @@ Enzyme commands return JSON. Read the output directly — do not pipe through Py
 ## Workflow
 
 1. **Discover vault context.** At session start, scan for structural files that reveal the vault's shape:
-   - Glob for `**/MOC.md`, `**/Index.md`, `**/agents.md`, `**/CLAUDE.md`, `**/guide.md`, and `**/_index.md`
+   - Glob for `**/MOC.md`, `**/Index.md`, `**/agents.md`, `**/CLAUDE.md`, `**/guide.md`, `**/ENZYME_GUIDE.md`, and `**/_index.md`
    - Read any discovered files to understand vault structure, conventions, and user preferences
-   - If the vault is **not initialized** (no `.enzyme/enzyme.db`), cat the discovered files together and pipe to `enzyme init --guide "$(cat file1.md file2.md ...)"` so catalyst generation has structural context
+   - If the vault is **not initialized** (no `.enzyme/enzyme.db`), build a guide by stacking the files with context headers describing what each one is, then pipe to `enzyme init --guide`. Example:
+     ```bash
+     enzyme init --guide "$(printf '=== guide.md (entity weights — tags and folders the user considers important) ===\n'; cat guide.md; printf '\n\n=== CLAUDE.md (vault workflow instructions and conventions) ===\n'; cat CLAUDE.md)"
+     ```
+     Each file type carries different signal: `guide.md` is a tag/folder weight map, `ENZYME_GUIDE.md` is a thematic description of the vault's shape, `CLAUDE.md` has workflow conventions and preferences, `MOC.md`/`Index.md` are structural maps. Label them so the LLM generating catalysts knows what it's reading.
    - If the vault **is initialized**, use this context to orient your petri reading — know the vault's shape before interpreting what's growing
 
 2. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed.
