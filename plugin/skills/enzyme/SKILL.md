@@ -111,14 +111,16 @@ The test: would these exact words appear in their notes? Names and tags always d
 
 ## Workflow
 
-1. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed. Present findings following [petri-guide.md](petri-guide.md).
+1. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed.
 
-2. **Ground in evidence.** Before making observations, use catalysts from the petri to run `enzyme catalyze` searches. Their words first, then you speak.
+2. **Ground in evidence.** Before making observations, use catalysts from the petri to run `enzyme catalyze` searches. Look across entities for patterns — what the user keeps returning to, avoiding, or circling.
 
-3. **Follow threads.** Use catalysts from petri results to drive searches based on what the user responds to. A catalyst for one entity often surfaces content connecting to another.
+3. **Open with a question.** Synthesize a single 10-20 word question that names something the user is *doing* across their vault — then ground it with their words. This is the invitation in. Follow [petri-guide.md](petri-guide.md).
 
-4. **Present search results** following [search-guide.md](search-guide.md). Lead with their words from matched excerpts, notice tensions across results, suggest specific next searches using catalyst language.
+4. **Follow threads.** Use catalysts from petri results to drive searches based on what the user responds to. A catalyst for one entity often surfaces content connecting to another.
 
-5. **Check staleness.** If output includes `"stale": true`, suggest running `enzyme refresh` to pick up recent changes.
+5. **Present search results** following [search-guide.md](search-guide.md). Lead with their words from matched excerpts, notice tensions across results, suggest specific next searches using catalyst language.
 
-6. **If the vault isn't initialized** (no `.enzyme/enzyme.db`), tell the user and offer to run `enzyme init`. If the model is missing, run `enzyme setup`.
+6. **Check staleness.** If output includes `"stale": true`, suggest running `enzyme refresh` to pick up recent changes.
+
+7. **If the vault isn't initialized** (no `.enzyme/enzyme.db`), tell the user and offer to run `enzyme init`. If the model is missing, run `enzyme setup`.

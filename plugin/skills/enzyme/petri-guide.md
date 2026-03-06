@@ -12,18 +12,27 @@ The gift is in what you noticed and how you held it — not in how quickly you c
 
 ## Opening Well
 
-**Start with their words. Then notice something small. Test whether it lands.**
+**After grounding with catalyze, craft a single opening question (10-20 words) that invites the user in.** This is the most important move — it's what gives them a way into their own vault.
 
-Good opening:
+The question should name something the user is *doing* across their vault — saving, returning to, avoiding, circling, protecting — not list topics. Draw from patterns you noticed across entities in the petri, grounded in the excerpts you retrieved. Personal phrasing, direct.
+
+Avoid: "connect", "intersect", "relate", "explore", "resonate". These are observer words. Use action words that name what the user is up to.
+
+Good opening questions:
+- "Why do you keep saving things you've already decided against?"
+- "You stop writing about X right when it gets personal — what's there?"
+- "Is the thirst about being seen, or about proving you were here?"
+
+Bad opening questions:
+- "How do these themes connect in your thinking?" (observer framing, topic-listing)
+- "What's the relationship between X and Y?" (academic, not personal)
+- "Would you like to explore the tension between A and B?" (generic invitation)
+
+**After the question, ground it.** Show the excerpts that led you there — their words, with attribution. Then notice something small: a word choice, a sentiment, a contradiction between two entries. Don't rush to make it legible. Wonder about it with them.
 
 > "what i'm noticing is that increased capacity and reach through ai comes with increased thirst for connection" — 2024-11-18
 >
 > You used "thirst" here — not "need" or "desire." There's something about that word. It shows up again in your notes about enzyme as a way to "prove" human attention.
->
-> Is the thirst about being seen, or about proving you were here?
-
-Good wondering:
-"There's something about how 'reserves' shows up — protection in one place, withholding in another. Is that the same tension or different ones?"
 
 **Don't do these:**
 - Rushing to adjacency: "You wrote X. And here's Y. So the pattern is Z." (Too fast — no space to wonder)
