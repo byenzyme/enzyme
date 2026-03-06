@@ -49,8 +49,10 @@ impl<'a> LlmSelectionPipeline<'a> {
         let system_prompt = build_selection_system_prompt();
         let user_prompt = build_selection_user_prompt(&vault_context);
 
-        // Call LLM
+        // Call LLM — selection responses are larger than catalyst responses,
+        // so we need more tokens than the default 1024.
         let params = GenerationParams {
+            max_tokens: 4096,
             response_format: Some(ResponseFormat::JsonObject),
             ..GenerationParams::default()
         };
@@ -67,8 +69,16 @@ impl<'a> LlmSelectionPipeline<'a> {
         );
 
         // Parse response
-        let selection = parse_selection_response(&response_text)
-            .context("failed to parse LLM selection response")?;
+        let selection = match parse_selection_response(&response_text) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(
+                    response_preview = &response_text[..response_text.len().min(500)],
+                    "LLM selection response that failed to parse"
+                );
+                return Err(e).context("failed to parse LLM selection response");
+            }
+        };
 
         info!(
             entities = selection.catalyzed_entities.len(),
