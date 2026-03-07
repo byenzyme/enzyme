@@ -12,19 +12,26 @@ use crate::explore_pipeline::{self, ExploreEvent, ExploreRequest};
 use crate::AppState;
 
 fn event_to_sse(event: &ExploreEvent) -> Event {
-    let (event_type, data) = match event {
-        ExploreEvent::Thinking { .. } => ("explore_thinking", serde_json::to_string(event)),
-        ExploreEvent::Search(_) => ("explore_search", serde_json::to_string(event)),
-        ExploreEvent::SynthesisSegment(_) => {
-            ("explore_synthesis_segment", serde_json::to_string(event))
-        }
-        ExploreEvent::Synthesis { .. } => ("explore_synthesis", serde_json::to_string(event)),
-        ExploreEvent::Complete(_) => ("explore_complete", serde_json::to_string(event)),
-        ExploreEvent::Error { .. } => ("error", serde_json::to_string(event)),
-    };
-
-    let data_str = data.unwrap_or_else(|_| "{}".to_string());
-    Event::default().event(event_type).data(data_str)
+    match event {
+        ExploreEvent::Thinking { message } => Event::default()
+            .event("explore_thinking")
+            .data(serde_json::json!({"text": message}).to_string()),
+        ExploreEvent::Search(data) => Event::default()
+            .event("explore_search")
+            .data(serde_json::to_string(data).unwrap_or_default()),
+        ExploreEvent::SynthesisSegment(data) => Event::default()
+            .event("explore_synthesis_segment")
+            .data(serde_json::to_string(data).unwrap_or_default()),
+        ExploreEvent::Synthesis { text } => Event::default()
+            .event("explore_synthesis")
+            .data(serde_json::json!({"text": text}).to_string()),
+        ExploreEvent::Complete(data) => Event::default()
+            .event("explore_complete")
+            .data(serde_json::to_string(data).unwrap_or_default()),
+        ExploreEvent::Error { message } => Event::default()
+            .event("error")
+            .data(serde_json::json!({"message": message}).to_string()),
+    }
 }
 
 async fn explore(

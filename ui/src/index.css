@@ -1,0 +1,150 @@
+@import "tailwindcss";
+
+/* Sleek rebrand - Geist Sans with analog textures */
+@theme {
+  /* Entity colors */
+  --color-tag: #4ade80;
+  --color-link: #60a5fa;
+  --color-catalyst: #4ade80;
+  --color-synthesis: #fbbf24;
+
+  /* Background */
+  --color-surface: #0a0a0a;
+  --color-surface-elevated: #141414;
+  --color-surface-hover: #1c1c1c;
+  --color-surface-active: #242424;
+
+  /* Text */
+  --color-text-primary: #e8e8e8;
+  --color-text-secondary: #909090;
+  --color-text-muted: #5a5a5a;
+
+  /* Borders */
+  --color-border: #242424;
+  --color-border-subtle: #1c1c1c;
+
+  /* Font stacks */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Menlo", "Monaco", "Cascadia Code", "Consolas", monospace;
+}
+
+/* Base styles */
+html,
+body {
+  @apply h-full w-full m-0 p-0;
+  background: var(--color-surface);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  @apply text-text-primary antialiased;
+}
+
+#root {
+  @apply h-full w-full m-0 p-0;
+  background-color: var(--color-surface);
+  overflow: hidden;
+  position: relative;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  @apply w-1.5 h-1.5;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-surface-hover rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-surface-active;
+}
+
+/* Selection styling */
+::selection {
+  background-color: rgba(74, 222, 128, 0.3);
+}
+
+/* Input focus styling */
+input:focus,
+textarea:focus,
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.4);
+}
+
+/* Code/monospace text */
+code, pre, .font-mono {
+  font-family: var(--font-mono);
+}
+
+/* Title typography */
+.font-title {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* Body text */
+.font-body {
+  font-family: var(--font-sans);
+  font-weight: 400;
+}
+
+/* Subtle animations */
+* {
+  transition-property: background-color, border-color, color, opacity;
+  transition-duration: 100ms;
+  transition-timing-function: ease-out;
+}
+
+*:not([class*="transition"]) {
+  transition-property: background-color, border-color, color, opacity;
+}
+
+/* Canvas animations */
+@keyframes fadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeSlideIn 0.5s ease-out forwards;
+}
+
+/* Explore search bar entrance glow */
+@keyframes searchGlow {
+  0% {
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.2),
+                0 0 50px rgba(255, 255, 255, 0.1);
+  }
+  100% {
+    box-shadow: 0 0 0 transparent;
+  }
+}
+
+.animate-search-glow {
+  animation: searchGlow 2s ease-out 0.5s backwards;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}

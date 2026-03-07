@@ -15,16 +15,28 @@ async fn get_chunks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, S
     let repo = Repository::new(&db);
 
     let rows = repo
-        .get_all_chunks_with_embeddings()
+        .get_all_chunks_enriched()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let tags_map = repo
+        .get_all_doc_tags()
+        .unwrap_or_default();
 
     let chunks: Vec<Value> = rows
         .into_iter()
-        .map(|(file_path, chunk_index, content)| {
+        .map(|(doc_id, chunk_id, chunk_index, file_path, content, chunk_word_count, created_at, modified_at, title)| {
+            let tags = tags_map.get(&doc_id).cloned().unwrap_or_default();
             json!({
-                "file_path": file_path,
+                "chunk_id": chunk_id,
+                "doc_id": doc_id,
                 "chunk_index": chunk_index,
+                "file_path": file_path,
                 "content": content,
+                "chunk_word_count": chunk_word_count,
+                "created_at": created_at,
+                "modified_at": modified_at,
+                "title": title,
+                "tags": tags,
             })
         })
         .collect();

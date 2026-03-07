@@ -19,3 +19,4 @@ chrono = { workspace = true }
 tokio-stream = "0.1"
 futures = "0.3"
 uuid = { workspace = true }
+rust-embed = { workspace = true }

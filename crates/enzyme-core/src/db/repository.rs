@@ -1055,6 +1055,52 @@ impl<'a> Repository<'a> {
         Ok(rows)
     }
 
+    /// Get all chunks with full metadata for the explore UI.
+    ///
+    /// Returns enriched chunk data including doc metadata, tags, and word counts.
+    pub fn get_all_chunks_enriched(
+        &self,
+    ) -> Result<Vec<(i64, i64, i64, String, String, i64, i64, i64, Option<String>)>> {
+        // (doc_id, chunk_id, chunk_index, file_path, content, chunk_word_count, created_at, modified_at, title)
+        let rows = self.db.query_read(
+            "SELECT d.id, c.id, c.chunk_index, d.source_ref, c.content,
+                    c.word_count, d.created_at, d.modified_at, d.title
+             FROM docs d
+             JOIN chunks c ON d.id = c.doc_id
+             WHERE d.embedded_at IS NOT NULL
+             ORDER BY d.source_ref, c.chunk_index",
+            &[],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )?;
+        Ok(rows)
+    }
+
+    /// Get all tags grouped by doc_id.
+    pub fn get_all_doc_tags(&self) -> Result<std::collections::HashMap<i64, Vec<String>>> {
+        let rows = self.db.query_read(
+            "SELECT doc_id, tag FROM doc_tags ORDER BY doc_id, tag",
+            &[],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut map = std::collections::HashMap::new();
+        for (doc_id, tag) in rows {
+            map.entry(doc_id).or_insert_with(Vec::new).push(tag);
+        }
+        Ok(map)
+    }
+
     /// Get tags for a document by its source_ref (relative vault path).
     pub fn get_tags_for_document(&self, source_ref: &str) -> Result<Vec<String>> {
         let rows = self.db.query_read(
