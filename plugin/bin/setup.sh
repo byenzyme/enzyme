@@ -55,3 +55,8 @@ export ENZYME_MODEL_DIR="$HOME/.cache/enzyme/models"
 exec "$HOME/.cache/enzyme/enzyme" "$@"
 WRAPPER
 chmod +x "$HOME/.local/bin/enzyme"
+
+# Ensure ~/.local/bin is in PATH for all subsequent Bash tool calls.
+if [ -n "$CLAUDE_ENV_FILE" ]; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$CLAUDE_ENV_FILE"
+fi
