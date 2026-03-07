@@ -31,18 +31,18 @@ impl Database {
         let path = path.as_ref();
         info!(?path, "opening database");
 
+        // Open write connection first and run migrations. This ensures WAL mode
+        // is active and any hot journal is rolled back before we open a read-only
+        // connection (which cannot perform rollback).
         let write_conn = Self::open_write_connection(path)?;
+        migrations::run_all_on_conn(&write_conn)?;
+
         let read_conn = Self::open_read_connection(path)?;
 
-        let mut db = Self {
+        Ok(Self {
             write_conn,
             read_conn,
-        };
-
-        // Run migrations on the write connection.
-        migrations::run_all(&mut db)?;
-
-        Ok(db)
+        })
     }
 
     /// Open an **in-memory** database — useful for tests and ephemeral sessions.
@@ -57,15 +57,14 @@ impl Database {
         let path = std::env::temp_dir().join(format!("enzyme-test-{}.db", uuid::Uuid::new_v4()));
 
         let write_conn = Self::open_write_connection(&path)?;
+        migrations::run_all_on_conn(&write_conn)?;
+
         let read_conn = Self::open_read_connection(&path)?;
 
-        let mut db = Self {
+        Ok(Self {
             write_conn,
             read_conn,
-        };
-
-        migrations::run_all(&mut db)?;
-        Ok(db)
+        })
     }
 
     // -- Connection factories -------------------------------------------------
