@@ -1,6 +1,8 @@
+use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -181,6 +183,8 @@ struct ChatCompletionRequest {
     top_k: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -196,6 +200,22 @@ struct Choice {
 #[derive(Deserialize)]
 struct ChoiceMessage {
     content: String,
+}
+
+/// SSE streaming response chunk.
+#[derive(Deserialize)]
+struct StreamingChunkResponse {
+    choices: Vec<StreamingChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamingChoice {
+    delta: StreamingDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamingDelta {
+    content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +261,7 @@ impl LlmClient {
             top_p: params.top_p,
             top_k: params.top_k,
             response_format: params.response_format,
+            stream: None,
         };
 
         debug!("Sending chat completion request to {} with model {}", url, model);
@@ -286,6 +307,97 @@ impl LlmClient {
     }
 
 
+
+    /// Streaming chat completion that returns a stream of token strings.
+    ///
+    /// Uses the OpenAI-compatible SSE streaming protocol (`stream: true`).
+    /// Each yielded item is a content delta string (a token or small chunk of text).
+    pub async fn chat_completion_streaming(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        params: GenerationParams,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let request_body = ChatCompletionRequest {
+            model: model.to_string(),
+            messages,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            top_k: params.top_k,
+            response_format: params.response_format,
+            stream: Some(true),
+        };
+
+        debug!("Sending streaming chat completion request to {} with model {}", url, model);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
+            .header("X-Title", "Enzyme")
+            .json(&request_body)
+            .send()
+            .await
+            .context("Failed to send streaming request to LLM API")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            warn!("LLM API returned error status {}: {}", status, error_body);
+            bail!("LLM API returned status {}: {}", status, error_body);
+        }
+
+        let byte_stream = response.bytes_stream();
+
+        let stream = async_stream::try_stream! {
+            use futures::StreamExt;
+
+            let mut buffer = String::new();
+            let mut byte_stream = std::pin::pin!(byte_stream);
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = chunk_result.context("Error reading streaming response")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete SSE lines from the buffer
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() || line.starts_with(':') {
+                        continue;
+                    }
+
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" {
+                            return;
+                        }
+
+                        if let Ok(parsed) = serde_json::from_str::<StreamingChunkResponse>(data) {
+                            if let Some(choice) = parsed.choices.first() {
+                                if let Some(content) = &choice.delta.content {
+                                    if !content.is_empty() {
+                                        yield content.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
 
     /// Chat completion with provider-aware prompt caching.
     ///

@@ -5,5 +5,6 @@ pub mod daemon;
 pub mod init;
 pub mod mcp;
 pub mod petri;
+pub mod serve;
 pub mod setup;
 pub mod status;

@@ -107,6 +107,13 @@ enum Commands {
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
+    /// Start the HTTP API server for the explore UI
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "8765")]
+        port: u16,
+    },
+
     /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
     #[command(name = "__daemon", hide = true)]
     Daemon,
@@ -202,6 +209,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
+        }
+        Commands::Serve { port } => {
+            commands::serve::run_serve(&vault_path, port).await?;
         }
         Commands::Setup { .. } | Commands::Daemon | Commands::Mcp => unreachable!(),
     }

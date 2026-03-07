@@ -5,5 +5,6 @@ pub mod embedding;
 pub mod llm;
 pub mod models;
 pub mod pipeline;
+pub mod query;
 pub mod search;
 pub mod catalog;
