@@ -344,20 +344,22 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 /// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
-/// 1. `OPENAI_API_KEY` env var + `OPENAI_BASE_URL` (defaults to OpenRouter)
+/// 1. `OPENAI_API_KEY` env var + `OPENAI_BASE_URL` / `OPENAI_MODEL` (defaults to OpenRouter)
 /// 2. `~/.enzyme/auth.json` → `{"api_key": "..."}`
 /// 3. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    // 1. OPENAI_API_KEY + optional OPENAI_BASE_URL (primary)
+    // 1. OPENAI_API_KEY + optional OPENAI_BASE_URL / OPENAI_MODEL (primary)
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
         if !key.is_empty() {
             let base_url = std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-            debug!("Resolved API key from OPENAI_API_KEY (base_url={})", base_url);
+            let model = std::env::var("OPENAI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+            debug!("Resolved API key from OPENAI_API_KEY (base_url={}, model={})", base_url, model);
             return Ok(ResolvedConfig {
                 api_key: key,
                 base_url,
-                model: DEFAULT_MODEL.to_string(),
+                model,
                 provider: ConfigProvider::OpenAiEnv,
             });
         }
@@ -375,11 +377,13 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
             .with_context(|| format!("Failed to parse auth config at {}", auth_path.display()))?;
 
         if !config.api_key.is_empty() {
+            let model = std::env::var("OPENAI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
             debug!("Resolved API key from {}", auth_path.display());
             return Ok(ResolvedConfig {
                 api_key: config.api_key,
                 base_url: DEFAULT_BASE_URL.to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model,
                 provider: ConfigProvider::AuthFile,
             });
         }
