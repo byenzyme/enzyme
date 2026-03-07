@@ -607,11 +607,12 @@ mod tests {
         let result = check_catalyst_staleness(&db, vault.path()).unwrap();
         assert!(result.is_stale(), "should be stale after adding 4 new files mentioning alpha");
         match result {
-            StalenessResult::Stale(StaleReason::NewContent { entity, delta }) => {
-                assert_eq!(entity, "alpha");
-                assert!(delta >= 3, "delta should be >= 3, got {}", delta);
+            StalenessResult::Stale(StaleReason::EntitiesStale { stale_entities }) => {
+                assert!(stale_entities.iter().any(|e| e.name == "alpha"), "alpha should be stale");
+                let alpha = stale_entities.iter().find(|e| e.name == "alpha").unwrap();
+                assert!(alpha.delta >= 3, "delta should be >= 3, got {}", alpha.delta);
             }
-            other => panic!("expected NewContent, got {:?}", other),
+            other => panic!("expected EntitiesStale, got {:?}", other),
         }
     }
 

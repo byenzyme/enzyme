@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use tracing::debug;
+use tracing::{debug, info};
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
@@ -19,8 +19,12 @@ use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::llm_selection::LlmSelectionPipeline;
 use enzyme_core::pipeline::selection::{SelectionPipeline, SelectionSource};
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
-use enzyme_core::pipeline::staleness::{check_catalyst_staleness, load_stored_entity_names, store_staleness_bookkeeping, StalenessResult};
+use enzyme_core::pipeline::staleness::{
+    check_catalyst_staleness, load_stored_entity_names, store_staleness_bookkeeping,
+    store_staleness_bookkeeping_partial, StalenessResult,
+};
 
+use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use crate::display::{DisplayEvent, InitDisplay};
 
 /// Stats collected during an init run, used for JSON output in quiet mode.
@@ -376,9 +380,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         }).ok();
     }
 
-    // ── Step 8: Generate CLAUDE.md ───────────────────────────────────────
-    if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
-        tracing::warn!("failed to update CLAUDE.md: {}", e);
+    // ── Step 8: Generate CLAUDE.md (interactive mode only) ────────────────
+    if !quiet {
+        if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
+            tracing::warn!("failed to update CLAUDE.md: {}", e);
+        }
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -437,11 +443,309 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Lightweight refresh: check staleness first, only run full init if stale.
+/// Lightweight refresh: dispatches to the appropriate path based on flags.
 ///
-/// After a successful init, stores bookkeeping (config hash + entity doc counts)
-/// so the next refresh can detect whether anything changed.
+/// - `--detached` → `run_refresh_detached` (background lockfile-guarded catalyst run)
+/// - `--quiet` without `--full` → `run_refresh_fast` (sync hot path for hooks)
+/// - Otherwise → interactive full pipeline
 pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
+    if detached {
+        return run_refresh_detached(vault_path).await;
+    }
+    if quiet && !full {
+        return run_refresh_fast(vault_path).await;
+    }
+    run_refresh_interactive(vault_path, full, quiet, vault_guide).await
+}
+
+/// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
+///
+/// Runs only cheap local work (indexing, embedding, similarity) synchronously,
+/// then spawns a background process for expensive LLM catalyst generation if
+/// the vault is stale.
+async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
+    let start = Instant::now();
+    let paths = EnzymePaths::new(vault_path)?;
+
+    // Ensure .enzyme directory exists
+    if let Some(parent) = paths.vault_db.parent() {
+        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+    }
+
+    let db = Database::open(&paths.vault_db)?;
+
+    // ── Step 1: Index (filesystem scan, fast) ────────────────────────────
+    let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+    let idx_stats = indexing.run(false, |_msg| {})?;
+    debug!(
+        new = idx_stats.files_new,
+        updated = idx_stats.files_updated,
+        deleted = idx_stats.files_deleted,
+        "fast refresh: indexing complete"
+    );
+
+    // ── Step 2: Embed new docs (incremental, local model) ────────────────
+    let emb_produced = match get_embedding_service(&paths.home) {
+        Ok(svc) => {
+            let pipeline = EmbeddingPipeline::new(&db, svc, paths.embeddings_dir.clone());
+            match pipeline.run(|_, _| {}) {
+                Ok(stats) => {
+                    debug!(docs = stats.documents_embedded, "fast refresh: embedding complete");
+                    stats.documents_embedded > 0
+                }
+                Err(e) => {
+                    debug!("fast refresh: embedding failed: {}", e);
+                    false
+                }
+            }
+        }
+        Err(_) => false,
+    };
+
+    // ── Step 3: Similarity (only if new embeddings and catalysts exist) ──
+    let has_catalysts = db.query_read(
+        "SELECT COUNT(*) FROM catalysts",
+        &[],
+        |row| row.get::<_, i64>(0),
+    ).map(|rows| rows.first().copied().unwrap_or(0) > 0).unwrap_or(false);
+
+    if emb_produced && has_catalysts {
+        if let Ok(svc) = get_embedding_service(&paths.home) {
+            let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+            if let Err(e) = sim_pipeline.run(|_, _| {}) {
+                debug!("fast refresh: similarity failed: {}", e);
+            }
+        }
+    }
+
+    // ── Step 4: Check staleness → spawn background if needed ────────────
+    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    let background_spawned = match &staleness {
+        StalenessResult::Fresh => false,
+        StalenessResult::Stale(reason) => {
+            debug!(?reason, "fast refresh: stale, spawning background");
+            spawn_background_refresh(vault_path, &paths)
+        }
+    };
+
+    // ── Step 5: Output JSON ─────────────────────────────────────────────
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let petri = super::petri::build_petri_json(vault_path, 10)?;
+    let output = json!({
+        "status": "completed",
+        "fresh": staleness.is_fresh(),
+        "background_spawned": background_spawned,
+        "indexing": {
+            "files_discovered": idx_stats.files_discovered,
+            "files_new": idx_stats.files_new,
+            "files_updated": idx_stats.files_updated,
+            "files_deleted": idx_stats.files_deleted,
+        },
+        "duration_ms": duration_ms,
+        "petri": petri,
+    });
+    println!("{}", serde_json::to_string(&output)?);
+
+    Ok(())
+}
+
+/// Detached background path — runs the expensive LLM catalyst pipeline.
+///
+/// Called by `spawn_background_refresh` via `enzyme refresh --detached --quiet`.
+/// Acquires a lockfile to prevent concurrent runs.
+async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+    let enzyme_dir = paths.vault_db.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| vault_path.join(".enzyme"));
+
+    // ── Step 1: Acquire lockfile ────────────────────────────────────────
+    let _lock = match acquire_refresh_lock(&enzyme_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            info!("detached refresh: lock held, exiting: {}", e);
+            return Ok(());
+        }
+    };
+
+    let db = Database::open(&paths.vault_db)?;
+
+    // ── Step 2: Re-check staleness (may have been resolved since spawn) ─
+    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    let reason = match staleness {
+        StalenessResult::Fresh => {
+            info!("detached refresh: already fresh, exiting");
+            return Ok(());
+        }
+        StalenessResult::Stale(reason) => reason,
+    };
+
+    // ── Step 3: Select entities ─────────────────────────────────────────
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+
+    // Determine which entities to process based on staleness reason
+    let entities_to_process = match reason.stale_entity_names() {
+        Some(stale_names) => {
+            // Partial refresh: only regenerate stale entities
+            info!(count = stale_names.len(), "detached refresh: partial regeneration");
+            sel_result.entities.iter()
+                .filter(|e| stale_names.contains(&e.name))
+                .cloned()
+                .collect::<Vec<_>>()
+        }
+        None => {
+            // Full refresh
+            info!(count = sel_result.entities.len(), "detached refresh: full regeneration");
+            sel_result.entities.clone()
+        }
+    };
+
+    if entities_to_process.is_empty() {
+        info!("detached refresh: no entities to process");
+        return Ok(());
+    }
+
+    // ── Step 4: Run catalyst pipeline ───────────────────────────────────
+    let api_config = resolve_api_config().await?;
+    let llm = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
+    let cat_pipeline = CatalystPipeline::new(&db, &llm);
+
+    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+
+    let vault_context = {
+        let ctx_builder = ContextBuilder::new(&db);
+        ctx_builder.build(&entities_to_process, 5, 300).ok()
+    };
+
+    let allocations = calculate_allocations(&entities_to_process);
+
+    let cat_config = CatalystConfig {
+        entity_profiles: &sel_result.entity_profiles,
+        catalysts_per_entity: 7,
+        default_profile: enzyme_config
+            .catalyst_profile
+            .as_deref()
+            .unwrap_or(DEFAULT_PROFILE_KEY),
+        format_key: enzyme_config
+            .catalyst_format
+            .as_deref()
+            .unwrap_or(DEFAULT_FORMAT_KEY),
+        custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
+        guide_signal: enzyme_config.guide_signal.as_deref(),
+        vault_guide: vault_context.as_deref(),
+        model: &api_config.model,
+        per_entity_allocations: Some(&allocations),
+    };
+
+    let stats = cat_pipeline.run(
+        &entities_to_process,
+        &cat_config,
+        |_event| {},
+    ).await?;
+
+    info!(
+        entities = stats.entities_processed,
+        catalysts = stats.catalysts_generated,
+        "detached refresh: catalyst generation complete"
+    );
+
+    // ── Step 5: Store bookkeeping ───────────────────────────────────────
+    let is_partial = reason.stale_entity_names().is_some();
+    if is_partial {
+        let names: Vec<String> = entities_to_process.iter().map(|e| e.name.clone()).collect();
+        store_staleness_bookkeeping_partial(&db, &names)?;
+    } else {
+        let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
+        store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
+    }
+
+    // ── Step 6: Recompute similarity ────────────────────────────────────
+    if stats.catalysts_generated > 0 {
+        if let Ok(svc) = get_embedding_service(&paths.home) {
+            let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+            if let Err(e) = sim_pipeline.run(|_, _| {}) {
+                info!("detached refresh: similarity failed: {}", e);
+            }
+        }
+    }
+
+    // Lock released on drop
+    Ok(())
+}
+
+/// Spawn a background refresh process (detached child).
+///
+/// Returns `true` if a background process was spawned, `false` if skipped
+/// (e.g., another refresh is already running).
+fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
+    let enzyme_dir = match paths.vault_db.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Skip if another background refresh is already running
+    if is_refresh_locked(enzyme_dir) {
+        debug!("background refresh already running, skipping spawn");
+        return false;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            debug!("failed to get current exe: {}", e);
+            return false;
+        }
+    };
+
+    let log_path = enzyme_dir.join("background_refresh.log");
+
+    // Open log file and /dev/null for stdin
+    let log_file = match fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("failed to create background refresh log: {}", e);
+            return false;
+        }
+    };
+    let log_stderr = match log_file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("failed to clone log file handle: {}", e);
+            return false;
+        }
+    };
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["refresh", "--detached", "--quiet", "-p"])
+        .arg(vault_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_stderr));
+
+    // On Unix, set process group so child survives parent exit
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    match cmd.spawn() {
+        Ok(child) => {
+            debug!(pid = child.id(), "spawned background refresh");
+            true
+        }
+        Err(e) => {
+            debug!("failed to spawn background refresh: {}", e);
+            false
+        }
+    }
+}
+
+/// Interactive refresh path — the original full pipeline with display output.
+///
+/// Used for `enzyme refresh` (no --quiet) and `enzyme refresh --full --quiet`.
+async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // Capture old entity names before init for diffing.
@@ -474,7 +778,7 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
     };
 
     // Run the full pipeline.
-    let init_result = run_init(vault_path, full, detached, quiet, vault_guide).await?;
+    let init_result = run_init(vault_path, full, false, quiet, vault_guide).await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;

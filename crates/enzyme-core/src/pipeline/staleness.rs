@@ -2,18 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
-use chrono::Utc;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::{Database, Repository};
 
-/// Maximum age (in days) before catalysts are considered stale.
-const MAX_CATALYST_AGE_DAYS: i64 = 3;
-
 /// Number of new document mentions for an entity before it's considered stale.
 const NEW_MENTIONS_THRESHOLD: usize = 3;
+
+/// If this many or more entities are stale, do a full refresh instead of partial.
+pub const FULL_REFRESH_ENTITY_THRESHOLD: usize = 3;
 
 /// Config DB key for the catalyst config hash.
 const CONFIG_HASH_KEY: &str = "catalyst_config_hash";
@@ -21,17 +20,52 @@ const CONFIG_HASH_KEY: &str = "catalyst_config_hash";
 /// Config DB key for the entity doc count snapshot (JSON).
 const ENTITY_DOC_COUNTS_KEY: &str = "catalyst_entity_doc_counts";
 
+/// An entity that has new content since last catalyst generation.
+#[derive(Debug, Clone)]
+pub struct StaleEntity {
+    pub name: String,
+    pub delta: usize,
+}
+
 /// Why the catalysts are stale.
 #[derive(Debug)]
 pub enum StaleReason {
     /// The enzyme-config.yaml changed (entities or profile).
     ConfigChanged,
-    /// Catalysts are older than the max age threshold.
-    CatalystsExpired,
     /// One or more entities have significantly more content since last generation.
-    NewContent { entity: String, delta: usize },
+    EntitiesStale { stale_entities: Vec<StaleEntity> },
     /// No catalysts exist yet.
     NoCatalysts,
+}
+
+impl StaleReason {
+    /// Whether this staleness requires a full refresh (all entities).
+    ///
+    /// True for config changes, no catalysts, or when enough entities are stale
+    /// that a full refresh is more efficient than partial.
+    pub fn needs_full_refresh(&self) -> bool {
+        match self {
+            StaleReason::ConfigChanged | StaleReason::NoCatalysts => true,
+            StaleReason::EntitiesStale { stale_entities } => {
+                stale_entities.len() >= FULL_REFRESH_ENTITY_THRESHOLD
+            }
+        }
+    }
+
+    /// Entity names to regenerate for a partial refresh.
+    ///
+    /// Returns `Some(names)` when only a subset of entities need regeneration,
+    /// `None` when a full refresh is needed.
+    pub fn stale_entity_names(&self) -> Option<Vec<String>> {
+        match self {
+            StaleReason::EntitiesStale { stale_entities }
+                if stale_entities.len() < FULL_REFRESH_ENTITY_THRESHOLD =>
+            {
+                Some(stale_entities.iter().map(|e| e.name.clone()).collect())
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Result of a staleness check.
@@ -47,14 +81,20 @@ impl StalenessResult {
     pub fn is_stale(&self) -> bool {
         matches!(self, StalenessResult::Stale(_))
     }
+
+    pub fn is_fresh(&self) -> bool {
+        matches!(self, StalenessResult::Fresh)
+    }
 }
 
 /// Check whether the vault's catalysts are stale and need regeneration.
 ///
-/// Three independent checks (any one triggers stale):
+/// Two independent checks (any one triggers stale):
 /// 1. **Config hash** — SHA256 of `catalyzedEntities` + `catalystProfile` changed.
-/// 2. **Catalyst age** — newest catalyst is older than `MAX_CATALYST_AGE_DAYS`.
-/// 3. **New content** — any selected entity has 3+ new document mentions.
+/// 2. **New content** — entities with 3+ new document mentions since last generation.
+///
+/// All stale entities are collected (not short-circuited) so callers can decide
+/// between a partial refresh (few entities) and a full refresh (many entities).
 pub fn check_catalyst_staleness(
     db: &Database,
     vault_path: &Path,
@@ -81,17 +121,9 @@ pub fn check_catalyst_staleness(
         return Ok(StalenessResult::Stale(StaleReason::ConfigChanged));
     }
 
-    // --- Check 2: Catalyst age ---
-    if let Some(ts) = latest_ts {
-        let age = Utc::now().signed_duration_since(ts);
-        if age.num_days() > MAX_CATALYST_AGE_DAYS {
-            info!(age_days = age.num_days(), "catalysts expired — stale");
-            return Ok(StalenessResult::Stale(StaleReason::CatalystsExpired));
-        }
-    }
-
-    // --- Check 3: New content ---
+    // --- Check 2: New content (collect ALL stale entities) ---
     let stored_counts = load_stored_doc_counts(&repo)?;
+    let mut stale_entities = Vec::new();
     if !stored_counts.is_empty() {
         for (entity_name, old_count) in &stored_counts {
             let current_count = repo.get_entity_doc_count(entity_name)?;
@@ -103,12 +135,18 @@ pub fn check_catalyst_staleness(
                     current_count,
                     "entity has new content — stale"
                 );
-                return Ok(StalenessResult::Stale(StaleReason::NewContent {
-                    entity: entity_name.clone(),
+                stale_entities.push(StaleEntity {
+                    name: entity_name.clone(),
                     delta,
-                }));
+                });
             }
         }
+    }
+
+    if !stale_entities.is_empty() {
+        return Ok(StalenessResult::Stale(StaleReason::EntitiesStale {
+            stale_entities,
+        }));
     }
 
     debug!("catalysts are fresh");
@@ -143,6 +181,31 @@ pub fn store_staleness_bookkeeping(
         config_hash = hash.as_str(),
         entity_count = entity_names.len(),
         "stored staleness bookkeeping"
+    );
+    Ok(())
+}
+
+/// Record bookkeeping for a partial refresh — updates doc counts only for the
+/// specified entities, preserving counts for all others.
+pub fn store_staleness_bookkeeping_partial(
+    db: &Database,
+    entity_names: &[String],
+) -> Result<()> {
+    let repo = Repository::new(db);
+
+    // Load existing counts and merge in the refreshed entities
+    let mut counts = load_stored_doc_counts(&repo)?;
+    for name in entity_names {
+        let count = repo.get_entity_doc_count(name)?;
+        counts.insert(name.clone(), count);
+    }
+    let json = serde_json::to_string(&counts)?;
+    repo.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
+
+    debug!(
+        refreshed = entity_names.len(),
+        total = counts.len(),
+        "stored partial staleness bookkeeping"
     );
     Ok(())
 }
