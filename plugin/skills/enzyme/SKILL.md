@@ -24,10 +24,12 @@ Content retrieval works by **resonance with catalyst questions**, not keyword ma
 
 ## Prerequisites
 
+Enzyme resolves the vault path in this order: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory. If `ENZYME_VAULT_ROOT` is set (check with `echo $ENZYME_VAULT_ROOT`), all commands automatically target the right vault — no `-p` or `cd` needed.
+
 ### Check vault initialization
 
 ```bash
-ls .enzyme/enzyme.db
+ls ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db
 ```
 
 - If `.enzyme/enzyme.db` exists: vault is ready. Run `enzyme petri` to begin.

@@ -154,7 +154,15 @@ fn resolve_vault_guide(flag: Option<String>) -> Option<String> {
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     match vault {
         Some(p) => Ok(p),
-        None => std::env::current_dir().map_err(|e| anyhow::anyhow!("failed to get current directory: {e}")),
+        None => {
+            if let Ok(root) = std::env::var("ENZYME_VAULT_ROOT") {
+                if !root.is_empty() {
+                    return Ok(PathBuf::from(root));
+                }
+            }
+            std::env::current_dir()
+                .map_err(|e| anyhow::anyhow!("failed to get current directory: {e}"))
+        }
     }
 }
 
