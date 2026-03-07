@@ -73,16 +73,24 @@ impl<'a> EmbeddingPipeline<'a> {
     /// `on_progress(completed_docs, total_docs)` is called after each document is
     /// processed so callers can drive a progress bar.
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
-        self.run_inner(Some(MAX_EMBEDDING_FILES), on_progress)
+        self.run_inner(Some(MAX_EMBEDDING_FILES), None, on_progress)
     }
 
     /// Run embedding with no document cap — embeds all documents in the DB.
     /// Used by `apply` where the target directory should be fully embedded.
     pub fn run_all(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
-        self.run_inner(None, on_progress)
+        self.run_inner(None, None, on_progress)
     }
 
-    fn run_inner(&self, max_docs: Option<usize>, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+    /// Run embedding only for documents indexed since `since_ms` (epoch millis).
+    ///
+    /// Used by the fast refresh path to embed only newly-indexed docs and avoid
+    /// processing the full historical backlog.
+    pub fn run_since(&self, since_ms: i64, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+        self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
+    }
+
+    fn run_inner(&self, max_docs: Option<usize>, indexed_since: Option<i64>, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
         // Ensure the embeddings directory exists
@@ -96,7 +104,7 @@ impl<'a> EmbeddingPipeline<'a> {
         let documents_pruned = self.prune_stale(&mut all_embeddings)?;
 
         // Step 2: Find documents needing embedding (optionally capped to most recent N)
-        let docs_needing = self.repo.get_documents_needing_embedding(max_docs)?;
+        let docs_needing = self.repo.get_documents_needing_embedding(max_docs, indexed_since)?;
         if docs_needing.is_empty() {
             if documents_pruned > 0 {
                 self.save_embeddings(&all_embeddings)?;

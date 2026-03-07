@@ -32,7 +32,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     let catalysts = repo.get_all_catalysts()?;
     let catalyst_count = catalysts.len();
 
-    let docs_needing = repo.get_documents_needing_embedding(None)?;
+    let docs_needing = repo.get_documents_needing_embedding(None, None)?;
     let embedded_count = doc_count - docs_needing.len() as i64;
 
     Ok(Some(json!({

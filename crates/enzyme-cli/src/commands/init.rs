@@ -475,6 +475,9 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     let db = Database::open(&paths.vault_db)?;
 
     // ── Step 1: Index (filesystem scan, fast) ────────────────────────────
+    // Capture timestamp before indexing so we can scope embedding to only
+    // the docs processed in this run.
+    let index_start_ms = chrono::Utc::now().timestamp_millis();
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
     let idx_stats = indexing.run(false, |_msg| {})?;
     debug!(
@@ -484,36 +487,43 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         "fast refresh: indexing complete"
     );
 
-    // ── Step 2: Embed new docs (incremental, local model) ────────────────
-    let emb_produced = match get_embedding_service(&paths.home) {
-        Ok(svc) => {
-            let pipeline = EmbeddingPipeline::new(&db, svc, paths.embeddings_dir.clone());
-            match pipeline.run(|_, _| {}) {
-                Ok(stats) => {
-                    debug!(docs = stats.documents_embedded, "fast refresh: embedding complete");
-                    stats.documents_embedded > 0
-                }
-                Err(e) => {
-                    debug!("fast refresh: embedding failed: {}", e);
-                    false
+    // ── Step 2: Embed only docs indexed in this run ─────────────────────
+    let has_changes = idx_stats.files_new > 0 || idx_stats.files_updated > 0 || idx_stats.files_deleted > 0;
+    let emb_produced = if has_changes {
+        match get_embedding_service(&paths.home) {
+            Ok(svc) => {
+                let pipeline = EmbeddingPipeline::new(&db, svc, paths.embeddings_dir.clone());
+                match pipeline.run_since(index_start_ms, |_, _| {}) {
+                    Ok(stats) => {
+                        debug!(docs = stats.documents_embedded, "fast refresh: embedding complete");
+                        stats.documents_embedded > 0
+                    }
+                    Err(e) => {
+                        debug!("fast refresh: embedding failed: {}", e);
+                        false
+                    }
                 }
             }
+            Err(_) => false,
         }
-        Err(_) => false,
+    } else {
+        false
     };
 
     // ── Step 3: Similarity (only if new embeddings and catalysts exist) ──
-    let has_catalysts = db.query_read(
-        "SELECT COUNT(*) FROM catalysts",
-        &[],
-        |row| row.get::<_, i64>(0),
-    ).map(|rows| rows.first().copied().unwrap_or(0) > 0).unwrap_or(false);
+    if emb_produced {
+        let has_catalysts = db.query_read(
+            "SELECT COUNT(*) FROM catalysts",
+            &[],
+            |row| row.get::<_, i64>(0),
+        ).map(|rows| rows.first().copied().unwrap_or(0) > 0).unwrap_or(false);
 
-    if emb_produced && has_catalysts {
-        if let Ok(svc) = get_embedding_service(&paths.home) {
-            let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
-            if let Err(e) = sim_pipeline.run(|_, _| {}) {
-                debug!("fast refresh: similarity failed: {}", e);
+        if has_catalysts {
+            if let Ok(svc) = get_embedding_service(&paths.home) {
+                let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+                if let Err(e) = sim_pipeline.run(|_, _| {}) {
+                    debug!("fast refresh: similarity failed: {}", e);
+                }
             }
         }
     }
