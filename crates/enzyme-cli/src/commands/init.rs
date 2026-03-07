@@ -733,16 +733,30 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_stderr));
 
-    // On Unix, set process group so child survives parent exit
+    // On Unix, double-fork to fully detach: the intermediate child exits
+    // immediately, the grandchild (the real worker) is adopted by init.
+    // This prevents zombies regardless of parent/child exit ordering.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                match libc::fork() {
+                    -1 => Err(std::io::Error::last_os_error()),
+                    0 => Ok(()),           // grandchild: continue to exec
+                    _ => libc::_exit(0),   // intermediate: exit immediately
+                }
+            });
+        }
     }
 
     match cmd.spawn() {
-        Ok(child) => {
-            debug!(pid = child.id(), "spawned background refresh");
+        Ok(mut child) => {
+            // Reap intermediate process (exited immediately after double-fork)
+            let _ = child.wait();
+            debug!("spawned background refresh (double-forked)");
             true
         }
         Err(e) => {
