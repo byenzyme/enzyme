@@ -104,6 +104,9 @@ enum Commands {
         check: bool,
     },
 
+    /// Start MCP (Model Context Protocol) server over stdio
+    Mcp,
+
     /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
     #[command(name = "__daemon", hide = true)]
     Daemon,
@@ -160,6 +163,9 @@ async fn main() -> Result<()> {
     if let Commands::Setup { check } = cli.command {
         return commands::setup::run_setup(check).await;
     }
+    if matches!(cli.command, Commands::Mcp) {
+        return commands::mcp::run_mcp(cli.vault).await;
+    }
 
     let vault_path = resolve_vault_path(cli.vault)?;
     info!(?vault_path, "resolved vault path");
@@ -197,7 +203,7 @@ async fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
         }
-        Commands::Setup { .. } | Commands::Daemon => unreachable!(),
+        Commands::Setup { .. } | Commands::Daemon | Commands::Mcp => unreachable!(),
     }
 
     Ok(())

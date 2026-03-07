@@ -56,5 +56,5 @@ Suggest 1-2 concrete next directions. Use language from the results themselves �
 If results are sparse or low-relevance:
 - The vault may not have content in this area yet. Say so directly.
 - Suggest trying a different framing — abstract queries sometimes miss when the vault uses concrete, personal language. Offer a more grounded alternative.
-- If the vault hasn't been refreshed recently, suggest `enzyme refresh` to pick up recent changes.
+- The vault auto-refreshes before each prompt, so results reflect current vault state.
 - Don't apologize. Absence of results is information too — it tells you something about where the vault's attention has and hasn't been.

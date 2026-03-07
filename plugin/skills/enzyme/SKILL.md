@@ -37,7 +37,7 @@ ls .enzyme/enzyme.db
 
 ### `enzyme petri` — See what's growing
 
-Returns JSON with trending entities and their catalysts. Output includes a `stale` field — if `true`, suggest running `enzyme refresh`.
+Returns JSON with trending entities and their catalysts.
 
 ```bash
 enzyme petri                  # Default: top 10 entities
@@ -46,7 +46,7 @@ enzyme petri -n 5             # Top 5 entities
 
 ### `enzyme catalyze "query"` — Search by concept
 
-Activates the vault's catalysts to surface resonant content. Returns JSON with matched excerpts, file paths, and contributing catalysts. Output includes a `stale` field.
+Activates the vault's catalysts to surface resonant content. Returns JSON with matched excerpts, file paths, and contributing catalysts.
 
 ```bash
 enzyme catalyze "feeling stuck"
@@ -63,10 +63,9 @@ enzyme init --guide "vault guide content"
 
 ### `enzyme refresh` — Update the index
 
-Re-scans vault content. Use when vault content has changed significantly or when commands report `stale: true`.
+Runs automatically before each prompt via hook — manual use is rarely needed. Use `--full` to force a complete re-index if results seem off.
 
 ```bash
-enzyme refresh
 enzyme refresh --full                 # Force full re-index
 ```
 
@@ -136,4 +135,3 @@ Enzyme commands return JSON. Read the output directly — do not pipe through Py
 
 6. **Present search results** following [search-guide.md](search-guide.md). Lead with their words from matched excerpts, notice tensions across results, suggest specific next searches using catalyst language.
 
-7. **Check staleness.** If output includes `"stale": true`, suggest running `enzyme refresh` to pick up recent changes.

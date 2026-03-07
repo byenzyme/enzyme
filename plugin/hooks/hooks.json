@@ -10,6 +10,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "enzyme refresh --quiet >/dev/null 2>&1 || true"
+          }
+        ]
+      }
     ]
   }
 }

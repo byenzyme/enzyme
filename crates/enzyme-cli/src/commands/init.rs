@@ -406,6 +406,37 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     }
 }
 
+/// Ensure the vault is fresh — check staleness, run init if needed.
+/// Does not print anything to stdout (safe for MCP/programmatic use).
+pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+
+    if !paths.vault_db.exists() {
+        return Ok(());
+    }
+
+    let db = Database::open(&paths.vault_db)?;
+    let staleness = check_catalyst_staleness(&db, vault_path)?;
+
+    if matches!(staleness, StalenessResult::Fresh) {
+        return Ok(());
+    }
+
+    drop(db);
+
+    // Run init in quiet mode (suppresses all output)
+    let _ = run_init(vault_path, false, false, true, None).await?;
+
+    // Store bookkeeping for next staleness check
+    let db = Database::open(&paths.vault_db)?;
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+    let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
+    store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
+
+    Ok(())
+}
+
 /// Lightweight refresh: check staleness first, only run full init if stale.
 ///
 /// After a successful init, stores bookkeeping (config hash + entity doc counts)

@@ -15,7 +15,7 @@ Use the Enzyme CLI for retrieving context from this vault. Run all commands from
 
 **Semantic search:** `enzyme catalyze "query"` — search by concept/theme, not keyword. Example: `enzyme catalyze "creativity and constraints"`.
 
-**Refresh:** `enzyme refresh` — lightweight update that only re-runs if content has changed. Use this in hooks or periodic checks.
+**Refresh:** `enzyme refresh` — runs automatically before each prompt. Manual use is for CI or hooks only.
 
 **When to use which:**
 - `enzyme petri` — "What's in my vault?" / "What have I been thinking about?"
