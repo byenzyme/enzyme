@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v enzyme >/dev/null 2>&1 || { mkdir -p ~/.local/bin && ln -sf ${CLAUDE_PLUGIN_ROOT}/bin/enzyme ~/.local/bin/enzyme 2>/dev/null; }; ${CLAUDE_PLUGIN_ROOT}/bin/enzyme --version >/dev/null 2>&1 || echo 'enzyme: bundled binary failed — unsupported platform?' >&2"
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/bin/setup.sh 2>/dev/null; enzyme --version >/dev/null 2>&1 || echo 'enzyme: setup failed — see https://github.com/jshph/enzyme/releases' >&2"
           }
         ]
       }
