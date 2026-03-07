@@ -94,6 +94,9 @@ jobs:
           [ -f model-files/model.onnx ] && model_files="$model_files model-files/model.onnx"
           [ -f model-files/tokenizer.json ] && model_files="$model_files model-files/tokenizer.json"
 
+          # Delete existing release if re-publishing the same tag
+          gh release delete "$tag" --repo "$RELEASE_REPO" --yes 2>/dev/null || true
+
           gh release create "$tag" \
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
