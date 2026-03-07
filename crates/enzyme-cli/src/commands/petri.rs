@@ -9,14 +9,10 @@ use enzyme_core::db::{Database, Repository};
 use enzyme_core::models::EntityType;
 use enzyme_core::pipeline::staleness::check_catalyst_staleness;
 
-pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
+/// Build the petri JSON value from the vault database.
+/// Assumes the DB exists — callers must guard this.
+pub fn build_petri_json(vault_path: &Path, top: usize) -> Result<serde_json::Value> {
     let paths = EnzymePaths::new(vault_path)?;
-
-    if !paths.vault_db.exists() {
-        println!("Vault not initialized. Run 'enzyme init' first.");
-        return Ok(());
-    }
-
     let db = Database::open(&paths.vault_db)?;
     let stale = check_catalyst_staleness(&db, vault_path)?.is_stale();
     let repo = Repository::new(&db);
@@ -118,13 +114,23 @@ pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
         }))
         .collect();
 
-    let output = json!({
+    Ok(json!({
         "entities": entity_list,
         "total_entities": entity_list.len(),
         "stale": stale,
         "applied_targets": targets_json,
-    });
+    }))
+}
 
+pub async fn run_petri(vault_path: &Path, top: usize) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+
+    if !paths.vault_db.exists() {
+        println!("Vault not initialized. Run 'enzyme init' first.");
+        return Ok(());
+    }
+
+    let output = build_petri_json(vault_path, top)?;
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())

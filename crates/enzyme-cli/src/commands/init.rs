@@ -4,6 +4,7 @@ use std::fs;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use serde_json::json;
 use tracing::debug;
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
@@ -22,7 +23,53 @@ use enzyme_core::pipeline::staleness::{check_catalyst_staleness, load_stored_ent
 
 use crate::display::{DisplayEvent, InitDisplay};
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
+/// Stats collected during an init run, used for JSON output in quiet mode.
+pub struct InitResult {
+    pub files_discovered: usize,
+    pub files_new: usize,
+    pub files_updated: usize,
+    pub files_deleted: usize,
+    pub catalysts_generated: usize,
+    pub embeddings_documents: Option<usize>,
+    pub embeddings_pruned: Option<usize>,
+    pub semantic_search: bool,
+    pub catalysts_available: bool,
+    pub warnings: Vec<String>,
+    pub duration_ms: u64,
+}
+
+impl InitResult {
+    /// Build the JSON output for quiet mode, including petri data.
+    pub fn to_json(&self, vault_path: &Path) -> Result<serde_json::Value> {
+        let petri = super::petri::build_petri_json(vault_path, 10)?;
+        let mut output = json!({
+            "status": "completed",
+            "fresh": false,
+            "indexing": {
+                "files_discovered": self.files_discovered,
+                "files_new": self.files_new,
+                "files_updated": self.files_updated,
+                "files_deleted": self.files_deleted,
+            },
+            "catalysts_generated": self.catalysts_generated,
+            "capabilities": {
+                "semantic_search": self.semantic_search,
+                "catalysts": self.catalysts_available,
+            },
+            "warnings": &self.warnings,
+            "duration_ms": self.duration_ms,
+            "petri": petri,
+        });
+
+        if let (Some(docs), Some(pruned)) = (self.embeddings_documents, self.embeddings_pruned) {
+            output["embeddings"] = json!({ "documents": docs, "pruned": pruned });
+        }
+
+        Ok(output)
+    }
+}
+
+pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -89,6 +136,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // Start display (quiet mode suppresses all output)
     let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
     let tx = display.sender();
+    let mut warnings: Vec<String> = Vec::new();
 
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     tx.send(DisplayEvent::IndexingStart).ok();
@@ -128,9 +176,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                     sel_result = result;
                 }
                 Err(e) => {
-                    tx.send(DisplayEvent::LlmSelectionSkipped(
-                        format!("LLM selection failed: {e}")
-                    )).ok();
+                    let msg = format!("LLM selection failed: {e}");
+                    tx.send(DisplayEvent::LlmSelectionSkipped(msg.clone())).ok();
+                    warnings.push(msg);
                 }
             }
         }
@@ -155,7 +203,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     let service = match get_embedding_service(&paths.home) {
         Ok(svc) => Some(svc),
         Err(e) => {
-            tx.send(DisplayEvent::EmbeddingSkipped(format!("model not found: {}", e))).ok();
+            let reason = format!("model not found: {}", e);
+            tx.send(DisplayEvent::EmbeddingSkipped(reason.clone())).ok();
+            warnings.push(format!("Embedding skipped: {}", reason));
             None
         }
     };
@@ -281,14 +331,14 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
         Some(stats)
     } else {
-        tx.send(DisplayEvent::ApiSkipped(
-            "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string()
-        )).ok();
+        let msg = "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string();
+        tx.send(DisplayEvent::ApiSkipped(msg.clone())).ok();
+        warnings.push(msg);
         None
     };
 
     // ── Step 6: Wait for background embedding ─────────────────────────────
-    let emb_completed = if let Some(handle) = embedding_handle {
+    let emb_stats = if let Some(handle) = embedding_handle {
         match handle.await.context("embedding task panicked")? {
             Ok(stats) => {
                 tx.send(DisplayEvent::EmbeddingComplete {
@@ -296,16 +346,19 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                     pruned: stats.documents_pruned,
                     duration_ms: stats.duration_ms,
                 }).ok();
-                true
+                Some((stats.documents_embedded, stats.documents_pruned))
             }
             Err(e) => {
-                tx.send(DisplayEvent::EmbeddingFailed(format!("{}", e))).ok();
-                false
+                let msg = format!("Embedding failed: {}", e);
+                tx.send(DisplayEvent::EmbeddingFailed(msg.clone())).ok();
+                warnings.push(msg);
+                None
             }
         }
     } else {
-        false
+        None
     };
+    let emb_completed = emb_stats.is_some();
 
     // ── Step 7: Similarity computation ────────────────────────────────────
     if emb_completed && cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
@@ -334,7 +387,23 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // Wait for display thread to finish rendering
     display.finish();
 
-    Ok(())
+    if quiet {
+        Ok(Some(InitResult {
+            files_discovered: idx_stats.files_discovered,
+            files_new: idx_stats.files_new,
+            files_updated: idx_stats.files_updated,
+            files_deleted: idx_stats.files_deleted,
+            catalysts_generated: cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
+            embeddings_documents: emb_stats.map(|(docs, _)| docs),
+            embeddings_pruned: emb_stats.map(|(_, pruned)| pruned),
+            semantic_search: emb_completed,
+            catalysts_available: cat_stats.is_some(),
+            warnings,
+            duration_ms,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Lightweight refresh: check staleness first, only run full init if stale.
@@ -352,6 +421,15 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
         match staleness {
             StalenessResult::Fresh => {
                 debug!("catalysts are fresh — nothing to do");
+                if quiet {
+                    let petri = super::petri::build_petri_json(vault_path, 10)?;
+                    let output = json!({
+                        "status": "completed",
+                        "fresh": true,
+                        "petri": petri,
+                    });
+                    println!("{}", serde_json::to_string(&output)?);
+                }
                 return Ok(());
             }
             StalenessResult::Stale(reason) => {
@@ -365,7 +443,7 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
     };
 
     // Run the full pipeline.
-    run_init(vault_path, full, detached, quiet, vault_guide).await?;
+    let init_result = run_init(vault_path, full, detached, quiet, vault_guide).await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;
@@ -374,24 +452,49 @@ pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: b
     let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
     store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
 
-    // Surface entity set diff if we had a previous snapshot.
-    if let Some(old_names) = old_entity_names {
+    // Compute entity set diff if we had a previous snapshot.
+    let new_names: std::collections::HashSet<String> =
+        entity_names.iter().cloned().collect();
+    let entity_changes = if let Some(ref old_names) = old_entity_names {
         if !old_names.is_empty() {
-            let new_names: std::collections::HashSet<String> =
-                entity_names.iter().cloned().collect();
-            let mut added: Vec<&String> = new_names.difference(&old_names).collect();
+            let mut added: Vec<&String> = new_names.difference(old_names).collect();
             let mut removed: Vec<&String> = old_names.difference(&new_names).collect();
             added.sort();
             removed.sort();
 
             if !added.is_empty() || !removed.is_empty() {
-                eprintln!("\n  Entity changes:");
-                for name in &added {
-                    eprintln!("    + {}", name);
-                }
-                for name in &removed {
-                    eprintln!("    - {}", name);
-                }
+                Some((added.into_iter().cloned().collect::<Vec<_>>(), removed.into_iter().cloned().collect::<Vec<_>>()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if quiet {
+        if let Some(result) = init_result {
+            let mut output = result.to_json(vault_path)?;
+
+            if let Some((added, removed)) = entity_changes {
+                output["entity_changes"] = json!({ "added": added, "removed": removed });
+            }
+
+            println!("{}", serde_json::to_string(&output)?);
+        }
+    } else {
+        // Surface entity set diff to stderr for interactive use.
+        if let Some((added, removed)) = entity_changes {
+            eprintln!("\n  Entity changes:");
+            for name in &added {
+                eprintln!("    + {}", name);
+            }
+            for name in &removed {
+                eprintln!("    - {}", name);
+            }
+            if let Some(ref old_names) = old_entity_names {
                 eprintln!(
                     "    {} unchanged",
                     old_names.intersection(&new_names).count()

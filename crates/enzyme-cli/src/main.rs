@@ -167,7 +167,14 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init { full, detached, guide, quiet } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
+            let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
+
+            if quiet {
+                if let Some(result) = init_result {
+                    let output = result.to_json(&vault_path)?;
+                    println!("{}", serde_json::to_string(&output)?);
+                }
+            }
         }
         Commands::Refresh { full, detached, guide, quiet } => {
             let vault_guide = resolve_vault_guide(guide);

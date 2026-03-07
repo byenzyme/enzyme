@@ -70,6 +70,12 @@ enzyme refresh
 enzyme refresh --full                 # Force full re-index
 ```
 
+### `--quiet` mode (agent/headless use)
+
+Both `enzyme init --quiet` and `enzyme refresh --quiet` output compact JSON to stdout that includes full petri data. **Do not follow up with a separate `enzyme petri` call** — it's already in the response under the `petri` key.
+
+When `refresh --quiet` detects the vault is fresh (nothing to do), the output is `{ "fresh": true, "petri": ... }`. When stale, the full output includes indexing stats, capabilities, warnings, entity changes, and petri.
+
 ### `enzyme apply <target>` — Project catalysts onto external content
 
 Indexes an external directory using the current vault's catalysts. After applying,
@@ -120,7 +126,7 @@ Enzyme commands return JSON. Read the output directly — do not pipe through Py
      Each file type carries different signal: `guide.md` is a tag/folder weight map, `ENZYME_GUIDE.md` is a thematic description of the vault's shape, `CLAUDE.md` has workflow conventions and preferences, `MOC.md`/`Index.md` are structural maps. Label them so the LLM generating catalysts knows what it's reading.
    - If the vault **is initialized**, use this context to orient your petri reading — know the vault's shape before interpreting what's growing
 
-2. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed.
+2. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed. (If you just ran `init --quiet` or `refresh --quiet`, petri is already in the JSON output — skip this step.)
 
 3. **Ground in evidence.** Before making observations, use catalysts from the petri to run `enzyme catalyze` searches. Look across entities for patterns — what the user keeps returning to, avoiding, or circling.
 
