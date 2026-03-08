@@ -53,6 +53,75 @@ jobs:
           tar czf enzyme-${{ matrix.release_name }}.tar.gz enzyme
           shasum -a 256 enzyme-${{ matrix.release_name }}.tar.gz > enzyme-${{ matrix.release_name }}.tar.gz.sha256
 
+      - name: Create MCPB bundle
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          MCPB_DIR="mcpb-staging"
+          MCPB_FILE="enzyme-mcp-${VERSION}-${{ matrix.release_name }}.mcpb"
+
+          mkdir -p "$MCPB_DIR"
+          cp target/${{ matrix.target }}/release/enzyme "$MCPB_DIR/"
+          chmod +x "$MCPB_DIR/enzyme"
+
+          # Determine platform for manifest
+          case "${{ matrix.release_name }}" in
+            macos-arm64)   PLATFORMS='["darwin"]' ;;
+            linux-x86_64)  PLATFORMS='["linux"]' ;;
+            linux-arm64)   PLATFORMS='["linux"]' ;;
+          esac
+
+          cat > "$MCPB_DIR/manifest.json" << EOF
+          {
+            "manifest_version": "0.3",
+            "name": "enzyme",
+            "display_name": "Enzyme",
+            "version": "${VERSION}",
+            "description": "Semantic search and pattern discovery for Obsidian vaults. Surface connections by concept, not keyword.",
+            "keywords": ["obsidian", "markdown", "vault", "semantic search", "knowledge base", "PKM", "notes"],
+            "author": {
+              "name": "Joshua Pham",
+              "url": "https://github.com/jshph"
+            },
+            "homepage": "https://enzyme.garden",
+            "documentation": "https://enzyme.garden/setup",
+            "repository": {
+              "type": "github",
+              "url": "https://github.com/jshph/enzyme"
+            },
+            "license": "MIT",
+            "server": {
+              "type": "binary",
+              "entry_point": "enzyme",
+              "mcp_config": {
+                "command": "\${__dirname}/enzyme",
+                "args": ["mcp"],
+                "env": {
+                  "ENZYME_VAULT_PATH": "\${user_config.vault_path}"
+                }
+              }
+            },
+            "user_config": {
+              "vault_path": {
+                "type": "directory",
+                "title": "Vault Path",
+                "description": "Path to your Obsidian/Markdown vault directory (leave empty to use current directory)",
+                "required": false
+              }
+            },
+            "tools_generated": true,
+            "compatibility": {
+              "platforms": ${PLATFORMS}
+            }
+          }
+          EOF
+          # Remove leading whitespace from heredoc
+          sed -i.bak 's/^          //' "$MCPB_DIR/manifest.json" && rm -f "$MCPB_DIR/manifest.json.bak"
+
+          cd "$MCPB_DIR"
+          zip -r "../$MCPB_FILE" .
+          cd ..
+          shasum -a 256 "$MCPB_FILE" > "$MCPB_FILE.sha256"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,6 +129,8 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz
             target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz.sha256
+            enzyme-mcp-*-${{ matrix.release_name }}.mcpb
+            enzyme-mcp-*-${{ matrix.release_name }}.mcpb.sha256
 
   publish:
     needs: build
@@ -82,12 +153,68 @@ jobs:
             --dir model-files \
             || echo "Warning: could not download model files from previous release (expected on first release)"
 
+      - name: Generate server.json for MCP Registry
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGES=""
+
+          add_package() {
+            local MCPB_FILE="$1"
+            if [ ! -f "$MCPB_FILE" ]; then return; fi
+            local SHA256=$(sha256sum "$MCPB_FILE" | cut -d' ' -f1)
+            if [ -n "$PACKAGES" ]; then PACKAGES="${PACKAGES},"; fi
+            PACKAGES="${PACKAGES}{
+                \"registryType\": \"mcpb\",
+                \"identifier\": \"https://github.com/jshph/enzyme/releases/download/v${VERSION}/$(basename "$MCPB_FILE")\",
+                \"fileSha256\": \"${SHA256}\",
+                \"transport\": { \"type\": \"stdio\" },
+                \"environmentVariables\": [
+                  {
+                    \"name\": \"ENZYME_VAULT_PATH\",
+                    \"description\": \"Path to your Obsidian/Markdown vault directory\",
+                    \"isRequired\": false,
+                    \"format\": \"string\",
+                    \"isSecret\": false
+                  }
+                ]
+              }"
+          }
+
+          add_package "$(find artifacts -name "enzyme-mcp-*-macos-arm64.mcpb" | head -1)"
+          add_package "$(find artifacts -name "enzyme-mcp-*-linux-x86_64.mcpb" | head -1)"
+          add_package "$(find artifacts -name "enzyme-mcp-*-linux-arm64.mcpb" | head -1)"
+
+          if [ -n "$PACKAGES" ]; then
+            cat > artifacts/server.json << EOF
+          {
+            "\$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+            "name": "io.github.jshph/enzyme",
+            "title": "Enzyme",
+            "description": "Semantic search and pattern discovery for Obsidian vaults. Surface connections by concept, not keyword.",
+            "version": "${VERSION}",
+            "websiteUrl": "https://enzyme.garden",
+            "repository": {
+              "url": "https://github.com/jshph/enzyme",
+              "source": "github"
+            },
+            "packages": [
+              ${PACKAGES}
+            ]
+          }
+          EOF
+            sed -i 's/^          //' artifacts/server.json
+            echo "Generated server.json:"
+            cat artifacts/server.json
+          else
+            echo "Warning: No MCPB files found, skipping server.json generation"
+          fi
+
       - name: Create release on public repo
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256')
+          files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256' -o -name '*.mcpb' -o -name 'server.json')
 
           # Include model files if available
           model_files=""
@@ -146,6 +273,16 @@ jobs:
           # Ensure executability
           chmod +x plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64 plugin/bin/enzyme-linux-arm64
 
+      - name: Download server.json from release
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release download "$tag" --repo "$RELEASE_REPO" \
+            --pattern 'server.json' \
+            --dir . \
+            || echo "Warning: server.json not found in release"
+
       - name: Sync plugin files to public repo
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
@@ -158,7 +295,11 @@ jobs:
           rsync -av --delete \
             --exclude '.git' \
             --exclude '.claude-plugin' \
+            --exclude 'server.json' \
             ../plugin/ ./
+
+          # Copy server.json to repo root for MCP Registry discovery
+          [ -f ../server.json ] && cp ../server.json ./server.json
 
           version="${tag#v}"
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" .claude-plugin/plugin.json
@@ -172,6 +313,65 @@ jobs:
           else
             git commit -m "Sync plugin files from enzyme-rust ${tag}"
             git push origin main
+          fi
+
+  sync-skill:
+    needs: publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Download model files from release
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p model-files
+          gh release download "$tag" --repo "$RELEASE_REPO" \
+            --pattern 'model.onnx' \
+            --pattern 'tokenizer.json' \
+            --dir model-files
+
+      - name: Update enzyme-skill repo
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          git lfs install
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
+          cd skill-repo
+
+          mkdir -p enzyme/bin enzyme/models tmp-bin
+
+          # Extract platform binaries
+          for platform in macos-arm64 linux-arm64 linux-x86_64; do
+            tar xzf "../artifacts/enzyme-${platform}/enzyme-${platform}.tar.gz" -C tmp-bin
+            mv tmp-bin/enzyme "enzyme/bin/enzyme-${platform}"
+            chmod +x "enzyme/bin/enzyme-${platform}"
+          done
+          rm -rf tmp-bin
+
+          # Copy model files
+          cp ../model-files/model.onnx enzyme/models/
+          cp ../model-files/tokenizer.json enzyme/models/
+
+          # Update version in SKILL.md metadata
+          sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" enzyme/SKILL.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No skill changes to sync"
+          else
+            git commit -m "Update binaries and model to ${version}"
+            git push origin master
           fi
 
   update-homebrew:
