@@ -59,6 +59,21 @@ pub fn extract_entities(
     // and numeric-only tags (footnote numbers, heading numbers)
     tag_set.retain(|t| !t.starts_with("readwise/") && !is_numeric_only(t));
 
+    // Expand hierarchical tags into parent components.
+    // e.g., "type/book" → also indexes "type"
+    //        "projects/rust/enzyme" → also indexes "projects" and "projects/rust"
+    let expanded: Vec<String> = tag_set
+        .iter()
+        .filter(|t| t.contains('/'))
+        .flat_map(|t| {
+            let segments: Vec<&str> = t.split('/').collect();
+            (1..segments.len()).map(move |i| segments[..i].join("/"))
+        })
+        .collect();
+    for parent in expanded {
+        tag_set.insert(parent);
+    }
+
     let mut tags: Vec<String> = tag_set.into_iter().collect();
     tags.sort();
 
@@ -271,6 +286,30 @@ mod tests {
         let entities = extract_entities(content, &PathBuf::from("note.md"), &[]);
 
         assert!(entities.tags.contains(&"projects/rust/enzyme".to_string()));
+        // Hierarchical expansion: parent components are also indexed
+        assert!(entities.tags.contains(&"projects".to_string()));
+        assert!(entities.tags.contains(&"projects/rust".to_string()));
+    }
+
+    #[test]
+    fn test_hierarchical_tag_expansion_frontmatter() {
+        let frontmatter_tags = vec!["type/book".to_string()];
+        let entities = extract_entities("content", &PathBuf::from("note.md"), &frontmatter_tags);
+
+        assert!(entities.tags.contains(&"type/book".to_string()));
+        assert!(entities.tags.contains(&"type".to_string()));
+    }
+
+    #[test]
+    fn test_hierarchical_expansion_no_duplicates() {
+        // If parent tag already exists explicitly, no duplication
+        let content = "#type #type/book";
+        let entities = extract_entities(content, &PathBuf::from("note.md"), &[]);
+
+        assert!(entities.tags.contains(&"type".to_string()));
+        assert!(entities.tags.contains(&"type/book".to_string()));
+        let type_count = entities.tags.iter().filter(|t| *t == "type").count();
+        assert_eq!(type_count, 1);
     }
 
     #[test]
