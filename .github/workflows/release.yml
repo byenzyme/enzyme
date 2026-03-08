@@ -122,13 +122,19 @@ jobs:
           cd ..
           shasum -a 256 "$MCPB_FILE" > "$MCPB_FILE.sha256"
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: enzyme-${{ matrix.release_name }}
           path: |
             target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz
             target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz.sha256
+
+      - name: Upload MCPB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: enzyme-mcpb-${{ matrix.release_name }}
+          path: |
             enzyme-mcp-*-${{ matrix.release_name }}.mcpb
             enzyme-mcp-*-${{ matrix.release_name }}.mcpb.sha256
 
