@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh ${CLAUDE_PLUGIN_ROOT}/bin/setup.sh 2>/dev/null; enzyme --version >/dev/null 2>&1 || echo 'enzyme: setup failed — see https://github.com/jshph/enzyme/releases' >&2"
+            "command": "sh ${CLAUDE_PLUGIN_ROOT}/bin/setup.sh 2>/dev/null; enzyme --version >/dev/null 2>&1 || echo 'enzyme: setup failed — see https://github.com/jshph/enzyme/releases' >&2; enzyme refresh --quiet >/dev/null 2>&1 || true"
           }
         ]
       }

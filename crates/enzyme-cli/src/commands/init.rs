@@ -487,11 +487,15 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         "fast refresh: indexing complete"
     );
 
-    // ── Step 2: Embed only docs indexed in this run ─────────────────────
+    // ── Step 2: Warm the embedding daemon & embed changed docs ──────────
+    // Always call get_embedding_service so the daemon stays warm across
+    // invocations (avoids ~650ms cold-start on the first `catalyze` call).
+    let svc = get_embedding_service(&paths.home).ok();
+
     let has_changes = idx_stats.files_new > 0 || idx_stats.files_updated > 0 || idx_stats.files_deleted > 0;
     let emb_produced = if has_changes {
-        match get_embedding_service(&paths.home) {
-            Ok(svc) => {
+        match svc {
+            Some(svc) => {
                 let pipeline = EmbeddingPipeline::new(&db, svc, paths.embeddings_dir.clone());
                 match pipeline.run_since(index_start_ms, |_, _| {}) {
                     Ok(stats) => {
@@ -504,7 +508,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
                     }
                 }
             }
-            Err(_) => false,
+            None => false,
         }
     } else {
         false
