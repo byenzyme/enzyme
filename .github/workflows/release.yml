@@ -76,7 +76,7 @@ jobs:
             "name": "enzyme",
             "display_name": "Enzyme",
             "version": "${VERSION}",
-            "description": "Semantic search and pattern discovery for Obsidian vaults. Surface connections by concept, not keyword.",
+            "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
             "keywords": ["obsidian", "markdown", "vault", "semantic search", "knowledge base", "PKM", "notes"],
             "author": {
               "name": "Joshua Pham",
@@ -196,7 +196,7 @@ jobs:
             "\$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
             "name": "io.github.jshph/enzyme",
             "title": "Enzyme",
-            "description": "Semantic search and pattern discovery for Obsidian vaults. Surface connections by concept, not keyword.",
+            "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
             "version": "${VERSION}",
             "websiteUrl": "https://enzyme.garden",
             "repository": {
