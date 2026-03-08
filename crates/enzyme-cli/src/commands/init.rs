@@ -76,6 +76,7 @@ impl InitResult {
 pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
+    let is_first_init = !paths.vault_db.exists();
 
     // Check for existing enzyme data and offer hard reset
     if !quiet && atty::is(atty::Stream::Stdin) {
@@ -392,6 +393,29 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
     // Wait for display thread to finish rendering
     display.finish();
+
+    // Show bonsai waitlist CTA on first interactive init
+    if !quiet && is_first_init {
+        eprintln!();
+        eprintln!(
+            "  {}Enzyme just planted your vault with a default guide.{}",
+            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::ResetColor,
+        );
+        eprintln!(
+            "  {}A bonsai guide is shaped to your vault — sharper catalysts, better questions.{}",
+            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::ResetColor,
+        );
+        eprintln!(
+            "  {}enzyme.garden/bonsai{} {}— join the waitlist{}",
+            crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
+            crossterm::style::ResetColor,
+            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::ResetColor,
+        );
+        eprintln!();
+    }
 
     if quiet {
         Ok(Some(InitResult {
