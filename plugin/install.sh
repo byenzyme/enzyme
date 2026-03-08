@@ -119,7 +119,17 @@ echo "Downloading embedding model (~52 MB)..."
 echo ""
 echo "Next steps:"
 echo "  cd /path/to/vault && enzyme init    # initialize your vault"
-echo ""
-echo "Add the Claude Code plugin:"
-echo "  claude plugin marketplace add jshph/enzyme"
-echo "  claude plugin install enzyme"
+
+# Install Claude Code plugin if claude is available
+if command -v claude &>/dev/null; then
+    echo ""
+    echo "Installing Claude Code plugin..."
+    claude plugin marketplace add jshph/enzyme 2>/dev/null || true
+    claude plugin install enzyme 2>/dev/null || true
+    echo "Plugin installed. Use /enzyme in Claude Code to explore your vault."
+else
+    echo ""
+    echo "Add the Claude Code plugin:"
+    echo "  claude plugin marketplace add jshph/enzyme"
+    echo "  claude plugin install enzyme"
+fi
