@@ -71,6 +71,9 @@ vocabulary drawn from the excerpts.",
     examples: &[
         "What passage contradicts the conclusion drawn about craft?",
         "Where does the tension between visibility and hiddenness remain unresolved?",
+        "When does the impulse to capture become a substitute for the thing it captures?",
+        "How does the language of provision mask what's actually being withheld?",
+        "In what ways has the pursuit of legibility foreclosed the possibilities of ambiguity?",
     ],
 };
 

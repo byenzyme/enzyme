@@ -268,13 +268,9 @@ directly. Let this inform the angle of your questions without constraining them.
     prompt.push_str(&format!(
         "\n\n\
 Attend to the excerpts and:\n\
-1. For EACH catalyst: First ground in specific excerpts — what does {entity_name} mean in THIS vault based on what you're reading? Quote a phrase. Do NOT default to generic definitions.\n\
-2. {periphery_instruction}\n\
-3. {format_instruction}\n\
-4. Create precise topic names (3-5 words, lowercase, space-separated) capturing each inquiry. Examples: \"craft negotiation perfection\", \"enzyme validation authenticity\", \"tools reveal conceal needs\", \"physical knowledge embodiment\", \"ai human voice missions\"\n\
-5. Write a starterPrompt: a single 10-20 word question that surfaces a pattern or tension the user hasn't noticed. \
-It should name something the user is doing (saving, returning to, avoiding), not just list topics. \
-Avoid \"connect\", \"intersect\", \"relate\", \"explore\". Use direct, personal phrasing.\n\n\
+1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
+2. {format_instruction}\n\
+3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\"). For starterPrompt: a single 10-20 word question naming something the user is doing (saving, returning to, avoiding) — no \"connect\", \"intersect\", \"relate\", \"explore\".\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -305,8 +301,8 @@ fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'s
         ),
         // "question" and any fallback
         _ => (
-            "Then probe the PERIPHERY of that grounded meaning — don't ask about the concept directly. Ask about what surrounds it, what it's in friction with, what tensions touch it, what it enables or forecloses.",
-            "Each catalyst must be a single impersonal retrieval question that invites philosophical wonder and can surface resonant passages anywhere in the archive. Keep every catalyst to one sentence and avoid second-person framing.",
+            "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.",
+            "Each catalyst must be a single impersonal retrieval question that invites philosophical wonder and can surface resonant passages anywhere in the archive. Keep every catalyst to one sentence and avoid second-person framing. IMPORTANT: Vary your sentence openings — do NOT start multiple catalysts with the same word (e.g., don't start 3 catalysts with \"What\").",
             "Ideological retrieval question",
         ),
     }

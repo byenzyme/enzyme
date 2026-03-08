@@ -184,8 +184,12 @@ impl InitDisplay {
         let (tx, rx) = mpsc::channel();
 
         let handle = std::thread::spawn(move || {
-            // Drain events silently until the channel closes
-            while rx.recv().is_ok() {}
+            // Drain events silently until Done or channel close
+            while let Ok(event) = rx.recv() {
+                if matches!(event, DisplayEvent::Done { .. }) {
+                    return;
+                }
+            }
         });
 
         Self {
