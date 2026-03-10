@@ -1,19 +1,27 @@
-# Enzyme
+<div align="center">
 
-Local-first knowledge indexing — explore your Obsidian vault by concept, not keyword.
+# 🧬 Enzyme
+
+**Local-first knowledge indexing — explore your Obsidian vault by concept, not keyword.**
+
+[![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
+[![License](https://img.shields.io/github/license/jshph/enzyme?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/jshph/enzyme?style=flat-square)](https://github.com/jshph/enzyme/releases/latest)
+
+[Website](https://enzyme.garden) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
+
+</div>
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
-enzyme setup
 ```
 
 On macOS you can also use Homebrew:
 
 ```bash
 brew install jshph/enzyme/enzyme-cli
-enzyme setup
 ```
 
 Then add the Claude Code plugin:
@@ -53,4 +61,3 @@ A search for "feeling stuck on the project" finds notes about creative blocks, m
 ## Links
 
 - [enzyme.garden](https://enzyme.garden)
-- [enzyme-rust](https://github.com/jshph/enzyme-rust) — source code
