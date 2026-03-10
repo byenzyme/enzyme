@@ -1,6 +1,6 @@
 # Enzyme
 
-Local-first knowledge indexing for Obsidian vaults. Generates semantic handles ("catalysts") that match the way you think, not just the words you used.
+An LSP for your ideas — gives Claude structural understanding of your Obsidian vault so it thinks with you instead of guessing.
 
 ## Why not just point Claude at a vault?
 
