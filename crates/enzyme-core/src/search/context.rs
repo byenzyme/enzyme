@@ -112,14 +112,15 @@ impl<'a> ContextSearch<'a> {
             }
         };
 
-        // Find top relevant catalysts (top 8)
+        // Find top relevant catalysts (top 10 — over-retrieve for better coverage)
+        let max_catalysts = 10usize;
         let mut cat_sims: Vec<(usize, f32)> = cat_embeddings
             .iter()
             .enumerate()
             .map(|(i, vec)| (i, Embedding::cosine_similarity(&query_vec, vec)))
             .collect();
         cat_sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        cat_sims.truncate(8);
+        cat_sims.truncate(max_catalysts);
 
         // Build catalyst metadata lookup for the top catalysts
         let catalyst_meta: HashMap<String, (&str, &str, f64)> = cat_sims
@@ -131,28 +132,34 @@ impl<'a> ContextSearch<'a> {
             .collect();
 
         // For each relevant catalyst, get pre-computed chunk similarities.
-        // Track per-chunk: (max_similarity, catalyst_count, best_catalyst_id)
+        // Weight each chunk's similarity by how relevant its catalyst is to the query.
+        // Track per-chunk: (max weighted score, catalyst_count, best_catalyst_id)
         struct ChunkScore {
-            max_similarity: f64,
+            max_weighted_score: f64,
             catalyst_count: usize,
             best_catalyst_id: String,
         }
 
         let mut chunk_scores: HashMap<String, ChunkScore> = HashMap::new();
+        let context_per_catalyst = (limit * 3 / max_catalysts.max(1)).max(10);
 
-        for (cat_idx, _cat_sim) in &cat_sims {
+        for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
-            let sims = self.repo.get_similarities_for_catalyst(&catalyst.id, 50)?;
+            let relevance = *cat_sim as f64;
+            let sims = self
+                .repo
+                .get_similarities_for_catalyst(&catalyst.id, context_per_catalyst)?;
 
             for sim in &sims {
                 let key = format!("{}:{}", sim.file_path, sim.chunk_index);
+                let weighted_score = sim.similarity * relevance;
                 let entry = chunk_scores.entry(key).or_insert(ChunkScore {
-                    max_similarity: 0.0,
+                    max_weighted_score: 0.0,
                     catalyst_count: 0,
                     best_catalyst_id: String::new(),
                 });
-                if sim.similarity > entry.max_similarity {
-                    entry.max_similarity = sim.similarity;
+                if weighted_score > entry.max_weighted_score {
+                    entry.max_weighted_score = weighted_score;
                     entry.best_catalyst_id = catalyst.id.clone();
                 }
                 entry.catalyst_count += 1;
@@ -192,7 +199,7 @@ impl<'a> ContextSearch<'a> {
             scored.push(ScoredChunk {
                 file_path,
                 chunk_index,
-                score: cs.max_similarity * multi_boost * recency_boost,
+                score: cs.max_weighted_score * multi_boost * recency_boost,
                 best_catalyst_id: cs.best_catalyst_id.clone(),
                 content: String::new(), // filled below
             });
