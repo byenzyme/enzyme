@@ -167,6 +167,66 @@ pub struct JsonSchemaSpec {
     pub strict: bool,
 }
 
+/// What level of structured output a provider supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredOutputSupport {
+    /// Full `json_schema` with strict mode (OpenAI, OpenRouter, LM Studio, Venice, vLLM).
+    JsonSchema,
+    /// `json_object` only — valid JSON but no shape guarantee (fallback).
+    JsonObject,
+    /// No `response_format` support — rely on prompt instructions + parse fallback.
+    None,
+}
+
+impl StructuredOutputSupport {
+    /// Detect the best structured output mode from a base URL.
+    pub fn detect(base_url: &str) -> Self {
+        let url = base_url.to_lowercase();
+
+        // Providers with full json_schema support
+        if url.contains("openrouter.ai")
+            || url.contains("api.openai.com")
+            || url.contains("api.venice.ai")
+        {
+            return Self::JsonSchema;
+        }
+
+        // LM Studio only supports json_schema (rejects json_object)
+        if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0") {
+            // Local servers: LM Studio, vLLM, llama.cpp, Ollama all support
+            // json_schema to varying degrees. json_schema is the safest common
+            // denominator — LM Studio rejects json_object, and llama.cpp/Ollama
+            // handle json_schema more reliably than json_object.
+            return Self::JsonSchema;
+        }
+
+        // Unknown provider — try json_schema, parsing fallback catches failures
+        Self::JsonSchema
+    }
+
+    /// Build the appropriate `ResponseFormat` for this provider's capabilities.
+    ///
+    /// If a schema is provided and the provider supports it, uses `json_schema`.
+    /// Otherwise falls back to `json_object` or `None`.
+    pub fn build_response_format(
+        &self,
+        schema_name: &str,
+        schema: serde_json::Value,
+    ) -> Option<ResponseFormat> {
+        match self {
+            Self::JsonSchema => Some(ResponseFormat::JsonSchema {
+                json_schema: JsonSchemaSpec {
+                    name: schema_name.to_string(),
+                    schema,
+                    strict: true,
+                },
+            }),
+            Self::JsonObject => Some(ResponseFormat::JsonObject),
+            Self::None => None,
+        }
+    }
+}
+
 impl Default for GenerationParams {
     fn default() -> Self {
         Self {
@@ -258,6 +318,11 @@ impl LlmClient {
         self.base_url.contains("openrouter.ai")
     }
 
+    /// Detect structured output support for this client's provider.
+    pub fn structured_output_support(&self) -> StructuredOutputSupport {
+        StructuredOutputSupport::detect(&self.base_url)
+    }
+
     pub async fn chat_completion(
         &self,
         model: &str,
@@ -266,14 +331,6 @@ impl LlmClient {
     ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        // Local/non-OpenRouter servers often don't support response_format: json_object.
-        // The prompts already request JSON output, so we can safely drop this hint.
-        let response_format = if self.is_openrouter() {
-            params.response_format
-        } else {
-            None
-        };
-
         let request_body = ChatCompletionRequest {
             model: model.to_string(),
             messages,
@@ -281,7 +338,7 @@ impl LlmClient {
             temperature: params.temperature,
             top_p: params.top_p,
             top_k: params.top_k,
-            response_format,
+            response_format: params.response_format,
             stream: None,
         };
 
@@ -341,12 +398,6 @@ impl LlmClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response_format = if self.is_openrouter() {
-            params.response_format
-        } else {
-            None
-        };
-
         let request_body = ChatCompletionRequest {
             model: model.to_string(),
             messages,
@@ -354,7 +405,7 @@ impl LlmClient {
             temperature: params.temperature,
             top_p: params.top_p,
             top_k: params.top_k,
-            response_format,
+            response_format: params.response_format,
             stream: Some(true),
         };
 

@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_api_config, ResponseFormat};
+// Note: steer doesn't have a strict schema — response is parsed as generic JSON Value.
+// We use JsonObject here since we just need valid JSON, not a specific shape.
 
 use crate::prompts;
 use crate::AppState;

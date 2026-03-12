@@ -6,7 +6,8 @@ use tracing::{debug, info};
 use crate::db::Database;
 use crate::llm::{
     build_selection_system_prompt, build_selection_user_prompt, parse_selection_response,
-    GenerationParams, LlmClient, ResponseFormat, SelectionResponse,
+    selection_json_schema,
+    GenerationParams, LlmClient, SelectionResponse,
 };
 use crate::models::Entity;
 use crate::pipeline::context::ContextBuilder;
@@ -51,9 +52,12 @@ impl<'a> LlmSelectionPipeline<'a> {
 
         // Call LLM — selection responses are larger than catalyst responses,
         // so we need more tokens than the default 1024.
+        let structured_output = self.llm.structured_output_support();
+        let response_format = structured_output
+            .build_response_format("selection_response", selection_json_schema());
         let params = GenerationParams {
             max_tokens: 4096,
-            response_format: Some(ResponseFormat::JsonObject),
+            response_format,
             ..GenerationParams::default()
         };
 

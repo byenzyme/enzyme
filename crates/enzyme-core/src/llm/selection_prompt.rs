@@ -36,6 +36,49 @@ pub struct ExpandableFolder {
     pub profile: Option<String>,
 }
 
+/// JSON Schema for the `SelectionResponse` response type.
+///
+/// Used with `response_format: json_schema` for strict schema enforcement.
+pub fn selection_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "catalyzedEntities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entityRef": { "type": "string" },
+                        "profile": { "type": "string" }
+                    },
+                    "required": ["entityRef"],
+                    "additionalProperties": false
+                }
+            },
+            "catalystProfile": { "type": "string" },
+            "guideSignal": { "type": "string" },
+            "expandableFolders": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "folderRef": { "type": "string" },
+                        "children": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "profile": { "type": "string" }
+                    },
+                    "required": ["folderRef", "children"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["catalyzedEntities"],
+        "additionalProperties": false
+    })
+}
+
 // ---------------------------------------------------------------------------
 // System prompt
 // ---------------------------------------------------------------------------

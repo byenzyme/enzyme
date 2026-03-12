@@ -29,6 +29,30 @@ struct CatalystPayload {
     starter_prompt: Option<String>,
 }
 
+/// JSON Schema for the `CatalystPayload` response type.
+///
+/// Used with `response_format: json_schema` for strict schema enforcement.
+pub fn catalyst_json_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "catalysts": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "topicNames": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "starterPrompt": {
+                "type": "string"
+            }
+        },
+        "required": ["catalysts", "topicNames", "starterPrompt"],
+        "additionalProperties": false
+    })
+}
+
 // ---------------------------------------------------------------------------
 // System prompt (built once, cached across entities)
 // ---------------------------------------------------------------------------

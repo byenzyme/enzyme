@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::config::CustomProfileGuidance;
 use crate::db::{Database, Repository};
 use crate::llm::{
-    LlmClient, GenerationParams, ResponseFormat,
+    LlmClient, GenerationParams,
     build_system_prompt, build_user_prompt, parse_catalyst_response,
+    catalyst_json_schema,
     get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
     DEFAULT_MODEL,
 };
@@ -228,10 +229,15 @@ impl<'a> CatalystPipeline<'a> {
         // Phase 2: Fire LLM calls with bounded concurrency
         // Local models (non-OpenRouter) typically serve one request at a time,
         // so we limit concurrency to avoid queueing and timeouts.
-        let is_local = !self.llm.is_openrouter();
-        let concurrency = if is_local { 1 } else { 26 };
+        let is_remote = self.llm.is_openrouter();
+        let concurrency = if is_remote { 26 } else { 1 };
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs = if is_local { 300 } else { 60 };
+        let entity_timeout_secs: u64 = if is_remote { 60 } else { 300 };
+
+        // Build the response_format once based on provider capabilities
+        let structured_output = self.llm.structured_output_support();
+        let response_format = structured_output
+            .build_response_format("catalyst_response", catalyst_json_schema());
 
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
@@ -247,6 +253,7 @@ impl<'a> CatalystPipeline<'a> {
             let system_prompt = Arc::clone(&system_prompt);
             let model = model.clone();
             let sem = Arc::clone(&semaphore);
+            let response_format = response_format.clone();
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
@@ -255,7 +262,7 @@ impl<'a> CatalystPipeline<'a> {
                 let entity_timeout = std::time::Duration::from_secs(entity_timeout_secs);
                 let result = tokio::time::timeout(entity_timeout, async {
                     let params = GenerationParams {
-                        response_format: Some(ResponseFormat::JsonObject),
+                        response_format,
                         ..GenerationParams::default()
                     };
 
