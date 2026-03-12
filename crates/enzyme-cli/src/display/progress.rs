@@ -23,6 +23,13 @@ use super::tree;
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum DisplayEvent {
+    // API config
+    ApiConfig {
+        base_url: String,
+        model: String,
+        masked_key: String,
+    },
+
     // Indexing
     IndexingStart,
     IndexingProgress(String),
@@ -267,6 +274,17 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             stored_starter_prompt: &mut Option<String>|
      -> bool {
         match event {
+            DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+                let _ = writeln!(
+                    out,
+                    "  {}LLM:{} {} @ {} (key: {})",
+                    crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                    crossterm::style::ResetColor,
+                    model,
+                    base_url,
+                    masked_key,
+                );
+            }
             DisplayEvent::IndexingStart => {
                 *stage = DisplayStage::Indexing;
             }
@@ -697,6 +715,9 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
     loop {
         match rx.recv() {
             Ok(event) => match event {
+                DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+                    println!("  LLM: {} @ {} (key: {})", model, base_url, masked_key);
+                }
                 DisplayEvent::IndexingStart => {
                     println!("Indexing vault...");
                 }

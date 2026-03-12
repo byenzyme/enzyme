@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use chrono::{Datelike, Utc};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{info, debug};
 use uuid::Uuid;
@@ -224,7 +225,14 @@ impl<'a> CatalystPipeline<'a> {
             });
         }
 
-        // Phase 2: Fire all LLM calls concurrently
+        // Phase 2: Fire LLM calls with bounded concurrency
+        // Local models (non-OpenRouter) typically serve one request at a time,
+        // so we limit concurrency to avoid queueing and timeouts.
+        let is_local = !self.llm.is_openrouter();
+        let concurrency = if is_local { 1 } else { 26 };
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let entity_timeout_secs = if is_local { 300 } else { 60 };
+
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
@@ -238,12 +246,13 @@ impl<'a> CatalystPipeline<'a> {
             let llm = Arc::clone(&llm);
             let system_prompt = Arc::clone(&system_prompt);
             let model = model.clone();
+            let sem = Arc::clone(&semaphore);
             join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
 
-                // 60s total timeout per entity (covers retries + backoff)
-                let entity_timeout = std::time::Duration::from_secs(60);
+                let entity_timeout = std::time::Duration::from_secs(entity_timeout_secs);
                 let result = tokio::time::timeout(entity_timeout, async {
                     let params = GenerationParams {
                         response_format: Some(ResponseFormat::JsonObject),
@@ -292,13 +301,13 @@ impl<'a> CatalystPipeline<'a> {
                         };
                     }
                     Err(_) => {
-                        debug!(entity_name = entity_name.as_str(), "entity timed out after 60s");
+                        debug!(entity_name = entity_name.as_str(), timeout_secs = entity_timeout_secs, "entity timed out");
                         return EntityResult {
                             entity_name,
                             entity_type,
                             catalysts: None,
                             starter_prompt: None,
-                            error: Some("timed out after 60s".to_string()),
+                            error: Some(format!("timed out after {}s", entity_timeout_secs)),
                         };
                     }
                 };

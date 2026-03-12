@@ -28,6 +28,19 @@ pub struct ResolvedConfig {
     pub provider: ConfigProvider,
 }
 
+impl ResolvedConfig {
+    /// Format a masked display of the API key (e.g. `sk-••••••••abcd`).
+    pub fn masked_api_key(&self) -> String {
+        let key = &self.api_key;
+        if key.len() <= 4 {
+            "••••".to_string()
+        } else {
+            let visible = &key[key.len() - 4..];
+            format!("{}••••{}", &key[..3.min(key.len())], visible)
+        }
+    }
+}
+
 /// Shape of the JSON returned by the free-config endpoint.
 #[derive(Deserialize)]
 struct FreeConfigResponse {
@@ -253,6 +266,14 @@ impl LlmClient {
     ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
 
+        // Local/non-OpenRouter servers often don't support response_format: json_object.
+        // The prompts already request JSON output, so we can safely drop this hint.
+        let response_format = if self.is_openrouter() {
+            params.response_format
+        } else {
+            None
+        };
+
         let request_body = ChatCompletionRequest {
             model: model.to_string(),
             messages,
@@ -260,7 +281,7 @@ impl LlmClient {
             temperature: params.temperature,
             top_p: params.top_p,
             top_k: params.top_k,
-            response_format: params.response_format,
+            response_format,
             stream: None,
         };
 
@@ -320,6 +341,12 @@ impl LlmClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let url = format!("{}/chat/completions", self.base_url);
 
+        let response_format = if self.is_openrouter() {
+            params.response_format
+        } else {
+            None
+        };
+
         let request_body = ChatCompletionRequest {
             model: model.to_string(),
             messages,
@@ -327,7 +354,7 @@ impl LlmClient {
             temperature: params.temperature,
             top_p: params.top_p,
             top_k: params.top_k,
-            response_format: params.response_format,
+            response_format,
             stream: Some(true),
         };
 
@@ -456,25 +483,33 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 /// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
-/// 1. `OPENAI_API_KEY` env var + `OPENAI_BASE_URL` / `OPENAI_MODEL` (defaults to OpenRouter)
+/// 1. `OPENAI_API_KEY` + `OPENAI_BASE_URL` env vars (both required) + optional `OPENAI_MODEL`
 /// 2. `~/.enzyme/auth.json` → `{"api_key": "..."}`
 /// 3. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    // 1. OPENAI_API_KEY + optional OPENAI_BASE_URL / OPENAI_MODEL (primary)
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
-            let base_url = std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    // 1. OPENAI_API_KEY + OPENAI_BASE_URL (both must be set for env override)
+    let has_key = std::env::var("OPENAI_API_KEY").ok().filter(|v| !v.is_empty());
+    let has_url = std::env::var("OPENAI_BASE_URL").ok().filter(|v| !v.is_empty());
+
+    match (&has_key, &has_url) {
+        (Some(key), Some(base_url)) => {
             let model = std::env::var("OPENAI_MODEL")
                 .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
             debug!("Resolved API key from OPENAI_API_KEY (base_url={}, model={})", base_url, model);
             return Ok(ResolvedConfig {
-                api_key: key,
-                base_url,
+                api_key: key.clone(),
+                base_url: base_url.clone(),
                 model,
                 provider: ConfigProvider::OpenAiEnv,
             });
         }
+        (Some(_), None) => {
+            warn!("OPENAI_API_KEY is set but OPENAI_BASE_URL is not — ignoring partial env config");
+        }
+        (None, Some(_)) => {
+            warn!("OPENAI_BASE_URL is set but OPENAI_API_KEY is not — ignoring partial env config");
+        }
+        (None, None) => {}
     }
 
     // 2. Fall back to ~/.enzyme/auth.json

@@ -143,6 +143,17 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
 
+    // Show resolved LLM config when using env overrides
+    if let Some(ref cfg) = api_config {
+        if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::OpenAiEnv) {
+            tx.send(DisplayEvent::ApiConfig {
+                base_url: cfg.base_url.clone(),
+                model: cfg.model.clone(),
+                masked_key: cfg.masked_api_key(),
+            }).ok();
+        }
+    }
+
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     tx.send(DisplayEvent::IndexingStart).ok();
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
