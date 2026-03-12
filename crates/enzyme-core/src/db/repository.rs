@@ -931,6 +931,16 @@ impl<'a> Repository<'a> {
         Ok(rows)
     }
 
+    /// Get the set of entity names that have at least one catalyst.
+    pub fn get_catalyzed_entity_names(&self) -> Result<std::collections::HashSet<String>> {
+        let names = self.db.query_read(
+            "SELECT DISTINCT entity FROM catalysts",
+            &[],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(names.into_iter().collect())
+    }
+
     /// Get every catalyst in the database.
     pub fn get_all_catalysts(&self) -> Result<Vec<Catalyst>> {
         let rows = self.db.query_read(

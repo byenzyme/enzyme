@@ -19,12 +19,25 @@ pub fn build_petri_json(vault_path: &Path, top: usize) -> Result<serde_json::Val
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let prefs = config.parse_preferences();
 
-    let entities = repo.get_top_entities(top, "recency_score")?;
+    // Single query to get the set of entity names that have catalysts,
+    // then filter top entities against that set. Only fetch full catalyst
+    // records for the entities we'll actually display.
+    let catalyzed_names = repo.get_catalyzed_entity_names()?;
+    let candidates = repo.get_top_entities(top * 3, "recency_score")?;
+    let selected: Vec<_> = candidates
+        .into_iter()
+        .filter(|e| catalyzed_names.contains(&e.name))
+        .take(top)
+        .collect();
+    let mut entities: Vec<(enzyme_core::models::Entity, Vec<enzyme_core::models::Catalyst>)> = Vec::new();
+    for entity in selected {
+        let catalysts = repo.get_catalysts_for_entity(&entity.name)?;
+        entities.push((entity, catalysts));
+    }
 
     let mut entity_list = Vec::new();
 
-    for entity in &entities {
-        let catalysts = repo.get_catalysts_for_entity(&entity.name)?;
+    for (entity, catalysts) in &entities {
 
         let now = chrono::Utc::now().timestamp_millis();
         let last_seen = entity.last_seen.unwrap_or(0);
