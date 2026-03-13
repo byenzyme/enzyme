@@ -23,6 +23,8 @@ Use the Enzyme CLI for retrieving context from this vault. Run all commands from
 - `grep` — Exact tag, wikilink, or text matches (names, `#tags`, `[[links]]`)
 
 **Tag search:** Tags appear as `- tag` in frontmatter and `#tag` inline. Search without `#` to catch both.
+
+**Reading catalyze results:** Each contributing catalyst includes `presentation_guidance` — profile-specific instructions for how to frame the surfaced content. Follow these when presenting results: they describe how to open, what to notice, and what tone to use.
 <!-- enzyme:end -->"#;
 
 pub fn generate_claude_md(vault_path: &Path) -> Result<()> {

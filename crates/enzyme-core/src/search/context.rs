@@ -34,6 +34,28 @@ pub struct TopCatalyst {
     pub topic_name: Option<String>,
     pub relevance_score: f64,
     pub contribution_count: usize,
+    /// Profile-specific guidance for how to present this catalyst's results.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub presentation_guidance: Vec<String>,
+}
+
+impl CatalyzeResponse {
+    /// Enrich top contributing catalysts with profile-specific presentation guidance.
+    pub fn with_presentation_guidance(
+        mut self,
+        entity_profiles: &HashMap<String, String>,
+        default_profile: Option<&str>,
+    ) -> Self {
+        for catalyst in &mut self.top_contributing_catalysts {
+            catalyst.presentation_guidance =
+                crate::llm::presentation_guidance_for_entity(
+                    &catalyst.entity,
+                    entity_profiles,
+                    default_profile,
+                );
+        }
+        self
+    }
 }
 
 /// Catalyst-based search over pre-computed similarities.
@@ -272,6 +294,7 @@ impl<'a> ContextSearch<'a> {
                     topic_name: None,
                     relevance_score: (*relevance_score * 1000.0).round() / 1000.0,
                     contribution_count: count,
+                    presentation_guidance: Vec::new(),
                 })
             })
             .collect();

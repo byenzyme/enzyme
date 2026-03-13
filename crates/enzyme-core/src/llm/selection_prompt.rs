@@ -15,6 +15,9 @@ pub struct SelectionResponse {
     pub catalyst_profile: Option<String>,
     #[serde(default)]
     pub guide_signal: Option<String>,
+    // Future: add voice_signal here — a tonal description of how the user writes
+    // (sentence rhythm, certainty level, specificity, register). Extract from
+    // vault excerpts or user guide files passed as <user_voice> context.
     #[serde(default)]
     pub expandable_folders: Vec<ExpandableFolder>,
 }
@@ -49,14 +52,14 @@ pub fn selection_json_schema() -> serde_json::Value {
                     "type": "object",
                     "properties": {
                         "entityRef": { "type": "string" },
-                        "profile": { "type": "string" }
+                        "profile": { "type": ["string", "null"] }
                     },
-                    "required": ["entityRef"],
+                    "required": ["entityRef", "profile"],
                     "additionalProperties": false
                 }
             },
-            "catalystProfile": { "type": "string" },
-            "guideSignal": { "type": "string" },
+            "catalystProfile": { "type": ["string", "null"] },
+            "guideSignal": { "type": ["string", "null"] },
             "expandableFolders": {
                 "type": "array",
                 "items": {
@@ -67,14 +70,14 @@ pub fn selection_json_schema() -> serde_json::Value {
                             "type": "array",
                             "items": { "type": "string" }
                         },
-                        "profile": { "type": "string" }
+                        "profile": { "type": ["string", "null"] }
                     },
-                    "required": ["folderRef", "children"],
+                    "required": ["folderRef", "children", "profile"],
                     "additionalProperties": false
                 }
             }
         },
-        "required": ["catalyzedEntities"],
+        "required": ["catalyzedEntities", "catalystProfile", "guideSignal", "expandableFolders"],
         "additionalProperties": false
     })
 }

@@ -13,6 +13,7 @@ use rmcp::service::RequestContext;
 use rmcp::{prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 
+use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -126,6 +127,18 @@ impl EnzymeMcp {
         let response = search
             .catalyze_search(&p.query, limit)
             .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;
+
+        // Enrich with profile-specific presentation guidance
+        let enzyme_config = EnzymeConfig::load(&self.vault_path)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let prefs = enzyme_config.parse_preferences();
+        let response = response.with_presentation_guidance(
+            &prefs.entity_profiles,
+            enzyme_config.catalyst_profile.as_deref(),
+        );
+
         let text = serde_json::to_string_pretty(&response)
             .map_err(|e| McpError::internal_error(format!("json serialization failed: {e}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(text)]))

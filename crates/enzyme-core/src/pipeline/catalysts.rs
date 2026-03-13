@@ -30,8 +30,6 @@ pub struct CatalystStats {
     pub catalysts_generated: usize,
     pub errors: Vec<(String, String)>,
     pub duration_ms: u64,
-    /// The first starter prompt generated across all entity calls.
-    pub starter_prompt: Option<String>,
 }
 
 /// Configuration for a catalyst generation run.
@@ -121,7 +119,6 @@ struct EntityResult {
     entity_name: String,
     entity_type: String,
     catalysts: Option<Vec<(String, String)>>,
-    starter_prompt: Option<String>,
     error: Option<String>,
 }
 
@@ -146,7 +143,6 @@ impl<'a> CatalystPipeline<'a> {
             catalysts_generated: 0,
             errors: Vec::new(),
             duration_ms: 0,
-            starter_prompt: None,
         };
 
         let total = entities.len();
@@ -303,7 +299,6 @@ impl<'a> CatalystPipeline<'a> {
                             entity_name,
                             entity_type,
                             catalysts: None,
-                            starter_prompt: None,
                             error: Some(e.to_string()),
                         };
                     }
@@ -313,7 +308,6 @@ impl<'a> CatalystPipeline<'a> {
                             entity_name,
                             entity_type,
                             catalysts: None,
-                            starter_prompt: None,
                             error: Some(format!("timed out after {}s", entity_timeout_secs)),
                         };
                     }
@@ -331,7 +325,6 @@ impl<'a> CatalystPipeline<'a> {
                         entity_name,
                         entity_type,
                         catalysts: Some(parsed.pairs),
-                        starter_prompt: parsed.starter_prompt,
                         error: None,
                     },
                     Err(e) => {
@@ -345,7 +338,6 @@ impl<'a> CatalystPipeline<'a> {
                             entity_name,
                             entity_type,
                             catalysts: None,
-                            starter_prompt: None,
                             error: Some(format!("parse error: {e}")),
                         }
                     }
@@ -402,15 +394,6 @@ impl<'a> CatalystPipeline<'a> {
                         let count = catalysts.len();
                         self.repo.insert_catalysts(&catalysts)?;
                         stats.catalysts_generated += count;
-
-                        // Capture the first starter prompt we see
-                        if stats.starter_prompt.is_none() {
-                            if let Some(prompt) = entity_result.starter_prompt {
-                                if !prompt.is_empty() {
-                                    stats.starter_prompt = Some(prompt);
-                                }
-                            }
-                        }
 
                         on_event(CatalystEvent::EntityCompleted {
                             entity_name: entity_result.entity_name.clone(),

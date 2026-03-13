@@ -4,6 +4,7 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::json;
 
+use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -31,6 +32,14 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize) -> Resul
     let start = Instant::now();
     let response = search.catalyze_search(query, limit)?;
     let processing_time = start.elapsed().as_secs_f64();
+
+    // Enrich top catalysts with profile-specific presentation guidance
+    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let prefs = enzyme_config.parse_preferences();
+    let response = response.with_presentation_guidance(
+        &prefs.entity_profiles,
+        enzyme_config.catalyst_profile.as_deref(),
+    );
 
     let output = json!({
         "query": query,

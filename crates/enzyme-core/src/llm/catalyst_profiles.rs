@@ -19,7 +19,7 @@ pub struct CatalystProfile {
     pub sample_prompts: &'static [&'static str],
     pub footer: Option<&'static str>,
     pub detection_patterns: &'static [&'static str],
-    pub agent_guidance: &'static [&'static str],
+    pub presentation_guidance: &'static [&'static str],
 }
 
 pub struct CatalystFormat {
@@ -158,7 +158,7 @@ what they actually think.",
         "Folder patterns: ideas/, concepts/, thinking/, notes/",
         "Default choice when no other profile clearly matches",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with their words: 'You wrote...' then notice something small.",
         "After surfacing their words, notice something small—a word choice, a sentiment, a tension.",
         "Don't rush to make it legible. 'There's something about how X shows up here...' is better than 'So the pattern is Y.'",
@@ -194,7 +194,7 @@ collected information into personal implication.",
         "Content with clear external attribution",
         "Folder patterns: Readwise/, sources/, reading/, highlights/, clips/, library/",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with a highlight that seems to carry weight for them.",
         "Bridge immediately to their own words—'You saved this, and elsewhere you wrote...'",
         "Don't treat imports as authoritative. Probe whether this actually fits their thinking.",
@@ -230,7 +230,7 @@ users reflect on who matters and why.",
         "Reflection on relationship dynamics",
         "Folder patterns: people/, contacts/, relationships/, network/, CRM/",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with something specific—a recent interaction, a pattern you noticed.",
         "Don't flatten relationships to transactions. Probe for meaning and mutuality.",
         "Notice what's unsaid. Relationship notes often contain what someone won't say directly.",
@@ -266,7 +266,7 @@ might be avoiding.",
         "Content with deadlines, milestones, or deliverables",
         "Folder patterns: projects/, work/, meetings/, clients/, sprints/",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with what seems stuck or unresolved—not what's going well.",
         "Don't add to the task list. Surface what's already there but being ignored.",
         "Notice the gap between what's written and what's happening.",
@@ -302,7 +302,7 @@ gathering information to avoid deciding.",
         "Content about bets, risks, or resource allocation",
         "Folder patterns: decisions/, strategy/, planning/, bets/",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with the trade-off that seems most alive—not the whole decision tree.",
         "Don't help them analyze more. Surface what they already know but won't act on.",
         "Notice when the 'need more information' is actually 'don't want to decide.'",
@@ -338,7 +338,7 @@ something else—a piece of writing, a decision, a conversation.",
         "Personal narrative and life documentation",
         "Folder patterns: journal/, daily/, reflection/, writing/, drafts/, creative/",
     ],
-    agent_guidance: &[
+    presentation_guidance: &[
         "Open with a pattern you've noticed across entries—not just the latest one.",
         "Don't push toward production. Some writing is for processing, not publishing.",
         "Notice what's being written around—the thing that keeps almost surfacing.",
@@ -388,6 +388,28 @@ pub fn full_guidance_lines(profile: &CatalystProfile) -> Vec<&'static str> {
     let mut lines = CORE_CATALYST_GUIDANCE.to_vec();
     lines.extend_from_slice(profile.guidance_lines);
     lines
+}
+
+/// Look up presentation guidance for an entity based on its profile.
+///
+/// Resolution order: entity-specific profile override → vault-wide default → dialectical.
+pub fn presentation_guidance_for_entity(
+    entity_name: &str,
+    entity_profiles: &std::collections::HashMap<String, String>,
+    default_profile: Option<&str>,
+) -> Vec<String> {
+    let profile_key = entity_profiles
+        .get(entity_name)
+        .map(|s| s.as_str())
+        .or(default_profile)
+        .unwrap_or(DEFAULT_PROFILE_KEY);
+
+    get_profile(profile_key)
+        .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap())
+        .presentation_guidance
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 #[cfg(test)]
