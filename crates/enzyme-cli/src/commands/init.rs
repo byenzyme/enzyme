@@ -76,8 +76,6 @@ impl InitResult {
 pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    let is_first_init = !paths.vault_db.exists();
-
     // Check for existing enzyme data and offer hard reset
     if !quiet && atty::is(atty::Stream::Stdin) {
         let enzyme_dir = paths.vault_db.parent().map(|p| p.to_path_buf());
@@ -341,10 +339,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             catalysts_generated: stats.catalysts_generated,
         }).ok();
 
-        if let Some(ref prompt) = stats.starter_prompt {
-            tx.send(DisplayEvent::StarterPrompt(prompt.clone())).ok();
-        }
-
         Some(stats)
     } else {
         let msg = "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string();
@@ -405,24 +399,27 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // Wait for display thread to finish rendering
     display.finish();
 
-    // Show bonsai waitlist CTA on first interactive init
-    if !quiet && is_first_init {
+    // Show starter prompt and bonsai CTA on interactive init
+    if !quiet {
         eprintln!();
         eprintln!(
-            "  {}Enzyme just planted your vault with a default guide.{}",
-            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            "  {}Try:{} claude {}\"explore my vault and tell me what i'm not seeing\"{}",
+            crossterm::style::SetForegroundColor(crossterm::style::Color::White),
+            crossterm::style::ResetColor,
+            crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
             crossterm::style::ResetColor,
         );
+        eprintln!();
         eprintln!(
             "  {}A bonsai guide is shaped to your vault — sharper catalysts, better questions.{}",
-            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::SetForegroundColor(crossterm::style::Color::Grey),
             crossterm::style::ResetColor,
         );
         eprintln!(
             "  {}enzyme.garden/bonsai{} {}— join the waitlist{}",
             crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
             crossterm::style::ResetColor,
-            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::SetForegroundColor(crossterm::style::Color::Grey),
             crossterm::style::ResetColor,
         );
         eprintln!();
