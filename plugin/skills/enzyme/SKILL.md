@@ -26,14 +26,38 @@ Content retrieval works by **resonance with catalyst questions**, not keyword ma
 
 Enzyme resolves the vault path in this order: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory. If `ENZYME_VAULT_ROOT` is set (check with `echo $ENZYME_VAULT_ROOT`), all commands automatically target the right vault — no `-p` or `cd` needed.
 
+### FUSE / remote filesystem setup (Cowork, containers)
+
+SQLite WAL journaling fails on FUSE-mounted filesystems (the vault mount in Cowork VMs). The plugin's setup hook detects Cowork automatically and sets `ENZYME_DB_DIR` in the wrapper. If you still see `disk I/O error` or `xDelete` errors, manually fix the wrapper:
+
+```bash
+cat > "$HOME/.local/bin/enzyme" << 'EOF'
+#!/bin/sh
+export ENZYME_MODEL_DIR="$HOME/.cache/enzyme/models"
+export ENZYME_DB_DIR="$HOME/.cache/enzyme/dbs"
+exec "$HOME/.cache/enzyme/enzyme" "$@"
+EOF
+chmod +x "$HOME/.local/bin/enzyme"
+```
+
+Then re-run `enzyme init`. The vault content is still read from the mount — only the DB moves to local storage.
+
 ### Check vault initialization
 
 ```bash
-ls ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db
+# Check if ENZYME_DB_DIR is set (Cowork redirects DB to local storage)
+echo "ENZYME_DB_DIR=${ENZYME_DB_DIR:-unset}"
+# Check for the database
+if [ -n "$ENZYME_DB_DIR" ]; then
+    ls "$ENZYME_DB_DIR"/*/enzyme.db 2>/dev/null
+else
+    ls ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db 2>/dev/null
+fi
 ```
 
-- If `.enzyme/enzyme.db` exists: vault is ready. Run `enzyme petri` to begin.
+- If `enzyme.db` exists and is non-empty: vault is ready. Run `enzyme petri` to begin.
 - If it doesn't exist: run `enzyme init` to initialize the vault.
+- If `ENZYME_DB_DIR` is set but no DB exists, the init hasn't run yet — run `enzyme init`.
 
 ## Commands
 

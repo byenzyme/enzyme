@@ -21,9 +21,27 @@ pub struct EnzymePaths {
 
 impl EnzymePaths {
     /// Construct paths for the given vault, respecting environment overrides.
+    ///
+    /// When `ENZYME_DB_DIR` is not set, auto-detects FUSE-mounted vault paths
+    /// (e.g. Cowork VMs at `/sessions/*/mnt/`) and redirects the database to
+    /// `~/.cache/enzyme/dbs` so SQLite WAL journaling works correctly.
     pub fn new(vault_path: impl AsRef<Path>) -> Result<Self> {
         let enzyme_home = env::var("ENZYME_HOME").ok().filter(|s| !s.is_empty());
-        let enzyme_db_dir = env::var("ENZYME_DB_DIR").ok().filter(|s| !s.is_empty());
+        let mut enzyme_db_dir = env::var("ENZYME_DB_DIR").ok().filter(|s| !s.is_empty());
+
+        // Auto-detect FUSE mounts where SQLite WAL will fail.
+        if enzyme_db_dir.is_none() && Self::is_fuse_mount(vault_path.as_ref()) {
+            let fallback = dirs::home_dir()
+                .map(|h| h.join(".cache").join("enzyme").join("dbs"));
+            if let Some(fb) = fallback {
+                tracing::info!(
+                    "vault appears to be on a FUSE mount — redirecting DB to {}",
+                    fb.display()
+                );
+                enzyme_db_dir = Some(fb.to_string_lossy().into_owned());
+            }
+        }
+
         Self::with_overrides(vault_path, enzyme_home.as_deref(), enzyme_db_dir.as_deref())
     }
 
@@ -78,6 +96,17 @@ impl EnzymePaths {
         let home_dir =
             dirs::home_dir().context("could not determine home directory")?;
         Ok(home_dir.join(".enzyme"))
+    }
+
+    /// Check whether a path lives on a FUSE-style mount where SQLite WAL
+    /// journaling is known to fail (e.g. Cowork VMs).
+    ///
+    /// Heuristic: resolve the real path and check for `/sessions/*/mnt/`.
+    fn is_fuse_mount(path: &Path) -> bool {
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let s = real.to_string_lossy();
+        // Cowork pattern: /sessions/<id>/mnt/...
+        s.contains("/sessions/") && s.contains("/mnt/")
     }
 
     /// Compute a stable subdirectory under `db_dir` for a given vault path.
@@ -227,5 +256,22 @@ mod tests {
             PathBuf::from("/tmp/eh/sources.json")
         );
         assert_eq!(paths.auth_token(), PathBuf::from("/tmp/eh/auth.json"));
+    }
+
+    #[test]
+    fn test_is_fuse_mount_cowork_pattern() {
+        assert!(EnzymePaths::is_fuse_mount(Path::new(
+            "/sessions/eloquent-zealous-planck/mnt/vault"
+        )));
+        assert!(EnzymePaths::is_fuse_mount(Path::new(
+            "/sessions/abc-123/mnt/some/nested/vault"
+        )));
+    }
+
+    #[test]
+    fn test_is_fuse_mount_normal_paths() {
+        assert!(!EnzymePaths::is_fuse_mount(Path::new("/Users/alice/vault")));
+        assert!(!EnzymePaths::is_fuse_mount(Path::new("/home/bob/obsidian")));
+        assert!(!EnzymePaths::is_fuse_mount(Path::new("/mnt/data"))); // no /sessions/
     }
 }
