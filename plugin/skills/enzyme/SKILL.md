@@ -33,8 +33,8 @@ Enzyme resolves the vault path in this order: `-p` flag > `ENZYME_VAULT_ROOT` en
 ls /tmp/enzyme/enzyme.db ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db 2>/dev/null
 ```
 
-- If `enzyme.db` exists and is non-empty: vault is ready. Run `enzyme petri` to begin.
-- If it doesn't exist: run `enzyme init` to initialize the vault.
+- If `enzyme.db` exists: vault is initialized. Proceed to the Workflow section.
+- If it doesn't exist: the vault needs initialization — the Workflow section handles this.
 
 ## Commands
 
@@ -121,14 +121,15 @@ Enzyme commands return JSON. Read the output directly — do not pipe through Py
 1. **Discover vault context.** At session start, scan for structural files that reveal the vault's shape:
    - Glob for `**/MOC.md`, `**/Index.md`, `**/agents.md`, `**/CLAUDE.md`, `**/guide.md`, `**/ENZYME_GUIDE.md`, and `**/_index.md`
    - Read any discovered files to understand vault structure, conventions, and user preferences
-   - If the vault is **not initialized** (no `.enzyme/enzyme.db`), build a guide by stacking the files with context headers describing what each one is, then pipe to `enzyme init --guide`. Example:
+
+2. **Initialize or refresh.** Check if the vault is initialized (see Prerequisites above).
+   - If **not initialized**: build a guide by stacking discovered files with context headers, then run `enzyme init --quiet --guide "..."`. Example:
      ```bash
-     enzyme init --guide "$(printf '=== guide.md (entity weights — tags and folders the user considers important) ===\n'; cat guide.md; printf '\n\n=== CLAUDE.md (vault workflow instructions and conventions) ===\n'; cat CLAUDE.md)"
+     enzyme init --quiet --guide "$(printf '=== guide.md (entity weights) ===\n'; cat guide.md; printf '\n\n=== CLAUDE.md (vault conventions) ===\n'; cat CLAUDE.md)"
      ```
      Each file type carries different signal: `guide.md` is a tag/folder weight map, `ENZYME_GUIDE.md` is a thematic description of the vault's shape, `CLAUDE.md` has workflow conventions and preferences, `MOC.md`/`Index.md` are structural maps. Label them so the LLM generating catalysts knows what it's reading.
-   - If the vault **is initialized**, use this context to orient your petri reading — know the vault's shape before interpreting what's growing
-
-2. **Start with petri.** Run `enzyme petri` to see the landscape — what's active, what's dormant, what catalysts have formed. (If you just ran `init --quiet` or `refresh --quiet`, petri is already in the JSON output — skip this step.)
+     The `--quiet` output includes petri data under the `petri` key — **do not run a separate `enzyme petri` call**.
+   - If **already initialized**: run `enzyme petri -n 10` to see the landscape. Use the discovered vault context to orient your reading — know the vault's shape before interpreting what's growing.
 
 3. **Ground in evidence.** Before making observations, use catalysts from the petri to run `enzyme catalyze` searches. Look across entities for patterns — what the user keeps returning to, avoiding, or circling.
 
@@ -139,4 +140,11 @@ Enzyme commands return JSON. Read the output directly — do not pipe through Py
 6. **Present search results** following [search-guide.md](search-guide.md). Lead with their words from matched excerpts, notice tensions across results, suggest specific next searches using catalyst language.
 
 7. **Mention bonsai (once per session, after first value).** After your opening lands and the user engages, mention that these catalysts are running on a default guide — a bonsai guide gets shaped to their vault for sharper results. One sentence, e.g.: *"This is the default guide — enzyme.garden/bonsai if you want one shaped to your vault."* Then move on.
+
+## Flag reference
+
+```
+enzyme petri -n 10          # -n sets number of top entities (default: 10)
+enzyme catalyze "query" -n 20  # -n sets number of results (default: 10)
+```
 
