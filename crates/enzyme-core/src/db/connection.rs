@@ -5,13 +5,14 @@ use tracing::{debug, info};
 
 use super::errors::DbError;
 use super::migrations;
-use crate::config::paths::EnzymePaths;
 
 /// Core database handle with separate read and write connections.
 ///
-/// Uses WAL journal mode by default for concurrent reads during writes.
-/// On FUSE mounts (e.g. Cowork VMs), falls back to DELETE journal mode
-/// since FUSE doesn't support the shared-memory files WAL requires.
+/// SQLite WAL mode allows concurrent reads while a single writer holds the lock.
+/// We maintain two connections:
+///   - `write_conn`: Exclusive writer with moderate cache (10 000 pages).
+///   - `read_conn`:  Read-only connection with large cache (20 000 pages) and
+///                   memory-mapped I/O for fast scans.
 pub struct Database {
     write_conn: Connection,
     read_conn: Connection,
@@ -26,22 +27,14 @@ const READ_MMAP_SIZE: i64 = 256 * 1024 * 1024; // 256 MB
 impl Database {
     /// Open (or create) a database at `path`, apply all pending migrations, and
     /// return a ready-to-use `Database`.
-    ///
-    /// Automatically detects FUSE mounts and uses DELETE journal mode instead
-    /// of WAL to avoid `xDelete` errors on filesystems that don't support it.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
         let path = path.as_ref();
-        let use_wal = !EnzymePaths::is_fuse_mount(path);
-        if !use_wal {
-            info!(?path, "FUSE mount detected — using DELETE journal mode");
-        } else {
-            info!(?path, "opening database");
-        }
+        info!(?path, "opening database");
 
-        // Open write connection first and run migrations. This ensures the
-        // journal mode is active and any hot journal is rolled back before we
-        // open a read-only connection (which cannot perform rollback).
-        let write_conn = Self::open_write_connection(path, use_wal)?;
+        // Open write connection first and run migrations. This ensures WAL mode
+        // is active and any hot journal is rolled back before we open a read-only
+        // connection (which cannot perform rollback).
+        let write_conn = Self::open_write_connection(path)?;
         migrations::run_all_on_conn(&write_conn)?;
 
         let read_conn = Self::open_read_connection(path)?;
@@ -63,7 +56,7 @@ impl Database {
 
         let path = std::env::temp_dir().join(format!("enzyme-test-{}.db", uuid::Uuid::new_v4()));
 
-        let write_conn = Self::open_write_connection(&path, true)?;
+        let write_conn = Self::open_write_connection(&path)?;
         migrations::run_all_on_conn(&write_conn)?;
 
         let read_conn = Self::open_read_connection(&path)?;
@@ -76,9 +69,9 @@ impl Database {
 
     // -- Connection factories -------------------------------------------------
 
-    fn open_write_connection(path: &Path, use_wal: bool) -> Result<Connection, DbError> {
+    fn open_write_connection(path: &Path) -> Result<Connection, DbError> {
         let conn = Connection::open(path)?;
-        Self::apply_write_pragmas(&conn, use_wal)?;
+        Self::apply_write_pragmas(&conn)?;
         Ok(conn)
     }
 
@@ -95,11 +88,10 @@ impl Database {
 
     // -- Pragma helpers -------------------------------------------------------
 
-    fn apply_write_pragmas(conn: &Connection, use_wal: bool) -> Result<(), DbError> {
-        let journal_mode = if use_wal { "WAL" } else { "DELETE" };
+    fn apply_write_pragmas(conn: &Connection) -> Result<(), DbError> {
         conn.execute_batch(
             &format!(
-                "PRAGMA journal_mode = {journal_mode};
+                "PRAGMA journal_mode = WAL;
                  PRAGMA foreign_keys = ON;
                  PRAGMA synchronous = NORMAL;
                  PRAGMA busy_timeout = 5000;

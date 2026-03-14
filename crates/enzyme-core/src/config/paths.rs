@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 /// Resolved filesystem paths for an Enzyme session.
 ///
 /// Respects `ENZYME_HOME` to override `~/.enzyme` for global state (auth, config).
-/// Vault data (DB, embeddings) always lives at `<vault>/.enzyme/`.
+/// Vault data (DB, embeddings) lives at `<vault>/.enzyme/` on normal filesystems.
+/// On FUSE mounts (Cowork VMs), data is redirected to `/tmp/enzyme/` because
+/// FUSE doesn't support SQLite's `xDelete` VFS operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnzymePaths {
     /// Global Enzyme home directory (`~/.enzyme` or `$ENZYME_HOME`).
@@ -19,6 +21,9 @@ pub struct EnzymePaths {
 
 impl EnzymePaths {
     /// Construct paths for the given vault, respecting environment overrides.
+    ///
+    /// On FUSE mounts, automatically redirects the DB and embeddings to
+    /// `/tmp/enzyme/` so SQLite can operate on a native filesystem.
     pub fn new(vault_path: impl AsRef<Path>) -> Result<Self> {
         let enzyme_home = env::var("ENZYME_HOME").ok().filter(|s| !s.is_empty());
         Self::with_overrides(vault_path, enzyme_home.as_deref())
@@ -40,8 +45,22 @@ impl EnzymePaths {
             }
         };
 
-        let vault_db = vault_path.join(".enzyme").join("enzyme.db");
-        let embeddings_dir = vault_path.join(".enzyme-embeddings");
+        let (vault_db, embeddings_dir) = if Self::is_fuse_mount(vault_path) {
+            let local = PathBuf::from("/tmp/enzyme");
+            tracing::info!(
+                "FUSE mount detected — redirecting DB to {}",
+                local.display()
+            );
+            (
+                local.join("enzyme.db"),
+                local.join("enzyme-embeddings"),
+            )
+        } else {
+            (
+                vault_path.join(".enzyme").join("enzyme.db"),
+                vault_path.join(".enzyme-embeddings"),
+            )
+        };
 
         Ok(Self {
             home,

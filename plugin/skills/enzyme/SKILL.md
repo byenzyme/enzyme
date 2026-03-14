@@ -29,7 +29,8 @@ Enzyme resolves the vault path in this order: `-p` flag > `ENZYME_VAULT_ROOT` en
 ### Check vault initialization
 
 ```bash
-ls ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db 2>/dev/null
+# On FUSE mounts (Cowork), enzyme auto-redirects the DB to /tmp/enzyme/
+ls /tmp/enzyme/enzyme.db ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db 2>/dev/null
 ```
 
 - If `enzyme.db` exists and is non-empty: vault is ready. Run `enzyme petri` to begin.
