@@ -54,7 +54,6 @@ pub fn build_petri_json(vault_path: &Path, top: usize) -> Result<serde_json::Val
         let catalyst_list: Vec<serde_json::Value> = catalysts
             .iter()
             .map(|c| json!({
-                "id": c.id,
                 "text": c.text,
                 "context": c.context,
             }))

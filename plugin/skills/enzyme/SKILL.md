@@ -108,6 +108,8 @@ The test: would these exact words appear in their notes? Names and tags always d
 
 Enzyme commands return JSON. Read the output directly — do not pipe through Python or jq.
 
+If the output is large and gets persisted to a file (you'll see a `persisted-output` path), use the **Read** tool to read that file. The JSON is valid and readable as-is.
+
 **`enzyme petri`** — each entity object has:
 - `name`, `type`, `frequency`, `activity_trend`, `days_since_last_seen`
 - `catalysts`: array of `{ text, context }`
