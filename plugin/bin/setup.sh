@@ -11,9 +11,16 @@ set -e
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Don't override an existing working installation (e.g., Homebrew).
+# If enzyme is installed outside the plugin (e.g., Homebrew) and it's not
+# the plugin-managed wrapper, leave it alone.
 if command -v enzyme >/dev/null 2>&1; then
-    enzyme --version >/dev/null 2>&1 && exit 0
+    ENZYME_BIN="$(command -v enzyme)"
+    # Skip setup only if this is NOT a plugin-managed installation.
+    # Plugin installs go to ~/.local/bin or ~/.cache — update those.
+    case "$ENZYME_BIN" in
+        "$HOME/.local/bin/"*|"$HOME/.cache/"*) ;; # plugin-managed, continue
+        *) enzyme --version >/dev/null 2>&1 && exit 0 ;; # external, skip
+    esac
 fi
 
 # Detect platform.
