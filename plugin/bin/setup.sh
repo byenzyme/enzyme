@@ -47,29 +47,16 @@ fi
 # Symlink model files into the cache dir.
 ln -sfn "${PLUGIN_ROOT}/models" "${CACHE_DIR}/models"
 
-# Detect Cowork-style environments where the vault lives on a FUSE mount
-# that doesn't support SQLite WAL journaling (xDelete fails).
-# Redirect the DB to local storage so SQLite operates on a native filesystem.
-ENZYME_DB_DIR_LINE=""
-REAL_PWD="$(cd "$PWD" && pwd -P 2>/dev/null || echo "$PWD")"
-if echo "$REAL_PWD" | grep -q '/sessions/.*/mnt/' 2>/dev/null; then
-    ENZYME_DB_DIR_LINE='export ENZYME_DB_DIR="$HOME/.cache/enzyme/dbs"'
-fi
-
 # Create a wrapper in PATH that uses ~/.cache-relative paths.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/enzyme" << WRAPPER
 #!/bin/sh
 export ENZYME_MODEL_DIR="\$HOME/.cache/enzyme/models"
-${ENZYME_DB_DIR_LINE}
 exec "\$HOME/.cache/enzyme/enzyme" "\$@"
 WRAPPER
 chmod +x "$HOME/.local/bin/enzyme"
 
-# Ensure ~/.local/bin is in PATH and ENZYME_DB_DIR is set for all subsequent
-# Bash tool calls (the wrapper handles it for `enzyme` invocations, but
-# CLAUDE_ENV_FILE ensures the env var is also visible to direct shell usage).
+# Ensure ~/.local/bin is in PATH for all subsequent Bash tool calls.
 if [ -n "$CLAUDE_ENV_FILE" ]; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$CLAUDE_ENV_FILE"
-    [ -n "$ENZYME_DB_DIR_LINE" ] && echo "$ENZYME_DB_DIR_LINE" >> "$CLAUDE_ENV_FILE"
 fi
