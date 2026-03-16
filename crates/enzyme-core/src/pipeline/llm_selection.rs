@@ -183,6 +183,39 @@ fn write_config(vault_path: &Path, selection: &SelectionResponse) -> Result<()> 
         yaml.push_str(&format!("\nguideSignal: \"{}\"\n", yaml_escape(signal)));
     }
 
+    // excludedTags / excludedLinks / excludedFolders
+    let mut excluded_tags = Vec::new();
+    let mut excluded_links = Vec::new();
+    let mut excluded_folders = Vec::new();
+    for entity in &selection.excluded_entities {
+        let r = entity.entity_ref.trim();
+        if let Some(tag) = r.strip_prefix('#') {
+            excluded_tags.push(tag.to_string());
+        } else if r.starts_with("[[") && r.ends_with("]]") {
+            excluded_links.push(r[2..r.len() - 2].to_string());
+        } else if let Some(folder) = r.strip_prefix("folder:") {
+            excluded_folders.push(folder.to_string());
+        }
+    }
+    if !excluded_tags.is_empty() {
+        yaml.push_str("\nexcludedTags:\n");
+        for tag in &excluded_tags {
+            yaml.push_str(&format!("  - \"{}\"\n", yaml_escape(tag)));
+        }
+    }
+    if !excluded_links.is_empty() {
+        yaml.push_str("\nexcludedLinks:\n");
+        for link in &excluded_links {
+            yaml.push_str(&format!("  - \"{}\"\n", yaml_escape(link)));
+        }
+    }
+    if !excluded_folders.is_empty() {
+        yaml.push_str("\nexcludedFolders:\n");
+        for folder in &excluded_folders {
+            yaml.push_str(&format!("  - \"{}\"\n", yaml_escape(folder)));
+        }
+    }
+
     // Check for existing config — don't overwrite user-edited config
     if config_path.exists() {
         let existing = std::fs::read_to_string(&config_path)
@@ -209,7 +242,7 @@ fn yaml_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::enzyme_config::EnzymeConfig;
-    use crate::llm::{ExpandableFolder, SelectedEntity, SelectionResponse};
+    use crate::llm::{ExcludedEntity, ExpandableFolder, SelectedEntity, SelectionResponse};
 
     #[test]
     fn test_write_config_creates_yaml() {
@@ -234,6 +267,7 @@ mod tests {
             catalyst_profile: Some("dialectical".to_string()),
             guide_signal: Some("Thinking about craft".to_string()),
             expandable_folders: vec![],
+            excluded_entities: vec![],
         };
 
         write_config(vault_path, &selection).unwrap();
@@ -277,6 +311,7 @@ mod tests {
                 children: vec!["[[ari]]".to_string(), "[[jonah]]".to_string()],
                 profile: Some("relational".to_string()),
             }],
+            excluded_entities: vec![],
         };
 
         write_config(vault_path, &selection).unwrap();
@@ -290,6 +325,46 @@ mod tests {
         // Verify it parses back
         let config: EnzymeConfig = serde_yaml::from_str(&contents).unwrap();
         assert!(!config.catalyzed_entities.is_empty());
+    }
+
+    #[test]
+    fn test_write_config_with_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path();
+
+        let selection = SelectionResponse {
+            catalyzed_entities: vec![SelectedEntity {
+                entity_ref: "#enzyme".to_string(),
+                profile: Some("dialectical".to_string()),
+            }],
+            catalyst_profile: None,
+            guide_signal: None,
+            expandable_folders: vec![],
+            excluded_entities: vec![
+                ExcludedEntity { entity_ref: "#todo".to_string() },
+                ExcludedEntity { entity_ref: "#note".to_string() },
+                ExcludedEntity { entity_ref: "[[template]]".to_string() },
+                ExcludedEntity { entity_ref: "folder:templates".to_string() },
+            ],
+        };
+
+        write_config(vault_path, &selection).unwrap();
+
+        let config_path = vault_path.join(".enzyme").join("enzyme-config.yaml");
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        assert!(contents.contains("excludedTags:"));
+        assert!(contents.contains("todo"));
+        assert!(contents.contains("note"));
+        assert!(contents.contains("excludedLinks:"));
+        assert!(contents.contains("template"));
+        assert!(contents.contains("excludedFolders:"));
+        assert!(contents.contains("templates"));
+
+        // Verify it parses back
+        let config: EnzymeConfig = serde_yaml::from_str(&contents).unwrap();
+        assert_eq!(config.excluded_tags.len(), 2);
+        assert_eq!(config.excluded_links.len(), 1);
+        assert_eq!(config.excluded_folders.len(), 1);
     }
 
     #[test]
@@ -311,6 +386,7 @@ mod tests {
             catalyst_profile: None,
             guide_signal: None,
             expandable_folders: vec![],
+            excluded_entities: vec![],
         };
 
         write_config(vault_path, &selection).unwrap();

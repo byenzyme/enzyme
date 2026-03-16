@@ -20,6 +20,14 @@ pub struct SelectionResponse {
     // vault excerpts or user guide files passed as <user_voice> context.
     #[serde(default)]
     pub expandable_folders: Vec<ExpandableFolder>,
+    #[serde(default)]
+    pub excluded_entities: Vec<ExcludedEntity>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcludedEntity {
+    pub entity_ref: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,9 +83,20 @@ pub fn selection_json_schema() -> serde_json::Value {
                     "required": ["folderRef", "children", "profile"],
                     "additionalProperties": false
                 }
+            },
+            "excludedEntities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entityRef": { "type": "string" }
+                    },
+                    "required": ["entityRef"],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["catalyzedEntities", "catalystProfile", "guideSignal", "expandableFolders"],
+        "required": ["catalyzedEntities", "catalystProfile", "guideSignal", "expandableFolders", "excludedEntities"],
         "additionalProperties": false
     })
 }
@@ -117,6 +136,9 @@ If a folder contains meaningful sub-entities (e.g. folder:people contains specif
 - Avoid meta/structural entities (e.g. #todo, #note, generic folder names)
 - Group related entities under expandable folders when natural
 
+## Exclusions
+Identify entities that should be excluded from trending and catalyst generation — structural/meta entities like #todo, #note, #template, generic folder names, or anything that serves an organizational role rather than a thematic one. If the guide mentions exclusions, respect those.
+
 ## Guide signal
 Write a 1-2 sentence "guide signal" — what's intellectually alive in this vault right now. This calibrates future catalyst generation.
 
@@ -137,6 +159,10 @@ Return a JSON object:
       "children": ["[[person1]]", "[[person2]]"],
       "profile": "relational"
     }
+  ],
+  "excludedEntities": [
+    {"entityRef": "#todo"},
+    {"entityRef": "#note"}
   ]
 }
 ```"##.to_string()
@@ -187,6 +213,10 @@ mod tests {
                     "children": ["[[ari]]", "[[jonah]]"],
                     "profile": "relational"
                 }
+            ],
+            "excludedEntities": [
+                {"entityRef": "#todo"},
+                {"entityRef": "#note"}
             ]
         }"##;
         let resp = parse_selection_response(json).unwrap();
@@ -197,6 +227,8 @@ mod tests {
         assert_eq!(resp.guide_signal.as_deref(), Some("Thinking about craft and tools"));
         assert_eq!(resp.expandable_folders.len(), 1);
         assert_eq!(resp.expandable_folders[0].children.len(), 2);
+        assert_eq!(resp.excluded_entities.len(), 2);
+        assert_eq!(resp.excluded_entities[0].entity_ref, "#todo");
     }
 
     #[test]
