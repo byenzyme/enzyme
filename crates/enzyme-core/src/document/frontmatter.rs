@@ -75,31 +75,19 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
         })
         .collect();
 
-    // Dates
-    if let Some(val) = mapping.get("created") {
-        fm.created = value_to_datetime(val);
-    }
-    // Also try common alternatives
-    if fm.created.is_none() {
-        if let Some(val) = mapping.get("date") {
+    // Dates — try field name aliases in priority order
+    static CREATED_FIELDS: &[&str] = &["created", "date", "date_created", "date created", "createdAt", "created_at"];
+    static MODIFIED_FIELDS: &[&str] = &["modified", "updated", "date_modified", "date modified", "lastModified", "last_modified", "updatedAt"];
+
+    for &key in CREATED_FIELDS {
+        if fm.created.is_some() { break; }
+        if let Some(val) = mapping.get(key) {
             fm.created = value_to_datetime(val);
         }
     }
-    if fm.created.is_none() {
-        if let Some(val) = mapping.get("date_created") {
-            fm.created = value_to_datetime(val);
-        }
-    }
-    if let Some(val) = mapping.get("modified") {
-        fm.modified = value_to_datetime(val);
-    }
-    if fm.modified.is_none() {
-        if let Some(val) = mapping.get("updated") {
-            fm.modified = value_to_datetime(val);
-        }
-    }
-    if fm.modified.is_none() {
-        if let Some(val) = mapping.get("date_modified") {
+    for &key in MODIFIED_FIELDS {
+        if fm.modified.is_some() { break; }
+        if let Some(val) = mapping.get(key) {
             fm.modified = value_to_datetime(val);
         }
     }
@@ -118,6 +106,13 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
         "modified",
         "updated",
         "date",
+        "createdAt",
+        "created_at",
+        "date created",
+        "lastModified",
+        "last_modified",
+        "updatedAt",
+        "date modified",
         "date_created",
         "date_modified",
         "aliases",
@@ -232,9 +227,23 @@ fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
         return Some(ndt.and_utc());
     }
 
-    // Try "YYYY-MM-DD"
-    if let Ok(nd) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
-        return nd.and_hms_opt(0, 0, 0).map(|ndt| ndt.and_utc());
+    // Try date-only formats
+    static DATE_FORMATS: &[&str] = &[
+        "%Y-%m-%d",       // 2024-01-15
+        "%d/%m/%Y",       // 15/01/2024
+        "%m/%d/%Y",       // 01/15/2024
+        "%Y/%m/%d",       // 2024/01/15
+        "%B %d, %Y",      // January 15, 2024
+        "%b %d, %Y",      // Jan 15, 2024
+        "%d %B %Y",       // 15 January 2024
+        "%d-%m-%Y",       // 15-01-2024
+        "%m-%d-%Y",       // 01-15-2024
+    ];
+
+    for fmt in DATE_FORMATS {
+        if let Ok(nd) = NaiveDate::parse_from_str(&s, fmt) {
+            return nd.and_hms_opt(0, 0, 0).map(|ndt| ndt.and_utc());
+        }
     }
 
     None

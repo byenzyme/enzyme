@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
@@ -13,6 +13,7 @@ use super::datepath::extract_date_from_path;
 use super::extract::{extract_entities, ExtractedEntities};
 use super::frontmatter::{parse_frontmatter, strip_frontmatter, Frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
+
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -104,8 +105,11 @@ impl DocumentProcessor {
             folders,
         } = extract_entities(body, path, &frontmatter_tags);
 
+        // Readwise detection — used for both chunking and date resolution
+        let is_readwise = is_readwise_content(body);
+
         // Chunks — use Readwise-aware chunking for highlight-based content
-        let chunks = if is_readwise_content(body) {
+        let chunks = if is_readwise {
             let highlights = extract_highlights(body);
             if highlights.is_empty() {
                 chunk_document(body, self.chunk_size)
@@ -121,8 +125,10 @@ impl DocumentProcessor {
         let char_count = body.chars().count() as i64;
 
         // Dates
-        let (created_at, created_source) = resolve_created_date(&frontmatter, path, &abs_path)?;
-        let (modified_at, modified_source) = resolve_modified_date(&frontmatter, &abs_path)?;
+        let (created_at, created_source) =
+            resolve_created_date(&frontmatter, path, &abs_path, body, is_readwise)?;
+        let (modified_at, modified_source) =
+            resolve_modified_date(&frontmatter, &abs_path, body, is_readwise)?;
 
         Ok(ProcessedDocument {
             source_ref,
@@ -153,11 +159,13 @@ impl DocumentProcessor {
 }
 
 /// Resolve the created-at timestamp.
-/// Priority: frontmatter → filename/path date → filesystem.
+/// Priority: frontmatter → filename/path date → content date (Readwise) → filesystem.
 fn resolve_created_date(
     frontmatter: &Option<Frontmatter>,
     rel_path: &Path,
     abs_path: &Path,
+    body: &str,
+    is_readwise: bool,
 ) -> Result<(i64, DateSource)> {
     if let Some(fm) = frontmatter {
         if let Some(dt) = fm.created {
@@ -168,6 +176,14 @@ fn resolve_created_date(
     // Try extracting a date from the file path/name.
     if let Some(dt) = extract_date_from_path(rel_path) {
         return Ok((datetime_to_millis(dt), DateSource::Filename));
+    }
+
+    // For Readwise-like content, use the earliest content date as creation date
+    // rather than the filesystem timestamp (which reflects import time).
+    if is_readwise {
+        if let Some(dt) = extract_earliest_content_date(body) {
+            return Ok((datetime_to_millis(dt), DateSource::Content));
+        }
     }
 
     // Fall back to filesystem creation time (or modified time on Linux).
@@ -183,14 +199,24 @@ fn resolve_created_date(
     Ok((datetime_to_millis(dt), DateSource::Filesystem))
 }
 
-/// Resolve the modified-at timestamp. Prefer frontmatter, fall back to filesystem.
+/// Resolve the modified-at timestamp.
+/// Priority: frontmatter → content date (Readwise) → filesystem.
 fn resolve_modified_date(
     frontmatter: &Option<Frontmatter>,
     abs_path: &Path,
+    body: &str,
+    is_readwise: bool,
 ) -> Result<(i64, DateSource)> {
     if let Some(fm) = frontmatter {
         if let Some(dt) = fm.modified {
             return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+        }
+    }
+
+    // For Readwise-like content, use the most recent content date.
+    if is_readwise {
+        if let Some(dt) = extract_latest_content_date(body) {
+            return Ok((datetime_to_millis(dt), DateSource::Content));
         }
     }
 
@@ -203,6 +229,56 @@ fn resolve_modified_date(
 
     let dt: DateTime<Utc> = system_time.into();
     Ok((datetime_to_millis(dt), DateSource::Filesystem))
+}
+
+// ---------------------------------------------------------------------------
+// Content date extraction (Readwise / highlight-based files)
+// ---------------------------------------------------------------------------
+
+/// Collect all dates from content: `>Last-Highlighted-Date:: [[YYYY-MM-DD]]`
+/// and generic `[[YYYY-MM-DD]]` wikilinks.
+fn collect_content_dates(body: &str) -> Vec<DateTime<Utc>> {
+    let mut dates = Vec::new();
+
+    // Scan for [[YYYY-MM-DD]] patterns (covers both standalone date links
+    // and Last-Highlighted-Date:: [[YYYY-MM-DD]]).
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i + 13 <= bytes.len() {
+        // Look for `[[` followed by a 10-char date and `]]`
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if i + 14 <= bytes.len() && bytes[i + 12] == b']' && bytes[i + 13] == b']' {
+                let date_str = &body[i + 2..i + 12];
+                if let Some(dt) = parse_ymd(date_str) {
+                    dates.push(dt);
+                }
+                i += 14;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    dates
+}
+
+/// Most recent content date — used for modified timestamp.
+fn extract_latest_content_date(body: &str) -> Option<DateTime<Utc>> {
+    collect_content_dates(body).into_iter().max()
+}
+
+/// Earliest content date — used for created timestamp on Readwise files
+/// where filesystem date reflects import time, not highlight time.
+fn extract_earliest_content_date(body: &str) -> Option<DateTime<Utc>> {
+    collect_content_dates(body).into_iter().min()
+}
+
+/// Parse a `YYYY-MM-DD` string into a UTC datetime at midnight.
+fn parse_ymd(s: &str) -> Option<DateTime<Utc>> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|ndt| DateTime::from_naive_utc_and_offset(ndt, Utc))
 }
 
 /// Convert a `DateTime<Utc>` to milliseconds since Unix epoch.
@@ -382,6 +458,93 @@ Second paragraph here.
 
         assert_eq!(doc.word_count, 6); // "Hello world. This is a test."
         assert_eq!(doc.char_count, body.len() as i64);
+    }
+
+    #[test]
+    fn test_readwise_content_dates() {
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+---
+title: Some Article
+---
+>Title:: Some Article
+>Author:: John Doe
+>Last-Highlighted-Date:: [[2024-01-15]]
+
+## Highlights
+First highlight from [[2023-11-02]]
+^rw100
+Second highlight from [[2024-01-15]]
+^rw200
+";
+        fs::write(vault.join("article.md"), content).unwrap();
+
+        let processor = DocumentProcessor::new(vault);
+        let doc = processor.process_file(Path::new("article.md")).unwrap();
+
+        // Created should use earliest content date (2023-11-02)
+        assert_eq!(doc.created_source, DateSource::Content);
+        let created = DateTime::from_timestamp_millis(doc.created_at).unwrap();
+        assert_eq!(created.format("%Y-%m-%d").to_string(), "2023-11-02");
+
+        // Modified should use latest content date (2024-01-15)
+        assert_eq!(doc.modified_source, DateSource::Content);
+        let modified = DateTime::from_timestamp_millis(doc.modified_at).unwrap();
+        assert_eq!(modified.format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn test_readwise_frontmatter_takes_priority() {
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+---
+title: Article With Dates
+created: 2023-06-01
+modified: 2024-02-01
+---
+>Last-Highlighted-Date:: [[2024-01-15]]
+
+## Highlights
+Some highlight [[2023-11-02]]
+^rw100
+Another highlight [[2024-01-15]]
+^rw200
+";
+        fs::write(vault.join("dated.md"), content).unwrap();
+
+        let processor = DocumentProcessor::new(vault);
+        let doc = processor.process_file(Path::new("dated.md")).unwrap();
+
+        // Frontmatter should win over content dates
+        assert_eq!(doc.created_source, DateSource::Frontmatter);
+        assert_eq!(doc.modified_source, DateSource::Frontmatter);
+    }
+
+    #[test]
+    fn test_non_readwise_ignores_content_dates() {
+        let (_dir, vault) = create_test_vault();
+        // Not Readwise content (no ^rw markers)
+        let content = "# Note\n\nReferencing [[2023-05-01]] and [[2024-01-15]] dates.\n";
+        fs::write(vault.join("normal.md"), content).unwrap();
+
+        let processor = DocumentProcessor::new(vault);
+        let doc = processor.process_file(Path::new("normal.md")).unwrap();
+
+        // Should fall through to filesystem, not content
+        assert_eq!(doc.created_source, DateSource::Filesystem);
+        assert_eq!(doc.modified_source, DateSource::Filesystem);
+    }
+
+    #[test]
+    fn test_collect_content_dates_parsing() {
+        let body = "Some text [[2024-03-15]] more [[not-a-date]] and [[2023-01-01]]";
+        let dates = collect_content_dates(body);
+        assert_eq!(dates.len(), 2);
+
+        let earliest = dates.iter().min().unwrap();
+        let latest = dates.iter().max().unwrap();
+        assert_eq!(earliest.format("%Y-%m-%d").to_string(), "2023-01-01");
+        assert_eq!(latest.format("%Y-%m-%d").to_string(), "2024-03-15");
     }
 
     #[test]
