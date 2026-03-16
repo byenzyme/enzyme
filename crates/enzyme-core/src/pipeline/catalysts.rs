@@ -6,7 +6,7 @@ use anyhow::Result;
 use chrono::{Datelike, Utc};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{info, debug};
+use tracing::{info, debug, warn};
 use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
@@ -30,6 +30,8 @@ pub struct CatalystStats {
     pub catalysts_generated: usize,
     pub errors: Vec<(String, String)>,
     pub duration_ms: u64,
+    /// Number of entities that failed due to rate limiting (429 / timeout).
+    pub rate_limited: usize,
 }
 
 /// Configuration for a catalyst generation run.
@@ -143,6 +145,7 @@ impl<'a> CatalystPipeline<'a> {
             catalysts_generated: 0,
             errors: Vec::new(),
             duration_ms: 0,
+            rate_limited: 0,
         };
 
         let total = entities.len();
@@ -223,12 +226,14 @@ impl<'a> CatalystPipeline<'a> {
         }
 
         // Phase 2: Fire LLM calls with bounded concurrency
-        // Local models (non-OpenRouter) typically serve one request at a time,
-        // so we limit concurrency to avoid queueing and timeouts.
+        // Remote providers can handle high parallelism; local models typically
+        // serve one request at a time. Paid OpenRouter has no platform rate
+        // limit (bottleneck is the upstream provider), so we start generous
+        // and let per-task exponential backoff absorb any 429s.
         let is_remote = self.llm.is_openrouter();
-        let concurrency = if is_remote { 26 } else { 1 };
+        let concurrency = if is_remote { 20 } else { 1 };
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs: u64 = if is_remote { 60 } else { 300 };
+        let entity_timeout_secs: u64 = if is_remote { 90 } else { 300 };
 
         // Build the response_format once based on provider capabilities
         let structured_output = self.llm.structured_output_support();
@@ -262,8 +267,10 @@ impl<'a> CatalystPipeline<'a> {
                         ..GenerationParams::default()
                     };
 
-                    // 2 attempts (1 retry)
-                    for attempt in 0..2u32 {
+                    // 3 attempts with exponential backoff + jitter
+                    let max_attempts = 3u32;
+                    let mut last_error = String::new();
+                    for attempt in 0..max_attempts {
                         let result = llm
                             .chat_completion_cached(
                                 &model,
@@ -276,20 +283,24 @@ impl<'a> CatalystPipeline<'a> {
                         match result {
                             Ok(r) => return Ok(r),
                             Err(e) => {
+                                last_error = e.to_string();
                                 debug!(
                                     entity_name = entity_name.as_str(),
                                     attempt,
                                     "LLM call failed: {}",
                                     e
                                 );
-                                if attempt < 1 {
-                                    let delay = std::time::Duration::from_millis(2000);
+                                if attempt < max_attempts - 1 {
+                                    // Exponential backoff: 2s, 4s + jitter (0-500ms)
+                                    let base_ms = 2000u64 * 2u64.pow(attempt);
+                                    let jitter_ms = (entity_name.len() as u64 * 37) % 500;
+                                    let delay = std::time::Duration::from_millis(base_ms + jitter_ms);
                                     tokio::time::sleep(delay).await;
                                 }
                             }
                         }
                     }
-                    Err(anyhow::anyhow!("all retry attempts failed"))
+                    Err(anyhow::anyhow!("all {} retry attempts failed: {}", max_attempts, last_error))
                 }).await;
 
                 let response_text = match result {
@@ -321,6 +332,18 @@ impl<'a> CatalystPipeline<'a> {
                 );
 
                 match parse_catalyst_response(&response_text) {
+                    Ok(parsed) if parsed.pairs.is_empty() => {
+                        debug!(
+                            entity_name = entity_name.as_str(),
+                            "LLM returned empty catalysts array"
+                        );
+                        EntityResult {
+                            entity_name,
+                            entity_type,
+                            catalysts: None,
+                            error: Some("LLM returned empty catalysts array".to_string()),
+                        }
+                    }
                     Ok(parsed) => EntityResult {
                         entity_name,
                         entity_type,
@@ -358,6 +381,12 @@ impl<'a> CatalystPipeline<'a> {
                             "catalyst generation failed: {}",
                             error
                         );
+                        let is_rate_limited = error.contains("429")
+                            || error.contains("rate")
+                            || error.contains("timed out");
+                        if is_rate_limited {
+                            stats.rate_limited += 1;
+                        }
                         on_event(CatalystEvent::EntityFailed {
                             entity_name: entity_result.entity_name.clone(),
                             entity_type: entity_result.entity_type.clone(),
@@ -416,6 +445,14 @@ impl<'a> CatalystPipeline<'a> {
                     debug!("tokio task panicked: {e}");
                 }
             }
+        }
+
+        if !stats.errors.is_empty() {
+            warn!(
+                total_errors = stats.errors.len(),
+                rate_limited = stats.rate_limited,
+                "catalyst generation completed with errors"
+            );
         }
 
         stats.duration_ms = start.elapsed().as_millis() as u64;

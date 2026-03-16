@@ -83,6 +83,8 @@ pub enum DisplayEvent {
     DiscoveryComplete {
         entities_processed: usize,
         catalysts_generated: usize,
+        errors_count: usize,
+        rate_limited: usize,
     },
 
     // Embedding
@@ -250,6 +252,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut lines_written: u16 = 0;
     let mut frame_counter: usize = 0;
     let mut catalysts_generated: Option<usize> = None;
+    let mut catalyst_errors: Option<(usize, usize)> = None; // (errors_count, rate_limited)
     let mut embedding_status: Option<String> = None;
 
     // Keep indexing messages for display
@@ -266,6 +269,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             lines_written: &mut u16,
                             spinner: &mut HelixSpinner,
                             catalysts_generated: &mut Option<usize>,
+                            catalyst_errors: &mut Option<(usize, usize)>,
                             embedding_status: &mut Option<String>|
      -> bool {
         match event {
@@ -397,8 +401,13 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::DiscoveryComplete {
                 entities_processed: _,
                 catalysts_generated: count,
+                errors_count,
+                rate_limited,
             } => {
                 catalysts_generated.replace(count);
+                if errors_count > 0 {
+                    catalyst_errors.replace((errors_count, rate_limited));
+                }
                 // Stay in Discovery stage — entity tree keeps cycling
             }
             DisplayEvent::EmbeddingStart => {
@@ -417,12 +426,20 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 embedding_status.take();
 
                 if let Some(count) = catalysts_generated.take() {
+                    let err_suffix = match catalyst_errors.take() {
+                        Some((errs, rl)) if rl > 0 => {
+                            format!(" ({} failed, {} rate-limited)", errs, rl)
+                        }
+                        Some((errs, _)) => format!(" ({} failed)", errs),
+                        None => String::new(),
+                    };
                     let _ = writeln!(
                         out,
-                        "  {}Catalysts:{} {} generated",
+                        "  {}Catalysts:{} {} generated{}",
                         crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
                         crossterm::style::ResetColor,
                         count,
+                        err_suffix,
                     );
                 }
 
@@ -466,12 +483,20 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 embedding_status.take();
 
                 if let Some(count) = catalysts_generated.take() {
+                    let err_suffix = match catalyst_errors.take() {
+                        Some((errs, rl)) if rl > 0 => {
+                            format!(" ({} failed, {} rate-limited)", errs, rl)
+                        }
+                        Some((errs, _)) => format!(" ({} failed)", errs),
+                        None => String::new(),
+                    };
                     let _ = writeln!(
                         out,
-                        "  {}Catalysts:{} {} generated",
+                        "  {}Catalysts:{} {} generated{}",
                         crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
                         crossterm::style::ResetColor,
                         count,
+                        err_suffix,
                     );
                 }
 
@@ -552,7 +577,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     event, &mut out, &mut stage, &mut rolling_window,
                     &mut discovery_completed, &mut discovery_total,
                     &mut lines_written, &mut spinner,
-                    &mut catalysts_generated, &mut embedding_status,
+                    &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
                 ) {
                     return;
                 }
@@ -562,7 +587,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         event, &mut out, &mut stage, &mut rolling_window,
                         &mut discovery_completed, &mut discovery_total,
                         &mut lines_written, &mut spinner,
-                        &mut catalysts_generated, &mut embedding_status,
+                        &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
                     ) {
                         return;
                     }
@@ -743,10 +768,20 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::DiscoveryComplete {
                     entities_processed: _,
                     catalysts_generated,
+                    errors_count,
+                    rate_limited,
                 } => {
+                    let err_suffix = if errors_count > 0 && rate_limited > 0 {
+                        format!(" ({} failed, {} rate-limited)", errors_count, rate_limited)
+                    } else if errors_count > 0 {
+                        format!(" ({} failed)", errors_count)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  Catalysts: {} generated",
-                        catalysts_generated
+                        "  Catalysts: {} generated{}",
+                        catalysts_generated,
+                        err_suffix,
                     );
                 }
                 DisplayEvent::EmbeddingStart => {

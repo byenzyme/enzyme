@@ -337,6 +337,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         tx.send(DisplayEvent::DiscoveryComplete {
             entities_processed: stats.entities_processed,
             catalysts_generated: stats.catalysts_generated,
+            errors_count: stats.errors.len(),
+            rate_limited: stats.rate_limited,
         }).ok();
 
         Some(stats)
