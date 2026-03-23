@@ -201,6 +201,7 @@ impl<'a> CatalystPipeline<'a> {
                 profile,
                 config.format_key,
                 config.guide_signal,
+                Some(entity),
             );
 
             debug!(

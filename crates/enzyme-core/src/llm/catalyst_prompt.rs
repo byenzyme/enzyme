@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::Deserialize;
 
 use crate::config::CustomProfileGuidance;
+use crate::models::Entity;
 use super::catalyst_profiles::{
     CatalystFormat, CatalystProfile, ENABLED_PROFILE_KEYS,
     full_guidance_lines, get_format, get_profile, DEFAULT_FORMAT_KEY,
@@ -229,6 +231,100 @@ fn build_profiles_section(custom_guidance: Option<&CustomProfileGuidance>) -> St
 // User prompt (varies per entity)
 // ---------------------------------------------------------------------------
 
+/// Build a `<practice_shape>` section from entity trends data.
+///
+/// Surfaces temporal engagement patterns so the LLM can use
+/// the shape of practice — not just content — to aim its probes.
+fn build_practice_shape(entity: &Entity) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    let freq_recent = entity.trends.frequency_recent;
+    let freq_all = entity.frequency;
+
+    // Engagement trajectory from timeline buckets
+    let now = Utc::now();
+    let cutoff = (now - chrono::Duration::days(90)).date_naive();
+
+    let freq_3m: i64 = entity
+        .trends
+        .timeline_buckets
+        .iter()
+        .filter_map(|(month_key, &count)| {
+            // Parse "YYYY-MM" keys
+            let mut parts = month_key.splitn(2, '-');
+            let year: i32 = parts.next()?.parse().ok()?;
+            let month: u32 = parts.next()?.parse().ok()?;
+            let bucket_date = chrono::NaiveDate::from_ymd_opt(year, month, 1)?;
+            if bucket_date >= cutoff {
+                Some(count)
+            } else {
+                None
+            }
+        })
+        .sum();
+
+    if freq_all > 0 {
+        if freq_3m > 0 && freq_recent > 0 {
+            let ratio = freq_3m as f64 / freq_recent.max(1) as f64;
+            if ratio > 0.5 {
+                parts.push(format!(
+                    "Engagement is accelerating: {} notes in the last 3 months out of {} in the past year ({} all time).",
+                    freq_3m, freq_recent, freq_all
+                ));
+            } else if ratio > 0.15 {
+                parts.push(format!(
+                    "Steady engagement: {} notes in the last 3 months, {} in the past year ({} all time).",
+                    freq_3m, freq_recent, freq_all
+                ));
+            } else {
+                parts.push(format!(
+                    "Engagement is cooling: {} notes in the last 3 months vs. {} in the past year ({} all time).",
+                    freq_3m, freq_recent, freq_all
+                ));
+            }
+        } else {
+            parts.push(format!(
+                "This entity appears in {} notes total, {} in the last 3 months.",
+                freq_all, freq_3m
+            ));
+        }
+    }
+
+    // Recency from last_seen (millis since epoch)
+    if let Some(last_seen_ms) = entity.last_seen {
+        if let Some(last_seen_dt) = chrono::DateTime::from_timestamp_millis(last_seen_ms) {
+            let days_since = (now - last_seen_dt).num_days();
+            if days_since == 0 {
+                parts.push("Last active today.".into());
+            } else if days_since <= 7 {
+                parts.push(format!(
+                    "Last active {} day{} ago.",
+                    days_since,
+                    if days_since != 1 { "s" } else { "" }
+                ));
+            } else if days_since <= 30 {
+                parts.push(format!(
+                    "Last active {} days ago ({}).",
+                    days_since,
+                    last_seen_dt.format("%b %d")
+                ));
+            } else {
+                parts.push(format!(
+                    "Dormant — last active {} days ago ({}).",
+                    days_since,
+                    last_seen_dt.format("%b %d")
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    format!("<practice_shape>\n{}\n</practice_shape>", parts.join(" "))
+}
+
 /// Build the user prompt for a specific entity.
 ///
 /// This references the profile selected in the system prompt and provides the
@@ -240,6 +336,7 @@ pub fn build_user_prompt(
     profile: &CatalystProfile,
     format_key: &str,
     guide_signal: Option<&str>,
+    entity: Option<&Entity>,
 ) -> String {
     let fmt = get_format(format_key)
         .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
@@ -275,6 +372,38 @@ directly. Let this inform the angle of your questions without constraining them.
         "\n\n<entity>\nFocus entity: {entity_name}\n</entity>"
     ));
 
+    // Practice shape from entity trends
+    if let Some(e) = entity {
+        let practice = build_practice_shape(e);
+        if !practice.is_empty() {
+            prompt.push_str(&format!("\n\n{practice}"));
+        }
+    }
+
+    // Register detection + engagement shape preamble
+    prompt.push_str("\n\n\
+Before generating catalysts, read the excerpts for register and engagement shape:\n\
+\n\
+Register — adapt your probing depth to what the content actually is:\n\
+- Conversational content (tool calls, Q&A turns, factual queries): treat questions at face value. \
+Surface what was being worked on, what information was gathered, what decisions were reached. \
+Do not probe beneath factual questions.\n\
+- Reflective content (journal entries, long-form prose, personal processing): apply the profile's \
+full probing posture — tensions, emergence, what's unresolved.\n\
+- Reference material (highlights, annotations, clipped articles): surface what drew attention and \
+how it connects to the user's own thinking elsewhere in the vault.\n\
+\n\
+Engagement shape — if practice_shape data is provided above, let the pattern of engagement \
+inform the angle of your probes:\n\
+- Accelerating engagement suggests an active conviction cycle — probe what's driving the return.\n\
+- Cooling engagement suggests something unresolved that lost energy — probe what was left open.\n\
+- Dormant entities with high all-time frequency suggest completed or abandoned threads — \
+probe what would reopen them.\n\
+\n\
+The register and engagement shape determine HOW you aim the probe. The selected profile \
+determines WHAT to probe for. Catalysts must still be retrieval-functional — each one should \
+embed well against vault passages and surface relevant content when used as a search query.");
+
     // Format-specific instructions
     let (periphery_instruction, format_instruction, placeholder_label) =
         format_instructions(fmt);
@@ -291,7 +420,7 @@ directly. Let this inform the angle of your questions without constraining them.
 
     prompt.push_str(&format!(
         "\n\n\
-Attend to the excerpts and:\n\
+Now attend to the excerpts and:\n\
 1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
 2. {format_instruction}\n\
 3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\n\
@@ -518,6 +647,7 @@ mod tests {
             &PROFILE_DIALECTICAL,
             "question",
             None,
+            None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Dialectical"));
         assert!(prompt.contains("<vault_context>"));
@@ -536,6 +666,7 @@ mod tests {
             &PROFILE_OPERATIONAL,
             "thesis",
             None,
+            None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
         assert!(prompt.contains("articulate what's at stake"));
@@ -552,6 +683,7 @@ mod tests {
             &PROFILE_DIALECTICAL,
             "question",
             Some("User is interested in X"),
+            None,
         );
         assert!(prompt.contains("USER CONTEXT (from vault guide):"));
         assert!(prompt.contains("User is interested in X"));
