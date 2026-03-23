@@ -390,9 +390,22 @@ pub fn full_guidance_lines(profile: &CatalystProfile) -> Vec<&'static str> {
     lines
 }
 
+/// Register-adaptive preamble prepended to all presentation guidance.
+///
+/// Tells the consuming agent to read the interaction context before applying
+/// profile-specific presentation style. This prevents reflective presentation
+/// (e.g., "You wrote...") when the agent is in a different mode.
+const PRESENTATION_REGISTER_PREAMBLE: &str = "\
+Read the interaction context before presenting. If the user asked a factual question or is \
+working on a task, present findings directly — summarize what the vault contains on this topic. \
+If the user is exploring or reflecting, use the profile guidance below to shape tone and pacing. \
+If you are an agent using these results for personalization (not showing them to the user), \
+treat the catalyst text as a preference signal and ignore presentation style.";
+
 /// Look up presentation guidance for an entity based on its profile.
 ///
 /// Resolution order: entity-specific profile override → vault-wide default → dialectical.
+/// Prepends a register-adaptive preamble so consuming agents adapt to context.
 pub fn presentation_guidance_for_entity(
     entity_name: &str,
     entity_profiles: &std::collections::HashMap<String, String>,
@@ -404,12 +417,13 @@ pub fn presentation_guidance_for_entity(
         .or(default_profile)
         .unwrap_or(DEFAULT_PROFILE_KEY);
 
-    get_profile(profile_key)
-        .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap())
-        .presentation_guidance
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    let profile = get_profile(profile_key)
+        .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
+
+    let mut guidance = Vec::with_capacity(1 + profile.presentation_guidance.len());
+    guidance.push(PRESENTATION_REGISTER_PREAMBLE.to_string());
+    guidance.extend(profile.presentation_guidance.iter().map(|s| s.to_string()));
+    guidance
 }
 
 #[cfg(test)]
