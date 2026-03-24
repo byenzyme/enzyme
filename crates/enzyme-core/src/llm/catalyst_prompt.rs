@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::config::CustomProfileGuidance;
 use crate::models::Entity;
+use crate::pipeline::eras::Era;
 use super::catalyst_profiles::{
     CatalystFormat, CatalystProfile, ENABLED_PROFILE_KEYS,
     full_guidance_lines, get_format, get_profile, DEFAULT_FORMAT_KEY,
@@ -20,13 +21,15 @@ struct CatalystEntry {
     topic: String,
 }
 
-/// Object format: `{ "catalysts": [...], "topicNames": [...] }`.
+/// Object format: `{ "catalysts": [...], "topicNames": [...], "eraLabels": [...] }`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CatalystPayload {
     catalysts: Vec<String>,
     #[serde(default)]
     topic_names: Vec<String>,
+    #[serde(default)]
+    era_labels: Vec<String>,
 }
 
 /// JSON Schema for the `CatalystPayload` response type.
@@ -41,6 +44,10 @@ pub fn catalyst_json_schema() -> serde_json::Value {
                 "items": { "type": "string" }
             },
             "topicNames": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "eraLabels": {
                 "type": "array",
                 "items": { "type": "string" }
             }
@@ -325,6 +332,16 @@ fn build_practice_shape(entity: &Entity) -> String {
     format!("<practice_shape>\n{}\n</practice_shape>", parts.join(" "))
 }
 
+/// Era-aware context: samples grouped by era, with allocation info.
+pub struct EraContext {
+    pub eras: Vec<Era>,
+    /// Per-era minimum catalyst counts (parallel to `eras`).
+    pub era_allocations: Vec<usize>,
+    /// (era_index, context_string) pairs. era_index indexes into `eras`;
+    /// index == eras.len() means unmatched/undated.
+    pub samples: Vec<(usize, String)>,
+}
+
 /// Build the user prompt for a specific entity.
 ///
 /// This references the profile selected in the system prompt and provides the
@@ -337,6 +354,7 @@ pub fn build_user_prompt(
     format_key: &str,
     guide_signal: Option<&str>,
     entity: Option<&Entity>,
+    era_context: Option<&EraContext>,
 ) -> String {
     let fmt = get_format(format_key)
         .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
@@ -359,13 +377,53 @@ directly. Let this inform the angle of your questions without constraining them.
         ));
     }
 
-    // Context section
-    let max_samples = context_samples.len().min(20);
-    let context_section: String = context_samples[..max_samples].join("\n\n");
-
-    prompt.push_str(&format!(
-        "\n\n<vault_context>\n{context_section}\n</vault_context>"
-    ));
+    // Context section — era-grouped if available, flat otherwise
+    if let Some(ec) = era_context {
+        if ec.eras.len() > 1 {
+            // Group samples by era
+            for (era_idx, era) in ec.eras.iter().enumerate() {
+                let era_samples: Vec<&str> = ec.samples
+                    .iter()
+                    .filter(|(idx, _)| *idx == era_idx)
+                    .map(|(_, s)| s.as_str())
+                    .collect();
+                if !era_samples.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n\n<vault_context era=\"{}\" notes=\"{}\">\n{}\n</vault_context>",
+                        era.label, era.count, era_samples.join("\n\n")
+                    ));
+                }
+            }
+            // Unmatched samples
+            let unmatched: Vec<&str> = ec.samples
+                .iter()
+                .filter(|(idx, _)| *idx == ec.eras.len())
+                .map(|(_, s)| s.as_str())
+                .collect();
+            if !unmatched.is_empty() {
+                prompt.push_str(&format!(
+                    "\n\n<vault_context era=\"undated\">\n{}\n</vault_context>",
+                    unmatched.join("\n\n")
+                ));
+            }
+        } else {
+            // Single or no eras — flat context
+            let context_section: String = ec.samples
+                .iter()
+                .map(|(_, s)| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            prompt.push_str(&format!(
+                "\n\n<vault_context>\n{context_section}\n</vault_context>"
+            ));
+        }
+    } else {
+        let max_samples = context_samples.len().min(20);
+        let context_section: String = context_samples[..max_samples].join("\n\n");
+        prompt.push_str(&format!(
+            "\n\n<vault_context>\n{context_section}\n</vault_context>"
+        ));
+    }
 
     // Entity focus
     prompt.push_str(&format!(
@@ -377,6 +435,41 @@ directly. Let this inform the angle of your questions without constraining them.
         let practice = build_practice_shape(e);
         if !practice.is_empty() {
             prompt.push_str(&format!("\n\n{practice}"));
+        }
+    }
+
+    // Era coverage instructions
+    if let Some(ec) = era_context {
+        if ec.eras.len() > 1 {
+            let mut era_lines: Vec<String> = Vec::new();
+            let mut accounted = 0usize;
+            for (i, era) in ec.eras.iter().enumerate() {
+                let alloc = ec.era_allocations.get(i).copied().unwrap_or(1);
+                era_lines.push(format!(
+                    "- \"{}\" ({} notes): min {} catalyst{}",
+                    era.label, era.count, alloc,
+                    if alloc != 1 { "s" } else { "" }
+                ));
+                accounted += alloc;
+            }
+            let free = num_catalysts.saturating_sub(accounted);
+            prompt.push_str(&format!(
+                "\n\n<era_coverage>\n\
+Each era in the context above represents a distinct period of engagement with this entity. \
+Ensure temporal coverage — ground at least the minimum number of catalysts in excerpts from each era:\n\
+{}\n\
+{}\
+The differences between eras often hold the most interesting material — probe what shifted, \
+what recurred, or what was left behind between periods.\n\
+</era_coverage>",
+                era_lines.join("\n"),
+                if free > 0 {
+                    format!("Remaining {} catalyst{}: allocate freely to wherever the richest material is.\n",
+                        free, if free != 1 { "s" } else { "" })
+                } else {
+                    String::new()
+                },
+            ));
         }
     }
 
@@ -418,12 +511,28 @@ embed well against vault passages and surface relevant content when used as a se
         .collect::<Vec<_>>()
         .join(",\n");
 
+    let has_eras = era_context.map_or(false, |ec| ec.eras.len() > 1);
+    let era_instruction = if has_eras {
+        "\n4. For eraLabels: the era label (from the era attributes on vault_context) that each catalyst is grounded in."
+    } else {
+        ""
+    };
+    let era_json = if has_eras {
+        let era_placeholders: String = (0..num_catalysts)
+            .map(|i| format!("    \"[era label {}]\"", i + 1))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!(",\n  \"eraLabels\": [\n{era_placeholders}\n  ]")
+    } else {
+        String::new()
+    };
+
     prompt.push_str(&format!(
         "\n\n\
 Now attend to the excerpts and:\n\
 1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
 2. {format_instruction}\n\
-3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\n\
+3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").{era_instruction}\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -431,7 +540,7 @@ Return a JSON object with:\n\
   ],\n\
   \"topicNames\": [\n\
 {topic_placeholders}\n\
-  ]\n\
+  ]{era_json}\n\
 }}"
     ));
 
@@ -464,22 +573,30 @@ fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'s
 // Response parsing
 // ---------------------------------------------------------------------------
 
-/// Parsed catalyst response: catalyst pairs.
+/// A single parsed catalyst with text, topic, and optional era label.
+pub struct ParsedCatalyst {
+    pub text: String,
+    pub topic: String,
+    pub era_label: Option<String>,
+}
+
+/// Parsed catalyst response.
 pub struct CatalystResponse {
     pub pairs: Vec<(String, String)>,
+    pub catalysts: Vec<ParsedCatalyst>,
 }
 
 /// Parse the LLM response into catalyst pairs.
 ///
 /// Supports two formats:
-/// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...] }`
+/// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...], "eraLabels": [...] }`
 /// 2. **Legacy array format**: `[{ "catalyst": "...", "topic": "..." }, ...]`
 pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
     let json_str = strip_code_fences(response);
 
     // Try the object format first
     if let Ok(payload) = serde_json::from_str::<CatalystPayload>(json_str) {
-        let pairs: Vec<(String, String)> = payload
+        let catalysts: Vec<ParsedCatalyst> = payload
             .catalysts
             .into_iter()
             .enumerate()
@@ -489,22 +606,29 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
                     .get(i)
                     .cloned()
                     .unwrap_or_else(|| generate_fallback_topic(&text));
-                (text, topic)
+                let era_label = payload.era_labels.get(i).cloned();
+                ParsedCatalyst { text, topic, era_label }
             })
             .collect();
-        return Ok(CatalystResponse { pairs });
+        let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+        return Ok(CatalystResponse { pairs, catalysts });
     }
 
     // Fall back to legacy array format
     let entries: Vec<CatalystEntry> =
         serde_json::from_str(json_str).context("Failed to parse catalyst response as JSON")?;
 
-    Ok(CatalystResponse {
-        pairs: entries
-            .into_iter()
-            .map(|entry| (entry.catalyst, entry.topic))
-            .collect(),
-    })
+    let catalysts: Vec<ParsedCatalyst> = entries
+        .into_iter()
+        .map(|entry| ParsedCatalyst {
+            text: entry.catalyst,
+            topic: entry.topic,
+            era_label: None,
+        })
+        .collect();
+    let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+
+    Ok(CatalystResponse { pairs, catalysts })
 }
 
 /// Strip markdown code fences from a response.
@@ -648,6 +772,7 @@ mod tests {
             "question",
             None,
             None,
+            None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Dialectical"));
         assert!(prompt.contains("<vault_context>"));
@@ -667,6 +792,7 @@ mod tests {
             "thesis",
             None,
             None,
+            None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
         assert!(prompt.contains("articulate what's at stake"));
@@ -683,6 +809,7 @@ mod tests {
             &PROFILE_DIALECTICAL,
             "question",
             Some("User is interested in X"),
+            None,
             None,
         );
         assert!(prompt.contains("USER CONTEXT (from vault guide):"));

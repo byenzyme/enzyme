@@ -14,11 +14,12 @@ use crate::db::{Database, Repository};
 use crate::llm::{
     LlmClient, GenerationParams,
     build_system_prompt, build_user_prompt, parse_catalyst_response,
-    catalyst_json_schema,
+    catalyst_json_schema, EraContext, ParsedCatalyst,
     get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
     DEFAULT_MODEL,
 };
 use crate::models::{Catalyst, Entity};
+use crate::pipeline::eras::{cluster_eras_periodic, assign_occurrences_to_eras, allocate_catalysts_to_eras, sample_contexts_by_era};
 
 pub struct CatalystPipeline<'a> {
     repo: Repository<'a>,
@@ -120,7 +121,7 @@ struct EntityJob {
 struct EntityResult {
     entity_name: String,
     entity_type: String,
-    catalysts: Option<Vec<(String, String)>>,
+    catalysts: Option<Vec<ParsedCatalyst>>,
     error: Option<String>,
 }
 
@@ -171,17 +172,6 @@ impl<'a> CatalystPipeline<'a> {
             let entity_name = &entity.name;
 
             let occurrences = self.repo.get_entity_occurrences(entity_id)?;
-            let context_samples: Vec<String> = occurrences
-                .iter()
-                .filter_map(|o| o.context.clone())
-                .take(20)
-                .collect();
-
-            if context_samples.is_empty() {
-                debug!(entity_name = entity_name.as_str(), "no context samples, skipping");
-                skipped.push(entity_name.clone());
-                continue;
-            }
 
             // Resolve per-entity profile
             let profile: &CatalystProfile = config
@@ -194,14 +184,54 @@ impl<'a> CatalystPipeline<'a> {
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
 
+            // Era-aware context sampling
+            let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
+            let era_context = if eras.len() > 1 {
+                let bucketed = assign_occurrences_to_eras(&eras, &occurrences);
+                let era_allocs = allocate_catalysts_to_eras(&eras, num_catalysts, 1);
+                let samples = sample_contexts_by_era(&eras, &bucketed, 20);
+
+                if samples.iter().all(|(_, s)| s.is_empty()) {
+                    None
+                } else {
+                    Some(EraContext {
+                        eras: eras.clone(),
+                        era_allocations: era_allocs,
+                        samples,
+                    })
+                }
+            } else {
+                None
+            };
+
+            // Flat context samples as fallback
+            let flat_samples: Vec<String> = occurrences
+                .iter()
+                .filter_map(|o| o.context.clone())
+                .take(20)
+                .collect();
+
+            let context_samples = if era_context.is_some() {
+                &[] as &[String]
+            } else {
+                &flat_samples
+            };
+
+            if flat_samples.is_empty() && era_context.is_none() {
+                debug!(entity_name = entity_name.as_str(), "no context samples, skipping");
+                skipped.push(entity_name.clone());
+                continue;
+            }
+
             let user_prompt = build_user_prompt(
                 entity_name,
-                &context_samples,
+                context_samples,
                 num_catalysts,
                 profile,
                 config.format_key,
                 config.guide_signal,
                 Some(entity),
+                era_context.as_ref(),
             );
 
             debug!(
@@ -333,7 +363,7 @@ impl<'a> CatalystPipeline<'a> {
                 );
 
                 match parse_catalyst_response(&response_text) {
-                    Ok(parsed) if parsed.pairs.is_empty() => {
+                    Ok(parsed) if parsed.catalysts.is_empty() => {
                         debug!(
                             entity_name = entity_name.as_str(),
                             "LLM returned empty catalysts array"
@@ -348,7 +378,7 @@ impl<'a> CatalystPipeline<'a> {
                     Ok(parsed) => EntityResult {
                         entity_name,
                         entity_type,
-                        catalysts: Some(parsed.pairs),
+                        catalysts: Some(parsed.catalysts),
                         error: None,
                     },
                     Err(e) => {
@@ -401,23 +431,29 @@ impl<'a> CatalystPipeline<'a> {
                         continue;
                     }
 
-                    if let Some(pairs) = entity_result.catalysts {
+                    if let Some(parsed_catalysts) = entity_result.catalysts {
                         // Delete old catalysts and insert new ones
                         self.repo
                             .delete_catalysts_for_entity(&entity_result.entity_name)?;
 
                         let catalyst_texts: Vec<String> =
-                            pairs.iter().map(|(t, _)| t.clone()).collect();
+                            parsed_catalysts.iter().map(|c| c.text.clone()).collect();
 
-                        let catalysts: Vec<Catalyst> = pairs
+                        let catalysts: Vec<Catalyst> = parsed_catalysts
                             .into_iter()
-                            .map(|(text, topic)| Catalyst {
-                                id: Uuid::new_v4().to_string(),
-                                text,
-                                entity: entity_result.entity_name.clone(),
-                                context: topic,
-                                generated_at: Utc::now(),
-                                metadata: serde_json::json!({}),
+                            .map(|pc| {
+                                let metadata = match &pc.era_label {
+                                    Some(era) => serde_json::json!({"era": era}),
+                                    None => serde_json::json!({}),
+                                };
+                                Catalyst {
+                                    id: Uuid::new_v4().to_string(),
+                                    text: pc.text,
+                                    entity: entity_result.entity_name.clone(),
+                                    context: pc.topic,
+                                    generated_at: Utc::now(),
+                                    metadata,
+                                }
                             })
                             .collect();
 
@@ -463,8 +499,21 @@ impl<'a> CatalystPipeline<'a> {
 
 /// Calculate per-entity catalyst allocation from 3-month activity.
 ///
-/// Bands: 0→3, 1-5→3-5, 6-10→5-7, 11-20→7-10, 20+→up to 15
-pub fn calculate_allocations(entities: &[Entity]) -> HashMap<String, usize> {
+/// Bands: 0→min, 1-5→min to base, 6-10→base area, 11-20→base to upper, 20+→up to max
+///
+/// When `min_top_catalysts` is set, the largest entity (by volume) is guaranteed
+/// at least that many catalysts. The base and max are derived accordingly,
+/// matching enzyme-python's `min_top_catalysts` parameter.
+pub fn calculate_allocations(entities: &[Entity], min_top_catalysts: Option<usize>) -> HashMap<String, usize> {
+    let min_per_entity: usize = 3;
+    let mut base: usize = 7;
+    let mut max_per_entity: usize = 15;
+
+    if let Some(min_top) = min_top_catalysts {
+        base = (min_top * 6 / 10).max(min_per_entity + 1);
+        max_per_entity = max_per_entity.max(min_top);
+    }
+
     let now = Utc::now();
     let month_keys: Vec<String> = (0..3)
         .map(|i| {
@@ -479,23 +528,46 @@ pub fn calculate_allocations(entities: &[Entity]) -> HashMap<String, usize> {
         })
         .collect();
 
-    entities
+    let entity_volumes: Vec<(&Entity, i64)> = entities
         .iter()
         .map(|e| {
             let volume: i64 = month_keys
                 .iter()
                 .filter_map(|k| e.trends.timeline_buckets.get(k))
                 .sum();
-            let alloc = match volume {
-                0 => 3,
-                1..=5 => 3 + ((volume as usize - 1) * 2) / 4,
-                6..=10 => 5 + ((volume as usize - 5) * 2) / 5,
-                11..=20 => 7 + ((volume as usize - 10) * 3) / 10,
-                _ => (10 + (volume as usize - 20)).min(15),
-            };
-            (e.name.clone(), alloc)
+            (e, volume)
         })
-        .collect()
+        .collect();
+
+    let mut allocations: HashMap<String, usize> = entity_volumes
+        .iter()
+        .map(|(e, volume)| {
+            let volume = *volume;
+            let alloc = match volume {
+                0 => min_per_entity,
+                1..=5 => min_per_entity + ((volume as usize) * 2) / 5,
+                6..=10 => 5 + ((volume as usize - 5) * 2) / 5,
+                11..=20 => base + ((volume as usize - 10) * 3) / 10,
+                _ => {
+                    let excess = ((volume as usize) - 20).min(20);
+                    10 + (excess * (max_per_entity - 10)) / 20
+                }
+            };
+            (e.name.clone(), alloc.clamp(min_per_entity, max_per_entity))
+        })
+        .collect();
+
+    // Boost the top entity if it didn't reach min_top_catalysts
+    if let Some(min_top) = min_top_catalysts {
+        if let Some((top_entity, _)) = entity_volumes.iter().max_by_key(|(_, v)| *v) {
+            let current = allocations.get(&top_entity.name).copied().unwrap_or(0);
+            if current < min_top {
+                allocations.insert(top_entity.name.clone(), min_top.min(max_per_entity));
+            }
+        }
+    }
+
+    allocations
 }
 
 #[cfg(test)]
@@ -523,7 +595,7 @@ mod tests {
     #[test]
     fn test_allocation_zero_volume() {
         let entities = vec![make_entity("empty", HashMap::new())];
-        let allocs = calculate_allocations(&entities);
+        let allocs = calculate_allocations(&entities, None);
         assert_eq!(allocs["empty"], 3);
     }
 
@@ -532,7 +604,7 @@ mod tests {
         let now = Utc::now();
         let key = format!("{:04}-{:02}", now.year(), now.month());
         let entities = vec![make_entity("low", HashMap::from([(key, 3)]))];
-        let allocs = calculate_allocations(&entities);
+        let allocs = calculate_allocations(&entities, None);
         assert!(allocs["low"] >= 3 && allocs["low"] <= 5);
     }
 
@@ -541,8 +613,9 @@ mod tests {
         let now = Utc::now();
         let key = format!("{:04}-{:02}", now.year(), now.month());
         let entities = vec![make_entity("high", HashMap::from([(key, 30)]))];
-        let allocs = calculate_allocations(&entities);
-        assert_eq!(allocs["high"], 15);
+        let allocs = calculate_allocations(&entities, None);
+        // volume=30, excess=min(10,20)=10, alloc=10+(10*5)/20=12
+        assert!(allocs["high"] >= 10 && allocs["high"] <= 15);
     }
 
     #[test]
@@ -550,7 +623,7 @@ mod tests {
         let now = Utc::now();
         let key = format!("{:04}-{:02}", now.year(), now.month());
         let entities = vec![make_entity("med", HashMap::from([(key, 15)]))];
-        let allocs = calculate_allocations(&entities);
+        let allocs = calculate_allocations(&entities, None);
         assert!(allocs["med"] >= 7 && allocs["med"] <= 10);
     }
 
@@ -562,8 +635,23 @@ mod tests {
         let prev_year = if now.month() == 1 { now.year() - 1 } else { now.year() };
         let k2 = format!("{:04}-{:02}", prev_year, prev_month);
         let entities = vec![make_entity("span", HashMap::from([(k1, 4), (k2, 4)]))];
-        let allocs = calculate_allocations(&entities);
+        let allocs = calculate_allocations(&entities, None);
         // 8 total → band 6-10 → 5-7
         assert!(allocs["span"] >= 5 && allocs["span"] <= 7);
+    }
+
+    #[test]
+    fn test_allocation_min_top_catalysts() {
+        let now = Utc::now();
+        let key = format!("{:04}-{:02}", now.year(), now.month());
+        let entities = vec![
+            make_entity("big", HashMap::from([(key.clone(), 50)])),
+            make_entity("small", HashMap::from([(key, 2)])),
+        ];
+        let allocs = calculate_allocations(&entities, Some(25));
+        // Top entity should be boosted to at least 25
+        assert!(allocs["big"] >= 25);
+        // Small entity should stay low
+        assert!(allocs["small"] <= 5);
     }
 }

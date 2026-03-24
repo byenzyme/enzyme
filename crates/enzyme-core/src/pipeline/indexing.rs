@@ -191,8 +191,8 @@ impl<'a> IndexingPipeline<'a> {
                         file_path: doc.source_ref.clone(),
                         context: context_snippet.clone(),
                         created_at: now,
-                        effective_date: Some(doc.modified_at),
-                        date_source: doc.modified_source.as_str().to_string(),
+                        effective_date: Some(doc.created_at),
+                        date_source: doc.created_source.as_str().to_string(),
                     },
                 ));
             }
@@ -207,8 +207,8 @@ impl<'a> IndexingPipeline<'a> {
                         file_path: doc.source_ref.clone(),
                         context: context_snippet.clone(),
                         created_at: now,
-                        effective_date: Some(doc.modified_at),
-                        date_source: doc.modified_source.as_str().to_string(),
+                        effective_date: Some(doc.created_at),
+                        date_source: doc.created_source.as_str().to_string(),
                     },
                 ));
             }
@@ -223,8 +223,8 @@ impl<'a> IndexingPipeline<'a> {
                         file_path: doc.source_ref.clone(),
                         context: context_snippet.clone(),
                         created_at: now,
-                        effective_date: Some(doc.modified_at),
-                        date_source: doc.modified_source.as_str().to_string(),
+                        effective_date: Some(doc.created_at),
+                        date_source: doc.created_source.as_str().to_string(),
                     },
                 ));
             }

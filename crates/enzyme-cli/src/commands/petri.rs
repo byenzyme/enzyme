@@ -53,10 +53,16 @@ pub fn build_petri_json(vault_path: &Path, top: usize) -> Result<serde_json::Val
 
         let catalyst_list: Vec<serde_json::Value> = catalysts
             .iter()
-            .map(|c| json!({
-                "text": c.text,
-                "context": c.context,
-            }))
+            .map(|c| {
+                let mut obj = json!({
+                    "text": c.text,
+                    "context": c.context,
+                });
+                if let Some(era) = c.metadata.get("era").and_then(|v| v.as_str()) {
+                    obj.as_object_mut().unwrap().insert("era".to_string(), json!(era));
+                }
+                obj
+            })
             .collect();
 
         let mut entry = json!({

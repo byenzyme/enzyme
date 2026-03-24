@@ -193,7 +193,15 @@ fn value_to_string_vec(val: &Value) -> Vec<String> {
 
 fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
     let s = match val {
-        Value::String(s) => s.clone(),
+        Value::String(s) => {
+            // Strip wikilink brackets: "[[2025-08-04]]" -> "2025-08-04"
+            let stripped = s.trim();
+            if stripped.starts_with("[[") && stripped.ends_with("]]") {
+                stripped[2..stripped.len() - 2].to_string()
+            } else {
+                s.clone()
+            }
+        }
         Value::Number(n) => {
             // Could be a unix timestamp
             if let Some(ts) = n.as_i64() {
@@ -513,5 +521,18 @@ Body
 ";
         let fm = parse_frontmatter(content).expect("should parse");
         assert!(fm.created.is_some());
+    }
+
+    #[test]
+    fn test_wikilink_wrapped_date() {
+        let content = "\
+---
+created: '[[2025-08-04]]'
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.created.is_some());
+        assert_eq!(fm.created.unwrap().date_naive().to_string(), "2025-08-04");
     }
 }
