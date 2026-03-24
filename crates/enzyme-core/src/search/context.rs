@@ -59,8 +59,15 @@ impl CatalyzeResponse {
 }
 
 /// Catalyst-based search over pre-computed similarities.
+///
+/// Supports an optional **target** database for split-DB mode (after `enzyme apply`):
+/// - Catalysts and catalyst embeddings come from the **source** repo
+/// - Similarities and chunk content come from the **target** repo
 pub struct ContextSearch<'a> {
+    /// Source vault: catalysts live here.
     repo: Repository<'a>,
+    /// Target DB for similarities/content. Falls back to `repo` when `None`.
+    target_repo: Option<Repository<'a>>,
     service: &'a EmbeddingService,
     embeddings_dir: PathBuf,
 }
@@ -73,6 +80,22 @@ impl<'a> ContextSearch<'a> {
     ) -> Self {
         Self {
             repo: Repository::new(db),
+            target_repo: None,
+            service,
+            embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Create a split-DB search: catalysts from `source_db`, similarities/content from `target_db`.
+    pub fn with_target(
+        source_db: &'a Database,
+        target_db: &'a Database,
+        service: &'a EmbeddingService,
+        embeddings_dir: impl AsRef<Path>,
+    ) -> Self {
+        Self {
+            repo: Repository::new(source_db),
+            target_repo: Some(Repository::new(target_db)),
             service,
             embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
@@ -165,11 +188,12 @@ impl<'a> ContextSearch<'a> {
         let mut chunk_scores: HashMap<String, ChunkScore> = HashMap::new();
         let context_per_catalyst = (limit * 3 / max_catalysts.max(1)).max(10);
 
+        let sim_repo = self.target_repo.as_ref().unwrap_or(&self.repo);
+
         for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
             let relevance = *cat_sim as f64;
-            let sims = self
-                .repo
+            let sims = sim_repo
                 .get_similarities_for_catalyst(&catalyst.id, context_per_catalyst)?;
 
             for sim in &sims {
@@ -212,7 +236,7 @@ impl<'a> ContextSearch<'a> {
 
             // Recency boost (from document modified_at)
             let mut recency_boost = 1.0;
-            if let Ok(Some(doc)) = self.repo.get_document_by_path(&file_path) {
+            if let Ok(Some(doc)) = sim_repo.get_document_by_path(&file_path) {
                 let now = chrono::Utc::now().timestamp_millis();
                 let age_days = ((now - doc.modified_at) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
                 recency_boost = 1.0 + (-0.693147 / 30.0 * age_days).exp();
@@ -232,8 +256,7 @@ impl<'a> ContextSearch<'a> {
         // Fetch content for top limit*3 candidates BEFORE dedup/truncation
         let fetch_count = (limit * 3).min(scored.len());
         for s in scored.iter_mut().take(fetch_count) {
-            s.content = self
-                .repo
+            s.content = sim_repo
                 .get_chunk_content(&s.file_path, s.chunk_index)?
                 .unwrap_or_default();
         }

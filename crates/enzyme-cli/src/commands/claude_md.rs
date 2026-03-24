@@ -17,9 +17,12 @@ Use the Enzyme CLI for retrieving context from this vault. Run all commands from
 
 **Refresh:** `enzyme refresh` — runs automatically before each prompt. Manual use is for CI or hooks only.
 
+**Apply to external content:** `enzyme apply ./target-dir` — index an external directory using your vault's catalysts. Then search it with `enzyme catalyze "query" --target ./target-dir`.
+
 **When to use which:**
 - `enzyme petri` — "What's in my vault?" / "What have I been thinking about?"
 - `enzyme catalyze` — Conceptual queries where you don't have exact text to match
+- `enzyme catalyze --target DIR` — Search external content (after `enzyme apply DIR`)
 - `grep` — Exact tag, wikilink, or text matches (names, `#tags`, `[[links]]`)
 
 **Tag search:** Tags appear as `- tag` in frontmatter and `#tag` inline. Search without `#` to catch both.

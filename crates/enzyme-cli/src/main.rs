@@ -44,6 +44,11 @@ enum Commands {
         /// Suppress all output (for agent/programmatic use)
         #[arg(short, long)]
         quiet: bool,
+
+        /// Minimum catalysts for the largest entity (by volume).
+        /// Raises the ceiling and boosts the top entity to at least this many.
+        #[arg(long)]
+        min_top_catalysts: Option<usize>,
     },
 
     /// Refresh the vault index (alias for init)
@@ -61,6 +66,10 @@ enum Commands {
         /// Suppress all output (for agent/programmatic use)
         #[arg(short, long)]
         quiet: bool,
+
+        /// Minimum catalysts for the largest entity (by volume).
+        #[arg(long)]
+        min_top_catalysts: Option<usize>,
     },
 
     /// Search using catalyst-based approximate matching
@@ -71,6 +80,10 @@ enum Commands {
         /// Maximum number of results
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
+
+        /// Target directory (from `enzyme apply`) to search instead of the vault itself
+        #[arg(long)]
+        target: Option<PathBuf>,
     },
 
     /// Show the current petri (top catalysts and entities)
@@ -186,9 +199,9 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached, guide, quiet } => {
+        Commands::Init { full, detached, guide, quiet, min_top_catalysts } => {
             let vault_guide = resolve_vault_guide(guide);
-            let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
+            let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
 
             if quiet {
                 if let Some(result) = init_result {
@@ -197,12 +210,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Refresh { full, detached, guide, quiet } => {
+        Commands::Refresh { full, detached, guide, quiet, min_top_catalysts } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_refresh(&vault_path, full, detached, quiet, vault_guide.as_deref()).await?;
+            commands::init::run_refresh(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
         }
-        Commands::Catalyze { query, limit } => {
-            commands::catalyze::run_catalyze(&vault_path, &query, limit).await?;
+        Commands::Catalyze { query, limit, target } => {
+            commands::catalyze::run_catalyze(&vault_path, &query, limit, target.as_deref()).await?;
         }
         Commands::Petri { top } => {
             commands::petri::run_petri(&vault_path, top).await?;
