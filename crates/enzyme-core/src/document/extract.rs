@@ -55,9 +55,10 @@ pub fn extract_entities(
     // -----------------------------------------------------------------------
     let folders = extract_folders(file_path);
 
-    // Filter out Readwise metadata tags (e.g., readwise/source/reader)
-    // and numeric-only tags (footnote numbers, heading numbers)
-    tag_set.retain(|t| !t.starts_with("readwise/") && !is_numeric_only(t));
+    // Filter out Readwise metadata tags (e.g., readwise/source/reader),
+    // numeric-only tags (footnote numbers, heading numbers),
+    // and hex color codes (#ff0000, #333, #1a2b3c)
+    tag_set.retain(|t| !t.starts_with("readwise/") && !is_numeric_only(t) && !is_hex_color(t));
 
     // Expand hierarchical tags into parent components.
     // e.g., "type/book" → also indexes "type"
@@ -100,6 +101,15 @@ pub fn extract_entities(
 /// Check if a string is purely numeric (possibly with leading zeros).
 fn is_numeric_only(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Check if a string looks like a CSS hex color code.
+///
+/// Matches 3, 4, 6, or 8 hex digit patterns (e.g., "fff", "ff0000", "1a2b3c4d").
+fn is_hex_color(s: &str) -> bool {
+    let len = s.len();
+    (len == 3 || len == 4 || len == 6 || len == 8)
+        && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Check if a link target is a bare date (YYYY-MM-DD).
@@ -513,6 +523,29 @@ Another #real-tag
         assert!(!entities.tags.contains(&"005".to_string()));
         assert!(!entities.tags.contains(&"15".to_string()));
         assert!(entities.tags.contains(&"pkm".to_string()));
+    }
+
+    #[test]
+    fn test_hex_color_tags_filtered() {
+        let content = "color: #ff0000 and #333 and #1a2b3c but not #rust or #ff0000ff";
+        let entities = extract_entities(content, &PathBuf::from("note.md"), &[]);
+
+        assert!(!entities.tags.contains(&"ff0000".to_string()));
+        assert!(!entities.tags.contains(&"333".to_string()));
+        assert!(!entities.tags.contains(&"1a2b3c".to_string()));
+        assert!(!entities.tags.contains(&"ff0000ff".to_string()));
+        assert!(entities.tags.contains(&"rust".to_string()));
+    }
+
+    #[test]
+    fn test_hex_color_not_overly_aggressive() {
+        // Tags that happen to be short but contain non-hex chars should survive
+        let content = "#git #npm #api";
+        let entities = extract_entities(content, &PathBuf::from("note.md"), &[]);
+
+        assert!(entities.tags.contains(&"git".to_string()));
+        assert!(entities.tags.contains(&"npm".to_string()));
+        assert!(entities.tags.contains(&"api".to_string()));
     }
 
     #[test]
