@@ -1,12 +1,17 @@
 /// Default chunk size in approximate characters (~512 tokens at ~4 chars/token).
 pub const DEFAULT_CHUNK_SIZE_CHARS: usize = 2048;
 
+/// Minimum chunk size in characters. Chunks smaller than this are merged into
+/// the next chunk to avoid near-empty embeddings (e.g. lone headings).
+const MIN_CHUNK_SIZE_CHARS: usize = 100;
+
 /// Split a document into chunks suitable for embedding.
 ///
 /// Splitting strategy:
 /// 1. Split on paragraph boundaries (double newlines) when possible.
 /// 2. If a paragraph exceeds `chunk_size`, split on sentence boundaries.
 /// 3. If a sentence still exceeds `chunk_size`, split at `chunk_size` on a word boundary.
+/// 4. Merge any trailing chunk smaller than `MIN_CHUNK_SIZE_CHARS` into the previous chunk.
 ///
 /// `chunk_size` is in characters (approximate ~4 chars per token, so 2048 chars ~ 512 tokens).
 pub fn chunk_document(content: &str, chunk_size: usize) -> Vec<String> {
@@ -79,7 +84,50 @@ pub fn chunk_document(content: &str, chunk_size: usize) -> Vec<String> {
         chunks.push(current_chunk);
     }
 
+    // Merge undersized chunks into their neighbor to avoid near-empty embeddings
+    // (e.g. lone headings like "# James 3").
+    merge_small_chunks(&mut chunks, MIN_CHUNK_SIZE_CHARS);
+
     chunks
+}
+
+/// Merge chunks smaller than `min_size` into the next chunk (or previous if last).
+fn merge_small_chunks(chunks: &mut Vec<String>, min_size: usize) {
+    if chunks.len() <= 1 {
+        return;
+    }
+    let mut merged: Vec<String> = Vec::with_capacity(chunks.len());
+    let mut carry = String::new();
+
+    for chunk in chunks.drain(..) {
+        if !carry.is_empty() {
+            // Prepend the carried small chunk
+            carry.push_str("\n\n");
+            carry.push_str(&chunk);
+            if carry.len() >= min_size {
+                merged.push(carry);
+                carry = String::new();
+            }
+            // else keep carrying (still too small after merge)
+        } else if chunk.len() < min_size {
+            carry = chunk;
+        } else {
+            merged.push(chunk);
+        }
+    }
+
+    // If there's still a carried chunk, append it to the last merged chunk
+    if !carry.is_empty() {
+        if let Some(last) = merged.last_mut() {
+            last.push_str("\n\n");
+            last.push_str(&carry);
+        } else {
+            // All chunks were tiny — just keep them as one
+            merged.push(carry);
+        }
+    }
+
+    *chunks = merged;
 }
 
 /// Split a large block of text (that exceeds `chunk_size`) by sentence boundaries,
@@ -318,18 +366,30 @@ mod tests {
 
     #[test]
     fn test_multiple_paragraphs_boundary() {
-        let p1 = "Alpha paragraph here.";
-        let p2 = "Beta paragraph here.";
-        let p3 = "Gamma paragraph here.";
+        // Use paragraphs large enough to exceed MIN_CHUNK_SIZE_CHARS individually.
+        let p1 = format!("Alpha paragraph with enough content to stand alone. {}", "x".repeat(80));
+        let p2 = format!("Beta paragraph with enough content to stand alone. {}", "y".repeat(80));
+        let p3 = format!("Gamma paragraph with enough content to stand alone. {}", "z".repeat(80));
         let content = format!("{}\n\n{}\n\n{}", p1, p2, p3);
 
-        // chunk_size = 45 fits p1 (21) + separator (2) + p2 (20) = 43, but not + p3
-        let chunks = chunk_document(&content, 45);
+        // chunk_size fits p1+p2 but not p1+p2+p3
+        let chunks = chunk_document(&content, 300);
 
         assert_eq!(chunks.len(), 2);
         assert!(chunks[0].contains("Alpha"));
         assert!(chunks[0].contains("Beta"));
         assert!(chunks[1].contains("Gamma"));
+    }
+
+    #[test]
+    fn test_small_heading_merged_into_next_chunk() {
+        // A heading alone should be merged into the following paragraph.
+        let content = format!("# Chapter Title\n\n{}", "Some real content here. ".repeat(10));
+        let chunks = chunk_document(&content, 2048);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("# Chapter Title"));
+        assert!(chunks[0].contains("Some real content"));
     }
 
     #[test]

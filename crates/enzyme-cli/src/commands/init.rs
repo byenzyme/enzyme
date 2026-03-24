@@ -9,7 +9,7 @@ use tracing::{debug, info};
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::Database;
+use enzyme_core::db::{Database, Repository};
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
@@ -73,7 +73,7 @@ impl InitResult {
     }
 }
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<Option<InitResult>> {
+pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
     // Check for existing enzyme data and offer hard reset
@@ -243,7 +243,14 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
     // ── Step 5: Catalyst generation in foreground ─────────────────────────
     // Load enzyme config for catalyst profile/format settings
-    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let mut enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+
+    // Persist --min-top-catalysts to config so refreshes respect it
+    if let Some(mtc) = min_top_catalysts {
+        if let Err(e) = enzyme_config.persist_min_top_catalysts(vault_path, mtc) {
+            tracing::warn!("failed to persist min_top_catalysts: {}", e);
+        }
+    }
 
     let cat_stats = if let Some(resolved) = api_config {
         let total = sel_result.entities.len();
@@ -265,7 +272,10 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         };
         let effective_vault_guide = effective_vault_guide.as_deref();
 
-        let allocations = calculate_allocations(&sel_result.entities);
+        let effective_min_top = min_top_catalysts.or_else(|| {
+            enzyme_config.trending.as_ref().and_then(|t| t.min_top_catalysts)
+        });
+        let allocations = calculate_allocations(&sel_result.entities, effective_min_top);
 
         let cat_config = CatalystConfig {
             entity_profiles: &sel_result.entity_profiles,
@@ -395,7 +405,12 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         }).ok();
     }
 
-    // ── Step 8: Generate CLAUDE.md (interactive mode only) ────────────────
+    // ── Step 8: Re-apply targets ──────────────────────────────────────────
+    if cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
+        reapply_targets(vault_path).await;
+    }
+
+    // ── Step 9: Generate CLAUDE.md (interactive mode only) ────────────────
     if !quiet {
         if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
             tracing::warn!("failed to update CLAUDE.md: {}", e);
@@ -472,7 +487,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     drop(db);
 
     // Run init in quiet mode (suppresses all output)
-    let _ = run_init(vault_path, false, false, true, None).await?;
+    let _ = run_init(vault_path, false, false, true, None, None).await?;
 
     // Store bookkeeping for next staleness check
     let db = Database::open(&paths.vault_db)?;
@@ -489,14 +504,14 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
 /// - `--detached` → `run_refresh_detached` (background lockfile-guarded catalyst run)
 /// - `--quiet` without `--full` → `run_refresh_fast` (sync hot path for hooks)
 /// - Otherwise → interactive full pipeline
-pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
+pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<()> {
     if detached {
         return run_refresh_detached(vault_path).await;
     }
     if quiet && !full {
         return run_refresh_fast(vault_path).await;
     }
-    run_refresh_interactive(vault_path, full, quiet, vault_guide).await
+    run_refresh_interactive(vault_path, full, quiet, vault_guide, min_top_catalysts).await
 }
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
@@ -673,7 +688,8 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         ctx_builder.build(&entities_to_process, 5, 300).ok()
     };
 
-    let allocations = calculate_allocations(&entities_to_process);
+    let detached_min_top = enzyme_config.trending.as_ref().and_then(|t| t.min_top_catalysts);
+    let allocations = calculate_allocations(&entities_to_process, detached_min_top);
 
     let cat_config = CatalystConfig {
         entity_profiles: &sel_result.entity_profiles,
@@ -725,8 +741,45 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         }
     }
 
+    // ── Step 7: Re-apply targets ───────────────────────────────────────
+    if stats.catalysts_generated > 0 {
+        reapply_targets(vault_path).await;
+    }
+
     // Lock released on drop
     Ok(())
+}
+
+/// Re-apply all previously applied targets using the vault's current catalysts.
+///
+/// Called after catalyst regeneration so that target similarity mappings stay
+/// in sync. Errors are logged but don't fail the parent operation.
+async fn reapply_targets(vault_path: &Path) {
+    let paths = match EnzymePaths::new(vault_path) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let db = match Database::open(&paths.vault_db) {
+        Ok(db) => db,
+        Err(_) => return,
+    };
+    let repo = Repository::new(&db);
+    let targets = match repo.get_all_applied_targets() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    for target in &targets {
+        let target_path = std::path::PathBuf::from(&target.target_path);
+        if !target_path.exists() {
+            info!(path = %target.target_path, "skipping re-apply: target path no longer exists");
+            continue;
+        }
+        info!(path = %target.target_path, "re-applying target after catalyst regeneration");
+        if let Err(e) = super::apply::run_apply(vault_path, &target_path, false).await {
+            info!(path = %target.target_path, err = %e, "re-apply failed for target");
+        }
+    }
 }
 
 /// Spawn a background refresh process (detached child).
@@ -814,7 +867,7 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
 /// Interactive refresh path — the original full pipeline with display output.
 ///
 /// Used for `enzyme refresh` (no --quiet) and `enzyme refresh --full --quiet`.
-async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vault_guide: Option<&str>) -> Result<()> {
+async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // Capture old entity names before init for diffing.
@@ -847,7 +900,7 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
     };
 
     // Run the full pipeline.
-    let init_result = run_init(vault_path, full, false, quiet, vault_guide).await?;
+    let init_result = run_init(vault_path, full, false, quiet, vault_guide, min_top_catalysts).await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;
