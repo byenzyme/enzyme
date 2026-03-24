@@ -182,7 +182,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             tx.send(DisplayEvent::LlmSelectionStart).ok();
             let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
             let llm_sel = LlmSelectionPipeline::new(&db, &llm);
-            match llm_sel.run(&sel_result.entities, vault_path, &resolved.model).await {
+            match llm_sel.run(&sel_result.entities, vault_path, &resolved.model, vault_guide).await {
                 Ok(result) => {
                     tx.send(DisplayEvent::LlmSelectionComplete {
                         entities_selected: result.entities.len(),
@@ -253,10 +253,17 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         let cat_pipeline = CatalystPipeline::new(&db, &llm);
         let tx_cat = tx.clone();
 
-        // Prefer built context XML; fall back to externally provided vault_guide
-        let effective_vault_guide = vault_context
-            .as_deref()
-            .or(vault_guide);
+        // Merge user-provided vault guide with DB-built context
+        let effective_vault_guide = match (vault_guide, vault_context.as_deref()) {
+            (Some(guide), Some(context)) => {
+                // User guide takes priority, append DB context as supplementary
+                Some(format!("{guide}\n\n<vault_context>\n{context}\n</vault_context>"))
+            }
+            (Some(guide), None) => Some(guide.to_string()),
+            (None, Some(context)) => Some(context.to_string()),
+            (None, None) => None,
+        };
+        let effective_vault_guide = effective_vault_guide.as_deref();
 
         let allocations = calculate_allocations(&sel_result.entities);
 

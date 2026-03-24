@@ -34,6 +34,7 @@ impl<'a> LlmSelectionPipeline<'a> {
         candidates: &[Entity],
         vault_path: &Path,
         model: &str,
+        vault_guide: Option<&str>,
     ) -> Result<SelectionResult> {
         // Build vault context XML
         let ctx_builder = ContextBuilder::new(self.db);
@@ -48,7 +49,13 @@ impl<'a> LlmSelectionPipeline<'a> {
 
         // Build prompts
         let system_prompt = build_selection_system_prompt();
-        let user_prompt = build_selection_user_prompt(&vault_context);
+        let mut user_prompt = build_selection_user_prompt(&vault_context);
+        if let Some(guide) = vault_guide {
+            user_prompt.push_str(&format!(
+                "\n\n<vault_guide>\n{}\n</vault_guide>",
+                guide
+            ));
+        }
 
         // Call LLM — selection responses are larger than catalyst responses,
         // so we need more tokens than the default 1024.
