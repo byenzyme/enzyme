@@ -84,6 +84,10 @@ enum Commands {
         /// Target directory (from `enzyme apply`) to search instead of the vault itself
         #[arg(long)]
         target: Option<PathBuf>,
+
+        /// Presentation register: explore (default), continuity, or reference
+        #[arg(long, default_value = "explore")]
+        register: String,
     },
 
     /// Show the current petri (top catalysts and entities)
@@ -214,8 +218,8 @@ async fn main() -> Result<()> {
             let vault_guide = resolve_vault_guide(guide);
             commands::init::run_refresh(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
         }
-        Commands::Catalyze { query, limit, target } => {
-            commands::catalyze::run_catalyze(&vault_path, &query, limit, target.as_deref()).await?;
+        Commands::Catalyze { query, limit, target, register } => {
+            commands::catalyze::run_catalyze(&vault_path, &query, limit, target.as_deref(), &register).await?;
         }
         Commands::Petri { top } => {
             commands::petri::run_petri(&vault_path, top).await?;

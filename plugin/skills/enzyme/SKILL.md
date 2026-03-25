@@ -54,7 +54,13 @@ Activates the vault's catalysts to surface resonant content. Returns JSON with m
 ```bash
 enzyme catalyze "feeling stuck"
 enzyme catalyze "tension between efficiency and presence" -n 20
+enzyme catalyze "what I decided about X" --register continuity
 ```
+
+**`--register`** controls presentation guidance in the response:
+- `explore` (default) — per-catalyst guidance for wonder/exploration
+- `continuity` — response-level guidance for restoring context, showing trajectory
+- `reference` — response-level guidance for surfacing capture patterns
 
 ### `enzyme init` — Initialize a vault
 
@@ -116,7 +122,9 @@ If the output is large and gets persisted to a file (you'll see a `persisted-out
 
 **`enzyme catalyze`** — response has:
 - `results`: array of `{ file_path, content, similarity }`
-- `top_contributing_catalysts`: array of `{ text, entity, contribution_count }`
+- `top_contributing_catalysts`: array of `{ text, entity, contribution_count, presentation_guidance }` (guidance populated in explore register only)
+- `presentation_guidance`: array of strings (populated in continuity/reference registers only)
+- `register`: the register used ("explore", "continuity", or "reference")
 
 ## Workflow
 

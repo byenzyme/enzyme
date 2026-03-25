@@ -27,7 +27,12 @@ Use the Enzyme CLI for retrieving context from this vault. Run all commands from
 
 **Tag search:** Tags appear as `- tag` in frontmatter and `#tag` inline. Search without `#` to catch both.
 
-**Reading catalyze results:** Each contributing catalyst includes `presentation_guidance` — profile-specific instructions for how to frame the surfaced content. Follow these when presenting results: they describe how to open, what to notice, and what tone to use.
+**Presentation registers:** Pass `--register` to catalyze to control how results should be framed:
+- `explore` (default) — wonder, probe, notice patterns. Guidance is per-catalyst based on entity profile.
+- `continuity` — restore what the user knew, show trajectory, enable forward motion. Use when catching someone up or resuming a thread.
+- `reference` — surface what drew attention, connect imports to the user's own thinking.
+
+Results include `presentation_guidance` — follow these when framing the surfaced content.
 <!-- enzyme:end -->"#;
 
 pub fn generate_claude_md(vault_path: &Path) -> Result<()> {

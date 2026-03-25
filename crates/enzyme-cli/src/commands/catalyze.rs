@@ -8,9 +8,10 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
+use enzyme_core::llm::ContentRegister;
 use enzyme_core::search::context::ContextSearch;
 
-pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: Option<&Path>) -> Result<()> {
+pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: Option<&Path>, register_str: &str) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
@@ -22,6 +23,12 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
         println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
+
+    let register = ContentRegister::from_str_opt(register_str)
+        .unwrap_or_else(|| {
+            tracing::warn!("unknown register '{}', defaulting to explore", register_str);
+            ContentRegister::Explore
+        });
 
     let db = Database::open(&paths.vault_db)?;
 
@@ -51,22 +58,23 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
     let response = search.catalyze_search(query, limit)?;
     let processing_time = start.elapsed().as_secs_f64();
 
-    // Enrich top catalysts with profile-specific presentation guidance
+    // Enrich with register-appropriate presentation guidance
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let prefs = enzyme_config.parse_preferences();
     let response = response.with_presentation_guidance(
+        register,
         &prefs.entity_profiles,
         enzyme_config.catalyst_profile.as_deref(),
     );
 
-    let output = json!({
-        "query": query,
-        "search_strategy": "catalyze",
-        "processing_time": (processing_time * 1000.0).round() / 1000.0,
-        "total_results": response.results.len(),
-        "results": response.results,
-        "top_contributing_catalysts": response.top_contributing_catalysts,
-    });
+    // Merge response fields with metadata into a single JSON object
+    let mut output = serde_json::to_value(&response)?;
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert("query".into(), json!(query));
+        obj.insert("search_strategy".into(), json!("catalyze"));
+        obj.insert("processing_time".into(), json!((processing_time * 1000.0).round() / 1000.0));
+        obj.insert("total_results".into(), json!(response.results.len()));
+    }
 
     println!("{}", serde_json::to_string(&output)?);
 

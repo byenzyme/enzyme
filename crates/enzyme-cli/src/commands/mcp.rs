@@ -17,6 +17,7 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
+use enzyme_core::llm::ContentRegister;
 use enzyme_core::search::context::ContextSearch;
 
 use super::init::ensure_fresh_vault;
@@ -92,6 +93,12 @@ struct CatalyzeParams {
     /// Maximum results
     #[schemars(description = "Maximum results")]
     limit: Option<u64>,
+
+    /// Presentation register: "explore" (default, profile-specific guidance for wonder/exploration),
+    /// "continuity" (restore what the user knew, show trajectory, enable forward motion),
+    /// "reference" (surface what drew attention, capture patterns)
+    #[schemars(description = "Presentation register: explore (default), continuity, or reference")]
+    register: Option<String>,
 }
 
 #[tool_router]
@@ -128,13 +135,18 @@ impl EnzymeMcp {
             .catalyze_search(&p.query, limit)
             .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;
 
-        // Enrich with profile-specific presentation guidance
+        // Enrich with register-appropriate presentation guidance
+        let register = p.register
+            .as_deref()
+            .and_then(ContentRegister::from_str_opt)
+            .unwrap_or_default();
         let enzyme_config = EnzymeConfig::load(&self.vault_path)
             .ok()
             .flatten()
             .unwrap_or_default();
         let prefs = enzyme_config.parse_preferences();
         let response = response.with_presentation_guidance(
+            register,
             &prefs.entity_profiles,
             enzyme_config.catalyst_profile.as_deref(),
         );
