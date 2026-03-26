@@ -1,10 +1,20 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
 use crate::db::{Database, Repository};
-use crate::models::Entity;
+use crate::models::{Entity, EntityType};
+
+/// Result of context building, including the XML and any detected page entities.
+pub struct ContextResult {
+    /// The vault context XML string.
+    pub xml: String,
+    /// Folders that have trending wikilinks as source files.
+    /// Maps folder name -> list of matching wikilink names.
+    pub folders_with_page_entities: HashMap<String, Vec<String>>,
+}
 
 pub struct ContextBuilder<'a> {
     repo: Repository<'a>,
@@ -25,7 +35,31 @@ impl<'a> ContextBuilder<'a> {
         excerpts_per_entity: usize,
         max_excerpt_chars: usize,
     ) -> Result<String> {
+        self.build_with_page_entities(entities, excerpts_per_entity, max_excerpt_chars)
+            .map(|r| r.xml)
+    }
+
+    /// Build vault context XML and detect page entities for expandable folder decisions.
+    ///
+    /// Page entities are trending wikilinks that have source files inside a folder.
+    /// For example, if `folder:people` is trending and `people/Alice Smith.md` exists
+    /// with `[[alice smith]]` also trending, then `people` has page entity `alice smith`.
+    pub fn build_with_page_entities(
+        &self,
+        entities: &[Entity],
+        excerpts_per_entity: usize,
+        max_excerpt_chars: usize,
+    ) -> Result<ContextResult> {
         let folders = self.repo.get_folder_structure()?;
+
+        // Collect trending link names for page entity detection
+        let trending_links: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Link)
+            .map(|e| e.name.as_str())
+            .collect();
+
+        let mut folders_with_page_entities: HashMap<String, Vec<String>> = HashMap::new();
 
         let mut xml = String::with_capacity(4096);
         xml.push_str("<vault>\n");
@@ -91,6 +125,33 @@ impl<'a> ContextBuilder<'a> {
                 xml.push_str("</children>\n");
             }
 
+            // Page entities for folder entities
+            if entity.entity_type == EntityType::Folder && !trending_links.is_empty() {
+                let page_entities = self
+                    .repo
+                    .get_folder_page_entities(entity_name, &trending_links)?;
+                if !page_entities.is_empty() {
+                    folders_with_page_entities
+                        .insert(entity_name.clone(), page_entities.clone());
+                    xml.push_str("      <page_entities hint=\"These wikilinks have source files in this folder. If selected as expandable, DO NOT also select these wikilinks separately.\">\n");
+                    for wikilink in page_entities.iter().take(10) {
+                        let _ = write!(
+                            xml,
+                            "        <wikilink>[[{}]]</wikilink>\n",
+                            EscapeXml(wikilink),
+                        );
+                    }
+                    if page_entities.len() > 10 {
+                        let _ = write!(
+                            xml,
+                            "        <!-- and {} more -->\n",
+                            page_entities.len() - 10,
+                        );
+                    }
+                    xml.push_str("      </page_entities>\n");
+                }
+            }
+
             // Recent excerpts
             let occurrences = self.repo.get_recent_occurrences(entity_id, excerpts_per_entity)?;
             let excerpts: Vec<_> = occurrences
@@ -122,7 +183,10 @@ impl<'a> ContextBuilder<'a> {
         xml.push_str("  </trending_entities>\n");
         xml.push_str("</vault>");
 
-        Ok(xml)
+        Ok(ContextResult {
+            xml,
+            folders_with_page_entities,
+        })
     }
 }
 

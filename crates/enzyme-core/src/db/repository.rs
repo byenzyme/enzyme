@@ -855,6 +855,57 @@ impl<'a> Repository<'a> {
         Ok((children, total_count))
     }
 
+    /// Identify trending wikilinks that have source files directly inside a folder.
+    ///
+    /// For example, if `folder_name = "people"` and `people/Alice Smith.md` exists,
+    /// and `"alice smith"` is in `trending_links`, this returns `["alice smith"]`.
+    ///
+    /// This is the basis for determining expandable folders: a folder whose files
+    /// correspond to trending wikilinks should be expanded so catalysts cover the
+    /// children instead of (or in addition to) the folder as a flat entity.
+    pub fn get_folder_page_entities(
+        &self,
+        folder_name: &str,
+        trending_links: &[&str],
+    ) -> Result<Vec<String>> {
+        if trending_links.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let like_pattern = format!("{}/%", folder_name);
+        let not_like_pattern = format!("{}/%/%", folder_name);
+
+        // Get file stems of immediate children in this folder
+        let rows = self.db.query_read(
+            "SELECT source_ref FROM docs
+             WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
+            &[
+                &like_pattern as &dyn rusqlite::types::ToSql,
+                &not_like_pattern,
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+
+        // Extract lowercase file stems
+        let folder_files: std::collections::HashSet<String> = rows
+            .iter()
+            .filter_map(|source_ref| {
+                let file_name = source_ref.rsplit('/').next()?;
+                let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+                Some(stem.to_lowercase())
+            })
+            .collect();
+
+        // Match against trending wikilinks
+        let matching: Vec<String> = trending_links
+            .iter()
+            .filter(|link| folder_files.contains(link.to_lowercase().as_str()))
+            .map(|link| link.to_string())
+            .collect();
+
+        Ok(matching)
+    }
+
     /// Get recent occurrences for an entity, ordered by effective_date descending.
     pub fn get_recent_occurrences(
         &self,

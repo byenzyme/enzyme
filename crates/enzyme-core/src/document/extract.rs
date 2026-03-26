@@ -269,7 +269,7 @@ fn extract_folders(file_path: &Path) -> Vec<String> {
         if i > 0 && !prefix.is_empty() {
             prefix.push('/');
         }
-        prefix.push_str(component);
+        prefix.push_str(&component.to_lowercase());
         folders.push(prefix.clone());
     }
 

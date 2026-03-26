@@ -127,8 +127,20 @@ Your task: From the trending entities below, select 15–25 that would produce t
 - **strategic** — names positions, bets, and leverage. For strategy, investment, decision-making entities.
 - **reflective** — creates space for personal pattern recognition. For journaling, self-reflection entities.
 
-## Expandable folders
-If a folder contains meaningful sub-entities (e.g. folder:people contains specific people), return it as an expandable folder with its most active children listed. Children inherit the folder's profile unless overridden.
+## Expandable folders and page entities
+Some folder entities include a `<page_entities>` section listing wikilinks that have source files in that folder. These folders should be selected as expandable — they contain meaningful child entities.
+
+When a folder has `<page_entities>`, **do NOT select those wikilinks as separate entities** — the folder subsumes them. Only select a wikilink separately if it represents a concept/topic rather than a page inside a folder.
+
+Children listed in expandable folders inherit the folder's profile unless overridden.
+
+## Vault guide
+A `<vault_guide>` may appear in the user message with directives from the vault owner. Treat it as authoritative intent — it overrides default heuristics. Apply it across all output fields:
+- **Entity selection**: If the guide says certain folders, tags, or links should be entities, include them. If it says something is structural (not semantic), deprioritize or exclude it.
+- **Profiles**: If the guide describes what kind of thinking a category represents, use that to assign profiles.
+- **Expandable folders**: If the guide names folders that contain meaningful sub-entities, expand them.
+- **Exclusions**: If the guide calls something structural or meta, exclude it.
+- **Guide signal**: Incorporate the guide's framing into your read of what's intellectually alive.
 
 ## Selection criteria
 - Prefer entities with recent activity and rich context
@@ -137,10 +149,10 @@ If a folder contains meaningful sub-entities (e.g. folder:people contains specif
 - Group related entities under expandable folders when natural
 
 ## Exclusions
-Identify entities that should be excluded from trending and catalyst generation — structural/meta entities like #todo, #note, #template, generic folder names, or anything that serves an organizational role rather than a thematic one. If the guide mentions exclusions, respect those.
+Identify entities that should be excluded from trending and catalyst generation — structural/meta entities like #todo, #note, #template, generic folder names, or anything that serves an organizational role rather than a thematic one. Respect any exclusions from the vault guide.
 
 ## Guide signal
-Write a 1-2 sentence "guide signal" — what's intellectually alive in this vault right now. This calibrates future catalyst generation.
+Write a 1-2 sentence "guide signal" — what's intellectually alive in this vault right now. This calibrates future catalyst generation. If a vault guide is present, let it inform your read.
 
 ## Response format
 Return a JSON object:

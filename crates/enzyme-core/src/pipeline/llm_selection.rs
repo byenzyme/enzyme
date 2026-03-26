@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -7,7 +8,7 @@ use crate::db::Database;
 use crate::llm::{
     build_selection_system_prompt, build_selection_user_prompt, parse_selection_response,
     selection_json_schema,
-    GenerationParams, LlmClient, SelectionResponse,
+    ExpandableFolder, GenerationParams, LlmClient, SelectionResponse,
 };
 use crate::models::Entity;
 use crate::pipeline::context::ContextBuilder;
@@ -25,10 +26,11 @@ impl<'a> LlmSelectionPipeline<'a> {
 
     /// Run LLM-assisted entity selection.
     ///
-    /// 1. Build vault context XML from trending candidates
+    /// 1. Build vault context XML from trending candidates (with page entity detection)
     /// 2. Ask the LLM to select and profile entities
-    /// 3. Write enzyme-config.yaml
-    /// 4. Re-run SelectionPipeline (now picks up the written config)
+    /// 3. Post-process: deterministically set expandable folders based on page entities
+    /// 4. Write enzyme-config.yaml
+    /// 5. Re-run SelectionPipeline (now picks up the written config)
     pub async fn run(
         &self,
         candidates: &[Entity],
@@ -36,20 +38,21 @@ impl<'a> LlmSelectionPipeline<'a> {
         model: &str,
         vault_guide: Option<&str>,
     ) -> Result<SelectionResult> {
-        // Build vault context XML
+        // Build vault context XML with page entity detection
         let ctx_builder = ContextBuilder::new(self.db);
-        let vault_context = ctx_builder
-            .build(candidates, 5, 300)
+        let ctx_result = ctx_builder
+            .build_with_page_entities(candidates, 5, 300)
             .context("failed to build vault context for LLM selection")?;
 
         debug!(
-            context_bytes = vault_context.len(),
+            context_bytes = ctx_result.xml.len(),
+            folders_with_page_entities = ctx_result.folders_with_page_entities.len(),
             "built vault context XML for LLM selection"
         );
 
         // Build prompts
         let system_prompt = build_selection_system_prompt();
-        let mut user_prompt = build_selection_user_prompt(&vault_context);
+        let mut user_prompt = build_selection_user_prompt(&ctx_result.xml);
         if let Some(guide) = vault_guide {
             user_prompt.push_str(&format!(
                 "\n\n<vault_guide>\n{}\n</vault_guide>",
@@ -80,7 +83,7 @@ impl<'a> LlmSelectionPipeline<'a> {
         );
 
         // Parse response
-        let selection = match parse_selection_response(&response_text) {
+        let mut selection = match parse_selection_response(&response_text) {
             Ok(s) => s,
             Err(e) => {
                 debug!(
@@ -91,10 +94,13 @@ impl<'a> LlmSelectionPipeline<'a> {
             }
         };
 
+        // Post-process: deterministically set expandable folders based on page entities
+        post_process_expandable_folders(&mut selection, &ctx_result.folders_with_page_entities);
+
         info!(
             entities = selection.catalyzed_entities.len(),
             expandable_folders = selection.expandable_folders.len(),
-            "LLM selected entities"
+            "LLM selected entities (after post-processing)"
         );
 
         // Write config
@@ -103,6 +109,93 @@ impl<'a> LlmSelectionPipeline<'a> {
         // Re-run selection pipeline with the new config
         let pipeline = SelectionPipeline::new(self.db, vault_path);
         pipeline.run()
+    }
+}
+
+/// Deterministically set expandable folders based on page entity detection.
+///
+/// This is more reliable than depending on the LLM to correctly identify
+/// expandable folders. We know structurally which folders have trending
+/// wikilinks as source files, so we set expandable programmatically.
+///
+/// Also deduplicates: removes wikilinks from `catalyzed_entities` that are
+/// children of an expandable folder (the folder subsumes them).
+fn post_process_expandable_folders(
+    selection: &mut SelectionResponse,
+    folders_with_page_entities: &HashMap<String, Vec<String>>,
+) {
+    if folders_with_page_entities.is_empty() {
+        return;
+    }
+
+    // Build a set of existing expandable folder refs for merging
+    let existing_expandable: std::collections::HashSet<String> = selection
+        .expandable_folders
+        .iter()
+        .map(|f| f.folder_ref.clone())
+        .collect();
+
+    // For each folder entity in the selection that has page entities,
+    // ensure it's in expandable_folders with its children
+    for entity in &selection.catalyzed_entities {
+        let folder_name = if let Some(name) = entity.entity_ref.strip_prefix("folder:") {
+            name
+        } else {
+            continue;
+        };
+
+        if let Some(page_entities) = folders_with_page_entities.get(folder_name) {
+            let folder_ref = entity.entity_ref.clone();
+
+            if existing_expandable.contains(&folder_ref) {
+                // Already expandable from LLM — merge children
+                if let Some(existing) = selection
+                    .expandable_folders
+                    .iter_mut()
+                    .find(|f| f.folder_ref == folder_ref)
+                {
+                    // Add any page entities not already in children
+                    let existing_children: std::collections::HashSet<String> =
+                        existing.children.iter().cloned().collect();
+                    for pe in page_entities {
+                        let wikilink = format!("[[{}]]", pe);
+                        if !existing_children.contains(&wikilink) {
+                            existing.children.push(wikilink);
+                        }
+                    }
+                }
+            } else {
+                // Not yet expandable — promote it
+                let children: Vec<String> =
+                    page_entities.iter().map(|pe| format!("[[{}]]", pe)).collect();
+                selection.expandable_folders.push(ExpandableFolder {
+                    folder_ref,
+                    children,
+                    profile: entity.profile.clone(),
+                });
+            }
+        }
+    }
+
+    // Deduplicate: collect all children of expandable folders as a set
+    let expandable_children: std::collections::HashSet<String> = selection
+        .expandable_folders
+        .iter()
+        .flat_map(|f| f.children.iter().cloned())
+        .collect();
+
+    // Remove wikilinks from catalyzed_entities that are children of expandable folders
+    let before = selection.catalyzed_entities.len();
+    selection
+        .catalyzed_entities
+        .retain(|e| !expandable_children.contains(&e.entity_ref));
+
+    let removed = before - selection.catalyzed_entities.len();
+    if removed > 0 {
+        debug!(
+            removed,
+            "deduplicated wikilinks subsumed by expandable folders"
+        );
     }
 }
 
