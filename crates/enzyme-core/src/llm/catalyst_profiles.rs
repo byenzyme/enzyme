@@ -122,6 +122,7 @@ pub const CORE_CATALYST_GUIDANCE: &[&str] = &[
     "Tensions manifest as: edges (knowing/not-knowing), held contradictions, aspirations (current/desired), resistances (engage/avoid).",
     "Quote or reference concrete language from the source material whenever possible.",
     "Return probing catalysts only—no exercises, imperatives, or statements passed off as answers.",
+    "Each catalyst must require reasoning to answer—not answerable by grep, timestamp lookup, or metadata scan. It must demand synthesis: connecting dots, recognizing patterns, or reasoning about a trajectory.",
 ];
 
 // ---------------------------------------------------------------------------
@@ -138,24 +139,22 @@ pub const DEFAULT_FORMAT_KEY: &str = "question";
 pub const FORMAT_QUESTION: CatalystFormat = CatalystFormat {
     key: "question",
     display_name: "Questions",
-    description: "Probing questions that invite wonder and surface resonant passages.",
-    format_prompt: "Generate catalysts as impersonal wondering-alongside. Each catalyst must be \
-a single sentence QUESTION that invites philosophical wonder and can surface \
-resonant passages anywhere in the vault. Avoid second-person framing and use \
-vocabulary drawn from the excerpts.",
+    description: "Probing questions that require reasoning and surface resonant passages.",
+    format_prompt: "Generate catalysts as single sentence questions. Avoid second-person \
+framing and use vocabulary drawn from the excerpts.",
     surface_guidance: &[
-        "What's tender or hard-won in the material",
+        "What shifted between attempts, iterations, or time periods",
         "The patterns that refuse to disappear",
-        "What's arriving that hasn't been named yet",
-        "What might need dwelling rather than resolution",
-        "The open wonderings that remain unresolved",
+        "What was decided and what alternatives were left behind",
+        "What recurring need or constraint shaped the approach",
+        "What trajectory connects earlier thinking to later thinking",
     ],
     examples: &[
-        "What passage contradicts the conclusion drawn about craft?",
-        "Where does the tension between visibility and hiddenness remain unresolved?",
-        "When does the impulse to capture become a substitute for the thing it captures?",
-        "How does the language of provision mask what's actually being withheld?",
-        "In what ways has the pursuit of legibility foreclosed the possibilities of ambiguity?",
+        "What does the commitment to craft cost when speed keeps winning?",
+        "What blocker on this project isn't actually about time or resources?",
+        "What shifted in the approach after the first attempt didn't land — and what got left behind?",
+        "How did the setup evolve from simple to complex, and what need was driving that?",
+        "What sits uneasily beside the decision to prioritize X over Y?",
     ],
 };
 
@@ -226,10 +225,10 @@ what they actually think.",
         "Honor the full lifecycle: some tensions need dwelling, some need integration, some need release.",
     ],
     sample_prompts: &[
-        "What passage in {{entity}} contradicts what {{author}} argued about {{concept}}?",
-        "Where does {{framework_a}} pull against {{framework_b}} in the writing on {{entity}}?",
-        "What did {{author}} say that sits uneasily with the conclusion drawn about {{topic}}?",
-        "What tension between {{position_a}} and {{position_b}} runs through {{entity}} unresolved?",
+        "What does the commitment to {{position_a}} cost when {{position_b}} keeps surfacing?",
+        "Where does {{framework_a}} pull against {{framework_b}} in ways the author hasn't reconciled?",
+        "What sits uneasily beside the conclusion about {{concept}} — what did settling it foreclose?",
+        "What would have to be given up to resolve the tension between {{position_a}} and {{position_b}}?",
     ],
     footer: Some("Consider whether the user has been circling this entity repeatedly and might benefit from synthesis, action, or closure instead of more discovery."),
     detection_patterns: &[
@@ -263,10 +262,10 @@ collected information into personal implication.",
         "Surface patterns across sources—what themes keep appearing in what they choose to save?",
     ],
     sample_prompts: &[
-        "What did {{author}} say in {{entity}} that contradicts the reflection on {{topic}}?",
-        "What theme in {{entity}} echoes what was written about {{related_experience}}?",
-        "Where does {{author}}'s claim challenge the assumption about {{concept}}?",
+        "What does saving this passage from {{author}} say about what's unresolved in the thinking on {{topic}}?",
+        "Where does {{author}}'s claim unsettle something the user had settled about {{concept}}?",
         "What passage from {{entity}} speaks to the unfinished thinking on {{thread}}?",
+        "What keeps drawing attention to {{theme}} across saved sources — what need is it serving?",
     ],
     footer: Some("The goal is personal resonance, not comprehensive synthesis. One genuine connection beats cataloging everything."),
     detection_patterns: &[
@@ -299,10 +298,10 @@ users reflect on who matters and why.",
         "Connect people to projects and ideas—relationships don't exist in isolation.",
     ],
     sample_prompts: &[
-        "What dynamic with {{person}} echoes the pattern described with {{other_person}}?",
-        "What interaction with {{person}} suggests something unspoken between them?",
-        "Where does {{person}} connect to {{project}} in ways not yet made explicit?",
+        "What does the dynamic with {{person}} cost that neither side names?",
         "What exchange with {{person}} about {{topic}} carries more weight than its surface?",
+        "Where does {{person}} connect to {{project}} in ways not yet made explicit?",
+        "What would shift if what goes unsaid with {{person}} were said?",
     ],
     footer: Some("Some relationships need tending, some need honest evaluation, some need release. Surface which this might be."),
     detection_patterns: &[
@@ -335,10 +334,10 @@ might be avoiding.",
         "Connect operational details to larger purpose—why does this project matter?",
     ],
     sample_prompts: &[
-        "What item in {{project}} has sat unresolved since {{timeframe}}?",
-        "What did {{person}} raise in the meeting on {{topic}} that never got addressed?",
         "What blocker on {{project}} isn't actually about time or resources?",
-        "Where does {{project}} depend on {{decision}} that remains unmade?",
+        "What keeps getting raised about {{topic}} without anyone owning the resolution?",
+        "Where does {{project}} depend on a decision that everyone treats as already made but nobody explicitly chose?",
+        "What pattern in the meeting notes suggests the real constraint on {{project}} isn't the one being discussed?",
     ],
     footer: Some("Operational clarity often comes from naming what's stuck, not adding more tasks."),
     detection_patterns: &[
@@ -407,9 +406,9 @@ something else—a piece of writing, a decision, a conversation.",
         "Honor the difference between processing and producing—not everything needs to ship.",
     ],
     sample_prompts: &[
-        "What theme about {{topic}} keeps returning across entries from {{timeframe}}?",
-        "What in the writing on {{topic}} shows signs of being ready to become something else?",
-        "What does the reflection on {{experience}} circle around without directly naming?",
+        "What does the writing on {{topic}} keep circling without directly naming?",
+        "What would change if the thing being processed in recent entries were said plainly?",
+        "What is the writing on {{experience}} protecting by not saying it directly?",
         "Where does the entry on {{moment}} contain raw material that speaks to {{thread}}?",
     ],
     footer: Some("Reflective work moves at its own pace. Surface what's ready, don't force production."),

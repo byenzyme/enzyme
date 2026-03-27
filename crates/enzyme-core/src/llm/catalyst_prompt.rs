@@ -108,8 +108,8 @@ extractions—they're ways of staying with what's knocking at the door.\n\n\
 Catalysts should surface:\n\
 {}{}\n\n\
 VOCABULARY: Avoid analytical vocabulary that distances the question from lived experience. \
-Specifically banned: \"foreclose,\" \"manifest,\" \"illuminate,\" \"inherent,\" \"underlying,\" \
-\"navigate,\" \"in what ways,\" \"suggest about,\" \"intersection of,\" \"the notion of,\" \
+Specifically banned: \"reveal,\" \"suggest about,\" \"underlying,\" \"foreclose,\" \"manifest,\" \
+\"illuminate,\" \"inherent,\" \"navigate,\" \"in what ways,\" \"intersection of,\" \"the notion of,\" \
 \"the pursuit of,\" \"implicitly,\" \"the architecture of.\" Use words that appeared in the \
 excerpts or that a person would use in conversation.\n\n\
 Always respond with valid JSON that includes the catalysts and topic names.",
@@ -563,8 +563,8 @@ fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'s
         // "question" and any fallback
         _ => (
             "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.",
-            "Each catalyst must be a single impersonal retrieval question that invites philosophical wonder and can surface resonant passages anywhere in the archive. Keep every catalyst to one sentence and avoid second-person framing. IMPORTANT: Vary your sentence openings — do NOT start multiple catalysts with the same word (e.g., don't start 3 catalysts with \"What\").",
-            "Ideological retrieval question",
+            "Each catalyst must be a single sentence question. Keep every catalyst to one sentence and avoid second-person framing. IMPORTANT: Vary your sentence openings — do NOT start multiple catalysts with the same word (e.g., don't start 3 catalysts with \"What\").",
+            "Retrieval question",
         ),
     }
 }
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_default() {
         let prompt = build_system_prompt(None, None, None);
-        assert!(prompt.contains("wondering-alongside"));
+        assert!(prompt.contains("single sentence questions"));
         assert!(prompt.contains("<catalyst_profiles>"));
         assert!(prompt.contains("Dialectical"));
         assert!(prompt.contains("Reflective"));

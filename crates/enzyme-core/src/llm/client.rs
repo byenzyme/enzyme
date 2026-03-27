@@ -230,7 +230,7 @@ impl StructuredOutputSupport {
 impl Default for GenerationParams {
     fn default() -> Self {
         Self {
-            max_tokens: 4096,
+            max_tokens: 8192,
             temperature: 0.7,
             top_p: 0.8,
             top_k: 20,

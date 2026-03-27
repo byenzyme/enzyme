@@ -382,9 +382,9 @@ impl<'a> CatalystPipeline<'a> {
                         error: None,
                     },
                     Err(e) => {
-                        debug!(
+                        warn!(
                             entity_name = entity_name.as_str(),
-                            response_preview = %&response_text[..response_text.len().min(500)],
+                            response_text = %response_text,
                             "failed to parse catalyst response: {}",
                             e
                         );
