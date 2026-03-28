@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -92,9 +92,17 @@ enum Commands {
 
     /// Show the current petri (top catalysts and entities)
     Petri {
-        /// Number of top entities to show
-        #[arg(short = 'n', long, default_value = "10")]
-        top: usize,
+        /// Number of top entities to show (default: all, or 15 with --query)
+        #[arg(short = 'n', long)]
+        top: Option<usize>,
+
+        /// Query to rank entities and catalysts by relevance
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Maximum catalysts per entity in query mode (default: 3)
+        #[arg(long)]
+        catalyst_budget: Option<usize>,
     },
 
     /// Apply vault catalysts to an external directory
@@ -136,7 +144,7 @@ enum Commands {
     Daemon,
 }
 
-fn init_tracing(verbose: u8) {
+fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
     let filter = match verbose {
         0 => "warn",
         1 => "info",
@@ -144,10 +152,30 @@ fn init_tracing(verbose: u8) {
         _ => "trace",
     };
 
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
+
+    // Try to log to .enzyme/enzyme.log when a vault path is available.
+    if let Some(vault) = vault_path {
+        let enzyme_dir = vault.join(".enzyme");
+        if std::fs::create_dir_all(&enzyme_dir).is_ok() {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(enzyme_dir.join("enzyme.log"))
+            {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(file)
+                    .with_ansi(false)
+                    .init();
+                return;
+            }
+        }
+    }
+
+    // Fallback: stderr (non-vault commands, or if file creation failed).
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
-        )
+        .with_env_filter(env_filter)
         .init();
 }
 
@@ -186,20 +214,23 @@ fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
 
-    // These commands don't need a vault path.
+    // These commands don't need a vault path — log to stderr.
     if matches!(cli.command, Commands::Daemon) {
+        init_tracing(cli.verbose, None);
         return commands::daemon::run_daemon().await;
     }
     if let Commands::Setup { check } = cli.command {
+        init_tracing(cli.verbose, None);
         return commands::setup::run_setup(check).await;
     }
     if matches!(cli.command, Commands::Mcp) {
+        init_tracing(cli.verbose, None);
         return commands::mcp::run_mcp(cli.vault).await;
     }
 
     let vault_path = resolve_vault_path(cli.vault)?;
+    init_tracing(cli.verbose, Some(&vault_path));
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
@@ -221,8 +252,9 @@ async fn main() -> Result<()> {
         Commands::Catalyze { query, limit, target, register } => {
             commands::catalyze::run_catalyze(&vault_path, &query, limit, target.as_deref(), &register).await?;
         }
-        Commands::Petri { top } => {
-            commands::petri::run_petri(&vault_path, top).await?;
+        Commands::Petri { top, query, catalyst_budget } => {
+            let default_top = if query.is_some() { 15 } else { usize::MAX };
+            commands::petri::run_petri(&vault_path, top.unwrap_or(default_top), query.as_deref(), catalyst_budget).await?;
         }
         Commands::Apply {
             target,

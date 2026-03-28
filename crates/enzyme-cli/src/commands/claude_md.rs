@@ -11,26 +11,42 @@ const ENZYME_SECTION: &str = r#"<!-- enzyme:start -->
 
 Use the Enzyme CLI for retrieving context from this vault. Run all commands from the vault root.
 
-**Vault overview:** `enzyme petri` — see trending entities (tags, links, folders) and their catalysts (thematic phrases that characterize what each entity is about).
+### Working memory
 
-**Semantic search:** `enzyme catalyze "query"` — search by concept/theme, not keyword. Example: `enzyme catalyze "creativity and constraints"`.
+Enzyme petri provides your working memory — entities and catalysts (thematic phrases) from the vault.
+If petri context was injected automatically (via hook), you already have it. If not, run it yourself
+after the user's first message:
 
-**Refresh:** `enzyme refresh` — runs automatically before each prompt. Manual use is for CI or hooks only.
+- **Specific prompt** ("what pages have I built", "remind me about the auth discussion"):
+  `enzyme petri --query "user's question"` — returns entities and catalysts ranked by relevance.
+- **Broad prompt** ("hey", "explore my ideas", "what have I been thinking about"):
+  `enzyme petri` — returns the full landscape: top entities by recency with all their catalysts.
 
-**Apply to external content:** `enzyme apply ./target-dir` — index an external directory using your vault's catalysts. Then search it with `enzyme catalyze "query" --target ./target-dir`.
+Use the catalyst phrases as vocabulary for composing `enzyme catalyze` queries — they connect
+to pre-computed content that the user's raw words won't find.
 
-**When to use which:**
-- `enzyme petri` — "What's in my vault?" / "What have I been thinking about?"
-- `enzyme catalyze` — Conceptual queries where you don't have exact text to match
-- `enzyme catalyze --target DIR` — Search external content (after `enzyme apply DIR`)
-- `grep` — Exact tag, wikilink, or text matches (names, `#tags`, `[[links]]`)
+### Semantic search
+
+`enzyme catalyze "query"` — search by concept/theme. Compose queries using catalyst vocabulary
+from petri rather than the user's raw words.
+
+Example flow:
+1. Petri returns entity `design` with catalyst "iterative page design with distinct visual identities"
+2. User asked "what pages have I built"
+3. Compose: `enzyme catalyze "page creation iterative design visual identities"`
+
+### Other commands
+
+- `enzyme refresh` — re-index changed content (runs on hooks/crons, rarely needed manually)
+- `enzyme apply ./target-dir` — index external content using vault catalysts, then `enzyme catalyze "query" --target ./target-dir`
+- `grep` — exact tag, wikilink, or text matches (names, `#tags`, `[[links]]`)
 
 **Tag search:** Tags appear as `- tag` in frontmatter and `#tag` inline. Search without `#` to catch both.
 
-**Presentation registers:** Pass `--register` to catalyze to control how results should be framed:
-- `explore` (default) — wonder, probe, notice patterns. Guidance is per-catalyst based on entity profile.
-- `continuity` — restore what the user knew, show trajectory, enable forward motion. Use when catching someone up or resuming a thread.
-- `reference` — surface what drew attention, connect imports to the user's own thinking.
+**Presentation registers:** Pass `--register` to catalyze to control framing:
+- `explore` (default) — wonder, probe, notice patterns
+- `continuity` — restore what the user knew, show trajectory, enable forward motion
+- `reference` — surface what drew attention, connect imports to the user's own thinking
 
 Results include `presentation_guidance` — follow these when framing the surfaced content.
 <!-- enzyme:end -->"#;

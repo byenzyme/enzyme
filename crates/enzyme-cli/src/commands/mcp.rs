@@ -82,6 +82,10 @@ struct PetriParams {
     /// Number of top entities to return
     #[schemars(description = "Number of top entities to return")]
     top: Option<u64>,
+
+    /// Query to rank entities and catalysts by relevance to the user's prompt
+    #[schemars(description = "Query to rank entities and catalysts by relevance to the user's prompt")]
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -109,8 +113,9 @@ impl EnzymeMcp {
         Parameters(p): Parameters<PetriParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_fresh().await?;
-        let top = p.top.unwrap_or(10) as usize;
-        let json = build_petri_json(&self.vault_path, top)
+        let default_top = if p.query.is_some() { 15 } else { usize::MAX };
+        let top = p.top.map(|t| t as usize).unwrap_or(default_top);
+        let json = build_petri_json(&self.vault_path, top, p.query.as_deref(), None)
             .map_err(|e| McpError::internal_error(format!("petri failed: {e}"), None))?;
         let text = serde_json::to_string_pretty(&json)
             .map_err(|e| McpError::internal_error(format!("json serialization failed: {e}"), None))?;

@@ -45,7 +45,7 @@ pub struct InitResult {
 impl InitResult {
     /// Build the JSON output for quiet mode, including petri data.
     pub fn to_json(&self, vault_path: &Path) -> Result<serde_json::Value> {
-        let petri = super::petri::build_petri_json(vault_path, 10)?;
+        let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
         let mut output = json!({
             "status": "completed",
             "fresh": false,
@@ -410,10 +410,16 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         reapply_targets(vault_path).await;
     }
 
-    // ── Step 9: Generate CLAUDE.md (interactive mode only) ────────────────
+    // ── Step 9: Generate CLAUDE.md and hook (interactive mode only) ──────
     if !quiet {
         if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
             tracing::warn!("failed to update CLAUDE.md: {}", e);
+        }
+        // Set up petri hook for Claude Code users (only if .claude/ already exists)
+        if vault_path.join(".claude").exists() {
+            if let Err(e) = setup_petri_hook(vault_path) {
+                tracing::warn!("failed to set up petri hook: {}", e);
+            }
         }
     }
 
@@ -600,7 +606,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────
     let duration_ms = start.elapsed().as_millis() as u64;
-    let petri = super::petri::build_petri_json(vault_path, 10)?;
+    let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
     let output = json!({
         "status": "completed",
         "fresh": staleness.is_fresh(),
@@ -879,7 +885,7 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
             StalenessResult::Fresh => {
                 debug!("catalysts are fresh — nothing to do");
                 if quiet {
-                    let petri = super::petri::build_petri_json(vault_path, 10)?;
+                    let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
                     let output = json!({
                         "status": "completed",
                         "fresh": true,
@@ -958,6 +964,95 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Set up a UserPromptSubmit hook that auto-injects query-aware petri context.
+///
+/// Creates `.claude/hooks/enzyme-petri.sh` and merges the hook config into
+/// `.claude/settings.json`. Idempotent — skips if already configured.
+fn setup_petri_hook(vault_path: &Path) -> Result<()> {
+    let claude_dir = vault_path.join(".claude");
+    let hooks_dir = claude_dir.join("hooks");
+    fs::create_dir_all(&hooks_dir)?;
+
+    // Write hook script (always overwrite — it's generated)
+    let hook_path = hooks_dir.join("enzyme-petri.sh");
+    let script = format!(
+        r#"#!/bin/bash
+INPUT=$(cat)
+PROMPT=$(echo "$INPUT" | jq -r '.prompt')
+RESULTS=$(enzyme petri -p "{vault}" --query "$PROMPT" 2>/dev/null)
+if [ $? -eq 0 ] && [ -n "$RESULTS" ]; then
+  ESCAPED=$(echo "$RESULTS" | jq -Rs .)
+  echo "{{\"additionalContext\": $ESCAPED}}"
+fi
+"#,
+        vault = vault_path.display()
+    );
+    fs::write(&hook_path, &script)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Merge hook config into settings.json
+    let settings_path = claude_dir.join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content).unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
+
+    let hook_command = ".claude/hooks/enzyme-petri.sh";
+    let already_configured = settings
+        .get("hooks")
+        .and_then(|h| h.get("UserPromptSubmit"))
+        .and_then(|ups| ups.as_array())
+        .map(|arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(hook_command)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if !already_configured {
+        let hook_entry = json!({
+            "hooks": [{
+                "type": "command",
+                "command": hook_command
+            }]
+        });
+
+        let hooks = settings
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert(json!({}));
+        let ups = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry("UserPromptSubmit")
+            .or_insert(json!([]));
+        ups.as_array_mut().unwrap().push(hook_entry);
+
+        fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings)?,
+        )?;
     }
 
     Ok(())
