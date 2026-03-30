@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde_yaml::Value;
@@ -11,6 +11,9 @@ pub struct Frontmatter {
     pub created: Option<DateTime<Utc>>,
     pub modified: Option<DateTime<Utc>>,
     pub aliases: Vec<String>,
+    /// Wikilinks extracted from any frontmatter field (people, author, related, etc.).
+    /// Normalized to lowercase, target only (no aliases or headings).
+    pub links: Vec<String>,
     /// All other key-value pairs not captured by named fields.
     pub extra: HashMap<String, Value>,
 }
@@ -123,6 +126,9 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
         }
     }
 
+    // Extract wikilinks from all frontmatter fields (people, author, related, etc.)
+    fm.links = extract_frontmatter_wikilinks(&mapping);
+
     Some(fm)
 }
 
@@ -159,6 +165,82 @@ pub fn strip_frontmatter(content: &str) -> &str {
             }
         }
         None => content,
+    }
+}
+
+/// Extract wikilinks from all frontmatter field values.
+///
+/// Scans every field's string representation for `[[Target]]`, `[[Target|Alias]]`,
+/// and `[[Target#Heading]]` patterns. Returns deduplicated, lowercase targets.
+///
+/// This captures links from fields like `people: [[Alice]], [[Bob]]`,
+/// `author: [[Charlie]]`, `related: [[Project Alpha]]`, etc.
+fn extract_frontmatter_wikilinks(mapping: &HashMap<String, Value>) -> Vec<String> {
+    let mut links: HashSet<String> = HashSet::new();
+
+    for val in mapping.values() {
+        collect_wikilinks_from_value(val, &mut links);
+    }
+
+    let mut result: Vec<String> = links.into_iter().collect();
+    result.sort();
+    result
+}
+
+/// Recursively collect wikilinks from a YAML value (handles strings, sequences, mappings).
+fn collect_wikilinks_from_value(val: &Value, links: &mut HashSet<String>) {
+    match val {
+        Value::String(s) => {
+            extract_wikilinks_from_str(s, links);
+        }
+        Value::Sequence(seq) => {
+            for item in seq {
+                collect_wikilinks_from_value(item, links);
+            }
+        }
+        Value::Mapping(map) => {
+            for v in map.values() {
+                collect_wikilinks_from_value(v, links);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract `[[target]]` patterns from a string, normalized to lowercase.
+fn extract_wikilinks_from_str(s: &str, links: &mut HashSet<String>) {
+    let mut search_from = 0;
+    let bytes = s.as_bytes();
+
+    while search_from + 3 < bytes.len() {
+        let Some(open) = s[search_from..].find("[[") else {
+            break;
+        };
+        let abs_open = search_from + open + 2;
+
+        let Some(close) = s[abs_open..].find("]]") else {
+            break;
+        };
+        let abs_close = abs_open + close;
+
+        let inner = &s[abs_open..abs_close];
+
+        if !inner.contains('\n') && !inner.is_empty() {
+            // Take target before | (alias) or # (heading)
+            let target = inner
+                .split('|')
+                .next()
+                .unwrap_or(inner)
+                .split('#')
+                .next()
+                .unwrap_or(inner)
+                .trim();
+            if !target.is_empty() {
+                links.insert(target.to_lowercase());
+            }
+        }
+
+        search_from = abs_close + 2;
     }
 }
 
@@ -534,5 +616,119 @@ Body
         let fm = parse_frontmatter(content).expect("should parse");
         assert!(fm.created.is_some());
         assert_eq!(fm.created.unwrap().date_naive().to_string(), "2025-08-04");
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_from_people_field() {
+        let content = "\
+---
+people: \"[[Alice]], [[Bob]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"alice".to_string()));
+        assert!(fm.links.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_from_multiple_fields() {
+        let content = "\
+---
+author: \"[[Charlie]]\"
+related: \"[[Project Alpha]]\"
+organization: \"[[Acme Corp]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"charlie".to_string()));
+        assert!(fm.links.contains(&"project alpha".to_string()));
+        assert!(fm.links.contains(&"acme corp".to_string()));
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_with_aliases() {
+        let content = "\
+---
+people: \"[[Alice Smith|Alice]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"alice smith".to_string()));
+        assert!(!fm.links.contains(&"alice".to_string()));
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_with_headings() {
+        let content = "\
+---
+related: \"[[Note#Section]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"note".to_string()));
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_yaml_list() {
+        let content = "\
+---
+people:
+  - \"[[Alice]]\"
+  - \"[[Bob]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"alice".to_string()));
+        assert!(fm.links.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_deduplicated() {
+        let content = "\
+---
+people: \"[[Alice]]\"
+author: \"[[Alice]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        let alice_count = fm.links.iter().filter(|l| *l == "alice").count();
+        assert_eq!(alice_count, 1);
+    }
+
+    #[test]
+    fn test_frontmatter_no_wikilinks() {
+        let content = "\
+---
+title: Plain Note
+tags: [rust]
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.is_empty());
+    }
+
+    #[test]
+    fn test_frontmatter_wikilinks_date_field_not_extracted() {
+        // Wikilinks in date fields like created: '[[2025-08-04]]' should still
+        // be extracted as links — the date parser handles them separately
+        let content = "\
+---
+created: '[[2025-08-04]]'
+people: \"[[Alice]]\"
+---
+Body
+";
+        let fm = parse_frontmatter(content).expect("should parse");
+        assert!(fm.links.contains(&"alice".to_string()));
+        // The date wikilink is also extracted as a link — that's fine,
+        // it will be filtered out by the date link filter in extract_entities
+        assert!(fm.links.contains(&"2025-08-04".to_string()));
     }
 }

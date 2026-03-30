@@ -166,6 +166,12 @@ impl<'a> IndexingPipeline<'a> {
 
     /// Collect all entity entries from processed documents into a flat list
     /// suitable for `upsert_entities_batch`.
+    ///
+    /// Context hierarchy (matching enzyme-python):
+    /// - Tag in frontmatter → full file body
+    /// - Link in any frontmatter field → full file body
+    /// - Folder entity → full file body (the file belongs to that folder)
+    /// - Inline-only tag/link → 250-word neighborhood around the mention
     fn collect_entity_entries(
         docs: &[ProcessedDocument],
     ) -> Vec<(String, EntityType, EntityOccurrence)> {
@@ -173,12 +179,33 @@ impl<'a> IndexingPipeline<'a> {
         let mut entries = Vec::new();
 
         for doc in docs {
-            let context_snippet: Option<String> = doc
-                .chunks
-                .first()
-                .map(|c| c.chars().take(200).collect());
+            // Pre-compute frontmatter sets for fast lookup
+            let fm_tags: std::collections::HashSet<&str> = doc
+                .frontmatter
+                .as_ref()
+                .map(|fm| fm.tags.iter().map(|t| t.as_str()).collect())
+                .unwrap_or_default();
+
+            let fm_links: std::collections::HashSet<&str> = doc
+                .frontmatter
+                .as_ref()
+                .map(|fm| fm.links.iter().map(|l| l.as_str()).collect())
+                .unwrap_or_default();
+
+            // Full file body (frontmatter stripped) for document-level entities
+            let full_body: Option<String> = doc.chunks.first().map(|_| {
+                crate::document::strip_frontmatter(&doc.content).to_string()
+            });
 
             for tag in &doc.tags {
+                let context = if fm_tags.contains(tag.as_str()) {
+                    // Frontmatter tag → full file body
+                    full_body.clone()
+                } else {
+                    // Inline-only tag → neighborhood context
+                    Self::lasso_context_for_tag(&doc.content, tag)
+                };
+
                 entries.push((
                     tag.clone(),
                     EntityType::Tag,
@@ -186,7 +213,7 @@ impl<'a> IndexingPipeline<'a> {
                         id: None,
                         entity_id: 0,
                         file_path: doc.source_ref.clone(),
-                        context: context_snippet.clone(),
+                        context,
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
@@ -195,6 +222,14 @@ impl<'a> IndexingPipeline<'a> {
             }
 
             for link in &doc.links {
+                let context = if fm_links.contains(link.as_str()) {
+                    // Frontmatter link → full file body
+                    full_body.clone()
+                } else {
+                    // Inline-only link → neighborhood context
+                    Self::lasso_context_for_wikilink(&doc.content, link)
+                };
+
                 entries.push((
                     link.clone(),
                     EntityType::Link,
@@ -202,7 +237,7 @@ impl<'a> IndexingPipeline<'a> {
                         id: None,
                         entity_id: 0,
                         file_path: doc.source_ref.clone(),
-                        context: context_snippet.clone(),
+                        context,
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
@@ -211,6 +246,7 @@ impl<'a> IndexingPipeline<'a> {
             }
 
             for folder in &doc.folders {
+                // Folder entity → always full file body
                 entries.push((
                     folder.clone(),
                     EntityType::Folder,
@@ -218,7 +254,7 @@ impl<'a> IndexingPipeline<'a> {
                         id: None,
                         entity_id: 0,
                         file_path: doc.source_ref.clone(),
-                        context: context_snippet.clone(),
+                        context: full_body.clone(),
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
@@ -228,6 +264,55 @@ impl<'a> IndexingPipeline<'a> {
         }
 
         entries
+    }
+
+    /// Extract ~250 words of context around each `#tag` occurrence, returning the
+    /// first match. Falls back to the first 200 chars if the tag isn't found.
+    fn lasso_context_for_tag(content: &str, tag: &str) -> Option<String> {
+        let needle = format!("#{tag}");
+        Self::lasso_around(content, &needle)
+    }
+
+    /// Extract ~250 words of context around a `[[wikilink]]` occurrence.
+    fn lasso_context_for_wikilink(content: &str, target: &str) -> Option<String> {
+        // Try [[target]] and [[target|...]] patterns
+        let needle = format!("[[{target}");
+        Self::lasso_around(content, &needle)
+    }
+
+    /// Find `needle` (case-insensitive) in `content` and return ~250 words around it.
+    fn lasso_around(content: &str, needle: &str) -> Option<String> {
+        let content_lower = content.to_lowercase();
+        let needle_lower = needle.to_lowercase();
+
+        let Some(byte_pos) = content_lower.find(&needle_lower) else {
+            // Fallback: first 200 chars
+            return Some(content.chars().take(200).collect());
+        };
+
+        let words: Vec<&str> = content.split_whitespace().collect();
+        if words.is_empty() {
+            return None;
+        }
+
+        // Find which word index the match falls in
+        let mut char_offset = 0;
+        let mut match_word_idx = 0;
+        for (i, word) in words.iter().enumerate() {
+            // Find this word's start in the original content
+            if let Some(pos) = content[char_offset..].find(word) {
+                let word_start = char_offset + pos;
+                if word_start + word.len() > byte_pos {
+                    match_word_idx = i;
+                    break;
+                }
+                char_offset = word_start + word.len();
+            }
+        }
+
+        let start = match_word_idx.saturating_sub(125);
+        let end = (match_word_idx + 125).min(words.len());
+        Some(words[start..end].join(" "))
     }
 
     /// Recompute trending scores for every entity in the database.
@@ -721,10 +806,122 @@ mod tests {
                 "folder occurrence for {} should have context",
                 occ.file_path
             );
+            let ctx = occ.context.as_ref().unwrap();
+            assert!(!ctx.is_empty(), "folder occurrence context should not be empty");
+            // Folder entities should get full file body, not just 200 chars
             assert!(
-                !occ.context.as_ref().unwrap().is_empty(),
-                "folder occurrence context should not be empty"
+                ctx.contains("researcher") || ctx.contains("collaborates"),
+                "folder context should contain substantive file content"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Frontmatter tag → full file context
+    // -----------------------------------------------------------------------
+    #[test]
+    fn frontmatter_tag_gets_full_context() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // Long content so we can distinguish full-body from a snippet
+        let long_body = "Paragraph one about productivity.\n\n".to_string()
+            + &"More content. ".repeat(50)
+            + "\n\nFinal paragraph about productivity workflow.";
+        let content = format!("---\ntags: [productivity]\n---\n{long_body}");
+        write_md(vault.path(), "note.md", &content);
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entities = db.get_all_entities().unwrap();
+        let tag_entity = entities
+            .iter()
+            .find(|e| e.name == "productivity" && e.entity_type == EntityType::Tag)
+            .expect("productivity tag should exist");
+
+        let occs = db.get_entity_occurrences(tag_entity.id.unwrap()).unwrap();
+        assert_eq!(occs.len(), 1);
+
+        let ctx = occs[0].context.as_ref().expect("should have context");
+        // Full body should contain both first and last paragraph
+        assert!(ctx.contains("Paragraph one"), "should contain start of body");
+        assert!(ctx.contains("Final paragraph"), "should contain end of body");
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. Inline-only tag → neighborhood context (not full file)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn inline_tag_gets_neighborhood_context() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // Tag only appears inline, not in frontmatter. Make content much longer
+        // than the 250-word neighborhood window.
+        let intro = "Introduction paragraph with various words. ".repeat(150);
+        let content = format!(
+            "---\ntitle: Test\n---\n{intro}\n\nMiddle section with #inline-tag here.\n\n{}",
+            "Conclusion paragraph with even more words. ".repeat(150)
+        );
+        write_md(vault.path(), "note.md", &content);
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entities = db.get_all_entities().unwrap();
+        let tag_entity = entities
+            .iter()
+            .find(|e| e.name == "inline-tag" && e.entity_type == EntityType::Tag)
+            .expect("inline-tag should exist");
+
+        let occs = db.get_entity_occurrences(tag_entity.id.unwrap()).unwrap();
+        assert_eq!(occs.len(), 1);
+
+        let ctx = occs[0].context.as_ref().expect("should have context");
+        // Neighborhood should include the tag mention
+        assert!(
+            ctx.contains("inline-tag") || ctx.contains("#inline-tag"),
+            "neighborhood context should contain the tag mention"
+        );
+        // But should NOT be the entire file
+        let full_len = content.len();
+        assert!(
+            ctx.len() < full_len / 2,
+            "neighborhood context ({} chars) should be much smaller than full file ({} chars)",
+            ctx.len(),
+            full_len
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. Frontmatter wikilink → full file context
+    // -----------------------------------------------------------------------
+    #[test]
+    fn frontmatter_wikilink_gets_full_context() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        let long_body = "First paragraph about a meeting with Alice.\n\n".to_string()
+            + &"More discussion notes. ".repeat(50)
+            + "\n\nFinal notes about action items.";
+        let content = format!("---\npeople: \"[[Alice]]\"\n---\n{long_body}");
+        write_md(vault.path(), "note.md", &content);
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entities = db.get_all_entities().unwrap();
+        let link_entity = entities
+            .iter()
+            .find(|e| e.name == "alice" && e.entity_type == EntityType::Link)
+            .expect("alice link should exist");
+
+        let occs = db.get_entity_occurrences(link_entity.id.unwrap()).unwrap();
+        assert_eq!(occs.len(), 1);
+
+        let ctx = occs[0].context.as_ref().expect("should have context");
+        assert!(ctx.contains("First paragraph"), "should contain start of body");
+        assert!(ctx.contains("Final notes"), "should contain end of body");
     }
 }

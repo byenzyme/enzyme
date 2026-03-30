@@ -99,11 +99,23 @@ impl DocumentProcessor {
             .as_ref()
             .map(|fm| fm.tags.clone())
             .unwrap_or_default();
+        let frontmatter_links = frontmatter
+            .as_ref()
+            .map(|fm| fm.links.clone())
+            .unwrap_or_default();
         let ExtractedEntities {
             tags,
-            links,
+            mut links,
             folders,
         } = extract_entities(body, path, &frontmatter_tags);
+
+        // Merge frontmatter links (people, author, related, etc.) into the link list
+        for fm_link in &frontmatter_links {
+            if !links.contains(fm_link) {
+                links.push(fm_link.clone());
+            }
+        }
+        links.sort();
 
         // Readwise detection — used for both chunking and date resolution
         let is_readwise = is_readwise_content(body);
