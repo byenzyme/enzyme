@@ -3,7 +3,7 @@
   "name": "io.github.jshph/enzyme",
   "title": "Enzyme",
   "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "websiteUrl": "https://enzyme.garden",
   "repository": {
     "url": "https://github.com/jshph/enzyme",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.0/enzyme-mcp-0.4.0-macos-arm64.mcpb",
-      "fileSha256": "f059a7a86fcdb5bd5cff485a799e03ac09669d6a67556ccb4ac4d4becca03d39",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.1/enzyme-mcp-0.4.1-macos-arm64.mcpb",
+      "fileSha256": "97041ac463de09f4467f7deca141d780fddd2ca11b22f3e32b06ca2a8a562f5d",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -26,8 +26,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.0/enzyme-mcp-0.4.0-linux-x86_64.mcpb",
-      "fileSha256": "bdae879794049426f9765d1b2b12044d644def57bb6f3d47ec1ac50879efdeec",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.1/enzyme-mcp-0.4.1-linux-x86_64.mcpb",
+      "fileSha256": "424fdcb615ed1ab64bff58a4794ac0aab6cf56673bc29882c8bfb3e82a91e819",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -40,8 +40,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.0/enzyme-mcp-0.4.0-linux-arm64.mcpb",
-      "fileSha256": "9e84149f783eb57f29b4584e9804b665c0aa640759c8ca891c22b00d1ba50882",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.1/enzyme-mcp-0.4.1-linux-arm64.mcpb",
+      "fileSha256": "8d9a92969e19342e2e114afc381deee3f2b7d9321105152776f7ee1417c0fb69",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {

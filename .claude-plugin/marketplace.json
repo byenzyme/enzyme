@@ -8,7 +8,7 @@
       "name": "enzyme",
       "source": "./",
       "description": "Local-first knowledge indexing — explore your Obsidian vault by concept, not keyword",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "author": {
         "name": "Joshua Pham"
       },
