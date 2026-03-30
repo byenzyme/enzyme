@@ -10,7 +10,6 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::{Embedding, EntityType};
-use enzyme_core::pipeline::similarity::load_catalyst_embeddings;
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -232,11 +231,13 @@ fn build_query_aware(
     }
 
     // Load cached catalyst embeddings
-    let cached = load_catalyst_embeddings(&paths.embeddings_dir)?
-        .ok_or_else(|| anyhow::anyhow!("no cached catalyst embeddings"))?;
+    let cached = db.get_all_catalyst_embeddings()?;
+    if cached.is_empty() {
+        anyhow::bail!("no cached catalyst embeddings");
+    }
     let cache_map: HashMap<&str, &Vec<f32>> = cached
         .iter()
-        .map(|c| (c.id.as_str(), &c.vector))
+        .map(|(id, vec)| (id.as_str(), vec))
         .collect();
 
     // Compute per-catalyst cosine similarity (use indices to avoid borrow issues)

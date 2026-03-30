@@ -15,8 +15,6 @@ pub struct EnzymePaths {
     pub home: PathBuf,
     /// Path to the vault's SQLite database.
     pub vault_db: PathBuf,
-    /// Path to the vault's embeddings directory (HNSW index, embedding cache).
-    pub embeddings_dir: PathBuf,
 }
 
 impl EnzymePaths {
@@ -45,27 +43,20 @@ impl EnzymePaths {
             }
         };
 
-        let (vault_db, embeddings_dir) = if Self::is_fuse_mount(vault_path) {
+        let vault_db = if Self::is_fuse_mount(vault_path) {
             let local = PathBuf::from("/tmp/enzyme");
             tracing::info!(
                 "FUSE mount detected — redirecting DB to {}",
                 local.display()
             );
-            (
-                local.join("enzyme.db"),
-                local.join("enzyme-embeddings"),
-            )
+            local.join("enzyme.db")
         } else {
-            (
-                vault_path.join(".enzyme").join("enzyme.db"),
-                vault_path.join(".enzyme-embeddings"),
-            )
+            vault_path.join(".enzyme").join("enzyme.db")
         };
 
         Ok(Self {
             home,
             vault_db,
-            embeddings_dir,
         })
     }
 
@@ -133,7 +124,6 @@ mod tests {
         let home_dir = dirs::home_dir().unwrap();
         assert_eq!(paths.home, home_dir.join(".enzyme"));
         assert_eq!(paths.vault_db, vault.join(".enzyme").join("enzyme.db"));
-        assert_eq!(paths.embeddings_dir, vault.join(".enzyme-embeddings"));
     }
 
     #[test]

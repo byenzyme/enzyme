@@ -1,20 +1,16 @@
-use std::io::{BufWriter, Read as IoRead, Write as IoWrite, BufReader};
-use std::path::PathBuf;
 use std::time::Instant;
-use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Catalyst, Embedding, CatalystSimilarity, EMBEDDING_DIMENSION};
+use crate::models::{Catalyst, Embedding, CatalystSimilarity};
 
 pub struct SimilarityPipeline<'a> {
     db: &'a Database,
     service: &'a EmbeddingService,
-    embeddings_dir: PathBuf,
 }
 
 pub struct SimilarityStats {
@@ -24,19 +20,9 @@ pub struct SimilarityStats {
     pub duration_ms: u64,
 }
 
-struct StoredEmbedding {
-    file_path: String,
-    chunk_index: u32,
-    vector: Vec<f32>,
-}
-
 impl<'a> SimilarityPipeline<'a> {
-    pub fn new(db: &'a Database, service: &'a EmbeddingService, embeddings_dir: PathBuf) -> Self {
-        Self {
-            db,
-            service,
-            embeddings_dir,
-        }
+    pub fn new(db: &'a Database, service: &'a EmbeddingService) -> Self {
+        Self { db, service }
     }
 
     /// Run similarity using catalysts from the local database.
@@ -47,9 +33,8 @@ impl<'a> SimilarityPipeline<'a> {
 
     /// Run similarity with externally-provided catalysts (e.g. from a source vault via `apply`).
     ///
-    /// When `cache_catalyst_embeddings` is true, catalyst embeddings are saved to disk
-    /// for reuse in `catalyze_search`. Set to false when the catalysts come from an
-    /// external source and caching would be misleading.
+    /// When `cache_catalyst_embeddings` is true, catalyst embeddings are saved to the
+    /// database for reuse in `catalyze_search`.
     pub fn run_with_catalysts(
         &self,
         catalysts: &[Catalyst],
@@ -69,16 +54,20 @@ impl<'a> SimilarityPipeline<'a> {
 
         // Embed all catalyst texts
         let catalyst_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
-        let catalyst_embeddings = self.service.embed_documents(&catalyst_texts)?;
+        let catalyst_vecs = self.service.embed_documents(&catalyst_texts)?;
 
-        // Cache catalyst embeddings to disk for fast reuse in catalyze_search
+        // Cache catalyst embeddings to DB for fast reuse in catalyze_search
         if cache_catalyst_embeddings {
-            let cat_ids: Vec<&str> = catalysts.iter().map(|c| c.id.as_str()).collect();
-            self.save_catalyst_embeddings(&cat_ids, &catalyst_embeddings)?;
+            let entries: Vec<(&str, &[f32])> = catalysts
+                .iter()
+                .zip(catalyst_vecs.iter())
+                .map(|(c, v)| (c.id.as_str(), v.as_slice()))
+                .collect();
+            self.db.upsert_catalyst_embeddings(&entries)?;
         }
 
-        // Load all chunk embeddings from disk
-        let chunk_embeddings = self.load_embeddings()?;
+        // Load all chunk embeddings from DB
+        let chunk_embeddings = self.db.get_all_chunk_embeddings()?;
         if chunk_embeddings.is_empty() {
             return Ok(SimilarityStats {
                 catalysts_processed: 0,
@@ -91,8 +80,8 @@ impl<'a> SimilarityPipeline<'a> {
         // Count unique documents
         let documents_compared = {
             let mut unique: std::collections::HashSet<&str> = std::collections::HashSet::new();
-            for emb in &chunk_embeddings {
-                unique.insert(&emb.file_path);
+            for (file_path, _, _) in &chunk_embeddings {
+                unique.insert(file_path.as_str());
             }
             unique.len()
         };
@@ -101,15 +90,14 @@ impl<'a> SimilarityPipeline<'a> {
         let mut similarities_computed = 0usize;
 
         // For each catalyst, compute cosine similarity against all chunk embeddings
-        for (i, (catalyst, cat_vec)) in catalysts.iter().zip(catalyst_embeddings.iter()).enumerate() {
+        for (i, (catalyst, cat_vec)) in catalysts.iter().zip(catalyst_vecs.iter()).enumerate() {
             on_progress(i + 1, total);
 
-            // Compute similarities against all chunks
-            let mut sims: Vec<(f64, &StoredEmbedding)> = chunk_embeddings
+            let mut sims: Vec<(f64, &str, u32)> = chunk_embeddings
                 .iter()
-                .map(|chunk_emb| {
-                    let sim = Embedding::cosine_similarity(cat_vec, &chunk_emb.vector) as f64;
-                    (sim, chunk_emb)
+                .map(|(file_path, chunk_index, vector)| {
+                    let sim = Embedding::cosine_similarity(cat_vec, vector) as f64;
+                    (sim, file_path.as_str(), *chunk_index)
                 })
                 .collect();
 
@@ -117,15 +105,14 @@ impl<'a> SimilarityPipeline<'a> {
             sims.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             sims.truncate(50);
 
-            // Create CatalystSimilarity records
             let similarity_records: Vec<CatalystSimilarity> = sims
                 .into_iter()
-                .map(|(sim, chunk_emb)| CatalystSimilarity {
+                .map(|(sim, file_path, chunk_index)| CatalystSimilarity {
                     id: None,
                     catalyst_id: catalyst.id.clone(),
                     catalyst_text: catalyst.text.clone(),
-                    file_path: chunk_emb.file_path.clone(),
-                    chunk_index: chunk_emb.chunk_index as i64,
+                    file_path: file_path.to_string(),
+                    chunk_index: chunk_index as i64,
                     similarity: sim,
                     chunk_metadata: serde_json::json!({}),
                     timeline_data: serde_json::json!({}),
@@ -147,132 +134,4 @@ impl<'a> SimilarityPipeline<'a> {
             duration_ms,
         })
     }
-
-    fn load_embeddings(&self) -> Result<Vec<StoredEmbedding>> {
-        let path = self.embeddings_dir.join("embeddings.bin");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let file = fs::File::open(&path)
-            .with_context(|| format!("failed to open embeddings file: {}", path.display()))?;
-        let mut reader = BufReader::new(file);
-
-        let mut buf4 = [0u8; 4];
-        reader.read_exact(&mut buf4)?;
-        let count = u32::from_le_bytes(buf4) as usize;
-
-        let mut embeddings = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            reader.read_exact(&mut buf4)?;
-            let path_len = u32::from_le_bytes(buf4) as usize;
-
-            let mut path_bytes = vec![0u8; path_len];
-            reader.read_exact(&mut path_bytes)?;
-            let file_path = String::from_utf8(path_bytes)
-                .context("invalid UTF-8 in embedding file path")?;
-
-            reader.read_exact(&mut buf4)?;
-            let chunk_index = u32::from_le_bytes(buf4);
-
-            let mut vector = vec![0f32; EMBEDDING_DIMENSION];
-            let vector_bytes: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(
-                    vector.as_mut_ptr() as *mut u8,
-                    EMBEDDING_DIMENSION * 4,
-                )
-            };
-            reader.read_exact(vector_bytes)?;
-
-            embeddings.push(StoredEmbedding {
-                file_path,
-                chunk_index,
-                vector,
-            });
-        }
-
-        Ok(embeddings)
-    }
-
-    /// Save catalyst embeddings to disk for reuse in `catalyze_search`.
-    ///
-    /// Format: `[count: u32 LE]` then per entry:
-    /// `[id_len: u32 LE][id_bytes][vector: f32 * EMBEDDING_DIMENSION LE]`
-    fn save_catalyst_embeddings(&self, ids: &[&str], embeddings: &[Vec<f32>]) -> Result<()> {
-        let path = self.embeddings_dir.join("catalyst_embeddings.bin");
-        fs::create_dir_all(&self.embeddings_dir)?;
-        let file = fs::File::create(&path)
-            .with_context(|| format!("failed to create catalyst embeddings file: {}", path.display()))?;
-        let mut writer = BufWriter::new(file);
-
-        writer.write_all(&(ids.len() as u32).to_le_bytes())?;
-
-        for (id, vec) in ids.iter().zip(embeddings.iter()) {
-            let id_bytes = id.as_bytes();
-            writer.write_all(&(id_bytes.len() as u32).to_le_bytes())?;
-            writer.write_all(id_bytes)?;
-
-            let vector_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    vec.as_ptr() as *const u8,
-                    vec.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            writer.write_all(vector_bytes)?;
-        }
-
-        writer.flush()?;
-        info!(count = ids.len(), path = %path.display(), "saved catalyst embeddings to disk");
-        Ok(())
-    }
-}
-
-/// A cached catalyst embedding loaded from disk.
-pub struct CachedCatalystEmbedding {
-    pub id: String,
-    pub vector: Vec<f32>,
-}
-
-/// Load cached catalyst embeddings from `catalyst_embeddings.bin`.
-///
-/// Returns `None` if the file doesn't exist (not yet computed).
-pub fn load_catalyst_embeddings(embeddings_dir: &std::path::Path) -> Result<Option<Vec<CachedCatalystEmbedding>>> {
-    let path = embeddings_dir.join("catalyst_embeddings.bin");
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let file = fs::File::open(&path)
-        .with_context(|| format!("failed to open catalyst embeddings: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-
-    let mut buf4 = [0u8; 4];
-    reader.read_exact(&mut buf4)?;
-    let count = u32::from_le_bytes(buf4) as usize;
-
-    let mut result = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        reader.read_exact(&mut buf4)?;
-        let id_len = u32::from_le_bytes(buf4) as usize;
-
-        let mut id_bytes = vec![0u8; id_len];
-        reader.read_exact(&mut id_bytes)?;
-        let id = String::from_utf8(id_bytes).context("invalid UTF-8 in catalyst id")?;
-
-        let mut vector = vec![0f32; EMBEDDING_DIMENSION];
-        let vector_bytes: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(
-                vector.as_mut_ptr() as *mut u8,
-                EMBEDDING_DIMENSION * std::mem::size_of::<f32>(),
-            )
-        };
-        reader.read_exact(vector_bytes)?;
-
-        result.push(CachedCatalystEmbedding { id, vector });
-    }
-
-    info!(count = result.len(), "loaded cached catalyst embeddings");
-    Ok(Some(result))
 }

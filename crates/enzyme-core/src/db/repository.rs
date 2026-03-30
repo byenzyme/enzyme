@@ -1244,6 +1244,114 @@ impl Database {
         )?;
         Ok(rows)
     }
+
+    // -----------------------------------------------------------------------
+    // Chunk embedding operations
+    // -----------------------------------------------------------------------
+
+    /// Batch-upsert chunk embeddings. Vectors are stored as little-endian f32 BLOBs.
+    pub fn upsert_chunk_embeddings(
+        &self,
+        embeddings: &[(String, u32, Vec<f32>)],
+    ) -> Result<()> {
+        if embeddings.is_empty() {
+            return Ok(());
+        }
+        let conn = self.write_conn();
+        let tx = conn
+            .unchecked_transaction()
+            .context("failed to begin transaction for upsert_chunk_embeddings")?;
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for (file_path, chunk_index, vector) in embeddings {
+            let blob = f32_vec_to_blob(vector);
+            stmt.execute(params![file_path, chunk_index, blob])?;
+        }
+        drop(stmt);
+        tx.commit().context("failed to commit upsert_chunk_embeddings")?;
+        Ok(())
+    }
+
+    /// Load all chunk embeddings from the database.
+    pub fn get_all_chunk_embeddings(&self) -> Result<Vec<(String, u32, Vec<f32>)>> {
+        let rows = self.query_read(
+            "SELECT file_path, chunk_index, vector FROM chunk_embeddings
+             ORDER BY file_path, chunk_index",
+            &[],
+            |row| {
+                let file_path: String = row.get(0)?;
+                let chunk_index: u32 = row.get(1)?;
+                let blob: Vec<u8> = row.get(2)?;
+                Ok((file_path, chunk_index, blob_to_f32_vec(&blob)))
+            },
+        )?;
+        Ok(rows)
+    }
+
+    /// Delete chunk embeddings for a specific file (used before re-embedding).
+    pub fn delete_chunk_embeddings_for_file(&self, file_path: &str) -> Result<()> {
+        self.execute_write(
+            "DELETE FROM chunk_embeddings WHERE file_path = ?1",
+            &[&file_path],
+        )?;
+        Ok(())
+    }
+
+    /// Prune chunk embeddings whose file_path no longer exists in the docs table.
+    /// Returns the number of rows deleted.
+    pub fn prune_stale_chunk_embeddings(&self) -> Result<usize> {
+        let count = self.execute_write(
+            "DELETE FROM chunk_embeddings
+             WHERE file_path NOT IN (SELECT source_ref FROM docs)",
+            &[],
+        )?;
+        Ok(count)
+    }
+
+    // -----------------------------------------------------------------------
+    // Catalyst embedding operations
+    // -----------------------------------------------------------------------
+
+    /// Batch-upsert catalyst embeddings.
+    pub fn upsert_catalyst_embeddings(
+        &self,
+        embeddings: &[(&str, &[f32])],
+    ) -> Result<()> {
+        if embeddings.is_empty() {
+            return Ok(());
+        }
+        let conn = self.write_conn();
+        let tx = conn
+            .unchecked_transaction()
+            .context("failed to begin transaction for upsert_catalyst_embeddings")?;
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO catalyst_embeddings (catalyst_id, vector)
+             VALUES (?1, ?2)",
+        )?;
+        for (catalyst_id, vector) in embeddings {
+            let blob = f32_vec_to_blob(vector);
+            stmt.execute(params![catalyst_id, blob])?;
+        }
+        drop(stmt);
+        tx.commit().context("failed to commit upsert_catalyst_embeddings")?;
+        Ok(())
+    }
+
+    /// Load all catalyst embeddings from the database.
+    pub fn get_all_catalyst_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
+        let rows = self.query_read(
+            "SELECT catalyst_id, vector FROM catalyst_embeddings",
+            &[],
+            |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob_to_f32_vec(&blob)))
+            },
+        )?;
+        Ok(rows)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,4 +1428,24 @@ fn map_applied_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedTa
         catalyst_count: row.get(3)?,
         applied_at: parse_datetime_utc(&applied_at_str),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Blob <-> Vec<f32> helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a `&[f32]` to a little-endian byte vector for BLOB storage.
+fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(v.len() * 4);
+    for &x in v {
+        buf.extend_from_slice(&x.to_le_bytes());
+    }
+    buf
+}
+
+/// Convert a BLOB back to `Vec<f32>` (little-endian).
+fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }

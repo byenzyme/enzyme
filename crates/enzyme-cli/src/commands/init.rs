@@ -79,18 +79,13 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // Check for existing enzyme data and offer hard reset
     if !quiet && atty::is(atty::Stream::Stdin) {
         let enzyme_dir = paths.vault_db.parent().map(|p| p.to_path_buf());
-        let embeddings_dir = &paths.embeddings_dir;
 
         let enzyme_exists = enzyme_dir.as_ref().map_or(false, |d| d.exists());
-        let embeddings_exists = embeddings_dir.exists();
 
-        if enzyme_exists || embeddings_exists {
+        if enzyme_exists {
             let mut dirs_found = Vec::new();
             if enzyme_exists {
                 dirs_found.push(enzyme_dir.as_ref().unwrap().display().to_string());
-            }
-            if embeddings_exists {
-                dirs_found.push(embeddings_dir.display().to_string());
             }
 
             eprintln!("Found existing enzyme data:");
@@ -109,10 +104,6 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                         fs::remove_dir_all(dir).context("failed to remove enzyme data directory")?;
                         eprintln!("Cleared {}", dir.display());
                     }
-                }
-                if embeddings_dir.exists() {
-                    fs::remove_dir_all(embeddings_dir).context("failed to remove embeddings directory")?;
-                    eprintln!("Cleared {}", embeddings_dir.display());
                 }
             }
         }
@@ -227,12 +218,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // ── Step 4: Launch doc embedding in background ────────────────────────
     let embedding_handle = if let Some(svc) = service {
         let db_path = paths.vault_db.clone();
-        let embeddings_dir = paths.embeddings_dir.clone();
         let tx_emb = tx.clone();
         tx.send(DisplayEvent::EmbeddingStart).ok();
         Some(tokio::task::spawn_blocking(move || {
             let bg_db = Database::open(&db_path)?;
-            let pipeline = EmbeddingPipeline::new(&bg_db, svc, embeddings_dir);
+            let pipeline = EmbeddingPipeline::new(&bg_db, svc);
             pipeline.run(|done, total| {
                 tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
             })
@@ -393,7 +383,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     if emb_completed && cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
         tx.send(DisplayEvent::SimilarityStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
-        let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+        let sim_pipeline = SimilarityPipeline::new(&db, svc);
         let tx_sim = tx.clone();
         let sim_stats = sim_pipeline.run(|done, total| {
             tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
@@ -558,7 +548,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     let emb_produced = if has_changes {
         match svc {
             Some(svc) => {
-                let pipeline = EmbeddingPipeline::new(&db, svc, paths.embeddings_dir.clone());
+                let pipeline = EmbeddingPipeline::new(&db, svc);
                 match pipeline.run_since(index_start_ms, |_, _| {}) {
                     Ok(stats) => {
                         debug!(docs = stats.documents_embedded, "fast refresh: embedding complete");
@@ -586,7 +576,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
 
         if has_catalysts {
             if let Ok(svc) = get_embedding_service(&paths.home) {
-                let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+                let sim_pipeline = SimilarityPipeline::new(&db, svc);
                 if let Err(e) = sim_pipeline.run(|_, _| {}) {
                     debug!("fast refresh: similarity failed: {}", e);
                 }
@@ -740,7 +730,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     // ── Step 6: Recompute similarity ────────────────────────────────────
     if stats.catalysts_generated > 0 {
         if let Ok(svc) = get_embedding_service(&paths.home) {
-            let sim_pipeline = SimilarityPipeline::new(&db, svc, paths.embeddings_dir.clone());
+            let sim_pipeline = SimilarityPipeline::new(&db, svc);
             if let Err(e) = sim_pipeline.run(|_, _| {}) {
                 info!("detached refresh: similarity failed: {}", e);
             }

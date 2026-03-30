@@ -7,12 +7,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::info;
 
 use enzyme_core::db::Database;
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::pipeline::similarity::load_catalyst_embeddings;
 use enzyme_core::search::hnsw::HnswIndex;
 
 /// Metadata about a single catalyst in the pool.
@@ -42,7 +41,6 @@ pub struct ExplorePool {
     pub warmed_catalyst_ids: Option<Vec<String>>,
     pub warmed_doc_index_map: Option<HashMap<String, String>>,
     pub built_at: SystemTime,
-    embeddings_file_mtime: Option<SystemTime>,
 }
 
 impl ExplorePool {
@@ -51,24 +49,22 @@ impl ExplorePool {
         let start = Instant::now();
         let paths = EnzymePaths::new(vault_path)?;
 
-        // Load catalyst embeddings from binary cache
-        let cached = load_catalyst_embeddings(&paths.embeddings_dir)?
-            .context("No cached catalyst embeddings found. Run `enzyme init` first.")?;
+        // Load catalyst metadata and similarities from DB
+        let db = Database::open(&paths.vault_db)?;
 
+        // Load catalyst embeddings from DB
+        let cached = db.get_all_catalyst_embeddings()?;
         if cached.is_empty() {
-            anyhow::bail!("Catalyst embeddings file is empty");
+            anyhow::bail!("No cached catalyst embeddings found. Run `enzyme init` first.");
         }
 
         // Build HNSW index over catalyst embeddings
         let mut hnsw_index = HnswIndex::new();
         let points: Vec<(Vec<f32>, String)> = cached
             .iter()
-            .map(|c| (c.vector.clone(), c.id.clone()))
+            .map(|(id, vec)| (vec.clone(), id.clone()))
             .collect();
         hnsw_index.build(points)?;
-
-        // Load catalyst metadata and similarities from DB
-        let db = Database::open(&paths.vault_db)?;
 
         let all_catalysts = db.get_all_catalysts()?;
         let mut catalyst_metadata = Vec::with_capacity(all_catalysts.len());
@@ -98,11 +94,6 @@ impl ExplorePool {
         // Pre-render pool context markdown
         let pool_context = Self::render_pool_context(&catalyst_metadata);
 
-        // Get embeddings file mtime for staleness check
-        let embeddings_file = paths.embeddings_dir.join("catalyst_embeddings.bin");
-        let embeddings_file_mtime = std::fs::metadata(&embeddings_file)
-            .ok()
-            .and_then(|m| m.modified().ok());
 
         let elapsed = start.elapsed();
         info!(
@@ -122,26 +113,12 @@ impl ExplorePool {
             warmed_catalyst_ids: None,
             warmed_doc_index_map: None,
             built_at: SystemTime::now(),
-            embeddings_file_mtime,
         })
     }
 
-    /// Check if the pool is stale (embeddings file has been modified since pool was built).
+    /// Check if the pool is stale (always returns false; staleness is managed by the caller).
     pub fn is_stale(&self) -> bool {
-        let paths = match EnzymePaths::new(&self.vault_path) {
-            Ok(p) => p,
-            Err(_) => return true,
-        };
-        let embeddings_file = paths.embeddings_dir.join("catalyst_embeddings.bin");
-        let current_mtime = std::fs::metadata(&embeddings_file)
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        match (self.embeddings_file_mtime, current_mtime) {
-            (Some(old), Some(new)) => new > old,
-            (None, Some(_)) => true,
-            _ => false,
-        }
+        false
     }
 
     /// Search the HNSW index for catalysts most similar to a query embedding.

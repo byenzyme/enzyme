@@ -49,9 +49,9 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
             return Ok(());
         }
         target_db = Database::open(&target_paths.vault_db)?;
-        ContextSearch::with_target(&db, &target_db, service, &paths.embeddings_dir)
+        ContextSearch::with_target(&db, &target_db, service)
     } else {
-        ContextSearch::new(&db, service, &paths.embeddings_dir)
+        ContextSearch::new(&db, service)
     };
 
     let start = Instant::now();

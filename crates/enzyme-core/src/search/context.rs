@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -9,7 +8,6 @@ use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::llm::ContentRegister;
 use crate::models::Embedding;
-use crate::pipeline::similarity::load_catalyst_embeddings;
 
 /// Structured response from catalyst-based search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,43 +80,38 @@ impl CatalyzeResponse {
 /// Catalyst-based search over pre-computed similarities.
 ///
 /// Supports an optional **target** database for split-DB mode (after `enzyme apply`):
-/// - Catalysts and catalyst embeddings come from the **source** repo
-/// - Similarities and chunk content come from the **target** repo
+/// - Catalysts come from the **source** DB
+/// - Catalyst embeddings, similarities, and chunk content come from the **target** DB
 pub struct ContextSearch<'a> {
     /// Source vault: catalysts live here.
     db: &'a Database,
-    /// Target DB for similarities/content. Falls back to `db` when `None`.
+    /// Target DB for embeddings/similarities/content. Falls back to `db` when `None`.
     target_db: Option<&'a Database>,
     service: &'a EmbeddingService,
-    embeddings_dir: PathBuf,
 }
 
 impl<'a> ContextSearch<'a> {
     pub fn new(
         db: &'a Database,
         service: &'a EmbeddingService,
-        embeddings_dir: impl AsRef<Path>,
     ) -> Self {
         Self {
             db,
             target_db: None,
             service,
-            embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
     }
 
-    /// Create a split-DB search: catalysts from `source_db`, similarities/content from `target_db`.
+    /// Create a split-DB search: catalysts from `source_db`, everything else from `target_db`.
     pub fn with_target(
         source_db: &'a Database,
         target_db: &'a Database,
         service: &'a EmbeddingService,
-        embeddings_dir: impl AsRef<Path>,
     ) -> Self {
         Self {
             db: source_db,
             target_db: Some(target_db),
             service,
-            embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
     }
 
@@ -143,41 +136,38 @@ impl<'a> ContextSearch<'a> {
             });
         }
 
-        // Load cached catalyst embeddings, falling back to re-embedding
-        let cat_embeddings = match load_catalyst_embeddings(&self.embeddings_dir)? {
-            Some(cached) => {
-                // Build a lookup from catalyst ID to cached vector
-                let cache_map: HashMap<&str, &Vec<f32>> = cached
-                    .iter()
-                    .map(|c| (c.id.as_str(), &c.vector))
-                    .collect();
+        // Load cached catalyst embeddings from DB, falling back to re-embedding
+        let emb_db = self.target_db.unwrap_or(self.db);
+        let cached = emb_db.get_all_catalyst_embeddings()?;
+        let cat_embeddings = if !cached.is_empty() {
+            let cache_map: HashMap<&str, &Vec<f32>> = cached
+                .iter()
+                .map(|(id, vec)| (id.as_str(), vec))
+                .collect();
 
-                // Map each catalyst to its cached vector; if any are missing, re-embed all
-                let mut vecs = Vec::with_capacity(catalysts.len());
-                let mut all_hit = true;
-                for cat in &catalysts {
-                    if let Some(vec) = cache_map.get(cat.id.as_str()) {
-                        vecs.push((*vec).clone());
-                    } else {
-                        all_hit = false;
-                        break;
-                    }
-                }
-
-                if all_hit {
-                    debug!("using cached catalyst embeddings ({} vectors)", vecs.len());
-                    vecs
+            let mut vecs = Vec::with_capacity(catalysts.len());
+            let mut all_hit = true;
+            for cat in &catalysts {
+                if let Some(vec) = cache_map.get(cat.id.as_str()) {
+                    vecs.push((*vec).clone());
                 } else {
-                    debug!("catalyst cache stale, re-embedding {} catalysts", catalysts.len());
-                    let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
-                    self.service.embed_documents(&cat_texts)?
+                    all_hit = false;
+                    break;
                 }
             }
-            None => {
-                debug!("no catalyst cache, embedding {} catalysts", catalysts.len());
+
+            if all_hit {
+                debug!("using cached catalyst embeddings ({} vectors)", vecs.len());
+                vecs
+            } else {
+                debug!("catalyst cache stale, re-embedding {} catalysts", catalysts.len());
                 let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
                 self.service.embed_documents(&cat_texts)?
             }
+        } else {
+            debug!("no catalyst cache, embedding {} catalysts", catalysts.len());
+            let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+            self.service.embed_documents(&cat_texts)?
         };
 
         // Find top relevant catalysts (top 10 — over-retrieve for better coverage)

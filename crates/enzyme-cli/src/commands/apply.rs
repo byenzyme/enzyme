@@ -73,16 +73,14 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
 
     // ── Phase 3: Embed target (spawn_blocking — CPU-bound ONNX) ────────────
     let target_db_path = target_paths.vault_db.clone();
-    let target_embeddings_dir = target_paths.embeddings_dir.clone();
 
     tx.send(DisplayEvent::EmbeddingStart).ok();
     let emb_stats = tokio::task::spawn_blocking({
         let target_db_path = target_db_path.clone();
-        let target_embeddings_dir = target_embeddings_dir.clone();
         let tx_emb = tx.clone();
         move || {
             let db = Database::open(&target_db_path)?;
-            let pipeline = EmbeddingPipeline::new(&db, service, target_embeddings_dir);
+            let pipeline = EmbeddingPipeline::new(&db, service);
             pipeline.run_all(|done, total| {
                 tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
             })
@@ -104,7 +102,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         let tx_sim = tx.clone();
         move || {
             let db = Database::open(&target_db_path)?;
-            let pipeline = SimilarityPipeline::new(&db, service, target_embeddings_dir);
+            let pipeline = SimilarityPipeline::new(&db, service);
             pipeline.run_with_catalysts(&catalysts, true, |done, total| {
                 tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
             })

@@ -135,7 +135,7 @@ impl EnzymeMcp {
             .map_err(|e| McpError::internal_error(format!("db open failed: {e}"), None))?;
         let service = get_embedding_service(&paths.home)
             .map_err(|e| McpError::internal_error(format!("embedding service failed: {e}"), None))?;
-        let search = ContextSearch::new(&db, service, &paths.embeddings_dir);
+        let search = ContextSearch::new(&db, service);
         let response = search
             .catalyze_search(&p.query, limit)
             .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;

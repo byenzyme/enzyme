@@ -1,14 +1,11 @@
-use std::fs;
-use std::io::{Read as IoRead, Write as IoWrite, BufReader, BufWriter};
-use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
-use tracing::{debug, info, warn};
+use anyhow::Result;
+use tracing::{info, warn};
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Timestamp, EMBEDDING_DIMENSION};
+use crate::models::Timestamp;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -19,59 +16,28 @@ use crate::models::{Timestamp, EMBEDDING_DIMENSION};
 pub const MAX_EMBEDDING_FILES: usize = 1024;
 
 // ---------------------------------------------------------------------------
-// EmbeddingPipeline
+// Pipeline
 // ---------------------------------------------------------------------------
 
-/// Orchestrates embedding generation for document chunks and persists the
-/// resulting vectors to a compact binary file on disk.
 pub struct EmbeddingPipeline<'a> {
     db: &'a Database,
     service: &'a EmbeddingService,
-    embeddings_dir: PathBuf,
 }
 
-/// Summary statistics returned after an embedding run.
 pub struct EmbeddingStats {
-    /// Number of documents whose chunks were successfully embedded.
     pub documents_embedded: usize,
-    /// Total number of chunks embedded across all documents.
     pub chunks_embedded: usize,
-    /// Number of stale documents pruned from the embedding store.
     pub documents_pruned: usize,
     /// Wall-clock time for the entire pipeline run, in milliseconds.
     pub duration_ms: u64,
 }
 
-/// A single stored embedding entry (private — not part of the public API).
-struct StoredEmbedding {
-    file_path: String,
-    chunk_index: u32,
-    vector: Vec<f32>,
-}
-
 impl<'a> EmbeddingPipeline<'a> {
-    /// Create a new pipeline.
-    ///
-    /// - `db` — the Enzyme database handle (used to read/write document metadata).
-    /// - `service` — the embedding model service.
-    /// - `embeddings_dir` — directory where `embeddings.bin` will be stored.
-    pub fn new(db: &'a Database, service: &'a EmbeddingService, embeddings_dir: PathBuf) -> Self {
-        Self {
-            db,
-            service,
-            embeddings_dir,
-        }
+    pub fn new(db: &'a Database, service: &'a EmbeddingService) -> Self {
+        Self { db, service }
     }
 
-    /// Run the embedding pipeline.
-    ///
-    /// 1. Query the database for documents whose embeddings are stale or missing.
-    /// 2. Embed each document's chunks via the [`EmbeddingService`].
-    /// 3. Merge new embeddings into the on-disk store (replacing stale entries).
-    /// 4. Mark documents as embedded in the database.
-    ///
-    /// `on_progress(completed_docs, total_docs)` is called after each document is
-    /// processed so callers can drive a progress bar.
+    /// Run embedding (capped to most recent N documents).
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), None, on_progress)
     }
@@ -83,9 +49,6 @@ impl<'a> EmbeddingPipeline<'a> {
     }
 
     /// Run embedding only for documents indexed since `since_ms` (epoch millis).
-    ///
-    /// Used by the fast refresh path to embed only newly-indexed docs and avoid
-    /// processing the full historical backlog.
     pub fn run_since(&self, since_ms: i64, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
     }
@@ -93,22 +56,15 @@ impl<'a> EmbeddingPipeline<'a> {
     fn run_inner(&self, max_docs: Option<usize>, indexed_since: Option<i64>, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
-        // Ensure the embeddings directory exists
-        fs::create_dir_all(&self.embeddings_dir)
-            .context("failed to create embeddings directory")?;
+        // Step 1: Prune stale chunk embeddings for deleted docs.
+        let documents_pruned = self.db.prune_stale_chunk_embeddings()?;
+        if documents_pruned > 0 {
+            info!(documents_pruned, "pruned stale chunk embeddings");
+        }
 
-        // Step 1: Load existing embeddings and prune stale entries for deleted docs.
-        // embeddings.bin is a materialized view of the docs table — deletions must
-        // propagate here so similarity computation doesn't reference ghost documents.
-        let mut all_embeddings = self.load_embeddings()?;
-        let documents_pruned = self.prune_stale(&mut all_embeddings)?;
-
-        // Step 2: Find documents needing embedding (optionally capped to most recent N)
+        // Step 2: Find documents needing embedding
         let docs_needing = self.db.get_documents_needing_embedding(max_docs, indexed_since)?;
         if docs_needing.is_empty() {
-            if documents_pruned > 0 {
-                self.save_embeddings(&all_embeddings)?;
-            }
             info!("No documents need embedding");
             return Ok(EmbeddingStats {
                 documents_embedded: 0,
@@ -121,12 +77,10 @@ impl<'a> EmbeddingPipeline<'a> {
         let total_docs = docs_needing.len();
         info!(total_docs, "documents need embedding");
 
-        // Step 2: Collect all chunks across documents into one flat list so the
-        // embedding service can fill every model batch to capacity.
-        // Track (doc_index, chunk_count) so we can scatter results back.
+        // Step 3: Collect all chunks into one flat list for batched embedding.
         let mut flat_chunks: Vec<&str> = Vec::new();
-        let mut doc_chunk_ranges: Vec<(usize, usize)> = Vec::new(); // (start, count)
-        let mut non_empty_docs: Vec<usize> = Vec::new(); // indices into docs_needing
+        let mut doc_chunk_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut non_empty_docs: Vec<usize> = Vec::new();
 
         for (i, (_doc_id, _source_ref, chunks)) in docs_needing.iter().enumerate() {
             if chunks.is_empty() {
@@ -143,9 +97,7 @@ impl<'a> EmbeddingPipeline<'a> {
         let total_chunks = flat_chunks.len();
         info!(total_chunks, total_docs = non_empty_docs.len(), "embedding all chunks in cross-document batches");
 
-        // Step 3: Embed all chunks at once — the service handles batching internally.
-        // Convert chunk-level progress into document-level progress so the UI
-        // displays a document count rather than a chunk count.
+        // Step 4: Embed all chunks at once.
         let total_non_empty = non_empty_docs.len();
         let all_vectors = self.service.embed_documents_with_progress(
             &flat_chunks,
@@ -162,7 +114,7 @@ impl<'a> EmbeddingPipeline<'a> {
             },
         )?;
 
-        // Step 4: Scatter results back to documents and update DB.
+        // Step 5: Scatter results back to documents and write to DB.
         let mut chunks_embedded = 0usize;
         let mut documents_embedded = 0usize;
 
@@ -171,17 +123,16 @@ impl<'a> EmbeddingPipeline<'a> {
             let (start_idx, count) = doc_chunk_ranges[range_idx];
             let vectors = &all_vectors[start_idx..start_idx + count];
 
-            // Remove old embeddings for this source_ref
-            all_embeddings.retain(|e| e.file_path != *source_ref);
+            // Replace old chunk embeddings for this file
+            self.db.delete_chunk_embeddings_for_file(source_ref)?;
 
-            // Add new embeddings
-            for (i, vector) in vectors.iter().enumerate() {
-                all_embeddings.push(StoredEmbedding {
-                    file_path: source_ref.clone(),
-                    chunk_index: i as u32,
-                    vector: vector.clone(),
-                });
-            }
+            // Insert new chunk embeddings
+            let entries: Vec<(String, u32, Vec<f32>)> = vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (source_ref.clone(), i as u32, v.clone()))
+                .collect();
+            self.db.upsert_chunk_embeddings(&entries)?;
 
             // Mark as embedded in DB
             let now: Timestamp = chrono::Utc::now().timestamp_millis();
@@ -205,9 +156,6 @@ impl<'a> EmbeddingPipeline<'a> {
             documents_embedded += 1;
         }
 
-        // Step 5: Save all embeddings to disk
-        self.save_embeddings(&all_embeddings)?;
-
         let duration_ms = start.elapsed().as_millis() as u64;
 
         info!(
@@ -223,162 +171,5 @@ impl<'a> EmbeddingPipeline<'a> {
             documents_pruned,
             duration_ms,
         })
-    }
-
-    // -----------------------------------------------------------------------
-    // Pruning
-    // -----------------------------------------------------------------------
-
-    /// Remove embeddings whose `file_path` no longer appears in the docs table.
-    /// Returns the number of unique documents pruned.
-    fn prune_stale(&self, embeddings: &mut Vec<StoredEmbedding>) -> Result<usize> {
-        if embeddings.is_empty() {
-            return Ok(0);
-        }
-
-        let valid: std::collections::HashSet<String> =
-            self.db.get_all_source_refs()?.into_iter().collect();
-
-        let before: std::collections::HashSet<&str> =
-            embeddings.iter().map(|e| e.file_path.as_str()).collect();
-        let docs_before = before.len();
-
-        embeddings.retain(|e| valid.contains(&e.file_path));
-
-        let after: std::collections::HashSet<&str> =
-            embeddings.iter().map(|e| e.file_path.as_str()).collect();
-        let pruned = docs_before - after.len();
-
-        if pruned > 0 {
-            info!(pruned, "pruned stale embeddings for deleted documents");
-        }
-
-        Ok(pruned)
-    }
-
-    // -----------------------------------------------------------------------
-    // Embedding storage (binary format)
-    // -----------------------------------------------------------------------
-    //
-    // Format of `embeddings.bin`:
-    //
-    // ```text
-    // [count: u32 LE]
-    // For each embedding:
-    //   [file_path_len: u32 LE][file_path: bytes][chunk_index: u32 LE][vector: f32 * 384 LE]
-    // ```
-    //
-    // We rebuild HNSW / BM25 indices from these embeddings on every load, so
-    // no separate index file is needed.
-
-    fn embeddings_path(&self) -> PathBuf {
-        self.embeddings_dir.join("embeddings.bin")
-    }
-
-    fn load_embeddings(&self) -> Result<Vec<StoredEmbedding>> {
-        let path = self.embeddings_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let file = fs::File::open(&path)
-            .with_context(|| format!("failed to open embeddings file: {}", path.display()))?;
-        let mut reader = BufReader::new(file);
-
-        let mut buf4 = [0u8; 4];
-
-        // Read count
-        reader
-            .read_exact(&mut buf4)
-            .context("failed to read embedding count")?;
-        let count = u32::from_le_bytes(buf4) as usize;
-
-        let mut embeddings = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            // Read file_path_len
-            reader
-                .read_exact(&mut buf4)
-                .context("failed to read file path length")?;
-            let path_len = u32::from_le_bytes(buf4) as usize;
-
-            // Read file_path
-            let mut path_bytes = vec![0u8; path_len];
-            reader
-                .read_exact(&mut path_bytes)
-                .context("failed to read file path bytes")?;
-            let file_path =
-                String::from_utf8(path_bytes).context("invalid UTF-8 in embedding file path")?;
-
-            // Read chunk_index
-            reader
-                .read_exact(&mut buf4)
-                .context("failed to read chunk index")?;
-            let chunk_index = u32::from_le_bytes(buf4);
-
-            // Read vector (EMBEDDING_DIMENSION * 4 bytes)
-            let mut vector = vec![0f32; EMBEDDING_DIMENSION];
-            // SAFETY: We reinterpret the Vec<f32> backing memory as a &mut [u8]
-            // for a single `read_exact` call. The slice length is exactly
-            // `EMBEDDING_DIMENSION * size_of::<f32>()` bytes, matching the layout
-            // of the f32 vector. The data is written in native-LE format (x86/ARM)
-            // and read back on the same architecture.
-            let vector_bytes: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(
-                    vector.as_mut_ptr() as *mut u8,
-                    EMBEDDING_DIMENSION * std::mem::size_of::<f32>(),
-                )
-            };
-            reader
-                .read_exact(vector_bytes)
-                .context("failed to read embedding vector")?;
-
-            embeddings.push(StoredEmbedding {
-                file_path,
-                chunk_index,
-                vector,
-            });
-        }
-
-        debug!(count = embeddings.len(), "loaded embeddings from disk");
-        Ok(embeddings)
-    }
-
-    fn save_embeddings(&self, embeddings: &[StoredEmbedding]) -> Result<()> {
-        let path = self.embeddings_path();
-        let file = fs::File::create(&path)
-            .with_context(|| format!("failed to create embeddings file: {}", path.display()))?;
-        let mut writer = BufWriter::new(file);
-
-        // Write count
-        writer
-            .write_all(&(embeddings.len() as u32).to_le_bytes())
-            .context("failed to write embedding count")?;
-
-        for emb in embeddings {
-            let path_bytes = emb.file_path.as_bytes();
-            writer.write_all(&(path_bytes.len() as u32).to_le_bytes())?;
-            writer.write_all(path_bytes)?;
-            writer.write_all(&emb.chunk_index.to_le_bytes())?;
-
-            // SAFETY: We reinterpret the Vec<f32> backing memory as a &[u8] for
-            // a single `write_all` call. See `load_embeddings` for the symmetric
-            // read. Both sides agree on LE byte order and vector length.
-            let vector_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    emb.vector.as_ptr() as *const u8,
-                    emb.vector.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            writer.write_all(vector_bytes)?;
-        }
-
-        writer.flush().context("failed to flush embeddings file")?;
-        info!(
-            count = embeddings.len(),
-            path = %path.display(),
-            "saved embeddings to disk"
-        );
-        Ok(())
     }
 }

@@ -126,6 +126,20 @@ CREATE TABLE IF NOT EXISTS applied_targets (
     catalyst_count  INTEGER NOT NULL DEFAULT 0,
     applied_at      TEXT DEFAULT (datetime('now'))
 );
+
+-- Chunk embeddings (replaces embeddings.bin) ------------------------------------
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    file_path   TEXT    NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    vector      BLOB    NOT NULL,
+    PRIMARY KEY (file_path, chunk_index)
+);
+
+-- Catalyst embeddings (replaces catalyst_embeddings.bin) -----------------------
+CREATE TABLE IF NOT EXISTS catalyst_embeddings (
+    catalyst_id TEXT NOT NULL PRIMARY KEY,
+    vector      BLOB NOT NULL
+);
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
@@ -141,6 +155,8 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "context_cache",
     "config",
     "applied_targets",
+    "chunk_embeddings",
+    "catalyst_embeddings",
 ];
 
 /// All indexes created by the schema (used for validation in tests).

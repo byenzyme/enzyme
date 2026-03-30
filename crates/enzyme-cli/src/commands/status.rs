@@ -37,7 +37,6 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     Ok(Some(json!({
         "vault": vault_path.display().to_string(),
         "database": paths.vault_db.display().to_string(),
-        "embeddings_dir": paths.embeddings_dir.display().to_string(),
         "documents": doc_count,
         "embedded": embedded_count,
         "entities": entity_count,
@@ -58,7 +57,6 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
         Some(json) => {
             println!("Vault: {}", json["vault"].as_str().unwrap_or(""));
             println!("Database: {}", json["database"].as_str().unwrap_or(""));
-            println!("Embeddings: {}", json["embeddings_dir"].as_str().unwrap_or(""));
             println!();
             println!("Documents:  {}", json["documents"]);
             println!("Embedded:   {}/{}", json["embedded"], json["documents"]);

@@ -351,7 +351,7 @@ pub async fn run_standard_pipeline(
             }
         };
 
-        let search = ContextSearch::new(&db, service, &paths.embeddings_dir);
+        let search = ContextSearch::new(&db, service);
 
         let mut all_results: Vec<SearchResultItem> = Vec::new();
         let mut doc_index_map: HashMap<String, String> = HashMap::new();
