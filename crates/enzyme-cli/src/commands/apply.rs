@@ -21,8 +21,6 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
 
     // ── Phase 1: Setup ─────────────────────────────────────────────────────
     let source_paths = EnzymePaths::new(source_path)?;
-    let target_paths = EnzymePaths::new(target_path)?;
-
     let service = get_embedding_service(&source_paths.home)?;
 
     // Load catalysts from source vault
@@ -41,6 +39,9 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         );
     }
 
+    // Target DB lives in source vault's .enzyme/targets/ directory
+    let target_db_path = source_paths.target_db(target_path);
+
     // Print header before starting display (not animated)
     println!("enzyme apply");
     println!("  source: {} ({} catalysts)", source_path.display(), catalysts.len());
@@ -51,13 +52,13 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
     let tx = display.sender();
 
     // ── Phase 2: Index target ──────────────────────────────────────────────
-    if let Some(parent) = target_paths.vault_db.parent() {
+    if let Some(parent) = target_db_path.parent() {
         fs::create_dir_all(parent)
-            .context("failed to create target .enzyme directory")?;
+            .context("failed to create targets directory")?;
     }
 
     tx.send(DisplayEvent::IndexingStart).ok();
-    let target_db = Database::open(&target_paths.vault_db)?;
+    let target_db = Database::open(&target_db_path)?;
     let indexing = IndexingPipeline::new(&target_db, target_path.to_path_buf());
     let tx_idx = tx.clone();
     let idx_stats = indexing.run(false, |msg| {
@@ -72,8 +73,6 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
     }).ok();
 
     // ── Phase 3: Embed target (spawn_blocking — CPU-bound ONNX) ────────────
-    let target_db_path = target_paths.vault_db.clone();
-
     tx.send(DisplayEvent::EmbeddingStart).ok();
     let emb_stats = tokio::task::spawn_blocking({
         let target_db_path = target_db_path.clone();

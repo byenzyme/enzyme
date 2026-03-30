@@ -34,12 +34,11 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
 
     let service = get_embedding_service(&paths.home)?;
 
-    // When a target is provided, open its DB for similarity/content lookups
+    // When a target is provided, open its DB from source's targets/ directory
     let target_db;
-    let target_paths;
     let search = if let Some(target_path) = target {
-        target_paths = EnzymePaths::new(target_path)?;
-        if !target_paths.vault_db.exists() {
+        let target_db_path = paths.target_db(target_path);
+        if !target_db_path.exists() {
             let output = json!({
                 "error": format!("Target not initialized. Run 'enzyme apply {}' first.", target_path.display()),
                 "query": query,
@@ -48,7 +47,7 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
             println!("{}", serde_json::to_string(&output)?);
             return Ok(());
         }
-        target_db = Database::open(&target_paths.vault_db)?;
+        target_db = Database::open(&target_db_path)?;
         ContextSearch::with_target(&db, &target_db, service)
     } else {
         ContextSearch::new(&db, service)

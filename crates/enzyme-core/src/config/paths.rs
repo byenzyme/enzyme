@@ -2,6 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 /// Resolved filesystem paths for an Enzyme session.
 ///
@@ -110,6 +111,32 @@ impl EnzymePaths {
     pub fn daemon_log(&self) -> PathBuf {
         self.home.join("embedding_daemon.log")
     }
+
+    /// Path to a target-specific database for `enzyme apply`.
+    ///
+    /// Target data lives in `<vault>/.enzyme/targets/<hash>.db` where
+    /// `<hash>` is a truncated SHA-256 of the canonical target path.
+    /// This keeps all apply artifacts in the source vault — the target
+    /// directory is never modified.
+    pub fn target_db(&self, target_path: &Path) -> PathBuf {
+        let canonical = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.to_path_buf());
+        let hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(canonical.to_string_lossy().as_bytes());
+            let result = hasher.finalize();
+            result[..8]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        };
+        self.vault_db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("targets")
+            .join(format!("{}.db", hash))
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +181,27 @@ mod tests {
         assert!(EnzymePaths::is_fuse_mount(Path::new(
             "/sessions/abc-123/mnt/some/nested/vault"
         )));
+    }
+
+    #[test]
+    fn test_target_db_in_source_enzyme_dir() {
+        let vault = PathBuf::from("/Users/alice/vault");
+        let paths = EnzymePaths::with_overrides(&vault, None).unwrap();
+
+        let target = Path::new("/Users/alice/other-vault");
+        let db_path = paths.target_db(target);
+
+        // Should be under <vault>/.enzyme/targets/<hash>.db
+        assert!(db_path.starts_with(vault.join(".enzyme").join("targets")));
+        assert!(db_path.extension().map_or(false, |e| e == "db"));
+
+        // Same target should produce the same hash
+        let db_path2 = paths.target_db(target);
+        assert_eq!(db_path, db_path2);
+
+        // Different target should produce a different hash
+        let db_path3 = paths.target_db(Path::new("/Users/alice/yet-another"));
+        assert_ne!(db_path, db_path3);
     }
 
     #[test]
