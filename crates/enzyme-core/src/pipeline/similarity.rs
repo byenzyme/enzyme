@@ -7,12 +7,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tracing::info;
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Catalyst, Embedding, CatalystSimilarity, EMBEDDING_DIMENSION};
 
 pub struct SimilarityPipeline<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
     service: &'a EmbeddingService,
     embeddings_dir: PathBuf,
 }
@@ -33,7 +33,7 @@ struct StoredEmbedding {
 impl<'a> SimilarityPipeline<'a> {
     pub fn new(db: &'a Database, service: &'a EmbeddingService, embeddings_dir: PathBuf) -> Self {
         Self {
-            repo: Repository::new(db),
+            db,
             service,
             embeddings_dir,
         }
@@ -41,7 +41,7 @@ impl<'a> SimilarityPipeline<'a> {
 
     /// Run similarity using catalysts from the local database.
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<SimilarityStats> {
-        let catalysts = self.repo.get_all_catalysts()?;
+        let catalysts = self.db.get_all_catalysts()?;
         self.run_with_catalysts(&catalysts, true, on_progress)
     }
 
@@ -134,7 +134,7 @@ impl<'a> SimilarityPipeline<'a> {
                 .collect();
 
             similarities_computed += similarity_records.len();
-            self.repo.upsert_catalyst_similarities(&similarity_records)?;
+            self.db.upsert_catalyst_similarities(&similarity_records)?;
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;

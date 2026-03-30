@@ -6,7 +6,7 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
 use crate::models::{EntityOccurrence, EntityTrends, EntityType};
 
@@ -14,7 +14,7 @@ use crate::models::{EntityOccurrence, EntityTrends, EntityType};
 /// discover files -> process -> diff against DB -> upsert new/changed ->
 /// delete removed -> extract entities -> compute trending scores.
 pub struct IndexingPipeline<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
     vault_path: PathBuf,
 }
 
@@ -30,10 +30,7 @@ pub struct IndexingStats {
 
 impl<'a> IndexingPipeline<'a> {
     pub fn new(db: &'a Database, vault_path: PathBuf) -> Self {
-        Self {
-            repo: Repository::new(db),
-            vault_path,
-        }
+        Self { db, vault_path }
     }
 
     /// Execute the indexing pipeline.
@@ -54,7 +51,7 @@ impl<'a> IndexingPipeline<'a> {
         info!(files_discovered, "files discovered");
 
         // Step 2: Get existing hashes from DB
-        let existing_hashes = self.repo.get_all_document_hashes()?;
+        let existing_hashes = self.db.get_all_document_hashes()?;
 
         // Step 3: Build a lookup from source_ref -> PathBuf for all discovered files
         let all_source_refs: HashMap<String, PathBuf> = all_paths
@@ -121,12 +118,12 @@ impl<'a> IndexingPipeline<'a> {
 
         // Step 6: Upsert processed documents into the database (single transaction)
         on_progress("Upserting documents...");
-        self.repo.upsert_documents_batch(&processed_docs)?;
+        self.db.upsert_documents_batch(&processed_docs)?;
 
         // Step 7: Delete removed files from the database
         if !deleted_paths.is_empty() {
             on_progress(&format!("Deleting {} removed files...", deleted_paths.len()));
-            self.repo.delete_documents_by_paths(&deleted_paths)?;
+            self.db.delete_documents_by_paths(&deleted_paths)?;
         }
 
         // Step 8: Extract entities from processed documents (single transaction)
@@ -138,7 +135,7 @@ impl<'a> IndexingPipeline<'a> {
                 .iter()
                 .map(|(name, etype, occ)| (name.as_str(), etype, occ))
                 .collect();
-            self.repo.upsert_entities_batch(&refs)?;
+            self.db.upsert_entities_batch(&refs)?;
         }
 
         // Step 9: Compute trending scores for all entities (bulk fetch)
@@ -238,7 +235,7 @@ impl<'a> IndexingPipeline<'a> {
     /// Fetches all occurrence dates in a **single query**, groups by entity_id
     /// in memory, then batch-updates all trends in one transaction.
     fn compute_trending_scores(&self) -> Result<()> {
-        let entities = self.repo.get_all_entities()?;
+        let entities = self.db.get_all_entities()?;
         let now_millis = chrono::Utc::now().timestamp_millis();
 
         // Build entity_id -> frequency lookup
@@ -248,7 +245,7 @@ impl<'a> IndexingPipeline<'a> {
             .collect();
 
         // Single bulk fetch of all occurrence dates
-        let all_occ_dates = self.repo.get_all_occurrence_dates()?;
+        let all_occ_dates = self.db.get_all_occurrence_dates()?;
 
         // Group by entity_id and compute scores in one pass
         // (rows are ordered by entity_id from the query)
@@ -308,7 +305,7 @@ impl<'a> IndexingPipeline<'a> {
             })
             .collect();
 
-        self.repo.update_entity_trends_batch(&updates)?;
+        self.db.update_entity_trends_batch(&updates)?;
 
         Ok(())
     }
@@ -317,7 +314,6 @@ impl<'a> IndexingPipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Repository;
     use crate::models::EntityType;
     use crate::pipeline::staleness::{
         check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult, StaleReason,
@@ -383,10 +379,9 @@ mod tests {
         assert_eq!(stats.files_discovered, 5);
         assert_eq!(stats.files_new, 5);
 
-        let repo = Repository::new(&db);
-        assert_eq!(repo.get_document_count().unwrap(), 5);
+        assert_eq!(db.get_document_count().unwrap(), 5);
 
-        let entities = repo.get_all_entities().unwrap();
+        let entities = db.get_all_entities().unwrap();
         assert!(!entities.is_empty(), "entities should have been extracted");
 
         // Trending scores should be non-zero for at least some entities
@@ -426,8 +421,7 @@ mod tests {
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
-        let repo = Repository::new(&db);
-        let count_before = repo.get_document_count().unwrap();
+        let count_before = db.get_document_count().unwrap();
 
         write_md(vault.path(), "new-one.md", "# New One\nContent with #newtag.\n");
         write_md(
@@ -440,10 +434,10 @@ mod tests {
 
         assert_eq!(stats.files_new, 2);
         assert_eq!(stats.files_updated, 0);
-        assert_eq!(repo.get_document_count().unwrap(), count_before + 2);
+        assert_eq!(db.get_document_count().unwrap(), count_before + 2);
 
         // New entities from the new files should exist
-        let entities = repo.get_all_entities().unwrap();
+        let entities = db.get_all_entities().unwrap();
         let entity_names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
         assert!(
             entity_names.contains(&"newtag"),
@@ -462,8 +456,7 @@ mod tests {
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
-        let repo = Repository::new(&db);
-        let hash_before = repo
+        let hash_before = db
             .get_document_by_path("note-a.md")
             .unwrap()
             .unwrap()
@@ -482,7 +475,7 @@ mod tests {
         assert_eq!(stats.files_updated, 1);
         assert_eq!(stats.files_new, 0);
 
-        let hash_after = repo
+        let hash_after = db
             .get_document_by_path("note-a.md")
             .unwrap()
             .unwrap()
@@ -501,15 +494,14 @@ mod tests {
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
-        let repo = Repository::new(&db);
-        let count_before = repo.get_document_count().unwrap();
+        let count_before = db.get_document_count().unwrap();
 
         std::fs::remove_file(vault.path().join("note-e.md")).unwrap();
 
         let stats = pipeline.run(false, |_| {}).unwrap();
 
         assert_eq!(stats.files_deleted, 1);
-        assert_eq!(repo.get_document_count().unwrap(), count_before - 1);
+        assert_eq!(db.get_document_count().unwrap(), count_before - 1);
     }
 
     // -----------------------------------------------------------------------
@@ -523,17 +515,15 @@ mod tests {
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
-        let repo = Repository::new(&db);
-
         // Find the "alpha" tag entity and record its frequency
-        let entities_before = repo.get_all_entities().unwrap();
+        let entities_before = db.get_all_entities().unwrap();
         let alpha_before = entities_before
             .iter()
             .find(|e| e.name == "alpha" && e.entity_type == EntityType::Tag)
             .expect("alpha tag should exist");
         let freq_before = alpha_before.frequency;
         let alpha_id = alpha_before.id.unwrap();
-        let occs_before = repo.get_entity_occurrences(alpha_id).unwrap().len();
+        let occs_before = db.get_entity_occurrences(alpha_id).unwrap().len();
 
         // Add a new file that also uses #alpha
         write_md(
@@ -543,7 +533,7 @@ mod tests {
         );
         pipeline.run(false, |_| {}).unwrap();
 
-        let entities_after = repo.get_all_entities().unwrap();
+        let entities_after = db.get_all_entities().unwrap();
         let alpha_after = entities_after
             .iter()
             .find(|e| e.name == "alpha" && e.entity_type == EntityType::Tag)
@@ -556,7 +546,7 @@ mod tests {
             alpha_after.frequency
         );
 
-        let occs_after = repo.get_entity_occurrences(alpha_id).unwrap().len();
+        let occs_after = db.get_entity_occurrences(alpha_id).unwrap().len();
         assert!(
             occs_after > occs_before,
             "alpha occurrences should increase: {} -> {}",
@@ -577,7 +567,6 @@ mod tests {
         pipeline.run(true, |_| {}).unwrap();
 
         // Insert a fake catalyst so staleness check doesn't short-circuit with NoCatalysts
-        let repo = Repository::new(&db);
         let fake_catalyst = Catalyst {
             id: uuid::Uuid::new_v4().to_string(),
             text: "test catalyst".to_string(),
@@ -586,7 +575,7 @@ mod tests {
             generated_at: chrono::Utc::now(),
             metadata: serde_json::json!({}),
         };
-        repo.insert_catalysts(&[fake_catalyst]).unwrap();
+        db.insert_catalysts(&[fake_catalyst]).unwrap();
 
         // Store bookkeeping with current entity doc counts
         let entity_names = vec!["alpha".to_string()];
@@ -628,7 +617,6 @@ mod tests {
         pipeline.run(true, |_| {}).unwrap();
 
         // Insert a fake catalyst
-        let repo = Repository::new(&db);
         let fake_catalyst = Catalyst {
             id: uuid::Uuid::new_v4().to_string(),
             text: "test catalyst".to_string(),
@@ -637,7 +625,7 @@ mod tests {
             generated_at: chrono::Utc::now(),
             metadata: serde_json::json!({}),
         };
-        repo.insert_catalysts(&[fake_catalyst]).unwrap();
+        db.insert_catalysts(&[fake_catalyst]).unwrap();
 
         // Store bookkeeping
         let entity_names = vec!["alpha".to_string()];
@@ -716,14 +704,13 @@ mod tests {
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
-        let repo = Repository::new(&db);
-        let entities = repo.get_all_entities().unwrap();
+        let entities = db.get_all_entities().unwrap();
         let folder_entity = entities
             .iter()
             .find(|e| e.name == "people" && e.entity_type == EntityType::Folder)
             .expect("people folder entity should exist");
 
-        let occs = repo
+        let occs = db
             .get_entity_occurrences(folder_entity.id.unwrap())
             .unwrap();
         assert_eq!(occs.len(), 2, "should have 2 occurrences (one per file)");

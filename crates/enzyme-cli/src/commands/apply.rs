@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use tracing::info;
 
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::AppliedTarget;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
@@ -33,8 +33,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         );
     }
     let source_db = Database::open(&source_paths.vault_db)?;
-    let source_repo = Repository::new(&source_db);
-    let catalysts = source_repo.get_all_catalysts()?;
+    let catalysts = source_db.get_all_catalysts()?;
     if catalysts.is_empty() {
         bail!(
             "source vault has no catalysts — run `enzyme init` on {} first",
@@ -124,8 +123,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         .canonicalize()
         .unwrap_or_else(|_| target_path.to_path_buf());
     let source_db = Database::open(&source_paths.vault_db)?;
-    let source_repo = Repository::new(&source_db);
-    source_repo.upsert_applied_target(&AppliedTarget {
+    source_db.upsert_applied_target(&AppliedTarget {
         id: None,
         target_path: canonical_target.to_string_lossy().to_string(),
         doc_count: idx_stats.files_discovered as i64,

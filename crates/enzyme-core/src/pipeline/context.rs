@@ -4,7 +4,7 @@ use std::fmt::Write;
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::models::{Entity, EntityType};
 
 /// Result of context building, including the XML and any detected page entities.
@@ -17,14 +17,12 @@ pub struct ContextResult {
 }
 
 pub struct ContextBuilder<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
 }
 
 impl<'a> ContextBuilder<'a> {
     pub fn new(db: &'a Database) -> Self {
-        Self {
-            repo: Repository::new(db),
-        }
+        Self { db }
     }
 
     /// Build vault context XML from DB for the given entities.
@@ -50,7 +48,7 @@ impl<'a> ContextBuilder<'a> {
         excerpts_per_entity: usize,
         max_excerpt_chars: usize,
     ) -> Result<ContextResult> {
-        let folders = self.repo.get_folder_structure()?;
+        let folders = self.db.get_folder_structure()?;
 
         // Collect trending link names for page entity detection
         let trending_links: Vec<&str> = entities
@@ -111,7 +109,7 @@ impl<'a> ContextBuilder<'a> {
             xml.push_str("</stats>\n");
 
             // Children
-            let children = self.repo.get_child_entities(entity_name, entity_type, 5)?;
+            let children = self.db.get_child_entities(entity_name, entity_type, 5)?;
             if !children.is_empty() {
                 xml.push_str("      <children>");
                 for child in &children {
@@ -128,7 +126,7 @@ impl<'a> ContextBuilder<'a> {
             // Page entities for folder entities
             if entity.entity_type == EntityType::Folder && !trending_links.is_empty() {
                 let page_entities = self
-                    .repo
+                    .db
                     .get_folder_page_entities(entity_name, &trending_links)?;
                 if !page_entities.is_empty() {
                     folders_with_page_entities
@@ -153,7 +151,7 @@ impl<'a> ContextBuilder<'a> {
             }
 
             // Recent excerpts
-            let occurrences = self.repo.get_recent_occurrences(entity_id, excerpts_per_entity)?;
+            let occurrences = self.db.get_recent_occurrences(entity_id, excerpts_per_entity)?;
             let excerpts: Vec<_> = occurrences
                 .iter()
                 .filter_map(|occ| {

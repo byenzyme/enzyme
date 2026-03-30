@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::llm::ContentRegister;
 use crate::models::Embedding;
@@ -86,9 +86,9 @@ impl CatalyzeResponse {
 /// - Similarities and chunk content come from the **target** repo
 pub struct ContextSearch<'a> {
     /// Source vault: catalysts live here.
-    repo: Repository<'a>,
-    /// Target DB for similarities/content. Falls back to `repo` when `None`.
-    target_repo: Option<Repository<'a>>,
+    db: &'a Database,
+    /// Target DB for similarities/content. Falls back to `db` when `None`.
+    target_db: Option<&'a Database>,
     service: &'a EmbeddingService,
     embeddings_dir: PathBuf,
 }
@@ -100,8 +100,8 @@ impl<'a> ContextSearch<'a> {
         embeddings_dir: impl AsRef<Path>,
     ) -> Self {
         Self {
-            repo: Repository::new(db),
-            target_repo: None,
+            db,
+            target_db: None,
             service,
             embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
@@ -115,8 +115,8 @@ impl<'a> ContextSearch<'a> {
         embeddings_dir: impl AsRef<Path>,
     ) -> Self {
         Self {
-            repo: Repository::new(source_db),
-            target_repo: Some(Repository::new(target_db)),
+            db: source_db,
+            target_db: Some(target_db),
             service,
             embeddings_dir: embeddings_dir.as_ref().to_path_buf(),
         }
@@ -133,7 +133,7 @@ impl<'a> ContextSearch<'a> {
         let query_vec = self.service.embed_query(query)?;
 
         // Get all catalysts
-        let catalysts = self.repo.get_all_catalysts()?;
+        let catalysts = self.db.get_all_catalysts()?;
         if catalysts.is_empty() {
             return Ok(CatalyzeResponse {
                 results: Vec::new(),
@@ -211,7 +211,7 @@ impl<'a> ContextSearch<'a> {
         let mut chunk_scores: HashMap<String, ChunkScore> = HashMap::new();
         let context_per_catalyst = (limit * 3 / max_catalysts.max(1)).max(10);
 
-        let sim_repo = self.target_repo.as_ref().unwrap_or(&self.repo);
+        let sim_repo = self.target_db.unwrap_or(self.db);
 
         for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];

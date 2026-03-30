@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Timestamp, EMBEDDING_DIMENSION};
 
@@ -25,7 +25,7 @@ pub const MAX_EMBEDDING_FILES: usize = 1024;
 /// Orchestrates embedding generation for document chunks and persists the
 /// resulting vectors to a compact binary file on disk.
 pub struct EmbeddingPipeline<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
     service: &'a EmbeddingService,
     embeddings_dir: PathBuf,
 }
@@ -57,7 +57,7 @@ impl<'a> EmbeddingPipeline<'a> {
     /// - `embeddings_dir` — directory where `embeddings.bin` will be stored.
     pub fn new(db: &'a Database, service: &'a EmbeddingService, embeddings_dir: PathBuf) -> Self {
         Self {
-            repo: Repository::new(db),
+            db,
             service,
             embeddings_dir,
         }
@@ -104,7 +104,7 @@ impl<'a> EmbeddingPipeline<'a> {
         let documents_pruned = self.prune_stale(&mut all_embeddings)?;
 
         // Step 2: Find documents needing embedding (optionally capped to most recent N)
-        let docs_needing = self.repo.get_documents_needing_embedding(max_docs, indexed_since)?;
+        let docs_needing = self.db.get_documents_needing_embedding(max_docs, indexed_since)?;
         if docs_needing.is_empty() {
             if documents_pruned > 0 {
                 self.save_embeddings(&all_embeddings)?;
@@ -185,9 +185,9 @@ impl<'a> EmbeddingPipeline<'a> {
 
             // Mark as embedded in DB
             let now: Timestamp = chrono::Utc::now().timestamp_millis();
-            match self.repo.get_document_by_path(source_ref) {
+            match self.db.get_document_by_path(source_ref) {
                 Ok(Some(doc)) => {
-                    self.repo
+                    self.db
                         .mark_document_embedded(*doc_id, &doc.content_hash, now)?;
                 }
                 Ok(None) => {
@@ -237,7 +237,7 @@ impl<'a> EmbeddingPipeline<'a> {
         }
 
         let valid: std::collections::HashSet<String> =
-            self.repo.get_all_source_refs()?.into_iter().collect();
+            self.db.get_all_source_refs()?.into_iter().collect();
 
         let before: std::collections::HashSet<&str> =
             embeddings.iter().map(|e| e.file_path.as_str()).collect();

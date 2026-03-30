@@ -5,7 +5,7 @@ use anyhow::Result;
 use tracing::{debug, info};
 
 use crate::config::enzyme_config::{EnzymeConfig, TrendingConfig};
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::models::{Entity, EntityType};
 
 /// How entities were selected.
@@ -30,16 +30,13 @@ pub struct SelectionResult {
 
 /// Selects entities for catalyst generation, either from user config or trending.
 pub struct SelectionPipeline<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
     vault_path: &'a Path,
 }
 
 impl<'a> SelectionPipeline<'a> {
     pub fn new(db: &'a Database, vault_path: &'a Path) -> Self {
-        Self {
-            repo: Repository::new(db),
-            vault_path,
-        }
+        Self { db, vault_path }
     }
 
     /// Run entity selection.
@@ -76,7 +73,7 @@ impl<'a> SelectionPipeline<'a> {
             .map(|e| (e.name.as_str(), e.entity_type.clone()))
             .collect();
 
-        let mut found = self.repo.get_entities_by_names(&lookup_pairs)?;
+        let mut found = self.db.get_entities_by_names(&lookup_pairs)?;
 
         // Build a set of excluded names for filtering
         let excluded: std::collections::HashSet<String> = prefs
@@ -114,7 +111,7 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Select trending entities with guaranteed type diversity.
     fn select_trending(&self, config: &TrendingConfig) -> Result<SelectionResult> {
-        let entities = self.repo.get_trending_entities(
+        let entities = self.db.get_trending_entities(
             config.minimum_tags,
             config.minimum_links,
             config.minimum_folders,

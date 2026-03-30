@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime};
 use anyhow::{Context, Result};
 use tracing::info;
 
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::pipeline::similarity::load_catalyst_embeddings;
 use enzyme_core::search::hnsw::HnswIndex;
@@ -69,9 +69,8 @@ impl ExplorePool {
 
         // Load catalyst metadata and similarities from DB
         let db = Database::open(&paths.vault_db)?;
-        let repo = Repository::new(&db);
 
-        let all_catalysts = repo.get_all_catalysts()?;
+        let all_catalysts = db.get_all_catalysts()?;
         let mut catalyst_metadata = Vec::with_capacity(all_catalysts.len());
         let mut similarities: HashMap<String, Vec<SimilarDoc>> = HashMap::new();
 
@@ -84,7 +83,7 @@ impl ExplorePool {
             });
 
             // Load pre-computed similarities for this catalyst
-            let sims = repo.get_similarities_for_catalyst(&cat.id, 50)?;
+            let sims = db.get_similarities_for_catalyst(&cat.id, 50)?;
             let sim_docs: Vec<SimilarDoc> = sims
                 .into_iter()
                 .map(|s| SimilarDoc {

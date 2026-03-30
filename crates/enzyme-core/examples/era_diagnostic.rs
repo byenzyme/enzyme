@@ -3,7 +3,7 @@
 //! Usage: cargo run -p enzyme-core --example era_diagnostic -- ~/obsidian
 
 use std::env;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::pipeline::eras::{cluster_eras_periodic, allocate_catalysts_to_eras};
 
 fn main() {
@@ -14,9 +14,8 @@ fn main() {
 
     let db_path = format!("{}/.enzyme/enzyme.db", vault_path);
     let db = Database::open(&db_path).expect("failed to open database");
-    let repo = Repository::new(&db);
 
-    let entities = repo.get_top_entities(20, "recency_score").expect("failed to get entities");
+    let entities = db.get_top_entities(20, "recency_score").expect("failed to get entities");
 
     let budget = 7usize;
 

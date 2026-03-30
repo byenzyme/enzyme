@@ -6,19 +6,18 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 
 use crate::AppState;
 
 async fn get_chunks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, StatusCode> {
     let db = Database::open(&state.paths.vault_db).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let repo = Repository::new(&db);
 
-    let rows = repo
+    let rows = db
         .get_all_chunks_enriched()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let tags_map = repo
+    let tags_map = db
         .get_all_doc_tags()
         .unwrap_or_default();
 

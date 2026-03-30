@@ -10,7 +10,7 @@ use tracing::{info, debug, warn};
 use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::llm::{
     LlmClient, GenerationParams,
     build_system_prompt, build_user_prompt, parse_catalyst_response,
@@ -22,7 +22,7 @@ use crate::models::{Catalyst, Entity};
 use crate::pipeline::eras::{cluster_eras_periodic, assign_occurrences_to_eras, allocate_catalysts_to_eras, sample_contexts_by_era};
 
 pub struct CatalystPipeline<'a> {
-    repo: Repository<'a>,
+    db: &'a Database,
     llm: &'a LlmClient,
 }
 
@@ -127,10 +127,7 @@ struct EntityResult {
 
 impl<'a> CatalystPipeline<'a> {
     pub fn new(db: &'a Database, llm: &'a LlmClient) -> Self {
-        Self {
-            repo: Repository::new(db),
-            llm,
-        }
+        Self { db, llm }
     }
 
     /// Run catalyst generation for the given pre-selected entities.
@@ -171,7 +168,7 @@ impl<'a> CatalystPipeline<'a> {
             let entity_id = entity.id.unwrap_or(0);
             let entity_name = &entity.name;
 
-            let occurrences = self.repo.get_entity_occurrences(entity_id)?;
+            let occurrences = self.db.get_entity_occurrences(entity_id)?;
 
             // Resolve per-entity profile
             let profile: &CatalystProfile = config
@@ -433,7 +430,7 @@ impl<'a> CatalystPipeline<'a> {
 
                     if let Some(parsed_catalysts) = entity_result.catalysts {
                         // Delete old catalysts and insert new ones
-                        self.repo
+                        self.db
                             .delete_catalysts_for_entity(&entity_result.entity_name)?;
 
                         let catalyst_texts: Vec<String> =
@@ -458,7 +455,7 @@ impl<'a> CatalystPipeline<'a> {
                             .collect();
 
                         let count = catalysts.len();
-                        self.repo.insert_catalysts(&catalysts)?;
+                        self.db.insert_catalysts(&catalysts)?;
                         stats.catalysts_generated += count;
 
                         on_event(CatalystEvent::EntityCompleted {

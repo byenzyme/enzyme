@@ -13,7 +13,7 @@ pub mod schema;
 
 pub use connection::Database;
 pub use errors::DbError;
-pub use repository::Repository;
+pub use repository::{FolderChild, FolderStats, SubfolderStats};
 
 #[cfg(test)]
 mod tests {
@@ -559,5 +559,303 @@ mod tests {
             &[&doc_id],
         );
         assert!(result.is_err(), "duplicate (doc_id, tag) should be rejected");
+    }
+
+    // -- upsert_documents_batch -----------------------------------------------
+
+    #[test]
+    fn test_upsert_documents_batch_inserts_with_tags_links_chunks() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        let doc = crate::document::ProcessedDocument {
+            source_ref: "notes/test.md".into(),
+            title: Some("Test".into()),
+            content: "hello world".into(),
+            content_hash: "hash1".into(),
+            word_count: 2,
+            char_count: 11,
+            created_at: now,
+            created_source: crate::models::DateSource::Filesystem,
+            modified_at: now,
+            modified_source: crate::models::DateSource::Filesystem,
+            tags: vec!["rust".into(), "test".into()],
+            links: vec!["other-note".into()],
+            folders: vec![],
+            chunks: vec!["hello".into(), "world".into()],
+            frontmatter: None,
+        };
+
+        let ids = db.upsert_documents_batch(&[doc]).unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let tags: Vec<String> = db
+            .query_read(
+                "SELECT tag FROM doc_tags WHERE doc_id = ?1 ORDER BY tag",
+                &[&ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, vec!["rust", "test"]);
+
+        let links: Vec<String> = db
+            .query_read(
+                "SELECT link FROM doc_links WHERE doc_id = ?1",
+                &[&ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(links, vec!["other-note"]);
+
+        let chunks: Vec<String> = db
+            .query_read(
+                "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
+                &[&ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chunks, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_upsert_documents_batch_replaces_existing() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        let make_doc = |hash: &str, tags: Vec<String>, chunks: Vec<String>| {
+            crate::document::ProcessedDocument {
+                source_ref: "notes/test.md".into(),
+                title: Some("Test".into()),
+                content: "content".into(),
+                content_hash: hash.into(),
+                word_count: 1,
+                char_count: 7,
+                created_at: now,
+                created_source: crate::models::DateSource::Filesystem,
+                modified_at: now,
+                modified_source: crate::models::DateSource::Filesystem,
+                tags,
+                links: vec![],
+                folders: vec![],
+                chunks,
+                frontmatter: None,
+            }
+        };
+
+        // Insert v1
+        db.upsert_documents_batch(&[make_doc(
+            "v1",
+            vec!["old-tag".into()],
+            vec!["old chunk".into()],
+        )])
+        .unwrap();
+
+        // Upsert v2 — should replace tags and chunks
+        let ids = db
+            .upsert_documents_batch(&[make_doc(
+                "v2",
+                vec!["new-tag".into()],
+                vec!["new chunk a".into(), "new chunk b".into()],
+            )])
+            .unwrap();
+
+        let tags: Vec<String> = db
+            .query_read(
+                "SELECT tag FROM doc_tags WHERE doc_id = ?1",
+                &[&ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tags, vec!["new-tag"]);
+
+        let chunks: Vec<String> = db
+            .query_read(
+                "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
+                &[&ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(chunks, vec!["new chunk a", "new chunk b"]);
+
+        // Only one document should exist
+        assert_eq!(db.get_document_count().unwrap(), 1);
+    }
+
+    // -- get_trending_entities ------------------------------------------------
+
+    #[test]
+    fn test_get_trending_entities_type_diversity() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        // Insert entities of each type with varying recency scores
+        let types_and_names: Vec<(&str, &str, f64)> = vec![
+            ("tag", "rust", 0.9),
+            ("tag", "python", 0.8),
+            ("tag", "go", 0.7),
+            ("link", "alice", 0.95),
+            ("link", "bob", 0.6),
+            ("folder", "projects", 0.85),
+            ("folder", "archive", 0.3),
+        ];
+
+        for (etype, name, score) in &types_and_names {
+            let trends = serde_json::json!({ "recency_score": score });
+            db.execute_write(
+                "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends)
+                 VALUES (?1, ?2, 1, ?3, ?3, ?4)",
+                &[
+                    &name.to_string() as &dyn rusqlite::types::ToSql,
+                    &etype.to_string(),
+                    &now,
+                    &trends.to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Request min 2 tags, 1 link, 1 folder, total 5
+        let entities = db.get_trending_entities(2, 1, 1, 5).unwrap();
+        assert_eq!(entities.len(), 5);
+
+        let tags: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == crate::models::EntityType::Tag)
+            .map(|e| e.name.as_str())
+            .collect();
+        let links: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == crate::models::EntityType::Link)
+            .map(|e| e.name.as_str())
+            .collect();
+        let folders: Vec<&str> = entities
+            .iter()
+            .filter(|e| e.entity_type == crate::models::EntityType::Folder)
+            .map(|e| e.name.as_str())
+            .collect();
+
+        assert!(tags.len() >= 2, "should have at least 2 tags");
+        assert!(links.len() >= 1, "should have at least 1 link");
+        assert!(folders.len() >= 1, "should have at least 1 folder");
+    }
+
+    // -- get_documents_needing_embedding --------------------------------------
+
+    #[test]
+    fn test_get_documents_needing_embedding_filters() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        // Doc 1: not embedded (embedded_at IS NULL)
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+             VALUES ('a.md', 'h1', ?1, ?1, ?1)",
+            &[&now],
+        )
+        .unwrap();
+        let id1: i64 = db
+            .query_read("SELECT id FROM docs WHERE source_ref = 'a.md'", &[], |r| r.get(0))
+            .unwrap()[0];
+        db.execute_write(
+            "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+             VALUES (?1, 0, 'chunk a', 2, ?2)",
+            &[&id1 as &dyn rusqlite::types::ToSql, &now],
+        )
+        .unwrap();
+
+        // Doc 2: embedded and up to date
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, embedded_content_hash, embedded_at, created_at, modified_at, indexed_at)
+             VALUES ('b.md', 'h2', 'h2', ?1, ?1, ?1, ?1)",
+            &[&now],
+        )
+        .unwrap();
+
+        // Doc 3: embedded but stale (hash mismatch)
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, embedded_content_hash, embedded_at, created_at, modified_at, indexed_at)
+             VALUES ('c.md', 'h3-new', 'h3-old', ?1, ?1, ?1, ?1)",
+            &[&now],
+        )
+        .unwrap();
+        let id3: i64 = db
+            .query_read("SELECT id FROM docs WHERE source_ref = 'c.md'", &[], |r| r.get(0))
+            .unwrap()[0];
+        db.execute_write(
+            "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+             VALUES (?1, 0, 'chunk c', 2, ?2)",
+            &[&id3 as &dyn rusqlite::types::ToSql, &now],
+        )
+        .unwrap();
+
+        // Without filters: should return docs a.md and c.md
+        let needing = db.get_documents_needing_embedding(None, None).unwrap();
+        let refs: Vec<&str> = needing.iter().map(|(_, r, _)| r.as_str()).collect();
+        assert!(refs.contains(&"a.md"));
+        assert!(refs.contains(&"c.md"));
+        assert!(!refs.contains(&"b.md"));
+
+        // With max_count = 1: should return only 1
+        let limited = db.get_documents_needing_embedding(Some(1), None).unwrap();
+        assert_eq!(limited.len(), 1);
+
+        // With indexed_since filter (future timestamp): should return none
+        let future = now + 100_000;
+        let filtered = db
+            .get_documents_needing_embedding(None, Some(future))
+            .unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    // -- get_folder_children_by_references ------------------------------------
+
+    #[test]
+    fn test_get_folder_children_by_references() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        // Create folder children: people/Alice.md, people/Bob.md
+        for name in &["people/Alice.md", "people/Bob.md"] {
+            db.execute_write(
+                "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+                 VALUES (?1, 'h', ?2, ?2, ?2)",
+                &[&name.to_string() as &dyn rusqlite::types::ToSql, &now],
+            )
+            .unwrap();
+        }
+
+        // Create a doc outside the folder that links to "alice" twice (via two docs)
+        for (i, source) in ["notes/journal.md", "notes/meeting.md"].iter().enumerate() {
+            db.execute_write(
+                "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+                 VALUES (?1, ?2, ?3, ?3, ?3)",
+                &[
+                    &source.to_string() as &dyn rusqlite::types::ToSql,
+                    &format!("h{}", i + 10),
+                    &now,
+                ],
+            )
+            .unwrap();
+            let doc_id: i64 = db
+                .query_read(
+                    "SELECT id FROM docs WHERE source_ref = ?1",
+                    &[&source.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap()[0];
+            db.execute_write(
+                "INSERT INTO doc_links (doc_id, link) VALUES (?1, 'alice')",
+                &[&doc_id],
+            )
+            .unwrap();
+        }
+
+        let (children, total) = db.get_folder_children_by_references("people", 10).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(children[0].name, "Alice");
+        assert_eq!(children[0].reference_count, 2);
+        // Bob has 0 external references
+        assert_eq!(children[1].name, "Bob");
+        assert_eq!(children[1].reference_count, 0);
     }
 }

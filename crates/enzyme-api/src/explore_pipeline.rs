@@ -499,8 +499,6 @@ pub async fn run_fast_pipeline(
                 return events;
             }
         };
-        let repo = enzyme_core::db::Repository::new(&db);
-
         let mut doc_scores: HashMap<String, (f64, usize, String)> = HashMap::new();
         let top_catalyst_count = top_catalysts.len().min(4);
         let mut search_events = Vec::new();
@@ -511,7 +509,7 @@ pub async fn run_fast_pipeline(
                     .iter()
                     .take(request.results_per_query)
                     .filter_map(|sd| {
-                        let content = repo
+                        let content = db
                             .get_chunk_content(&sd.file_path, sd.chunk_index)
                             .ok()
                             .flatten()

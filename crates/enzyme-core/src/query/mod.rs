@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::db::{Database, Repository};
+use crate::db::Database;
 use crate::config::paths::EnzymePaths;
 
 /// Format the top entities and their catalysts as a compact context string
@@ -15,13 +15,12 @@ use crate::config::paths::EnzymePaths;
 pub fn format_petri_context(vault_path: &std::path::Path, top: usize) -> Result<String> {
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
-    let repo = Repository::new(&db);
 
-    let entities = repo.get_top_entities(top, "recency_score")?;
+    let entities = db.get_top_entities(top, "recency_score")?;
     let mut lines = Vec::new();
 
     for entity in &entities {
-        let catalysts = repo.get_catalysts_for_entity(&entity.name)?;
+        let catalysts = db.get_catalysts_for_entity(&entity.name)?;
         if catalysts.is_empty() {
             continue;
         }
@@ -42,13 +41,12 @@ pub fn format_petri_context(vault_path: &std::path::Path, top: usize) -> Result<
 pub fn format_steering_petri_context(vault_path: &std::path::Path, top: usize) -> Result<String> {
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
-    let repo = Repository::new(&db);
 
-    let entities = repo.get_top_entities(top, "recency_score")?;
+    let entities = db.get_top_entities(top, "recency_score")?;
     let mut lines = Vec::new();
 
     for entity in &entities {
-        let catalysts = repo.get_catalysts_for_entity(&entity.name)?;
+        let catalysts = db.get_catalysts_for_entity(&entity.name)?;
         if catalysts.is_empty() {
             continue;
         }

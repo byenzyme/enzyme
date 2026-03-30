@@ -7,7 +7,7 @@ use rusqlite::params;
 use crate::document::ProcessedDocument;
 use crate::models::*;
 
-use super::Database;
+use super::connection::Database;
 
 // ---------------------------------------------------------------------------
 // Context query types
@@ -84,24 +84,10 @@ fn parse_datetime_utc(s: &str) -> DateTime<Utc> {
 }
 
 // ---------------------------------------------------------------------------
-// Repository
+// High-level query / CRUD methods on Database
 // ---------------------------------------------------------------------------
 
-/// High-level CRUD layer over the Enzyme [`Database`].
-///
-/// All methods take `&self` because [`Database`] internally manages separate
-/// read and write connections, and the write connection uses SQLite WAL mode
-/// so `&self` is sufficient (no `&mut self` needed).
-pub struct Repository<'a> {
-    db: &'a Database,
-}
-
-impl<'a> Repository<'a> {
-    /// Wrap an existing [`Database`] handle.
-    pub fn new(db: &'a Database) -> Self {
-        Self { db }
-    }
-
+impl Database {
     // -----------------------------------------------------------------------
     // Document operations
     // -----------------------------------------------------------------------
@@ -115,7 +101,7 @@ impl<'a> Repository<'a> {
             return Ok(Vec::new());
         }
 
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let indexed_at = chrono::Utc::now().timestamp_millis();
         let chunk_now = chrono::Utc::now().timestamp_millis();
 
@@ -214,7 +200,7 @@ impl<'a> Repository<'a> {
 
     /// Retrieve a single document by its `source_ref` (relative vault path).
     pub fn get_document_by_path(&self, source_ref: &str) -> Result<Option<Document>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, source_ref, title, content, content_hash,
                     word_count, char_count,
                     created_at, created_source,
@@ -256,7 +242,7 @@ impl<'a> Repository<'a> {
 
     /// Return a map of `source_ref -> content_hash` for every document in the database.
     pub fn get_all_document_hashes(&self) -> Result<HashMap<String, String>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT source_ref, content_hash FROM docs",
             &[],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -303,13 +289,13 @@ impl<'a> Repository<'a> {
         }
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
-        let docs = self.db.query_read(&sql, &param_refs, |row| {
+        let docs = self.query_read(&sql, &param_refs, |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })?;
 
         let mut results = Vec::with_capacity(docs.len());
         for (doc_id, source_ref) in docs {
-            let chunks = self.db.query_read(
+            let chunks = self.query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
                 &[&doc_id as &dyn rusqlite::types::ToSql],
                 |row| row.get::<_, String>(0),
@@ -327,7 +313,7 @@ impl<'a> Repository<'a> {
         content_hash: &str,
         now: Timestamp,
     ) -> Result<()> {
-        self.db.execute_write(
+        self.execute_write(
             "UPDATE docs SET embedded_at = ?1, embedded_content_hash = ?2 WHERE id = ?3",
             &[
                 &now as &dyn rusqlite::types::ToSql,
@@ -347,7 +333,7 @@ impl<'a> Repository<'a> {
             return Ok(0);
         }
 
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "DELETE FROM docs WHERE source_ref IN ({})",
@@ -363,7 +349,7 @@ impl<'a> Repository<'a> {
 
     /// Return all `source_ref` values from the docs table.
     pub fn get_all_source_refs(&self) -> Result<Vec<String>> {
-        Ok(self.db
+        Ok(self
             .query_read("SELECT source_ref FROM docs", &[], |row| {
                 row.get::<_, String>(0)
             })?)
@@ -372,7 +358,6 @@ impl<'a> Repository<'a> {
     /// Return the total number of documents in the database.
     pub fn get_document_count(&self) -> Result<i64> {
         let rows = self
-            .db
             .query_read("SELECT COUNT(*) FROM docs", &[], |row| row.get::<_, i64>(0))?;
         Ok(rows.into_iter().next().unwrap_or(0))
     }
@@ -394,7 +379,7 @@ impl<'a> Repository<'a> {
             return Ok(());
         }
 
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let tx = conn
             .unchecked_transaction()
             .context("failed to begin transaction for upsert_entities_batch")?;
@@ -447,7 +432,7 @@ impl<'a> Repository<'a> {
 
     /// Get all occurrences for a given entity.
     pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
              FROM entity_occurrences WHERE entity_id = ?1",
             &[&entity_id as &dyn rusqlite::types::ToSql],
@@ -484,7 +469,7 @@ impl<'a> Repository<'a> {
             entities.truncate(limit);
             Ok(entities)
         } else {
-            let rows = self.db.query_read(
+            let rows = self.query_read(
                 "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
                  FROM entities ORDER BY frequency DESC LIMIT ?1",
                 &[&(limit as i64) as &dyn rusqlite::types::ToSql],
@@ -499,7 +484,7 @@ impl<'a> Repository<'a> {
         if updates.is_empty() {
             return Ok(());
         }
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let tx = conn
             .unchecked_transaction()
             .context("failed to begin transaction for update_entity_trends_batch")?;
@@ -521,7 +506,7 @@ impl<'a> Repository<'a> {
     /// Returns `(entity_id, effective_date, created_at)` for every occurrence,
     /// ordered by entity_id so the caller can stream-group.
     pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64)>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT entity_id, effective_date, created_at
              FROM entity_occurrences
              ORDER BY entity_id",
@@ -639,7 +624,7 @@ impl<'a> Repository<'a> {
         let mut results = Vec::new();
 
         for (name, entity_type) in names {
-            let rows = self.db.query_read(
+            let rows = self.query_read(
                 "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
                  FROM entities WHERE name = ?1 AND type = ?2",
                 &[
@@ -657,7 +642,7 @@ impl<'a> Repository<'a> {
 
     /// Retrieve every entity in the database.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
              FROM entities",
             &[],
@@ -676,7 +661,7 @@ impl<'a> Repository<'a> {
     /// top-level folder, ordered by file count descending.
     pub fn get_folder_structure(&self) -> Result<Vec<FolderStats>> {
         // Top-level folders: first path segment of source_ref
-        let top_folders = self.db.query_read(
+        let top_folders = self.query_read(
             "SELECT
                 CASE
                     WHEN INSTR(source_ref, '/') > 0
@@ -711,7 +696,7 @@ impl<'a> Repository<'a> {
             }
 
             // Get subfolders for this parent
-            let subfolders = self.db.query_read(
+            let subfolders = self.query_read(
                 "SELECT
                     SUBSTR(
                         source_ref,
@@ -762,7 +747,7 @@ impl<'a> Repository<'a> {
         let like_pattern = format!("{}/%", parent_name);
         let not_like_pattern = format!("{}/%/%", parent_name);
 
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
              FROM entities
              WHERE name LIKE ?1 AND name NOT LIKE ?2 AND type = ?3
@@ -797,7 +782,7 @@ impl<'a> Repository<'a> {
         let not_like_pattern = format!("{}/%/%", folder_name);
 
         // Get all immediate children with their modified_at
-        let children_rows = self.db.query_read(
+        let children_rows = self.query_read(
             "SELECT source_ref, modified_at
              FROM docs
              WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
@@ -823,7 +808,7 @@ impl<'a> Repository<'a> {
             let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
 
             // Count references from documents OUTSIDE this folder
-            let ref_count = self.db.query_read(
+            let ref_count = self.query_read(
                 "SELECT COUNT(DISTINCT dl.doc_id)
                  FROM doc_links dl
                  JOIN docs d ON d.id = dl.doc_id
@@ -876,7 +861,7 @@ impl<'a> Repository<'a> {
         let not_like_pattern = format!("{}/%/%", folder_name);
 
         // Get file stems of immediate children in this folder
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT source_ref FROM docs
              WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
             &[
@@ -912,7 +897,7 @@ impl<'a> Repository<'a> {
         entity_id: i64,
         limit: usize,
     ) -> Result<Vec<EntityOccurrence>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
              FROM entity_occurrences
              WHERE entity_id = ?1
@@ -943,7 +928,7 @@ impl<'a> Repository<'a> {
 
     /// Batch-insert catalysts.
     pub fn insert_catalysts(&self, catalysts: &[Catalyst]) -> Result<()> {
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let tx = conn
             .unchecked_transaction()
             .context("failed to begin transaction for insert_catalysts")?;
@@ -973,7 +958,7 @@ impl<'a> Repository<'a> {
 
     /// Get all catalysts associated with a given entity name.
     pub fn get_catalysts_for_entity(&self, entity: &str) -> Result<Vec<Catalyst>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, text, entity, context, generated_at, metadata
              FROM catalysts WHERE entity = ?1",
             &[&entity as &dyn rusqlite::types::ToSql],
@@ -984,7 +969,7 @@ impl<'a> Repository<'a> {
 
     /// Get the set of entity names that have at least one catalyst.
     pub fn get_catalyzed_entity_names(&self) -> Result<std::collections::HashSet<String>> {
-        let names = self.db.query_read(
+        let names = self.query_read(
             "SELECT DISTINCT entity FROM catalysts",
             &[],
             |row| row.get::<_, String>(0),
@@ -994,7 +979,7 @@ impl<'a> Repository<'a> {
 
     /// Get every catalyst in the database.
     pub fn get_all_catalysts(&self) -> Result<Vec<Catalyst>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, text, entity, context, generated_at, metadata FROM catalysts",
             &[],
             map_catalyst_row,
@@ -1004,7 +989,7 @@ impl<'a> Repository<'a> {
 
     /// Get the most recent `generated_at` timestamp across all catalysts.
     pub fn get_latest_catalyst_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT MAX(generated_at) FROM catalysts",
             &[],
             |row| row.get::<_, Option<String>>(0),
@@ -1016,7 +1001,7 @@ impl<'a> Repository<'a> {
     ///
     /// Uses `entity_occurrences` to count unique file paths.
     pub fn get_entity_doc_count(&self, entity_name: &str) -> Result<usize> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT COUNT(DISTINCT eo.file_path)
              FROM entity_occurrences eo
              JOIN entities e ON e.id = eo.entity_id
@@ -1029,14 +1014,14 @@ impl<'a> Repository<'a> {
 
     /// Delete all catalysts for a given entity name.
     pub fn delete_catalysts_for_entity(&self, entity: &str) -> Result<()> {
-        self.db
+        self
             .execute_write("DELETE FROM catalysts WHERE entity = ?1", &[&entity])?;
         Ok(())
     }
 
     /// Batch upsert catalyst similarity records.
     pub fn upsert_catalyst_similarities(&self, sims: &[CatalystSimilarity]) -> Result<()> {
-        let conn = self.db.write_conn();
+        let conn = self.write_conn();
         let tx = conn
             .unchecked_transaction()
             .context("failed to begin transaction for upsert_catalyst_similarities")?;
@@ -1078,7 +1063,7 @@ impl<'a> Repository<'a> {
         catalyst_id: &str,
         limit: usize,
     ) -> Result<Vec<CatalystSimilarity>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, catalyst_id, catalyst_text, file_path, chunk_index,
                     similarity, chunk_metadata, timeline_data, created_at
              FROM catalyst_similarities
@@ -1102,7 +1087,7 @@ impl<'a> Repository<'a> {
     ///
     /// Returns `(source_ref, chunk_index, content)`.
     pub fn get_all_chunks_with_embeddings(&self) -> Result<Vec<(String, i64, String)>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT d.source_ref, c.chunk_index, c.content
              FROM docs d
              JOIN chunks c ON d.id = c.doc_id
@@ -1127,7 +1112,7 @@ impl<'a> Repository<'a> {
         &self,
     ) -> Result<Vec<(i64, i64, i64, String, String, i64, i64, i64, Option<String>)>> {
         // (doc_id, chunk_id, chunk_index, file_path, content, chunk_word_count, created_at, modified_at, title)
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT d.id, c.id, c.chunk_index, d.source_ref, c.content,
                     c.word_count, d.created_at, d.modified_at, d.title
              FROM docs d
@@ -1154,7 +1139,7 @@ impl<'a> Repository<'a> {
 
     /// Get all tags grouped by doc_id.
     pub fn get_all_doc_tags(&self) -> Result<std::collections::HashMap<i64, Vec<String>>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT doc_id, tag FROM doc_tags ORDER BY doc_id, tag",
             &[],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
@@ -1168,7 +1153,7 @@ impl<'a> Repository<'a> {
 
     /// Get tags for a document by its source_ref (relative vault path).
     pub fn get_tags_for_document(&self, source_ref: &str) -> Result<Vec<String>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT dt.tag
              FROM doc_tags dt
              JOIN docs d ON d.id = dt.doc_id
@@ -1186,7 +1171,7 @@ impl<'a> Repository<'a> {
         file_path: &str,
         chunk_index: i64,
     ) -> Result<Option<String>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT c.content
              FROM chunks c
              JOIN docs d ON d.id = c.doc_id
@@ -1206,7 +1191,7 @@ impl<'a> Repository<'a> {
 
     /// Set a configuration value (insert or update).
     pub fn set_config(&self, key: &str, value: &str) -> Result<()> {
-        self.db.execute_write(
+        self.execute_write(
             "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
             &[&key as &dyn rusqlite::types::ToSql, &value],
@@ -1216,7 +1201,7 @@ impl<'a> Repository<'a> {
 
     /// Get a configuration value by key.
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT value FROM config WHERE key = ?1",
             &[&key as &dyn rusqlite::types::ToSql],
             |row| row.get::<_, String>(0),
@@ -1231,7 +1216,7 @@ impl<'a> Repository<'a> {
     /// Insert or update an applied target record.
     pub fn upsert_applied_target(&self, target: &AppliedTarget) -> Result<()> {
         let applied_at = target.applied_at.format("%Y-%m-%d %H:%M:%S").to_string();
-        self.db.execute_write(
+        self.execute_write(
             "INSERT INTO applied_targets (target_path, doc_count, catalyst_count, applied_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(target_path) DO UPDATE SET
@@ -1250,7 +1235,7 @@ impl<'a> Repository<'a> {
 
     /// Get all applied targets.
     pub fn get_all_applied_targets(&self) -> Result<Vec<AppliedTarget>> {
-        let rows = self.db.query_read(
+        let rows = self.query_read(
             "SELECT id, target_path, doc_count, catalyst_count, applied_at
              FROM applied_targets
              ORDER BY applied_at DESC",

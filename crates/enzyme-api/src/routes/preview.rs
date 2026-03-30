@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 
 use crate::AppState;
@@ -89,13 +89,12 @@ async fn preview(
         Ok(d) => d,
         Err(_) => return Json(json!({ "results": [], "elapsed_ms": 0 })),
     };
-    let repo = Repository::new(&db);
 
     let mut results: Vec<Value> = doc_scores
         .into_iter()
         .map(|(file_path, (max_sim, count))| {
             let boosted = max_sim * (1.0 + 0.2 * (count as f64 - 1.0));
-            let content = repo
+            let content = db
                 .get_chunk_content(&file_path, 0)
                 .ok()
                 .flatten()

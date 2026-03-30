@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
-use crate::db::{Database, Repository};
+use crate::db::Database;
 
 /// Number of new document mentions for an entity before it's considered stale.
 const NEW_MENTIONS_THRESHOLD: usize = 3;
@@ -99,10 +99,8 @@ pub fn check_catalyst_staleness(
     db: &Database,
     vault_path: &Path,
 ) -> Result<StalenessResult> {
-    let repo = Repository::new(db);
-
     // --- Check 0: Do catalysts exist at all? ---
-    let latest_ts = repo.get_latest_catalyst_timestamp()?;
+    let latest_ts = db.get_latest_catalyst_timestamp()?;
     if latest_ts.is_none() {
         info!("no catalysts found — stale");
         return Ok(StalenessResult::Stale(StaleReason::NoCatalysts));
@@ -110,7 +108,7 @@ pub fn check_catalyst_staleness(
 
     // --- Check 1: Config hash ---
     let current_hash = compute_config_hash(vault_path)?;
-    let stored_hash = repo.get_config(CONFIG_HASH_KEY)?;
+    let stored_hash = db.get_config(CONFIG_HASH_KEY)?;
 
     if stored_hash.as_deref() != Some(&current_hash) {
         info!(
@@ -122,11 +120,11 @@ pub fn check_catalyst_staleness(
     }
 
     // --- Check 2: New content (collect ALL stale entities) ---
-    let stored_counts = load_stored_doc_counts(&repo)?;
+    let stored_counts = load_stored_doc_counts(db)?;
     let mut stale_entities = Vec::new();
     if !stored_counts.is_empty() {
         for (entity_name, old_count) in &stored_counts {
-            let current_count = repo.get_entity_doc_count(entity_name)?;
+            let current_count = db.get_entity_doc_count(entity_name)?;
             if current_count >= *old_count + NEW_MENTIONS_THRESHOLD {
                 let delta = current_count - old_count;
                 info!(
@@ -162,20 +160,18 @@ pub fn store_staleness_bookkeeping(
     vault_path: &Path,
     entity_names: &[String],
 ) -> Result<()> {
-    let repo = Repository::new(db);
-
     // Store config hash
     let hash = compute_config_hash(vault_path)?;
-    repo.set_config(CONFIG_HASH_KEY, &hash)?;
+    db.set_config(CONFIG_HASH_KEY, &hash)?;
 
     // Store entity doc counts
     let mut counts: HashMap<String, usize> = HashMap::new();
     for name in entity_names {
-        let count = repo.get_entity_doc_count(name)?;
+        let count = db.get_entity_doc_count(name)?;
         counts.insert(name.clone(), count);
     }
     let json = serde_json::to_string(&counts)?;
-    repo.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
+    db.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
 
     debug!(
         config_hash = hash.as_str(),
@@ -191,16 +187,14 @@ pub fn store_staleness_bookkeeping_partial(
     db: &Database,
     entity_names: &[String],
 ) -> Result<()> {
-    let repo = Repository::new(db);
-
     // Load existing counts and merge in the refreshed entities
-    let mut counts = load_stored_doc_counts(&repo)?;
+    let mut counts = load_stored_doc_counts(db)?;
     for name in entity_names {
-        let count = repo.get_entity_doc_count(name)?;
+        let count = db.get_entity_doc_count(name)?;
         counts.insert(name.clone(), count);
     }
     let json = serde_json::to_string(&counts)?;
-    repo.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
+    db.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
 
     debug!(
         refreshed = entity_names.len(),
@@ -244,14 +238,13 @@ fn compute_config_hash(vault_path: &Path) -> Result<String> {
 
 /// Load entity names from the last staleness snapshot.
 pub fn load_stored_entity_names(db: &Database) -> Result<HashSet<String>> {
-    let repo = Repository::new(db);
-    let counts = load_stored_doc_counts(&repo)?;
+    let counts = load_stored_doc_counts(db)?;
     Ok(counts.into_keys().collect())
 }
 
 /// Load stored entity doc counts from the config table.
-fn load_stored_doc_counts(repo: &Repository) -> Result<HashMap<String, usize>> {
-    match repo.get_config(ENTITY_DOC_COUNTS_KEY)? {
+fn load_stored_doc_counts(db: &Database) -> Result<HashMap<String, usize>> {
+    match db.get_config(ENTITY_DOC_COUNTS_KEY)? {
         Some(json) => {
             let counts: HashMap<String, usize> = serde_json::from_str(&json)?;
             Ok(counts)

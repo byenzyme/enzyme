@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 
 /// Build structured JSON with vault status info.
 /// Returns None if the vault is not initialized.
@@ -24,15 +24,14 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     };
 
     let db = Database::open(&paths.vault_db)?;
-    let repo = Repository::new(&db);
 
-    let doc_count = repo.get_document_count()?;
-    let entities = repo.get_all_entities()?;
+    let doc_count = db.get_document_count()?;
+    let entities = db.get_all_entities()?;
     let entity_count = entities.len();
-    let catalysts = repo.get_all_catalysts()?;
+    let catalysts = db.get_all_catalysts()?;
     let catalyst_count = catalysts.len();
 
-    let docs_needing = repo.get_documents_needing_embedding(None, None)?;
+    let docs_needing = db.get_documents_needing_embedding(None, None)?;
     let embedded_count = doc_count - docs_needing.len() as i64;
 
     Ok(Some(json!({

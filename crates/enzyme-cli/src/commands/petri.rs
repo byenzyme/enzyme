@@ -7,7 +7,7 @@ use tracing::debug;
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::{Embedding, EntityType};
 use enzyme_core::pipeline::similarity::load_catalyst_embeddings;
@@ -22,7 +22,6 @@ pub fn build_petri_json(
 ) -> Result<serde_json::Value> {
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
-    let repo = Repository::new(&db);
 
     // Load config for expandable folder preferences
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
@@ -35,7 +34,7 @@ pub fn build_petri_json(
     let entities = if let Some(query_text) = query {
         match build_query_aware(
             &paths,
-            &repo,
+            &db,
             top,
             query_text,
             catalyst_budget.unwrap_or(3),
@@ -47,15 +46,15 @@ pub fn build_petri_json(
                 debug!("query-aware petri returned no results, falling back to recency");
                 entity_relevances.clear();
                 catalyst_relevances.clear();
-                build_recency_based(&repo, top)?
+                build_recency_based(&db, top)?
             }
             Err(e) => {
                 debug!("query-aware petri failed: {}, falling back to recency", e);
-                build_recency_based(&repo, top)?
+                build_recency_based(&db, top)?
             }
         }
     } else {
-        build_recency_based(&repo, top)?
+        build_recency_based(&db, top)?
     };
 
     // Build JSON
@@ -119,7 +118,7 @@ pub fn build_petri_json(
         if entity.entity_type == EntityType::Folder {
             if let Some(configured_children) = prefs.expandable_folders.get(&entity.name) {
                 let (children, total_count) =
-                    repo.get_folder_children_by_references(&entity.name, 10)?;
+                    db.get_folder_children_by_references(&entity.name, 10)?;
 
                 let sampled: Vec<serde_json::Value> = children
                     .iter()
@@ -136,7 +135,7 @@ pub fn build_petri_json(
                 let catalyzed: Vec<String> = configured_children
                     .iter()
                     .filter(|child| {
-                        repo.get_catalysts_for_entity(&child.name)
+                        db.get_catalysts_for_entity(&child.name)
                             .map(|cats| !cats.is_empty())
                             .unwrap_or(false)
                     })
@@ -159,7 +158,7 @@ pub fn build_petri_json(
         entity_list.push(entry);
     }
 
-    let applied_targets = repo.get_all_applied_targets()?;
+    let applied_targets = db.get_all_applied_targets()?;
     let targets_json: Vec<serde_json::Value> = applied_targets
         .iter()
         .map(|t| {
@@ -190,11 +189,11 @@ pub fn build_petri_json(
 
 /// Select entities by recency score (default behavior when no query is provided).
 fn build_recency_based(
-    repo: &Repository,
+    db: &Database,
     top: usize,
 ) -> Result<Vec<(enzyme_core::models::Entity, Vec<enzyme_core::models::Catalyst>)>> {
-    let catalyzed_names = repo.get_catalyzed_entity_names()?;
-    let candidates = repo.get_top_entities(top.saturating_mul(3), "recency_score")?;
+    let catalyzed_names = db.get_catalyzed_entity_names()?;
+    let candidates = db.get_top_entities(top.saturating_mul(3), "recency_score")?;
     let selected: Vec<_> = candidates
         .into_iter()
         .filter(|e| catalyzed_names.contains(&e.name))
@@ -202,7 +201,7 @@ fn build_recency_based(
         .collect();
     let mut entities = Vec::new();
     for entity in selected {
-        let catalysts = repo.get_catalysts_for_entity(&entity.name)?;
+        let catalysts = db.get_catalysts_for_entity(&entity.name)?;
         entities.push((entity, catalysts));
     }
     Ok(entities)
@@ -217,7 +216,7 @@ fn build_recency_based(
 /// 5. Return top N entities with top K catalysts per entity (by similarity)
 fn build_query_aware(
     paths: &EnzymePaths,
-    repo: &Repository,
+    db: &Database,
     top: usize,
     query: &str,
     catalyst_budget: usize,
@@ -227,7 +226,7 @@ fn build_query_aware(
     let service = get_embedding_service(&paths.home)?;
     let query_vec = service.embed_query(query)?;
 
-    let catalysts = repo.get_all_catalysts()?;
+    let catalysts = db.get_all_catalysts()?;
     if catalysts.is_empty() {
         return Ok(vec![]);
     }
@@ -262,7 +261,7 @@ fn build_query_aware(
 
     // Load entity metadata for recency scores
     let all_entities =
-        repo.get_top_entities(entity_groups.len().max(100), "recency_score")?;
+        db.get_top_entities(entity_groups.len().max(100), "recency_score")?;
     let entity_map: HashMap<&str, &enzyme_core::models::Entity> = all_entities
         .iter()
         .map(|e| (e.name.as_str(), e))

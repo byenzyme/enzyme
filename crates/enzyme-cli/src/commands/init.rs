@@ -9,7 +9,7 @@ use tracing::{debug, info};
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
-use enzyme_core::db::{Database, Repository};
+use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
@@ -769,8 +769,7 @@ async fn reapply_targets(vault_path: &Path) {
         Ok(db) => db,
         Err(_) => return,
     };
-    let repo = Repository::new(&db);
-    let targets = match repo.get_all_applied_targets() {
+    let targets = match db.get_all_applied_targets() {
         Ok(t) => t,
         Err(_) => return,
     };
