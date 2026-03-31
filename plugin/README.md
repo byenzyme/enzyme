@@ -36,6 +36,22 @@ claude plugin marketplace add jshph/enzyme
 claude plugin install enzyme
 ```
 
+### MCP server
+
+If you prefer MCP over the plugin, Enzyme ships a stdio MCP server that works with any MCP-compatible client (Claude Desktop, Cursor, etc):
+
+```bash
+claude mcp add enzyme -- enzyme mcp
+```
+
+The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you can initialize and explore your vault entirely from the client without running CLI commands separately.
+
+Also available on [Smithery](https://smithery.ai) — auto-installs the enzyme binary if not already present:
+
+```bash
+smithery mcp add jshph/enzyme --client claude
+```
+
 ## Quick start
 
 ```bash
