@@ -7,7 +7,7 @@
     {
       "name": "enzyme",
       "source": "./",
-      "description": "Local-first knowledge indexing — explore your Obsidian vault by concept, not keyword",
+      "description": "A compile step for knowledge bases — gives your agent a concept graph of your content",
       "version": "0.4.1",
       "author": {
         "name": "Joshua Pham"
