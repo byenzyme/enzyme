@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -20,7 +20,7 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::ContentRegister;
 use enzyme_core::search::context::ContextSearch;
 
-use super::init::ensure_fresh_vault;
+use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
 use super::status::build_status_json;
 
@@ -43,7 +43,7 @@ fn strip_frontmatter(s: &str) -> &str {
 
 #[derive(Clone)]
 struct EnzymeMcp {
-    vault_path: PathBuf,
+    vault_path: Arc<RwLock<PathBuf>>,
     refreshed: Arc<AtomicBool>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
@@ -52,11 +52,18 @@ struct EnzymeMcp {
 impl EnzymeMcp {
     fn new(vault_path: PathBuf) -> Self {
         Self {
-            vault_path,
+            vault_path: Arc::new(RwLock::new(vault_path)),
             refreshed: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
+    }
+
+    fn vault_path(&self) -> Result<PathBuf, McpError> {
+        self.vault_path
+            .read()
+            .map(|p| p.clone())
+            .map_err(|e| McpError::internal_error(format!("lock poisoned: {e}"), None))
     }
 
     /// Ensure vault freshness on first tool call.
@@ -64,7 +71,7 @@ impl EnzymeMcp {
     /// future from ensure_fresh_vault into the Send context required by rmcp.
     async fn ensure_fresh(&self) -> Result<(), McpError> {
         if !self.refreshed.swap(true, Ordering::SeqCst) {
-            let vault_path = self.vault_path.clone();
+            let vault_path = self.vault_path()?;
             let handle = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 handle.block_on(ensure_fresh_vault(&vault_path))
@@ -75,6 +82,13 @@ impl EnzymeMcp {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct InitParams {
+    /// Path to the Obsidian/Markdown vault directory to initialize
+    #[schemars(description = "Absolute path to the Obsidian/Markdown vault directory")]
+    vault_path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -107,15 +121,59 @@ struct CatalyzeParams {
 
 #[tool_router]
 impl EnzymeMcp {
+    #[tool(description = "Initialize or refresh the enzyme index for a vault. Call this first if the vault hasn't been set up yet.")]
+    async fn init(
+        &self,
+        Parameters(p): Parameters<InitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let vault_path = PathBuf::from(&p.vault_path);
+        if !vault_path.is_dir() {
+            return Err(McpError::invalid_params(
+                format!("Not a directory: {}", p.vault_path),
+                None,
+            ));
+        }
+
+        // Update the server's vault path
+        {
+            let mut vp = self.vault_path.write()
+                .map_err(|e| McpError::internal_error(format!("lock poisoned: {e}"), None))?;
+            *vp = vault_path.clone();
+        }
+        // Reset freshness so ensure_fresh re-checks
+        self.refreshed.store(false, Ordering::SeqCst);
+
+        let handle = tokio::runtime::Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            handle.block_on(run_init(&vault_path, false, false, true, None, None))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?
+        .map_err(|e| McpError::internal_error(format!("init failed: {e}"), None))?;
+
+        let vault_path = self.vault_path()?;
+        let text = match result {
+            Some(r) => {
+                let json = r.to_json(&vault_path)
+                    .map_err(|e| McpError::internal_error(format!("json failed: {e}"), None))?;
+                serde_json::to_string_pretty(&json)
+                    .map_err(|e| McpError::internal_error(format!("json serialization failed: {e}"), None))?
+            }
+            None => format!("Vault initialized at {}", vault_path.display()),
+        };
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[tool(description = "Show trending entities and their catalysts")]
     async fn petri(
         &self,
         Parameters(p): Parameters<PetriParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_fresh().await?;
+        let vault_path = self.vault_path()?;
         let default_top = if p.query.is_some() { 15 } else { usize::MAX };
         let top = p.top.map(|t| t as usize).unwrap_or(default_top);
-        let json = build_petri_json(&self.vault_path, top, p.query.as_deref(), None)
+        let json = build_petri_json(&vault_path, top, p.query.as_deref(), None)
             .map_err(|e| McpError::internal_error(format!("petri failed: {e}"), None))?;
         let text = serde_json::to_string_pretty(&json)
             .map_err(|e| McpError::internal_error(format!("json serialization failed: {e}"), None))?;
@@ -128,8 +186,9 @@ impl EnzymeMcp {
         Parameters(p): Parameters<CatalyzeParams>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_fresh().await?;
+        let vault_path = self.vault_path()?;
         let limit = p.limit.unwrap_or(10) as usize;
-        let paths = EnzymePaths::new(&self.vault_path)
+        let paths = EnzymePaths::new(&vault_path)
             .map_err(|e| McpError::internal_error(format!("paths failed: {e}"), None))?;
         let db = Database::open(&paths.vault_db)
             .map_err(|e| McpError::internal_error(format!("db open failed: {e}"), None))?;
@@ -145,7 +204,7 @@ impl EnzymeMcp {
             .as_deref()
             .and_then(ContentRegister::from_str_opt)
             .unwrap_or_default();
-        let enzyme_config = EnzymeConfig::load(&self.vault_path)
+        let enzyme_config = EnzymeConfig::load(&vault_path)
             .ok()
             .flatten()
             .unwrap_or_default();
@@ -163,7 +222,7 @@ impl EnzymeMcp {
 
     #[tool(description = "Show vault indexing stats")]
     async fn status(&self) -> Result<CallToolResult, McpError> {
-        let vault_path = self.vault_path.clone();
+        let vault_path = self.vault_path()?;
         let handle = tokio::runtime::Handle::current();
         let json = tokio::task::spawn_blocking(move || {
             handle.block_on(build_status_json(&vault_path))
@@ -175,7 +234,7 @@ impl EnzymeMcp {
         let text = match json {
             Some(v) => serde_json::to_string_pretty(&v)
                 .map_err(|e| McpError::internal_error(format!("json serialization failed: {e}"), None))?,
-            None => "Vault not initialized. Run 'enzyme init' first.".to_string(),
+            None => "Vault not initialized. Run the 'init' tool with your vault path first.".to_string(),
         };
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -217,7 +276,9 @@ impl ServerHandler for EnzymeMcp {
 }
 
 pub async fn run_mcp(vault: Option<PathBuf>) -> Result<()> {
-    let vault_path = vault.unwrap_or(std::env::current_dir()?);
+    let vault_path = vault
+        .or_else(|| std::env::var("ENZYME_VAULT_PATH").ok().map(PathBuf::from))
+        .unwrap_or(std::env::current_dir().unwrap_or_default());
     let server = EnzymeMcp::new(vault_path);
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
