@@ -1,0 +1,17 @@
+name: enzyme
+version: "0.3.13"
+description: "Vault intelligence — concept graph and semantic search for markdown"
+author: Joshua Pham
+homepage: https://enzyme.garden
+repository: https://github.com/jshph/enzyme-skill
+
+hooks:
+  on_session_start: hooks.on_session_start
+  pre_llm_call: hooks.pre_llm_call
+
+tools:
+  - enzyme_petri
+  - enzyme_catalyze
+  - enzyme_refresh
+  - enzyme_status
+  - enzyme_init

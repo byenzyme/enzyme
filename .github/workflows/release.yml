@@ -302,6 +302,7 @@ jobs:
             --exclude '.git' \
             --exclude '.claude-plugin' \
             --exclude 'server.json' \
+            --exclude 'agent' \
             ../plugin/ ./
 
           # Copy server.json to repo root for MCP Registry discovery
@@ -353,7 +354,7 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
           cd skill-repo
 
-          mkdir -p enzyme/bin enzyme/models tmp-bin
+          mkdir -p enzyme/bin enzyme/models enzyme/references enzyme/scripts tmp-bin
 
           # Extract platform binaries
           for platform in macos-arm64 linux-arm64 linux-x86_64; do
@@ -367,8 +368,25 @@ jobs:
           cp ../model-files/model.onnx enzyme/models/
           cp ../model-files/tokenizer.json enzyme/models/
 
-          # Update version in SKILL.md metadata
+          # Sync agent plugin files (SKILL.md, Hermes adapter, guides, install script)
+          cp ../plugin/agent/SKILL.md enzyme/SKILL.md
+          cp ../plugin/agent/plugin.yaml enzyme/plugin.yaml
+          cp ../plugin/agent/__init__.py enzyme/__init__.py
+          cp ../plugin/agent/schemas.py enzyme/schemas.py
+          cp ../plugin/agent/tools.py enzyme/tools.py
+          cp ../plugin/agent/hooks.py enzyme/hooks.py
+          cp ../plugin/agent/setup.py enzyme/setup.py
+          cp ../plugin/agent/install.sh enzyme/install.sh
+          cp ../plugin/agent/petri-guide.md enzyme/references/petri-guide.md
+          cp ../plugin/agent/search-guide.md enzyme/references/search-guide.md
+          cp ../plugin/agent/scripts/setup.sh enzyme/scripts/setup.sh
+          cp ../plugin/agent/README.md ./README.md
+          cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
+
+          # Update versions
           sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" enzyme/SKILL.md
+          sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" enzyme/plugin.yaml
+          sed -i "s/EXPECTED_VERSION = \"[^\"]*\"/EXPECTED_VERSION = \"${version}\"/" enzyme/setup.py
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -376,7 +394,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No skill changes to sync"
           else
-            git commit -m "Update binaries and model to ${version}"
+            git commit -m "Update to ${version}"
             git push origin master
           fi
 
