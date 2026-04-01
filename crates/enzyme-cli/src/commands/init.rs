@@ -519,9 +519,9 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
-    // Ensure .enzyme directory exists
-    if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+    // If the vault was never initialized, don't create .enzyme — just bail.
+    if !paths.vault_db.exists() {
+        return Ok(());
     }
 
     let db = Database::open(&paths.vault_db)?;

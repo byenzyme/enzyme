@@ -155,9 +155,10 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
     // Try to log to .enzyme/enzyme.log when a vault path is available.
+    // Only use the file logger if .enzyme/ already exists (don't create it).
     if let Some(vault) = vault_path {
         let enzyme_dir = vault.join(".enzyme");
-        if std::fs::create_dir_all(&enzyme_dir).is_ok() {
+        if enzyme_dir.is_dir() {
             if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
