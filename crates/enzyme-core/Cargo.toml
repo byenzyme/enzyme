@@ -8,7 +8,7 @@ description = "Core library for Enzyme — local-first knowledge indexing and ap
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-rusqlite = { workspace = true }
+libsql = { workspace = true }
 rten = { workspace = true }
 rten-tensor = { workspace = true }
 tokenizers = { workspace = true }
@@ -32,12 +32,7 @@ async-stream = "0.3"
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
-libsql = "0.9"
 
 [[bench]]
-name = "catalyze_rusqlite"
-harness = false
-
-[[bench]]
-name = "catalyze_libsql"
+name = "catalyze"
 harness = false

@@ -570,8 +570,8 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     if emb_produced {
         let has_catalysts = db.query_read(
             "SELECT COUNT(*) FROM catalysts",
-            &[],
-            |row| row.get::<_, i64>(0),
+            vec![],
+            |row| row.get::<i64>(0),
         ).map(|rows| rows.first().copied().unwrap_or(0) > 0).unwrap_or(false);
 
         if has_catalysts {

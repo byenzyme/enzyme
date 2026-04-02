@@ -140,6 +140,16 @@ CREATE TABLE IF NOT EXISTS catalyst_embeddings (
     catalyst_id TEXT NOT NULL PRIMARY KEY,
     vector      BLOB NOT NULL
 );
+
+-- Packed catalyst embeddings: all vectors in a single row to eliminate
+-- per-row async overhead on the libsql read path.  count × 384 f32 values
+-- stored as little-endian bytes, preceded by a JSON array of catalyst_ids.
+CREATE TABLE IF NOT EXISTS catalyst_embeddings_packed (
+    id      INTEGER PRIMARY KEY DEFAULT 1,
+    count   INTEGER NOT NULL,
+    ids     TEXT    NOT NULL,
+    vectors BLOB    NOT NULL
+);
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
@@ -157,6 +167,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "applied_targets",
     "chunk_embeddings",
     "catalyst_embeddings",
+    "catalyst_embeddings_packed",
 ];
 
 /// All indexes created by the schema (used for validation in tests).

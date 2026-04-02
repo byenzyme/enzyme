@@ -1,166 +1,141 @@
+use std::future::Future;
 use std::path::Path;
 
-use rusqlite::Connection;
+use libsql::{Builder, Connection, Database as LibsqlDb};
 use tracing::{debug, info};
 
 use super::errors::DbError;
 use super::migrations;
 
-/// Core database handle with separate read and write connections.
+/// Core database handle backed by a libsql local connection.
 ///
-/// SQLite WAL mode allows concurrent reads while a single writer holds the lock.
-/// We maintain two connections:
-///   - `write_conn`: Exclusive writer with moderate cache (10 000 pages).
-///   - `read_conn`:  Read-only connection with large cache (20 000 pages) and
-///                   memory-mapped I/O for fast scans.
+/// All public methods are sync-shaped: they block the calling thread via
+/// [`block_in_place_sync`] and drive the underlying async libsql calls to
+/// completion.  CLI callers run inside a tokio multi-thread runtime and use
+/// `block_in_place` to yield the worker back while blocking; test callers get
+/// a fresh current-thread runtime per call.
 pub struct Database {
-    write_conn: Connection,
-    read_conn: Connection,
+    _db: LibsqlDb,
+    pub(crate) conn: Connection,
 }
 
-// -- Pragma tuning constants --------------------------------------------------
-
-const WRITE_CACHE_SIZE: i64 = -10000; // negative = KiB (10 MB)
-const READ_CACHE_SIZE: i64 = -20000; // 20 MB
-const READ_MMAP_SIZE: i64 = 256 * 1024 * 1024; // 256 MB
+/// Drive a future to completion from any thread context.
+///
+/// - Inside a tokio multi-thread runtime: uses `block_in_place` so the worker
+///   thread is yielded back to the scheduler and no deadlock occurs.
+/// - Outside any runtime (test context): creates a one-shot current-thread
+///   runtime, runs the future, then drops it.
+pub(crate) fn block_in_place_sync<F: Future>(f: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime")
+            .block_on(f),
+    }
+}
 
 impl Database {
     /// Open (or create) a database at `path`, apply all pending migrations, and
     /// return a ready-to-use `Database`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
-        let path = path.as_ref();
+        let path = path.as_ref().to_owned();
         info!(?path, "opening database");
-
-        // Open write connection first and run migrations. This ensures WAL mode
-        // is active and any hot journal is rolled back before we open a read-only
-        // connection (which cannot perform rollback).
-        let write_conn = Self::open_write_connection(path)?;
-        migrations::run_all_on_conn(&write_conn)?;
-
-        let read_conn = Self::open_read_connection(path)?;
-
-        Ok(Self {
-            write_conn,
-            read_conn,
+        block_in_place_sync(async move {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| DbError::Migration("non-UTF8 database path".into()))?;
+            let db = Builder::new_local(path_str)
+                .build()
+                .await
+                .map_err(DbError::Libsql)?;
+            let conn = db.connect().map_err(DbError::Libsql)?;
+            apply_pragmas(&conn, true).await?;
+            migrations::run_all_on_conn(&conn).await?;
+            Ok(Self { _db: db, conn })
         })
     }
 
     /// Open an **in-memory** database — useful for tests and ephemeral sessions.
-    ///
-    /// Internally this creates a temporary file in the OS temp directory so
-    /// that both write and read connections work correctly with WAL mode and
-    /// foreign-key enforcement.  (SQLite shared-cache in-memory databases
-    /// disable foreign keys and have table-level locking issues.)
     pub fn open_in_memory() -> Result<Self, DbError> {
-        debug!("opening in-memory database (temp file backed)");
-
-        let path = std::env::temp_dir().join(format!("enzyme-test-{}.db", uuid::Uuid::new_v4()));
-
-        let write_conn = Self::open_write_connection(&path)?;
-        migrations::run_all_on_conn(&write_conn)?;
-
-        let read_conn = Self::open_read_connection(&path)?;
-
-        Ok(Self {
-            write_conn,
-            read_conn,
+        debug!("opening in-memory database");
+        block_in_place_sync(async {
+            let db = Builder::new_local(":memory:")
+                .build()
+                .await
+                .map_err(DbError::Libsql)?;
+            let conn = db.connect().map_err(DbError::Libsql)?;
+            apply_pragmas(&conn, false).await?;
+            migrations::run_all_on_conn(&conn).await?;
+            Ok(Self { _db: db, conn })
         })
-    }
-
-    // -- Connection factories -------------------------------------------------
-
-    fn open_write_connection(path: &Path) -> Result<Connection, DbError> {
-        let conn = Connection::open(path)?;
-        Self::apply_write_pragmas(&conn)?;
-        Ok(conn)
-    }
-
-    fn open_read_connection(path: &Path) -> Result<Connection, DbError> {
-        let conn = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-        )?;
-        Self::apply_read_pragmas(&conn)?;
-        Ok(conn)
-    }
-
-    // -- Pragma helpers -------------------------------------------------------
-
-    fn apply_write_pragmas(conn: &Connection) -> Result<(), DbError> {
-        conn.execute_batch(
-            &format!(
-                "PRAGMA journal_mode = WAL;
-                 PRAGMA foreign_keys = ON;
-                 PRAGMA synchronous = NORMAL;
-                 PRAGMA busy_timeout = 5000;
-                 PRAGMA cache_size = {WRITE_CACHE_SIZE};"
-            ),
-        )?;
-        Ok(())
-    }
-
-    fn apply_read_pragmas(conn: &Connection) -> Result<(), DbError> {
-        conn.execute_batch(
-            &format!(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA cache_size = {READ_CACHE_SIZE};
-                 PRAGMA mmap_size = {READ_MMAP_SIZE};"
-            ),
-        )?;
-        Ok(())
-    }
-
-    // -- Public access --------------------------------------------------------
-
-    /// Borrow the write connection (for INSERT / UPDATE / DELETE / DDL).
-    pub fn write_conn(&self) -> &Connection {
-        &self.write_conn
-    }
-
-    /// Borrow the write connection mutably (required for transactions).
-    pub fn write_conn_mut(&mut self) -> &mut Connection {
-        &mut self.write_conn
-    }
-
-    /// Borrow the read connection (for SELECT queries).
-    pub fn read_conn(&self) -> &Connection {
-        &self.read_conn
     }
 
     // -- Convenience wrappers -------------------------------------------------
 
     /// Execute a write statement and return the number of rows changed.
-    pub fn execute_write(&self, sql: &str, params: &[&dyn rusqlite::types::ToSql]) -> Result<usize, DbError> {
-        Ok(self.write_conn.execute(sql, params)?)
+    pub fn execute_write(
+        &self,
+        sql: &str,
+        params: Vec<libsql::Value>,
+    ) -> Result<usize, DbError> {
+        let sql = sql.to_owned();
+        block_in_place_sync(async move {
+            self.conn
+                .execute(&sql, params)
+                .await
+                .map(|n| n as usize)
+                .map_err(DbError::Libsql)
+        })
     }
 
     /// Run a read query, mapping each row with the provided closure.
-    pub fn query_read<T, F>(&self, sql: &str, params: &[&dyn rusqlite::types::ToSql], map_row: F) -> Result<Vec<T>, DbError>
+    pub fn query_read<T, F>(
+        &self,
+        sql: &str,
+        params: Vec<libsql::Value>,
+        mut map_row: F,
+    ) -> Result<Vec<T>, DbError>
     where
-        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+        F: FnMut(libsql::Row) -> Result<T, libsql::Error>,
     {
-        let mut stmt = self.read_conn.prepare(sql)?;
-        let rows = stmt.query_map(params, map_row)?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        Ok(results)
+        let sql = sql.to_owned();
+        block_in_place_sync(async move {
+            let mut rows = self
+                .conn
+                .query(&sql, params)
+                .await
+                .map_err(DbError::Libsql)?;
+            let mut results = Vec::new();
+            while let Some(row) = rows.next().await.map_err(DbError::Libsql)? {
+                results.push(map_row(row).map_err(DbError::Libsql)?);
+            }
+            Ok(results)
+        })
     }
+}
 
-    /// Execute a closure inside a transaction on the write connection.
-    ///
-    /// The transaction is committed when the closure returns `Ok` and rolled
-    /// back on `Err`.
-    pub fn transaction<T, F>(&mut self, f: F) -> Result<T, DbError>
-    where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<T, DbError>,
-    {
-        let tx = self.write_conn.transaction()?;
-        let result = f(&tx)?;
-        tx.commit()?;
-        Ok(result)
+// -- Pragma helpers -----------------------------------------------------------
+
+async fn apply_pragmas(conn: &Connection, wal: bool) -> Result<(), DbError> {
+    // Pragmas that return a result row must use query() + drain.
+    // execute_batch() fails on pragmas that produce output rows.
+    let mut pragmas: Vec<String> = Vec::new();
+    if wal {
+        pragmas.push("PRAGMA journal_mode = WAL".into());
     }
+    pragmas.push("PRAGMA foreign_keys = ON".into());
+    pragmas.push("PRAGMA synchronous = NORMAL".into());
+    pragmas.push("PRAGMA busy_timeout = 5000".into());
+    pragmas.push("PRAGMA cache_size = -20000".into());
+    pragmas.push(format!("PRAGMA mmap_size = {}", 256 * 1024 * 1024));
+
+    for sql in &pragmas {
+        let mut rows = conn
+            .query(sql.as_str(), ())
+            .await
+            .map_err(DbError::Libsql)?;
+        while rows.next().await.map_err(DbError::Libsql)?.is_some() {}
+    }
+    Ok(())
 }

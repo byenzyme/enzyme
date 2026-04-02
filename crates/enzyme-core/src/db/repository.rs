@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rusqlite::params;
+use libsql::Value;
 
 use crate::document::ProcessedDocument;
 use crate::models::*;
 
-use super::connection::Database;
+use super::connection::{block_in_place_sync, Database};
 
 // ---------------------------------------------------------------------------
 // Context query types
@@ -67,20 +67,22 @@ fn parse_entity_type(s: &str) -> EntityType {
 }
 
 /// Parse a `DateTime<Utc>` from a SQLite TEXT column produced by `datetime('now')`.
-///
-/// SQLite's `datetime('now')` produces strings like `"2024-06-15 14:30:00"`.
-/// We also accept RFC 3339 for values written explicitly.
 fn parse_datetime_utc(s: &str) -> DateTime<Utc> {
-    // Try RFC 3339 first (e.g., "2024-06-15T14:30:00Z" or with offset).
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return dt.with_timezone(&Utc);
     }
-    // SQLite datetime format: "YYYY-MM-DD HH:MM:SS"
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
         return ndt.and_utc();
     }
-    // Fallback: epoch
     DateTime::UNIX_EPOCH
+}
+
+/// Convert `Option<T>` to a libsql `Value`, using Null for None.
+fn opt_val<T: Into<Value>>(opt: Option<T>) -> Value {
+    match opt {
+        Some(v) => v.into(),
+        None => Value::Null,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,107 +97,126 @@ impl Database {
     /// Insert or replace documents and their associated tags, links, and chunks.
     ///
     /// All documents are written inside a **single transaction** so that SQLite
-    /// only fsyncs once. Prepared statements are reused across all documents.
+    /// only fsyncs once.
     pub fn upsert_documents_batch(&self, docs: &[ProcessedDocument]) -> Result<Vec<i64>> {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
 
-        let conn = self.write_conn();
+        let docs = docs.to_vec();
         let indexed_at = chrono::Utc::now().timestamp_millis();
         let chunk_now = chrono::Utc::now().timestamp_millis();
 
-        let tx = conn.unchecked_transaction()
-            .context("failed to begin transaction for upsert_documents_batch")?;
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for upsert_documents_batch")?;
 
-        let mut doc_ids = Vec::with_capacity(docs.len());
+            let mut doc_ids = Vec::with_capacity(docs.len());
 
-        // Prepare all statements once, reuse for every document.
-        let mut lookup_stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
-        let mut del_tags_stmt = tx.prepare("DELETE FROM doc_tags WHERE doc_id = ?1")?;
-        let mut del_links_stmt = tx.prepare("DELETE FROM doc_links WHERE doc_id = ?1")?;
-        let mut del_chunks_stmt = tx.prepare("DELETE FROM chunks WHERE doc_id = ?1")?;
-        let mut insert_doc_stmt = tx.prepare(
-            "INSERT OR REPLACE INTO docs (
-                source_ref, title, content, content_hash,
-                word_count, char_count,
-                created_at, created_source,
-                modified_at, modified_source,
-                indexed_at, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        )?;
-        let mut get_id_stmt = tx.prepare("SELECT id FROM docs WHERE source_ref = ?1")?;
-        let mut tag_stmt = tx.prepare("INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?1, ?2)")?;
-        let mut link_stmt = tx.prepare("INSERT OR IGNORE INTO doc_links (doc_id, link) VALUES (?1, ?2)")?;
-        let mut chunk_stmt = tx.prepare(
-            "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
+            for doc in &docs {
+                let metadata = doc
+                    .frontmatter
+                    .as_ref()
+                    .map(|fm| serde_json::to_string(&fm.extra).unwrap_or_else(|_| "{}".to_string()))
+                    .unwrap_or_else(|| "{}".to_string());
 
-        for doc in docs {
-            let metadata = doc
-                .frontmatter
-                .as_ref()
-                .map(|fm| serde_json::to_string(&fm.extra).unwrap_or_else(|_| "{}".to_string()))
-                .unwrap_or_else(|| "{}".to_string());
+                // Delete old children if the document already exists.
+                let mut lookup_rows = tx
+                    .query(
+                        "SELECT id FROM docs WHERE source_ref = ?1",
+                        vec![Value::Text(doc.source_ref.clone())],
+                    )
+                    .await?;
+                let existing_id: Option<i64> = if let Some(row) = lookup_rows.next().await? {
+                    Some(row.get::<i64>(0)?)
+                } else {
+                    None
+                };
 
-            // Delete old children if the document already exists.
-            let existing_id: Option<i64> = {
-                let mut rows = lookup_stmt.query(params![doc.source_ref])?;
-                match rows.next()? {
-                    Some(row) => Some(row.get(0)?),
-                    None => None,
+                if let Some(old_id) = existing_id {
+                    tx.execute("DELETE FROM doc_tags WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
+                    tx.execute("DELETE FROM doc_links WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
+                    tx.execute("DELETE FROM chunks WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
                 }
-            };
-            if let Some(old_id) = existing_id {
-                del_tags_stmt.execute(params![old_id])?;
-                del_links_stmt.execute(params![old_id])?;
-                del_chunks_stmt.execute(params![old_id])?;
+
+                let insert_params = vec![
+                    Value::Text(doc.source_ref.clone()),
+                    opt_val(doc.title.clone()),
+                    Value::Text(doc.content.clone()),
+                    Value::Text(doc.content_hash.clone()),
+                    Value::Integer(doc.word_count),
+                    Value::Integer(doc.char_count),
+                    Value::Integer(doc.created_at),
+                    Value::Text(doc.created_source.as_str().to_string()),
+                    Value::Integer(doc.modified_at),
+                    Value::Text(doc.modified_source.as_str().to_string()),
+                    Value::Integer(indexed_at),
+                    Value::Text(metadata),
+                ];
+                tx.execute(
+                    "INSERT OR REPLACE INTO docs (
+                        source_ref, title, content, content_hash,
+                        word_count, char_count,
+                        created_at, created_source,
+                        modified_at, modified_source,
+                        indexed_at, metadata
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    insert_params,
+                )
+                .await?;
+
+                let mut id_rows = tx
+                    .query(
+                        "SELECT id FROM docs WHERE source_ref = ?1",
+                        vec![Value::Text(doc.source_ref.clone())],
+                    )
+                    .await?;
+                let doc_id: i64 = id_rows
+                    .next()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("doc not found after insert"))?
+                    .get::<i64>(0)?;
+
+                for tag in &doc.tags {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?1, ?2)",
+                        vec![Value::Integer(doc_id), Value::Text(tag.clone())],
+                    )
+                    .await?;
+                }
+                for link in &doc.links {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO doc_links (doc_id, link) VALUES (?1, ?2)",
+                        vec![Value::Integer(doc_id), Value::Text(link.clone())],
+                    )
+                    .await?;
+                }
+                for (i, chunk_content) in doc.chunks.iter().enumerate() {
+                    let word_count = chunk_content.split_whitespace().count() as i64;
+                    tx.execute(
+                        "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        vec![
+                            Value::Integer(doc_id),
+                            Value::Integer(i as i64),
+                            Value::Text(chunk_content.clone()),
+                            Value::Integer(word_count),
+                            Value::Integer(chunk_now),
+                        ],
+                    )
+                    .await?;
+                }
+
+                doc_ids.push(doc_id);
             }
 
-            insert_doc_stmt.execute(params![
-                doc.source_ref,
-                doc.title,
-                doc.content,
-                doc.content_hash,
-                doc.word_count,
-                doc.char_count,
-                doc.created_at,
-                doc.created_source.as_str(),
-                doc.modified_at,
-                doc.modified_source.as_str(),
-                indexed_at,
-                metadata,
-            ])?;
-
-            let doc_id: i64 = get_id_stmt.query_row(params![doc.source_ref], |row| row.get(0))?;
-
-            for tag in &doc.tags {
-                tag_stmt.execute(params![doc_id, tag])?;
-            }
-            for link in &doc.links {
-                link_stmt.execute(params![doc_id, link])?;
-            }
-            for (i, chunk_content) in doc.chunks.iter().enumerate() {
-                let word_count = chunk_content.split_whitespace().count() as i64;
-                chunk_stmt.execute(params![doc_id, i as i64, chunk_content, word_count, chunk_now])?;
-            }
-
-            doc_ids.push(doc_id);
-        }
-
-        drop(lookup_stmt);
-        drop(del_tags_stmt);
-        drop(del_links_stmt);
-        drop(del_chunks_stmt);
-        drop(insert_doc_stmt);
-        drop(get_id_stmt);
-        drop(tag_stmt);
-        drop(link_stmt);
-        drop(chunk_stmt);
-
-        tx.commit().context("failed to commit upsert_documents_batch")?;
-        Ok(doc_ids)
+            tx.commit()
+                .await
+                .context("failed to commit upsert_documents_batch")?;
+            Ok(doc_ids)
+        })
     }
 
     /// Retrieve a single document by its `source_ref` (relative vault path).
@@ -208,29 +229,29 @@ impl Database {
                     indexed_at, embedded_at, embedded_content_hash,
                     metadata
              FROM docs WHERE source_ref = ?1",
-            &[&source_ref as &dyn rusqlite::types::ToSql],
+            vec![Value::Text(source_ref.to_string())],
             |row| {
                 Ok(Document {
-                    id: Some(row.get(0)?),
-                    source_ref: row.get(1)?,
-                    title: row.get(2)?,
-                    content: row.get(3)?,
-                    content_hash: row.get(4)?,
-                    word_count: row.get(5)?,
-                    char_count: row.get(6)?,
-                    created_at: row.get(7)?,
+                    id: Some(row.get::<i64>(0)?),
+                    source_ref: row.get::<String>(1)?,
+                    title: row.get::<Option<String>>(2)?,
+                    content: row.get::<Option<String>>(3)?,
+                    content_hash: row.get::<String>(4)?,
+                    word_count: row.get::<i64>(5)?,
+                    char_count: row.get::<i64>(6)?,
+                    created_at: row.get::<i64>(7)?,
                     created_source: parse_date_source(
-                        &row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                        &row.get::<Option<String>>(8)?.unwrap_or_default(),
                     ),
-                    modified_at: row.get(9)?,
+                    modified_at: row.get::<i64>(9)?,
                     modified_source: parse_date_source(
-                        &row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                        &row.get::<Option<String>>(10)?.unwrap_or_default(),
                     ),
-                    indexed_at: row.get(11)?,
-                    embedded_at: row.get(12)?,
-                    embedded_content_hash: row.get(13)?,
+                    indexed_at: row.get::<i64>(11)?,
+                    embedded_at: row.get::<Option<i64>>(12)?,
+                    embedded_content_hash: row.get::<Option<String>>(13)?,
                     metadata: row
-                        .get::<_, Option<String>>(14)?
+                        .get::<Option<String>>(14)?
                         .and_then(|s| serde_json::from_str(&s).ok())
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                 })
@@ -244,31 +265,19 @@ impl Database {
     pub fn get_all_document_hashes(&self) -> Result<HashMap<String, String>> {
         let rows = self.query_read(
             "SELECT source_ref, content_hash FROM docs",
-            &[],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            vec![],
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
         )?;
         Ok(rows.into_iter().collect())
     }
 
     /// Find documents whose embeddings are stale or missing.
-    ///
-    /// Returns `(doc_id, source_ref, chunk_contents)` for each document
-    /// where `embedded_content_hash != content_hash` or `embedded_at IS NULL`.
-    ///
-    /// When `max_count` is `Some(n)`, returns at most `n` documents ordered by
-    /// `created_at DESC` (most recent first), matching the Python behaviour of
-    /// capping embedding runs to the N most recent documents.
-    ///
-    /// When `indexed_since` is `Some(ts)`, only returns documents whose
-    /// `indexed_at >= ts` — used by the fast refresh path to avoid processing
-    /// the full historical backlog.
     pub fn get_documents_needing_embedding(
         &self,
         max_count: Option<usize>,
         indexed_since: Option<i64>,
     ) -> Result<Vec<(i64, String, Vec<String>)>> {
-        // Build query dynamically — parameter indices depend on which clauses are active.
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut params: Vec<Value> = Vec::new();
         let mut sql = String::from(
             "SELECT id, source_ref FROM docs
              WHERE (embedded_content_hash IS NULL
@@ -277,28 +286,27 @@ impl Database {
         );
 
         if let Some(ts) = indexed_since {
-            params.push(Box::new(ts));
+            params.push(Value::Integer(ts));
             sql.push_str(&format!(" AND indexed_at >= ?{}", params.len()));
         }
 
         sql.push_str(" ORDER BY created_at DESC");
 
         if let Some(n) = max_count {
-            params.push(Box::new(n as i64));
+            params.push(Value::Integer(n as i64));
             sql.push_str(&format!(" LIMIT ?{}", params.len()));
         }
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-        let docs = self.query_read(&sql, &param_refs, |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+
+        let docs = self.query_read(&sql, params, |row| {
+            Ok((row.get::<i64>(0)?, row.get::<String>(1)?))
         })?;
 
         let mut results = Vec::with_capacity(docs.len());
         for (doc_id, source_ref) in docs {
             let chunks = self.query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
-                &[&doc_id as &dyn rusqlite::types::ToSql],
-                |row| row.get::<_, String>(0),
+                vec![Value::Integer(doc_id)],
+                |row| row.get::<String>(0),
             )?;
             results.push((doc_id, source_ref, chunks));
         }
@@ -315,10 +323,10 @@ impl Database {
     ) -> Result<()> {
         self.execute_write(
             "UPDATE docs SET embedded_at = ?1, embedded_content_hash = ?2 WHERE id = ?3",
-            &[
-                &now as &dyn rusqlite::types::ToSql,
-                &content_hash,
-                &doc_id,
+            vec![
+                Value::Integer(now),
+                Value::Text(content_hash.to_string()),
+                Value::Integer(doc_id),
             ],
         )?;
         Ok(())
@@ -333,32 +341,28 @@ impl Database {
             return Ok(0);
         }
 
-        let conn = self.write_conn();
         let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "DELETE FROM docs WHERE source_ref IN ({})",
             placeholders.join(", ")
         );
-
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            paths.iter().map(|p| p as &dyn rusqlite::types::ToSql).collect();
-
-        let count = conn.execute(&sql, params.as_slice())?;
+        let params: Vec<Value> = paths.iter().map(|p| Value::Text(p.clone())).collect();
+        let count = self.execute_write(&sql, params)?;
         Ok(count)
     }
 
     /// Return all `source_ref` values from the docs table.
     pub fn get_all_source_refs(&self) -> Result<Vec<String>> {
-        Ok(self
-            .query_read("SELECT source_ref FROM docs", &[], |row| {
-                row.get::<_, String>(0)
-            })?)
+        Ok(self.query_read("SELECT source_ref FROM docs", vec![], |row| {
+            row.get::<String>(0)
+        })?)
     }
 
     /// Return the total number of documents in the database.
     pub fn get_document_count(&self) -> Result<i64> {
-        let rows = self
-            .query_read("SELECT COUNT(*) FROM docs", &[], |row| row.get::<_, i64>(0))?;
+        let rows = self.query_read("SELECT COUNT(*) FROM docs", vec![], |row| {
+            row.get::<i64>(0)
+        })?;
         Ok(rows.into_iter().next().unwrap_or(0))
     }
 
@@ -367,10 +371,6 @@ impl Database {
     // -----------------------------------------------------------------------
 
     /// Batch-insert or update entities and record occurrences.
-    ///
-    /// All operations run inside a **single transaction** with prepared
-    /// statements reused across all entries.  Each entry is a
-    /// `(name, EntityType, EntityOccurrence)` tuple.
     pub fn upsert_entities_batch(
         &self,
         entries: &[(&str, &EntityType, &EntityOccurrence)],
@@ -379,55 +379,81 @@ impl Database {
             return Ok(());
         }
 
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for upsert_entities_batch")?;
+        // Collect owned data before entering the async block.
+        let entries: Vec<(String, String, EntityOccurrence)> = entries
+            .iter()
+            .map(|&(name, entity_type, occ)| {
+                (name.to_string(), entity_type.as_str().to_string(), occ.clone())
+            })
+            .collect();
 
-        let mut insert_ignore_stmt = tx.prepare(
-            "INSERT OR IGNORE INTO entities (name, type, frequency, first_seen, last_seen)
-             VALUES (?1, ?2, 0, ?3, ?4)",
-        )?;
-        let mut update_stmt = tx.prepare(
-            "UPDATE entities
-             SET frequency = frequency + 1,
-                 last_seen = MAX(COALESCE(last_seen, 0), COALESCE(?1, 0))
-             WHERE name = ?2 AND type = ?3",
-        )?;
-        let mut lookup_stmt = tx.prepare(
-            "SELECT id FROM entities WHERE name = ?1 AND type = ?2",
-        )?;
-        let mut occ_stmt = tx.prepare(
-            "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at, effective_date, date_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for upsert_entities_batch")?;
 
-        for &(name, entity_type, occurrence) in entries {
-            let effective_date = occurrence.effective_date;
-            let type_str = entity_type.as_str();
+            for (name, type_str, occurrence) in &entries {
+                let effective_date = occurrence.effective_date;
 
-            insert_ignore_stmt.execute(params![name, type_str, effective_date, effective_date])?;
-            update_stmt.execute(params![effective_date, name, type_str])?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO entities (name, type, frequency, first_seen, last_seen)
+                     VALUES (?1, ?2, 0, ?3, ?4)",
+                    vec![
+                        Value::Text(name.clone()),
+                        Value::Text(type_str.clone()),
+                        opt_val(effective_date),
+                        opt_val(effective_date),
+                    ],
+                )
+                .await?;
 
-            let entity_id: i64 = lookup_stmt.query_row(params![name, type_str], |row| row.get(0))?;
+                tx.execute(
+                    "UPDATE entities
+                     SET frequency = frequency + 1,
+                         last_seen = MAX(COALESCE(last_seen, 0), COALESCE(?1, 0))
+                     WHERE name = ?2 AND type = ?3",
+                    vec![
+                        opt_val(effective_date),
+                        Value::Text(name.clone()),
+                        Value::Text(type_str.clone()),
+                    ],
+                )
+                .await?;
 
-            occ_stmt.execute(params![
-                entity_id,
-                occurrence.file_path,
-                occurrence.context,
-                occurrence.created_at,
-                occurrence.effective_date,
-                occurrence.date_source,
-            ])?;
-        }
+                let mut rows = tx
+                    .query(
+                        "SELECT id FROM entities WHERE name = ?1 AND type = ?2",
+                        vec![Value::Text(name.clone()), Value::Text(type_str.clone())],
+                    )
+                    .await?;
+                let entity_id: i64 = rows
+                    .next()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("entity not found after insert"))?
+                    .get::<i64>(0)?;
 
-        drop(insert_ignore_stmt);
-        drop(update_stmt);
-        drop(lookup_stmt);
-        drop(occ_stmt);
+                tx.execute(
+                    "INSERT INTO entity_occurrences
+                     (entity_id, file_path, context, created_at, effective_date, date_source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    vec![
+                        Value::Integer(entity_id),
+                        Value::Text(occurrence.file_path.clone()),
+                        opt_val(occurrence.context.clone()),
+                        Value::Integer(occurrence.created_at),
+                        opt_val(occurrence.effective_date),
+                        Value::Text(occurrence.date_source.clone()),
+                    ],
+                )
+                .await?;
+            }
 
-        tx.commit().context("failed to commit upsert_entities_batch")?;
-        Ok(())
+            tx.commit()
+                .await
+                .context("failed to commit upsert_entities_batch")?;
+            Ok(())
+        })
     }
 
     /// Get all occurrences for a given entity.
@@ -435,16 +461,16 @@ impl Database {
         let rows = self.query_read(
             "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
              FROM entity_occurrences WHERE entity_id = ?1",
-            &[&entity_id as &dyn rusqlite::types::ToSql],
+            vec![Value::Integer(entity_id)],
             |row| {
                 Ok(EntityOccurrence {
-                    id: Some(row.get(0)?),
-                    entity_id: row.get(1)?,
-                    file_path: row.get(2)?,
-                    context: row.get(3)?,
-                    created_at: row.get(4)?,
-                    effective_date: row.get(5)?,
-                    date_source: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    id: Some(row.get::<i64>(0)?),
+                    entity_id: row.get::<i64>(1)?,
+                    file_path: row.get::<String>(2)?,
+                    context: row.get::<Option<String>>(3)?,
+                    created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
+                    effective_date: row.get::<Option<i64>>(5)?,
+                    date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
                 })
             },
         )?;
@@ -452,13 +478,8 @@ impl Database {
     }
 
     /// Get the top entities, ordered by the given column.
-    ///
-    /// If `order_by` is `"recency_score"`, entities are fetched, their trends
-    /// JSON is parsed, and they are sorted by `recency_score` descending.
-    /// Otherwise, entities are ordered by `frequency DESC`.
     pub fn get_top_entities(&self, limit: usize, order_by: &str) -> Result<Vec<Entity>> {
         if order_by == "recency_score" {
-            // Fetch all entities, parse trends, sort by recency_score, take limit.
             let mut entities = self.get_all_entities()?;
             entities.sort_by(|a, b| {
                 b.trends
@@ -472,7 +493,7 @@ impl Database {
             let rows = self.query_read(
                 "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
                  FROM entities ORDER BY frequency DESC LIMIT ?1",
-                &[&(limit as i64) as &dyn rusqlite::types::ToSql],
+                vec![Value::Integer(limit as i64)],
                 map_entity_row,
             )?;
             Ok(rows)
@@ -484,43 +505,43 @@ impl Database {
         if updates.is_empty() {
             return Ok(());
         }
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for update_entity_trends_batch")?;
+        let updates: Vec<(i64, EntityTrends)> = updates.to_vec();
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for update_entity_trends_batch")?;
 
-        let mut stmt = tx.prepare("UPDATE entities SET trends = ?1 WHERE id = ?2")?;
-        for (entity_id, trends) in updates {
-            let trends_json =
-                serde_json::to_string(trends).context("failed to serialize EntityTrends")?;
-            stmt.execute(params![trends_json, entity_id])?;
-        }
+            for (entity_id, trends) in &updates {
+                let trends_json =
+                    serde_json::to_string(trends).context("failed to serialize EntityTrends")?;
+                tx.execute(
+                    "UPDATE entities SET trends = ?1 WHERE id = ?2",
+                    vec![Value::Text(trends_json), Value::Integer(*entity_id)],
+                )
+                .await?;
+            }
 
-        drop(stmt);
-        tx.commit().context("failed to commit update_entity_trends_batch")?;
-        Ok(())
+            tx.commit()
+                .await
+                .context("failed to commit update_entity_trends_batch")?;
+            Ok(())
+        })
     }
 
     /// Fetch all occurrence timestamps in one query, grouped by entity_id.
-    ///
-    /// Returns `(entity_id, effective_date, created_at)` for every occurrence,
-    /// ordered by entity_id so the caller can stream-group.
     pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64)>> {
         let rows = self.query_read(
             "SELECT entity_id, effective_date, created_at
              FROM entity_occurrences
              ORDER BY entity_id",
-            &[],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            vec![],
+            |row| Ok((row.get::<i64>(0)?, row.get::<Option<i64>>(1)?, row.get::<i64>(2)?)),
         )?;
         Ok(rows)
     }
 
     /// Get trending entities with guaranteed type diversity.
-    ///
-    /// Phase 1: Take guaranteed minimums from each type bucket (tags, links, folders).
-    /// Phase 2: Merge remaining entities, sort by recency, fill to total_limit.
-    /// Only includes root-level entities (no `/` in name for links/folders).
     pub fn get_trending_entities(
         &self,
         min_tags: usize,
@@ -530,21 +551,15 @@ impl Database {
     ) -> Result<Vec<Entity>> {
         let all = self.get_all_entities()?;
 
-        // Filter to root-level only (no path separators in name)
-        // Tags can have nested paths like "enzyme/pmf" — those are allowed
         let is_root_level = |e: &Entity| -> bool {
             match e.entity_type {
-                EntityType::Tag => true, // tags can be nested (e.g. #enzyme/pmf)
+                EntityType::Tag => true,
                 EntityType::Link | EntityType::Folder => !e.name.contains('/'),
             }
         };
 
-        let root_entities: Vec<Entity> = all
-            .into_iter()
-            .filter(|e| is_root_level(e))
-            .collect();
+        let root_entities: Vec<Entity> = all.into_iter().filter(|e| is_root_level(e)).collect();
 
-        // Separate by type and sort each by recency_score descending
         let mut tags: Vec<Entity> = root_entities
             .iter()
             .filter(|e| e.entity_type == EntityType::Tag)
@@ -572,7 +587,6 @@ impl Database {
         links.sort_by(sort_by_recency);
         folders.sort_by(sort_by_recency);
 
-        // Phase 1: guaranteed minimums
         let mut selected: Vec<Entity> = Vec::new();
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -589,14 +603,12 @@ impl Database {
             selected.push(entity.clone());
         }
 
-        // Phase 2: fill remaining slots from all types
         if selected.len() < total_limit {
             let mut remaining: Vec<Entity> = root_entities
                 .into_iter()
                 .filter(|e| !used.contains(&e.name))
                 .collect();
             remaining.sort_by(sort_by_recency);
-
             for entity in remaining {
                 if selected.len() >= total_limit {
                     break;
@@ -605,7 +617,6 @@ impl Database {
             }
         }
 
-        // Final sort by recency descending
         selected.sort_by(sort_by_recency);
         selected.truncate(total_limit);
 
@@ -613,9 +624,6 @@ impl Database {
     }
 
     /// Look up entities by their (name, type) pairs.
-    ///
-    /// Returns only entities that exist in the database. The order may differ
-    /// from the input.
     pub fn get_entities_by_names(&self, names: &[(&str, EntityType)]) -> Result<Vec<Entity>> {
         if names.is_empty() {
             return Ok(Vec::new());
@@ -627,13 +635,12 @@ impl Database {
             let rows = self.query_read(
                 "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
                  FROM entities WHERE name = ?1 AND type = ?2",
-                &[
-                    &name.to_lowercase() as &dyn rusqlite::types::ToSql,
-                    &entity_type.as_str(),
+                vec![
+                    Value::Text(name.to_lowercase()),
+                    Value::Text(entity_type.as_str().to_string()),
                 ],
                 map_entity_row,
             )?;
-
             results.extend(rows);
         }
 
@@ -645,7 +652,7 @@ impl Database {
         let rows = self.query_read(
             "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
              FROM entities",
-            &[],
+            vec![],
             map_entity_row,
         )?;
         Ok(rows)
@@ -656,11 +663,7 @@ impl Database {
     // -----------------------------------------------------------------------
 
     /// Derive folder structure from document `source_ref` paths.
-    ///
-    /// Returns `(folder_name, file_count, most_recent_modified_at)` for each
-    /// top-level folder, ordered by file count descending.
     pub fn get_folder_structure(&self) -> Result<Vec<FolderStats>> {
-        // Top-level folders: first path segment of source_ref
         let top_folders = self.query_read(
             "SELECT
                 CASE
@@ -673,12 +676,12 @@ impl Database {
              FROM docs
              GROUP BY folder
              ORDER BY file_count DESC",
-            &[],
+            vec![],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<String>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<Option<i64>>(2)?,
                 ))
             },
         )?;
@@ -695,7 +698,6 @@ impl Database {
                 continue;
             }
 
-            // Get subfolders for this parent
             let subfolders = self.query_read(
                 "SELECT
                     SUBSTR(
@@ -714,11 +716,11 @@ impl Database {
                  GROUP BY subfolder
                  ORDER BY file_count DESC
                  LIMIT 10",
-                &[&name as &dyn rusqlite::types::ToSql],
+                vec![Value::Text(name.clone())],
                 |row| {
                     Ok(SubfolderStats {
-                        name: row.get::<_, String>(0)?,
-                        file_count: row.get::<_, i64>(1)?,
+                        name: row.get::<String>(0)?,
+                        file_count: row.get::<i64>(1)?,
                     })
                 },
             )?;
@@ -735,9 +737,6 @@ impl Database {
     }
 
     /// Get immediate child entities of a parent entity.
-    ///
-    /// For tags: children of `#enzyme` are `#enzyme/pmf`, `#enzyme/search`, etc.
-    /// Returns at most `limit` children, ordered by frequency descending.
     pub fn get_child_entities(
         &self,
         parent_name: &str,
@@ -753,11 +752,11 @@ impl Database {
              WHERE name LIKE ?1 AND name NOT LIKE ?2 AND type = ?3
              ORDER BY frequency DESC
              LIMIT ?4",
-            &[
-                &like_pattern as &dyn rusqlite::types::ToSql,
-                &not_like_pattern,
-                &entity_type,
-                &(limit as i64),
+            vec![
+                Value::Text(like_pattern),
+                Value::Text(not_like_pattern),
+                Value::Text(entity_type.to_string()),
+                Value::Integer(limit as i64),
             ],
             map_entity_row,
         )?;
@@ -766,13 +765,6 @@ impl Database {
     }
 
     /// Get the most-referenced children of a folder, ranked by external wikilink count.
-    ///
-    /// "Children" are documents whose `source_ref` matches `{folder}/%.md` but
-    /// NOT `{folder}/%/%.md` (i.e. immediate children only).  Reference counts
-    /// come from `doc_links` rows where the linking document lives *outside*
-    /// the folder.
-    ///
-    /// Returns `(children, total_child_count)`.
     pub fn get_folder_children_by_references(
         &self,
         folder_name: &str,
@@ -781,43 +773,32 @@ impl Database {
         let like_pattern = format!("{}/%", folder_name);
         let not_like_pattern = format!("{}/%/%", folder_name);
 
-        // Get all immediate children with their modified_at
         let children_rows = self.query_read(
             "SELECT source_ref, modified_at
              FROM docs
              WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
-            &[
-                &like_pattern as &dyn rusqlite::types::ToSql,
-                &not_like_pattern,
-            ],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            vec![Value::Text(like_pattern), Value::Text(not_like_pattern)],
+            |row| Ok((row.get::<String>(0)?, row.get::<Option<i64>>(1)?)),
         )?;
 
         let total_count = children_rows.len() as i64;
-
-        // For each child, extract the file stem and count external references
         let outside_pattern = format!("{}/%", folder_name);
         let mut children: Vec<FolderChild> = Vec::new();
 
         for (source_ref, modified_at) in &children_rows {
-            // Extract file stem: "people/Alice Jones.md" -> "Alice Jones"
-            let file_name = source_ref
-                .rsplit('/')
-                .next()
-                .unwrap_or(source_ref);
+            let file_name = source_ref.rsplit('/').next().unwrap_or(source_ref);
             let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
 
-            // Count references from documents OUTSIDE this folder
             let ref_count = self.query_read(
                 "SELECT COUNT(DISTINCT dl.doc_id)
                  FROM doc_links dl
                  JOIN docs d ON d.id = dl.doc_id
                  WHERE dl.link = ?1 AND d.source_ref NOT LIKE ?2",
-                &[
-                    &stem.to_lowercase() as &dyn rusqlite::types::ToSql,
-                    &outside_pattern,
+                vec![
+                    Value::Text(stem.to_lowercase()),
+                    Value::Text(outside_pattern.clone()),
                 ],
-                |row| row.get::<_, i64>(0),
+                |row| row.get::<i64>(0),
             )?;
             let reference_count = ref_count.into_iter().next().unwrap_or(0);
 
@@ -829,7 +810,6 @@ impl Database {
             });
         }
 
-        // Sort by reference_count desc, then by name for stability
         children.sort_by(|a, b| {
             b.reference_count
                 .cmp(&a.reference_count)
@@ -841,13 +821,6 @@ impl Database {
     }
 
     /// Identify trending wikilinks that have source files directly inside a folder.
-    ///
-    /// For example, if `folder_name = "people"` and `people/Alice Smith.md` exists,
-    /// and `"alice smith"` is in `trending_links`, this returns `["alice smith"]`.
-    ///
-    /// This is the basis for determining expandable folders: a folder whose files
-    /// correspond to trending wikilinks should be expanded so catalysts cover the
-    /// children instead of (or in addition to) the folder as a flat entity.
     pub fn get_folder_page_entities(
         &self,
         folder_name: &str,
@@ -860,18 +833,13 @@ impl Database {
         let like_pattern = format!("{}/%", folder_name);
         let not_like_pattern = format!("{}/%/%", folder_name);
 
-        // Get file stems of immediate children in this folder
         let rows = self.query_read(
             "SELECT source_ref FROM docs
              WHERE source_ref LIKE ?1 AND source_ref NOT LIKE ?2",
-            &[
-                &like_pattern as &dyn rusqlite::types::ToSql,
-                &not_like_pattern,
-            ],
-            |row| row.get::<_, String>(0),
+            vec![Value::Text(like_pattern), Value::Text(not_like_pattern)],
+            |row| row.get::<String>(0),
         )?;
 
-        // Extract lowercase file stems
         let folder_files: std::collections::HashSet<String> = rows
             .iter()
             .filter_map(|source_ref| {
@@ -881,7 +849,6 @@ impl Database {
             })
             .collect();
 
-        // Match against trending wikilinks
         let matching: Vec<String> = trending_links
             .iter()
             .filter(|link| folder_files.contains(link.to_lowercase().as_str()))
@@ -903,19 +870,16 @@ impl Database {
              WHERE entity_id = ?1
              ORDER BY effective_date DESC
              LIMIT ?2",
-            &[
-                &entity_id as &dyn rusqlite::types::ToSql,
-                &(limit as i64),
-            ],
+            vec![Value::Integer(entity_id), Value::Integer(limit as i64)],
             |row| {
                 Ok(EntityOccurrence {
-                    id: Some(row.get(0)?),
-                    entity_id: row.get(1)?,
-                    file_path: row.get(2)?,
-                    context: row.get(3)?,
-                    created_at: row.get(4)?,
-                    effective_date: row.get(5)?,
-                    date_source: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    id: Some(row.get::<i64>(0)?),
+                    entity_id: row.get::<i64>(1)?,
+                    file_path: row.get::<String>(2)?,
+                    context: row.get::<Option<String>>(3)?,
+                    created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
+                    effective_date: row.get::<Option<i64>>(5)?,
+                    date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
                 })
             },
         )?;
@@ -928,32 +892,38 @@ impl Database {
 
     /// Batch-insert catalysts.
     pub fn insert_catalysts(&self, catalysts: &[Catalyst]) -> Result<()> {
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for insert_catalysts")?;
+        let catalysts = catalysts.to_vec();
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for insert_catalysts")?;
 
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO catalysts (id, text, entity, context, generated_at, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-            for cat in catalysts {
+            for cat in &catalysts {
                 let generated_at = cat.generated_at.format("%Y-%m-%d %H:%M:%S").to_string();
-                let metadata = serde_json::to_string(&cat.metadata).unwrap_or_else(|_| "{}".to_string());
-                stmt.execute(params![
-                    cat.id,
-                    cat.text,
-                    cat.entity,
-                    cat.context,
-                    generated_at,
-                    metadata,
-                ])?;
+                let metadata =
+                    serde_json::to_string(&cat.metadata).unwrap_or_else(|_| "{}".to_string());
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalysts
+                     (id, text, entity, context, generated_at, metadata)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    vec![
+                        Value::Text(cat.id.clone()),
+                        Value::Text(cat.text.clone()),
+                        Value::Text(cat.entity.clone()),
+                        Value::Text(cat.context.clone()),
+                        Value::Text(generated_at),
+                        Value::Text(metadata),
+                    ],
+                )
+                .await?;
             }
-        }
 
-        tx.commit().context("failed to commit insert_catalysts")?;
-        Ok(())
+            tx.commit()
+                .await
+                .context("failed to commit insert_catalysts")?;
+            Ok(())
+        })
     }
 
     /// Get all catalysts associated with a given entity name.
@@ -961,7 +931,7 @@ impl Database {
         let rows = self.query_read(
             "SELECT id, text, entity, context, generated_at, metadata
              FROM catalysts WHERE entity = ?1",
-            &[&entity as &dyn rusqlite::types::ToSql],
+            vec![Value::Text(entity.to_string())],
             map_catalyst_row,
         )?;
         Ok(rows)
@@ -971,8 +941,8 @@ impl Database {
     pub fn get_catalyzed_entity_names(&self) -> Result<std::collections::HashSet<String>> {
         let names = self.query_read(
             "SELECT DISTINCT entity FROM catalysts",
-            &[],
-            |row| row.get::<_, String>(0),
+            vec![],
+            |row| row.get::<String>(0),
         )?;
         Ok(names.into_iter().collect())
     }
@@ -981,7 +951,7 @@ impl Database {
     pub fn get_all_catalysts(&self) -> Result<Vec<Catalyst>> {
         let rows = self.query_read(
             "SELECT id, text, entity, context, generated_at, metadata FROM catalysts",
-            &[],
+            vec![],
             map_catalyst_row,
         )?;
         Ok(rows)
@@ -991,70 +961,73 @@ impl Database {
     pub fn get_latest_catalyst_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
         let rows = self.query_read(
             "SELECT MAX(generated_at) FROM catalysts",
-            &[],
-            |row| row.get::<_, Option<String>>(0),
+            vec![],
+            |row| row.get::<Option<String>>(0),
         )?;
         Ok(rows.into_iter().next().flatten().map(|s| parse_datetime_utc(&s)))
     }
 
     /// Count distinct documents that mention a given entity (by entity name).
-    ///
-    /// Uses `entity_occurrences` to count unique file paths.
     pub fn get_entity_doc_count(&self, entity_name: &str) -> Result<usize> {
         let rows = self.query_read(
             "SELECT COUNT(DISTINCT eo.file_path)
              FROM entity_occurrences eo
              JOIN entities e ON e.id = eo.entity_id
              WHERE e.name = ?1",
-            &[&entity_name as &dyn rusqlite::types::ToSql],
-            |row| row.get::<_, i64>(0),
+            vec![Value::Text(entity_name.to_string())],
+            |row| row.get::<i64>(0),
         )?;
         Ok(rows.into_iter().next().unwrap_or(0) as usize)
     }
 
     /// Delete all catalysts for a given entity name.
     pub fn delete_catalysts_for_entity(&self, entity: &str) -> Result<()> {
-        self
-            .execute_write("DELETE FROM catalysts WHERE entity = ?1", &[&entity])?;
+        self.execute_write(
+            "DELETE FROM catalysts WHERE entity = ?1",
+            vec![Value::Text(entity.to_string())],
+        )?;
         Ok(())
     }
 
     /// Batch upsert catalyst similarity records.
     pub fn upsert_catalyst_similarities(&self, sims: &[CatalystSimilarity]) -> Result<()> {
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for upsert_catalyst_similarities")?;
+        let sims = sims.to_vec();
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for upsert_catalyst_similarities")?;
 
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO catalyst_similarities
-                    (catalyst_id, catalyst_text, file_path, chunk_index,
-                     similarity, chunk_metadata, timeline_data, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
-            for sim in sims {
+            for sim in &sims {
                 let chunk_meta =
                     serde_json::to_string(&sim.chunk_metadata).unwrap_or_else(|_| "{}".to_string());
                 let timeline =
                     serde_json::to_string(&sim.timeline_data).unwrap_or_else(|_| "{}".to_string());
                 let created_at = sim.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
-                stmt.execute(params![
-                    sim.catalyst_id,
-                    sim.catalyst_text,
-                    sim.file_path,
-                    sim.chunk_index,
-                    sim.similarity,
-                    chunk_meta,
-                    timeline,
-                    created_at,
-                ])?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalyst_similarities
+                        (catalyst_id, catalyst_text, file_path, chunk_index,
+                         similarity, chunk_metadata, timeline_data, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    vec![
+                        Value::Text(sim.catalyst_id.clone()),
+                        Value::Text(sim.catalyst_text.clone()),
+                        Value::Text(sim.file_path.clone()),
+                        Value::Integer(sim.chunk_index as i64),
+                        Value::Real(sim.similarity),
+                        Value::Text(chunk_meta),
+                        Value::Text(timeline),
+                        Value::Text(created_at),
+                    ],
+                )
+                .await?;
             }
-        }
 
-        tx.commit()
-            .context("failed to commit upsert_catalyst_similarities")?;
-        Ok(())
+            tx.commit()
+                .await
+                .context("failed to commit upsert_catalyst_similarities")?;
+            Ok(())
+        })
     }
 
     /// Get the top similarities for a given catalyst, ordered by similarity descending.
@@ -1070,9 +1043,9 @@ impl Database {
              WHERE catalyst_id = ?1
              ORDER BY similarity DESC
              LIMIT ?2",
-            &[
-                &catalyst_id as &dyn rusqlite::types::ToSql,
-                &(limit as i64),
+            vec![
+                Value::Text(catalyst_id.to_string()),
+                Value::Integer(limit as i64),
             ],
             map_catalyst_similarity_row,
         )?;
@@ -1084,8 +1057,6 @@ impl Database {
     // -----------------------------------------------------------------------
 
     /// Get all chunks belonging to documents that have been embedded.
-    ///
-    /// Returns `(source_ref, chunk_index, content)`.
     pub fn get_all_chunks_with_embeddings(&self) -> Result<Vec<(String, i64, String)>> {
         let rows = self.query_read(
             "SELECT d.source_ref, c.chunk_index, c.content
@@ -1093,12 +1064,12 @@ impl Database {
              JOIN chunks c ON d.id = c.doc_id
              WHERE d.embedded_at IS NOT NULL
              ORDER BY d.source_ref, c.chunk_index",
-            &[],
+            vec![],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<String>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<String>(2)?,
                 ))
             },
         )?;
@@ -1106,12 +1077,9 @@ impl Database {
     }
 
     /// Get all chunks with full metadata for the explore UI.
-    ///
-    /// Returns enriched chunk data including doc metadata, tags, and word counts.
     pub fn get_all_chunks_enriched(
         &self,
     ) -> Result<Vec<(i64, i64, i64, String, String, i64, i64, i64, Option<String>)>> {
-        // (doc_id, chunk_id, chunk_index, file_path, content, chunk_word_count, created_at, modified_at, title)
         let rows = self.query_read(
             "SELECT d.id, c.id, c.chunk_index, d.source_ref, c.content,
                     c.word_count, d.created_at, d.modified_at, d.title
@@ -1119,18 +1087,18 @@ impl Database {
              JOIN chunks c ON d.id = c.doc_id
              WHERE d.embedded_at IS NOT NULL
              ORDER BY d.source_ref, c.chunk_index",
-            &[],
+            vec![],
             |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, Option<String>>(8)?,
+                    row.get::<i64>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<i64>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<i64>(5)?,
+                    row.get::<i64>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<Option<String>>(8)?,
                 ))
             },
         )?;
@@ -1141,8 +1109,8 @@ impl Database {
     pub fn get_all_doc_tags(&self) -> Result<std::collections::HashMap<i64, Vec<String>>> {
         let rows = self.query_read(
             "SELECT doc_id, tag FROM doc_tags ORDER BY doc_id, tag",
-            &[],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            vec![],
+            |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?)),
         )?;
         let mut map = std::collections::HashMap::new();
         for (doc_id, tag) in rows {
@@ -1159,8 +1127,8 @@ impl Database {
              JOIN docs d ON d.id = dt.doc_id
              WHERE d.source_ref = ?1
              ORDER BY dt.tag",
-            &[&source_ref as &dyn rusqlite::types::ToSql],
-            |row| row.get::<_, String>(0),
+            vec![Value::Text(source_ref.to_string())],
+            |row| row.get::<String>(0),
         )?;
         Ok(rows)
     }
@@ -1176,11 +1144,8 @@ impl Database {
              FROM chunks c
              JOIN docs d ON d.id = c.doc_id
              WHERE d.source_ref = ?1 AND c.chunk_index = ?2",
-            &[
-                &file_path as &dyn rusqlite::types::ToSql,
-                &chunk_index,
-            ],
-            |row| row.get::<_, String>(0),
+            vec![Value::Text(file_path.to_string()), Value::Integer(chunk_index)],
+            |row| row.get::<String>(0),
         )?;
         Ok(rows.into_iter().next())
     }
@@ -1194,7 +1159,7 @@ impl Database {
         self.execute_write(
             "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-            &[&key as &dyn rusqlite::types::ToSql, &value],
+            vec![Value::Text(key.to_string()), Value::Text(value.to_string())],
         )?;
         Ok(())
     }
@@ -1203,8 +1168,8 @@ impl Database {
     pub fn get_config(&self, key: &str) -> Result<Option<String>> {
         let rows = self.query_read(
             "SELECT value FROM config WHERE key = ?1",
-            &[&key as &dyn rusqlite::types::ToSql],
-            |row| row.get::<_, String>(0),
+            vec![Value::Text(key.to_string())],
+            |row| row.get::<String>(0),
         )?;
         Ok(rows.into_iter().next())
     }
@@ -1223,11 +1188,11 @@ impl Database {
                  doc_count = excluded.doc_count,
                  catalyst_count = excluded.catalyst_count,
                  applied_at = excluded.applied_at",
-            &[
-                &target.target_path as &dyn rusqlite::types::ToSql,
-                &target.doc_count,
-                &target.catalyst_count,
-                &applied_at,
+            vec![
+                Value::Text(target.target_path.clone()),
+                Value::Integer(target.doc_count as i64),
+                Value::Integer(target.catalyst_count as i64),
+                Value::Text(applied_at),
             ],
         )?;
         Ok(())
@@ -1239,7 +1204,7 @@ impl Database {
             "SELECT id, target_path, doc_count, catalyst_count, applied_at
              FROM applied_targets
              ORDER BY applied_at DESC",
-            &[],
+            vec![],
             map_applied_target_row,
         )?;
         Ok(rows)
@@ -1257,21 +1222,32 @@ impl Database {
         if embeddings.is_empty() {
             return Ok(());
         }
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for upsert_chunk_embeddings")?;
-        let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
-             VALUES (?1, ?2, ?3)",
-        )?;
-        for (file_path, chunk_index, vector) in embeddings {
-            let blob = f32_vec_to_blob(vector);
-            stmt.execute(params![file_path, chunk_index, blob])?;
-        }
-        drop(stmt);
-        tx.commit().context("failed to commit upsert_chunk_embeddings")?;
-        Ok(())
+        let embeddings = embeddings.to_vec();
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for upsert_chunk_embeddings")?;
+
+            for (file_path, chunk_index, vector) in &embeddings {
+                let blob = f32_vec_to_blob(vector);
+                tx.execute(
+                    "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
+                     VALUES (?1, ?2, ?3)",
+                    vec![
+                        Value::Text(file_path.clone()),
+                        Value::Integer(*chunk_index as i64),
+                        Value::Blob(blob),
+                    ],
+                )
+                .await?;
+            }
+
+            tx.commit()
+                .await
+                .context("failed to commit upsert_chunk_embeddings")?;
+            Ok(())
+        })
     }
 
     /// Load all chunk embeddings from the database.
@@ -1279,12 +1255,12 @@ impl Database {
         let rows = self.query_read(
             "SELECT file_path, chunk_index, vector FROM chunk_embeddings
              ORDER BY file_path, chunk_index",
-            &[],
+            vec![],
             |row| {
-                let file_path: String = row.get(0)?;
-                let chunk_index: u32 = row.get(1)?;
-                let blob: Vec<u8> = row.get(2)?;
-                Ok((file_path, chunk_index, blob_to_f32_vec(&blob)))
+                let file_path: String = row.get::<String>(0)?;
+                let chunk_index: i64 = row.get::<i64>(1)?;
+                let blob: Vec<u8> = row.get::<Vec<u8>>(2)?;
+                Ok((file_path, chunk_index as u32, blob_to_f32_vec(&blob)))
             },
         )?;
         Ok(rows)
@@ -1294,7 +1270,7 @@ impl Database {
     pub fn delete_chunk_embeddings_for_file(&self, file_path: &str) -> Result<()> {
         self.execute_write(
             "DELETE FROM chunk_embeddings WHERE file_path = ?1",
-            &[&file_path],
+            vec![Value::Text(file_path.to_string())],
         )?;
         Ok(())
     }
@@ -1305,16 +1281,19 @@ impl Database {
         let count = self.execute_write(
             "DELETE FROM chunk_embeddings
              WHERE file_path NOT IN (SELECT source_ref FROM docs)",
-            &[],
+            vec![],
         )?;
         Ok(count)
     }
 
     // -----------------------------------------------------------------------
-    // Catalyst embedding operations
+    // Catalyst embedding operations (packed format)
     // -----------------------------------------------------------------------
 
-    /// Batch-upsert catalyst embeddings.
+    /// Batch-upsert catalyst embeddings using the packed BLOB format.
+    ///
+    /// All embeddings are stored as a single row in `catalyst_embeddings_packed`
+    /// to eliminate per-row async overhead on the libsql read path.
     pub fn upsert_catalyst_embeddings(
         &self,
         embeddings: &[(&str, &[f32])],
@@ -1322,35 +1301,65 @@ impl Database {
         if embeddings.is_empty() {
             return Ok(());
         }
-        let conn = self.write_conn();
-        let tx = conn
-            .unchecked_transaction()
-            .context("failed to begin transaction for upsert_catalyst_embeddings")?;
-        let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO catalyst_embeddings (catalyst_id, vector)
-             VALUES (?1, ?2)",
-        )?;
-        for (catalyst_id, vector) in embeddings {
-            let blob = f32_vec_to_blob(vector);
-            stmt.execute(params![catalyst_id, blob])?;
+
+        let n = embeddings.len();
+        let ids: Vec<String> = embeddings.iter().map(|(id, _)| id.to_string()).collect();
+        let ids_json = serde_json::to_string(&ids).context("serialize catalyst ids")?;
+        let mut all_vecs: Vec<u8> = Vec::with_capacity(n * 384 * 4);
+        for (_, vector) in embeddings {
+            all_vecs.extend_from_slice(&f32_vec_to_blob(vector));
         }
-        drop(stmt);
-        tx.commit().context("failed to commit upsert_catalyst_embeddings")?;
+
+        block_in_place_sync(async move {
+            let tx = self.conn
+                .transaction()
+                .await
+                .context("begin upsert_catalyst_embeddings")?;
+            tx.execute("DELETE FROM catalyst_embeddings_packed", ()).await?;
+            tx.execute(
+                "INSERT INTO catalyst_embeddings_packed (count, ids, vectors) VALUES (?1, ?2, ?3)",
+                vec![
+                    Value::Integer(n as i64),
+                    Value::Text(ids_json),
+                    Value::Blob(all_vecs),
+                ],
+            )
+            .await?;
+            tx.commit().await.context("commit upsert_catalyst_embeddings")?;
+            Ok::<(), anyhow::Error>(())
+        })?;
         Ok(())
     }
 
-    /// Load all catalyst embeddings from the database.
+    /// Load all catalyst embeddings from the packed table.
     pub fn get_all_catalyst_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
         let rows = self.query_read(
-            "SELECT catalyst_id, vector FROM catalyst_embeddings",
-            &[],
+            "SELECT ids, vectors FROM catalyst_embeddings_packed WHERE id = 1",
+            vec![],
             |row| {
-                let id: String = row.get(0)?;
-                let blob: Vec<u8> = row.get(1)?;
-                Ok((id, blob_to_f32_vec(&blob)))
+                let ids_json: String = row.get::<String>(0)?;
+                let vectors_blob: Vec<u8> = row.get::<Vec<u8>>(1)?;
+                Ok((ids_json, vectors_blob))
             },
         )?;
-        Ok(rows)
+
+        let (ids_json, vectors_blob) = match rows.into_iter().next() {
+            Some(pair) => pair,
+            None => return Ok(vec![]),
+        };
+
+        let ids: Vec<String> = serde_json::from_str(&ids_json)
+            .context("deserialize catalyst ids")?;
+        let embedding_dim = if ids.is_empty() { 384 } else { vectors_blob.len() / ids.len() / 4 * 4 };
+        let results: Vec<(String, Vec<f32>)> = ids
+            .into_iter()
+            .zip(
+                vectors_blob
+                    .chunks(embedding_dim.max(4))
+                    .map(blob_to_f32_vec),
+            )
+            .collect();
+        Ok(results)
     }
 }
 
@@ -1358,57 +1367,53 @@ impl Database {
 // Row-mapping helpers
 // ---------------------------------------------------------------------------
 
-/// Map a row from the `entities` table to an [`Entity`].
-fn map_entity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
-    let trends_str: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
-    let trends: EntityTrends =
-        serde_json::from_str(&trends_str).unwrap_or_default();
+fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
+    let trends_str: String = row.get::<Option<String>>(6)?.unwrap_or_default();
+    let trends: EntityTrends = serde_json::from_str(&trends_str).unwrap_or_default();
 
-    let metadata_str: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+    let metadata_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Object(Default::default()));
 
     Ok(Entity {
-        id: Some(row.get(0)?),
-        name: row.get(1)?,
-        entity_type: parse_entity_type(&row.get::<_, String>(2)?),
-        frequency: row.get(3)?,
-        first_seen: row.get(4)?,
-        last_seen: row.get(5)?,
+        id: Some(row.get::<i64>(0)?),
+        name: row.get::<String>(1)?,
+        entity_type: parse_entity_type(&row.get::<String>(2)?),
+        frequency: row.get::<i64>(3)?,
+        first_seen: row.get::<Option<i64>>(4)?,
+        last_seen: row.get::<Option<i64>>(5)?,
         trends,
         metadata,
     })
 }
 
-/// Map a row from the `catalysts` table to a [`Catalyst`].
-fn map_catalyst_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Catalyst> {
-    let generated_at_str: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
-    let metadata_str: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
+fn map_catalyst_row(row: libsql::Row) -> Result<Catalyst, libsql::Error> {
+    let generated_at_str: String = row.get::<Option<String>>(4)?.unwrap_or_default();
+    let metadata_str: String = row.get::<Option<String>>(5)?.unwrap_or_default();
 
     Ok(Catalyst {
-        id: row.get(0)?,
-        text: row.get(1)?,
-        entity: row.get(2)?,
-        context: row.get(3)?,
+        id: row.get::<String>(0)?,
+        text: row.get::<String>(1)?,
+        entity: row.get::<String>(2)?,
+        context: row.get::<String>(3)?,
         generated_at: parse_datetime_utc(&generated_at_str),
         metadata: serde_json::from_str(&metadata_str)
             .unwrap_or(serde_json::Value::Object(Default::default())),
     })
 }
 
-/// Map a row from the `catalyst_similarities` table to a [`CatalystSimilarity`].
-fn map_catalyst_similarity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalystSimilarity> {
-    let chunk_meta_str: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
-    let timeline_str: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
-    let created_at_str: String = row.get::<_, Option<String>>(8)?.unwrap_or_default();
+fn map_catalyst_similarity_row(row: libsql::Row) -> Result<CatalystSimilarity, libsql::Error> {
+    let chunk_meta_str: String = row.get::<Option<String>>(6)?.unwrap_or_default();
+    let timeline_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
+    let created_at_str: String = row.get::<Option<String>>(8)?.unwrap_or_default();
 
     Ok(CatalystSimilarity {
-        id: Some(row.get(0)?),
-        catalyst_id: row.get(1)?,
-        catalyst_text: row.get(2)?,
-        file_path: row.get(3)?,
-        chunk_index: row.get(4)?,
-        similarity: row.get(5)?,
+        id: Some(row.get::<i64>(0)?),
+        catalyst_id: row.get::<String>(1)?,
+        catalyst_text: row.get::<String>(2)?,
+        file_path: row.get::<String>(3)?,
+        chunk_index: row.get::<i64>(4)?,
+        similarity: row.get::<f64>(5)?,
         chunk_metadata: serde_json::from_str(&chunk_meta_str)
             .unwrap_or(serde_json::Value::Object(Default::default())),
         timeline_data: serde_json::from_str(&timeline_str)
@@ -1417,15 +1422,14 @@ fn map_catalyst_similarity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Cata
     })
 }
 
-/// Map a row from the `applied_targets` table to an [`AppliedTarget`].
-fn map_applied_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedTarget> {
-    let applied_at_str: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+fn map_applied_target_row(row: libsql::Row) -> Result<AppliedTarget, libsql::Error> {
+    let applied_at_str: String = row.get::<Option<String>>(4)?.unwrap_or_default();
 
     Ok(AppliedTarget {
-        id: Some(row.get(0)?),
-        target_path: row.get(1)?,
-        doc_count: row.get(2)?,
-        catalyst_count: row.get(3)?,
+        id: Some(row.get::<i64>(0)?),
+        target_path: row.get::<String>(1)?,
+        doc_count: row.get::<i64>(2)?,
+        catalyst_count: row.get::<i64>(3)?,
         applied_at: parse_datetime_utc(&applied_at_str),
     })
 }
@@ -1434,7 +1438,6 @@ fn map_applied_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppliedTa
 // Blob <-> Vec<f32> helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a `&[f32]` to a little-endian byte vector for BLOB storage.
 fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(v.len() * 4);
     for &x in v {
@@ -1443,7 +1446,6 @@ fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
     buf
 }
 
-/// Convert a BLOB back to `Vec<f32>` (little-endian).
 fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))

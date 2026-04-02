@@ -18,7 +18,7 @@ pub use repository::{FolderChild, FolderStats, SubfolderStats};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
+    use libsql::Value;
 
     // -- Helpers --------------------------------------------------------------
 
@@ -36,8 +36,8 @@ mod tests {
         let tables: Vec<String> = db
             .query_read(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<String>(0),
             )
             .unwrap();
 
@@ -56,8 +56,8 @@ mod tests {
         let indexes: Vec<String> = db
             .query_read(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<String>(0),
             )
             .unwrap();
 
@@ -76,77 +76,70 @@ mod tests {
         let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        // Insert a document.
         db.execute_write(
             "INSERT INTO docs (source_ref, title, content, content_hash, word_count, char_count, created_at, modified_at, indexed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            &[
-                &"notes/rust.md" as &dyn rusqlite::types::ToSql,
-                &"Rust Notes",
-                &"Some content about Rust",
-                &"abc123",
-                &42i64,
-                &200i64,
-                &now,
-                &now,
-                &now,
+            vec![
+                Value::Text("notes/rust.md".into()),
+                Value::Text("Rust Notes".into()),
+                Value::Text("Some content about Rust".into()),
+                Value::Text("abc123".into()),
+                Value::Integer(42),
+                Value::Integer(200),
+                Value::Integer(now),
+                Value::Integer(now),
+                Value::Integer(now),
             ],
         )
         .unwrap();
 
-        // Get the doc id.
         let doc_id: i64 = db
             .query_read(
                 "SELECT id FROM docs WHERE source_ref = ?1",
-                &[&"notes/rust.md"],
-                |row| row.get(0),
+                vec![Value::Text("notes/rust.md".into())],
+                |row| row.get::<i64>(0),
             )
             .unwrap()[0];
 
-        // Insert tags via junction table.
         for tag in &["rust", "programming", "systems"] {
             db.execute_write(
                 "INSERT INTO doc_tags (doc_id, tag) VALUES (?1, ?2)",
-                &[&doc_id as &dyn rusqlite::types::ToSql, tag],
+                vec![Value::Integer(doc_id), Value::Text(tag.to_string())],
             )
             .unwrap();
         }
 
-        // Insert links via junction table.
         for link in &["memory-safety", "ownership"] {
             db.execute_write(
                 "INSERT INTO doc_links (doc_id, link) VALUES (?1, ?2)",
-                &[&doc_id as &dyn rusqlite::types::ToSql, link],
+                vec![Value::Integer(doc_id), Value::Text(link.to_string())],
             )
             .unwrap();
         }
 
-        // Query tags for the document.
         let tags: Vec<String> = db
             .query_read(
                 "SELECT tag FROM doc_tags WHERE doc_id = ?1 ORDER BY tag",
-                &[&doc_id],
-                |row| row.get(0),
+                vec![Value::Integer(doc_id)],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(tags, vec!["programming", "rust", "systems"]);
 
-        // Query links for the document.
         let links: Vec<String> = db
             .query_read(
                 "SELECT link FROM doc_links WHERE doc_id = ?1 ORDER BY link",
-                &[&doc_id],
-                |row| row.get(0),
+                vec![Value::Integer(doc_id)],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(links, vec!["memory-safety", "ownership"]);
 
-        // Reverse lookup: find docs by tag.
         let docs_with_rust: Vec<String> = db
             .query_read(
                 "SELECT d.source_ref FROM docs d JOIN doc_tags dt ON d.id = dt.doc_id WHERE dt.tag = ?1",
-                &[&"rust"],
-                |row| row.get(0),
+                vec![Value::Text("rust".into())],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(docs_with_rust, vec!["notes/rust.md"]);
@@ -162,27 +155,27 @@ mod tests {
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
              VALUES ('doc.md', 'hash1', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
 
         let doc_id: i64 = db
             .query_read(
                 "SELECT id FROM docs WHERE source_ref = 'doc.md'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap()[0];
 
         for i in 0..3 {
             db.execute_write(
                 "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                &[
-                    &doc_id as &dyn rusqlite::types::ToSql,
-                    &(i as i64),
-                    &format!("Chunk {i} content"),
-                    &10i64,
-                    &now,
+                vec![
+                    Value::Integer(doc_id),
+                    Value::Integer(i),
+                    Value::Text(format!("Chunk {i} content")),
+                    Value::Integer(10),
+                    Value::Integer(now),
                 ],
             )
             .unwrap();
@@ -191,8 +184,8 @@ mod tests {
         let chunks: Vec<(i64, String)> = db
             .query_read(
                 "SELECT chunk_index, content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
-                &[&doc_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                vec![Value::Integer(doc_id)],
+                |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?)),
             )
             .unwrap();
 
@@ -211,51 +204,55 @@ mod tests {
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
              VALUES ('del.md', 'hash', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
 
         let doc_id: i64 = db
             .query_read(
                 "SELECT id FROM docs WHERE source_ref = 'del.md'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap()[0];
 
         db.execute_write(
             "INSERT INTO doc_tags (doc_id, tag) VALUES (?1, 'test')",
-            &[&doc_id],
+            vec![Value::Integer(doc_id)],
         )
         .unwrap();
         db.execute_write(
             "INSERT INTO doc_links (doc_id, link) VALUES (?1, 'link')",
-            &[&doc_id],
+            vec![Value::Integer(doc_id)],
         )
         .unwrap();
         db.execute_write(
             "INSERT INTO chunks (doc_id, chunk_index, content, created_at) VALUES (?1, 0, 'c', ?2)",
-            &[&doc_id as &dyn rusqlite::types::ToSql, &now],
+            vec![Value::Integer(doc_id), Value::Integer(now)],
         )
         .unwrap();
 
-        // Delete the parent document.
-        db.execute_write("DELETE FROM docs WHERE id = ?1", &[&doc_id])
+        db.execute_write("DELETE FROM docs WHERE id = ?1", vec![Value::Integer(doc_id)])
             .unwrap();
 
-        // All children should be gone.
         let tag_count: Vec<i64> = db
-            .query_read("SELECT COUNT(*) FROM doc_tags", &[], |row| row.get(0))
+            .query_read("SELECT COUNT(*) FROM doc_tags", vec![], |row| {
+                row.get::<i64>(0)
+            })
             .unwrap();
         assert_eq!(tag_count[0], 0);
 
         let link_count: Vec<i64> = db
-            .query_read("SELECT COUNT(*) FROM doc_links", &[], |row| row.get(0))
+            .query_read("SELECT COUNT(*) FROM doc_links", vec![], |row| {
+                row.get::<i64>(0)
+            })
             .unwrap();
         assert_eq!(link_count[0], 0);
 
         let chunk_count: Vec<i64> = db
-            .query_read("SELECT COUNT(*) FROM chunks", &[], |row| row.get(0))
+            .query_read("SELECT COUNT(*) FROM chunks", vec![], |row| {
+                row.get::<i64>(0)
+            })
             .unwrap();
         assert_eq!(chunk_count[0], 0);
     }
@@ -264,23 +261,24 @@ mod tests {
 
     #[test]
     fn test_transaction_commit() {
-        let mut db = test_db();
+        let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        db.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at) VALUES ('tx.md', 'h', ?1, ?1, ?1)",
-                params![now],
-            )?;
-            Ok(())
-        })
+        // Use BEGIN/COMMIT to test transaction commit semantics.
+        db.execute_write("BEGIN", vec![]).unwrap();
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+             VALUES ('tx.md', 'h', ?1, ?1, ?1)",
+            vec![Value::Integer(now)],
+        )
         .unwrap();
+        db.execute_write("COMMIT", vec![]).unwrap();
 
         let count: Vec<i64> = db
             .query_read(
                 "SELECT COUNT(*) FROM docs WHERE source_ref = 'tx.md'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap();
         assert_eq!(count[0], 1);
@@ -288,26 +286,24 @@ mod tests {
 
     #[test]
     fn test_transaction_rollback() {
-        let mut db = test_db();
+        let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        let result: Result<(), DbError> = db.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at) VALUES ('rollback.md', 'h', ?1, ?1, ?1)",
-                params![now],
-            )?;
-            // Force an error to trigger rollback.
-            Err(DbError::Migration("intentional test rollback".into()))
-        });
+        // Use BEGIN/ROLLBACK to test that uncommitted changes are discarded.
+        db.execute_write("BEGIN", vec![]).unwrap();
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+             VALUES ('rollback.md', 'h', ?1, ?1, ?1)",
+            vec![Value::Integer(now)],
+        )
+        .unwrap();
+        db.execute_write("ROLLBACK", vec![]).unwrap();
 
-        assert!(result.is_err());
-
-        // The insert should NOT have persisted.
         let count: Vec<i64> = db
             .query_read(
                 "SELECT COUNT(*) FROM docs WHERE source_ref = 'rollback.md'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap();
         assert_eq!(count[0], 0);
@@ -322,7 +318,7 @@ mod tests {
         let db = Database::open(&db_path).unwrap();
 
         let mode: Vec<String> = db
-            .query_read("PRAGMA journal_mode", &[], |row| row.get(0))
+            .query_read("PRAGMA journal_mode", vec![], |row| row.get::<String>(0))
             .unwrap();
         assert_eq!(mode[0].to_lowercase(), "wal");
     }
@@ -334,7 +330,7 @@ mod tests {
         let db = test_db();
 
         let fk: Vec<i64> = db
-            .query_read("PRAGMA foreign_keys", &[], |row| row.get(0))
+            .query_read("PRAGMA foreign_keys", vec![], |row| row.get::<i64>(0))
             .unwrap();
         assert_eq!(fk[0], 1, "foreign_keys pragma should be ON");
     }
@@ -346,19 +342,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("idempotent.db");
 
-        // Open twice -- the second open should be a no-op for migrations.
         {
             let _db = Database::open(&db_path).unwrap();
         }
         {
             let db = Database::open(&db_path).unwrap();
 
-            // Verify tables still exist after second open.
             let tables: Vec<String> = db
                 .query_read(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                    &[],
-                    |row| row.get(0),
+                    vec![],
+                    |row| row.get::<String>(0),
                 )
                 .unwrap();
 
@@ -379,32 +373,31 @@ mod tests {
 
         db.execute_write(
             "INSERT INTO config (key, value) VALUES ('vault_name', 'My Vault')",
-            &[],
+            vec![],
         )
         .unwrap();
 
         let val: Vec<String> = db
             .query_read(
                 "SELECT value FROM config WHERE key = 'vault_name'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(val[0], "My Vault");
 
-        // Upsert with ON CONFLICT.
         db.execute_write(
             "INSERT INTO config (key, value) VALUES ('vault_name', 'Renamed Vault')
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
-            &[],
+            vec![],
         )
         .unwrap();
 
         let val: Vec<String> = db
             .query_read(
                 "SELECT value FROM config WHERE key = 'vault_name'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(val[0], "Renamed Vault");
@@ -419,12 +412,12 @@ mod tests {
 
         db.execute_write(
             "INSERT INTO entities (name, type, frequency, first_seen, last_seen) VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[
-                &"rust" as &dyn rusqlite::types::ToSql,
-                &"tag",
-                &5i64,
-                &now,
-                &now,
+            vec![
+                Value::Text("rust".into()),
+                Value::Text("tag".into()),
+                Value::Integer(5),
+                Value::Integer(now),
+                Value::Integer(now),
             ],
         )
         .unwrap();
@@ -432,20 +425,20 @@ mod tests {
         let entity_id: i64 = db
             .query_read(
                 "SELECT id FROM entities WHERE name = 'rust' AND type = 'tag'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap()[0];
 
         db.execute_write(
             "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at, effective_date)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[
-                &entity_id as &dyn rusqlite::types::ToSql,
-                &"notes/rust.md",
-                &"discussing ownership model",
-                &now,
-                &now,
+            vec![
+                Value::Integer(entity_id),
+                Value::Text("notes/rust.md".into()),
+                Value::Text("discussing ownership model".into()),
+                Value::Integer(now),
+                Value::Integer(now),
             ],
         )
         .unwrap();
@@ -456,8 +449,8 @@ mod tests {
                  FROM entity_occurrences eo
                  JOIN entities e ON e.id = eo.entity_id
                  WHERE e.name = 'rust'",
-                &[],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                vec![],
+                |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
             )
             .unwrap();
 
@@ -473,11 +466,11 @@ mod tests {
 
         db.execute_write(
             "INSERT INTO catalysts (id, text, entity, context) VALUES (?1, ?2, ?3, ?4)",
-            &[
-                &"cat-001" as &dyn rusqlite::types::ToSql,
-                &"What patterns exist in systems programming?",
-                &"rust",
-                &"default",
+            vec![
+                Value::Text("cat-001".into()),
+                Value::Text("What patterns exist in systems programming?".into()),
+                Value::Text("rust".into()),
+                Value::Text("default".into()),
             ],
         )
         .unwrap();
@@ -485,12 +478,12 @@ mod tests {
         db.execute_write(
             "INSERT INTO catalyst_similarities (catalyst_id, catalyst_text, file_path, chunk_index, similarity)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            &[
-                &"cat-001" as &dyn rusqlite::types::ToSql,
-                &"What patterns exist in systems programming?",
-                &"notes/rust.md",
-                &0i64,
-                &0.87f64,
+            vec![
+                Value::Text("cat-001".into()),
+                Value::Text("What patterns exist in systems programming?".into()),
+                Value::Text("notes/rust.md".into()),
+                Value::Integer(0),
+                Value::Real(0.87),
             ],
         )
         .unwrap();
@@ -498,8 +491,8 @@ mod tests {
         let sims: Vec<(String, f64)> = db
             .query_read(
                 "SELECT file_path, similarity FROM catalyst_similarities WHERE catalyst_id = 'cat-001'",
-                &[],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                vec![],
+                |row| Ok((row.get::<String>(0)?, row.get::<f64>(1)?)),
             )
             .unwrap();
 
@@ -517,13 +510,13 @@ mod tests {
 
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at) VALUES ('dup.md', 'h', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
 
         let result = db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at) VALUES ('dup.md', 'h2', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         );
 
         assert!(result.is_err(), "duplicate source_ref should be rejected");
@@ -536,27 +529,27 @@ mod tests {
 
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at) VALUES ('u.md', 'h', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
 
         let doc_id: i64 = db
             .query_read(
                 "SELECT id FROM docs WHERE source_ref = 'u.md'",
-                &[],
-                |row| row.get(0),
+                vec![],
+                |row| row.get::<i64>(0),
             )
             .unwrap()[0];
 
         db.execute_write(
             "INSERT INTO doc_tags (doc_id, tag) VALUES (?1, 'dup')",
-            &[&doc_id],
+            vec![Value::Integer(doc_id)],
         )
         .unwrap();
 
         let result = db.execute_write(
             "INSERT INTO doc_tags (doc_id, tag) VALUES (?1, 'dup')",
-            &[&doc_id],
+            vec![Value::Integer(doc_id)],
         );
         assert!(result.is_err(), "duplicate (doc_id, tag) should be rejected");
     }
@@ -592,8 +585,8 @@ mod tests {
         let tags: Vec<String> = db
             .query_read(
                 "SELECT tag FROM doc_tags WHERE doc_id = ?1 ORDER BY tag",
-                &[&ids[0]],
-                |row| row.get(0),
+                vec![Value::Integer(ids[0])],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(tags, vec!["rust", "test"]);
@@ -601,8 +594,8 @@ mod tests {
         let links: Vec<String> = db
             .query_read(
                 "SELECT link FROM doc_links WHERE doc_id = ?1",
-                &[&ids[0]],
-                |row| row.get(0),
+                vec![Value::Integer(ids[0])],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(links, vec!["other-note"]);
@@ -610,8 +603,8 @@ mod tests {
         let chunks: Vec<String> = db
             .query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
-                &[&ids[0]],
-                |row| row.get(0),
+                vec![Value::Integer(ids[0])],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(chunks, vec!["hello", "world"]);
@@ -642,7 +635,6 @@ mod tests {
             }
         };
 
-        // Insert v1
         db.upsert_documents_batch(&[make_doc(
             "v1",
             vec!["old-tag".into()],
@@ -650,7 +642,6 @@ mod tests {
         )])
         .unwrap();
 
-        // Upsert v2 — should replace tags and chunks
         let ids = db
             .upsert_documents_batch(&[make_doc(
                 "v2",
@@ -662,8 +653,8 @@ mod tests {
         let tags: Vec<String> = db
             .query_read(
                 "SELECT tag FROM doc_tags WHERE doc_id = ?1",
-                &[&ids[0]],
-                |row| row.get(0),
+                vec![Value::Integer(ids[0])],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(tags, vec!["new-tag"]);
@@ -671,13 +662,12 @@ mod tests {
         let chunks: Vec<String> = db
             .query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
-                &[&ids[0]],
-                |row| row.get(0),
+                vec![Value::Integer(ids[0])],
+                |row| row.get::<String>(0),
             )
             .unwrap();
         assert_eq!(chunks, vec!["new chunk a", "new chunk b"]);
 
-        // Only one document should exist
         assert_eq!(db.get_document_count().unwrap(), 1);
     }
 
@@ -688,7 +678,6 @@ mod tests {
         let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        // Insert entities of each type with varying recency scores
         let types_and_names: Vec<(&str, &str, f64)> = vec![
             ("tag", "rust", 0.9),
             ("tag", "python", 0.8),
@@ -704,17 +693,16 @@ mod tests {
             db.execute_write(
                 "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends)
                  VALUES (?1, ?2, 1, ?3, ?3, ?4)",
-                &[
-                    &name.to_string() as &dyn rusqlite::types::ToSql,
-                    &etype.to_string(),
-                    &now,
-                    &trends.to_string(),
+                vec![
+                    Value::Text(name.to_string()),
+                    Value::Text(etype.to_string()),
+                    Value::Integer(now),
+                    Value::Text(trends.to_string()),
                 ],
             )
             .unwrap();
         }
 
-        // Request min 2 tags, 1 link, 1 folder, total 5
         let entities = db.get_trending_entities(2, 1, 1, 5).unwrap();
         assert_eq!(entities.len(), 5);
 
@@ -746,60 +734,58 @@ mod tests {
         let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        // Doc 1: not embedded (embedded_at IS NULL)
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
              VALUES ('a.md', 'h1', ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
         let id1: i64 = db
-            .query_read("SELECT id FROM docs WHERE source_ref = 'a.md'", &[], |r| r.get(0))
+            .query_read("SELECT id FROM docs WHERE source_ref = 'a.md'", vec![], |r| {
+                r.get::<i64>(0)
+            })
             .unwrap()[0];
         db.execute_write(
             "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
              VALUES (?1, 0, 'chunk a', 2, ?2)",
-            &[&id1 as &dyn rusqlite::types::ToSql, &now],
+            vec![Value::Integer(id1), Value::Integer(now)],
         )
         .unwrap();
 
-        // Doc 2: embedded and up to date
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, embedded_content_hash, embedded_at, created_at, modified_at, indexed_at)
              VALUES ('b.md', 'h2', 'h2', ?1, ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
 
-        // Doc 3: embedded but stale (hash mismatch)
         db.execute_write(
             "INSERT INTO docs (source_ref, content_hash, embedded_content_hash, embedded_at, created_at, modified_at, indexed_at)
              VALUES ('c.md', 'h3-new', 'h3-old', ?1, ?1, ?1, ?1)",
-            &[&now],
+            vec![Value::Integer(now)],
         )
         .unwrap();
         let id3: i64 = db
-            .query_read("SELECT id FROM docs WHERE source_ref = 'c.md'", &[], |r| r.get(0))
+            .query_read("SELECT id FROM docs WHERE source_ref = 'c.md'", vec![], |r| {
+                r.get::<i64>(0)
+            })
             .unwrap()[0];
         db.execute_write(
             "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
              VALUES (?1, 0, 'chunk c', 2, ?2)",
-            &[&id3 as &dyn rusqlite::types::ToSql, &now],
+            vec![Value::Integer(id3), Value::Integer(now)],
         )
         .unwrap();
 
-        // Without filters: should return docs a.md and c.md
         let needing = db.get_documents_needing_embedding(None, None).unwrap();
         let refs: Vec<&str> = needing.iter().map(|(_, r, _)| r.as_str()).collect();
         assert!(refs.contains(&"a.md"));
         assert!(refs.contains(&"c.md"));
         assert!(!refs.contains(&"b.md"));
 
-        // With max_count = 1: should return only 1
         let limited = db.get_documents_needing_embedding(Some(1), None).unwrap();
         assert_eq!(limited.len(), 1);
 
-        // With indexed_since filter (future timestamp): should return none
         let future = now + 100_000;
         let filtered = db
             .get_documents_needing_embedding(None, Some(future))
@@ -814,38 +800,36 @@ mod tests {
         let db = test_db();
         let now = 1_700_000_000_000i64;
 
-        // Create folder children: people/Alice.md, people/Bob.md
         for name in &["people/Alice.md", "people/Bob.md"] {
             db.execute_write(
                 "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
                  VALUES (?1, 'h', ?2, ?2, ?2)",
-                &[&name.to_string() as &dyn rusqlite::types::ToSql, &now],
+                vec![Value::Text(name.to_string()), Value::Integer(now)],
             )
             .unwrap();
         }
 
-        // Create a doc outside the folder that links to "alice" twice (via two docs)
         for (i, source) in ["notes/journal.md", "notes/meeting.md"].iter().enumerate() {
             db.execute_write(
                 "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
                  VALUES (?1, ?2, ?3, ?3, ?3)",
-                &[
-                    &source.to_string() as &dyn rusqlite::types::ToSql,
-                    &format!("h{}", i + 10),
-                    &now,
+                vec![
+                    Value::Text(source.to_string()),
+                    Value::Text(format!("h{}", i + 10)),
+                    Value::Integer(now),
                 ],
             )
             .unwrap();
             let doc_id: i64 = db
                 .query_read(
                     "SELECT id FROM docs WHERE source_ref = ?1",
-                    &[&source.to_string()],
-                    |r| r.get(0),
+                    vec![Value::Text(source.to_string())],
+                    |r| r.get::<i64>(0),
                 )
                 .unwrap()[0];
             db.execute_write(
                 "INSERT INTO doc_links (doc_id, link) VALUES (?1, 'alice')",
-                &[&doc_id],
+                vec![Value::Integer(doc_id)],
             )
             .unwrap();
         }
@@ -854,7 +838,6 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(children[0].name, "Alice");
         assert_eq!(children[0].reference_count, 2);
-        // Bob has 0 external references
         assert_eq!(children[1].name, "Bob");
         assert_eq!(children[1].reference_count, 0);
     }
