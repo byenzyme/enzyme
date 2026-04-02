@@ -261,7 +261,7 @@ impl<'a> CatalystPipeline<'a> {
         let is_remote = self.llm.is_openrouter();
         let concurrency = if is_remote { 20 } else { 1 };
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs: u64 = if is_remote { 90 } else { 300 };
+        let entity_timeout_secs: u64 = if is_remote { 10 } else { 300 };
 
         // Build the response_format once based on provider capabilities
         let structured_output = self.llm.structured_output_support();
@@ -355,7 +355,7 @@ impl<'a> CatalystPipeline<'a> {
                 debug!(
                     entity_name = entity_name.as_str(),
                     response_len = response_text.len(),
-                    response_preview = %&response_text[..response_text.len().min(300)],
+                    response_text = %response_text,
                     "LLM response received"
                 );
 
@@ -379,7 +379,7 @@ impl<'a> CatalystPipeline<'a> {
                         error: None,
                     },
                     Err(e) => {
-                        warn!(
+                        debug!(
                             entity_name = entity_name.as_str(),
                             response_text = %response_text,
                             "failed to parse catalyst response: {}",
@@ -482,7 +482,7 @@ impl<'a> CatalystPipeline<'a> {
         }
 
         if !stats.errors.is_empty() {
-            warn!(
+            debug!(
                 total_errors = stats.errors.len(),
                 rate_limited = stats.rate_limited,
                 "catalyst generation completed with errors"

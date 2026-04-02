@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Result};
 use chrono::Utc;
 use serde::Deserialize;
 
@@ -591,42 +591,55 @@ pub struct CatalystResponse {
 /// Supports two formats:
 /// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...], "eraLabels": [...] }`
 /// 2. **Legacy array format**: `[{ "catalyst": "...", "topic": "..." }, ...]`
+///
+/// If both full-parse attempts fail (e.g. truncated response), falls back to partial
+/// recovery: extracts however many complete catalyst strings exist before the cutoff.
 pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
-    let cleaned;
-    let json_str = {
-        let s = strip_code_fences(response);
-        if s.contains(",") {
-            cleaned = strip_trailing_commas(s);
-            &cleaned
-        } else {
-            s
-        }
-    };
+    let s = strip_code_fences(response);
+    // Normalize Unicode smart quotes → escaped ASCII so they don't break JSON string boundaries.
+    let s = normalize_smart_quotes(s);
+    let s = strip_trailing_commas(&s);
 
     // Try the object format first
-    if let Ok(payload) = serde_json::from_str::<CatalystPayload>(json_str) {
-        let catalysts: Vec<ParsedCatalyst> = payload
-            .catalysts
-            .into_iter()
-            .enumerate()
-            .map(|(i, text)| {
-                let topic = payload
-                    .topic_names
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| generate_fallback_topic(&text));
-                let era_label = payload.era_labels.get(i).cloned();
-                ParsedCatalyst { text, topic, era_label }
-            })
-            .collect();
-        let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
-        return Ok(CatalystResponse { pairs, catalysts });
+    if let Ok(payload) = serde_json::from_str::<CatalystPayload>(&s) {
+        return Ok(build_from_payload(payload));
     }
 
     // Fall back to legacy array format
-    let entries: Vec<CatalystEntry> =
-        serde_json::from_str(json_str).context("Failed to parse catalyst response as JSON")?;
+    if let Ok(entries) = serde_json::from_str::<Vec<CatalystEntry>>(&s) {
+        return Ok(build_from_entries(entries));
+    }
 
+    // Partial recovery: salvage complete catalysts from a truncated response.
+    if let Some(recovered) = try_recover_partial(&s) {
+        if !recovered.catalysts.is_empty() {
+            return Ok(recovered);
+        }
+    }
+
+    bail!("Failed to parse catalyst response as JSON")
+}
+
+fn build_from_payload(payload: CatalystPayload) -> CatalystResponse {
+    let catalysts: Vec<ParsedCatalyst> = payload
+        .catalysts
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let topic = payload
+                .topic_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| generate_fallback_topic(&text));
+            let era_label = payload.era_labels.get(i).cloned();
+            ParsedCatalyst { text, topic, era_label }
+        })
+        .collect();
+    let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+    CatalystResponse { pairs, catalysts }
+}
+
+fn build_from_entries(entries: Vec<CatalystEntry>) -> CatalystResponse {
     let catalysts: Vec<ParsedCatalyst> = entries
         .into_iter()
         .map(|entry| ParsedCatalyst {
@@ -636,8 +649,133 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
         })
         .collect();
     let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+    CatalystResponse { pairs, catalysts }
+}
 
-    Ok(CatalystResponse { pairs, catalysts })
+/// Replace Unicode left/right double quotation marks with escaped ASCII quotes
+/// so they don't accidentally break JSON string boundaries.
+fn normalize_smart_quotes(s: &str) -> String {
+    s.replace('\u{201C}', "\\\"").replace('\u{201D}', "\\\"")
+}
+
+/// Attempt to salvage complete catalysts from a truncated JSON response.
+///
+/// Finds the `"catalysts"` array in the (possibly incomplete) JSON and extracts
+/// every fully-formed string before the truncation point. Does the same for
+/// `"topicNames"` and `"eraLabels"`, generating fallback topics where needed.
+fn try_recover_partial(json: &str) -> Option<CatalystResponse> {
+    let catalysts = find_and_extract_strings(json, "catalysts")?;
+    if catalysts.is_empty() {
+        return None;
+    }
+    let topic_names = find_and_extract_strings(json, "topicNames").unwrap_or_default();
+    let era_labels = find_and_extract_strings(json, "eraLabels").unwrap_or_default();
+
+    let parsed: Vec<ParsedCatalyst> = catalysts
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let topic = topic_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| generate_fallback_topic(&text));
+            let era_label = era_labels.get(i).cloned();
+            ParsedCatalyst { text, topic, era_label }
+        })
+        .collect();
+
+    let pairs = parsed.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+    Some(CatalystResponse { pairs, catalysts: parsed })
+}
+
+/// Locate a named key in JSON and extract its complete string array values.
+///
+/// Returns `None` if the key or array opener is not found. Returns a
+/// (possibly empty) `Vec` of all complete strings before the truncation point.
+fn find_and_extract_strings(json: &str, key: &str) -> Option<Vec<String>> {
+    let needle = format!("\"{}\"", key);
+    let key_pos = json.find(&needle)?;
+    let after_key = &json[key_pos + needle.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start_matches(|c: char| c.is_whitespace());
+    if !after_colon.starts_with('[') {
+        return None;
+    }
+    Some(extract_complete_strings_from_array(after_colon))
+}
+
+/// Walk a JSON array literal (starting with `[`) and return every fully-formed
+/// string value encountered before truncation or the closing `]`.
+fn extract_complete_strings_from_array(array_json: &str) -> Vec<String> {
+    let rest = match array_json.trim_start_matches(|c: char| c.is_whitespace()).strip_prefix('[') {
+        Some(r) => r,
+        None => return vec![],
+    };
+
+    let mut results = Vec::new();
+    let mut chars = rest.char_indices().peekable();
+
+    loop {
+        // Skip whitespace and commas between elements.
+        while let Some(&(_, c)) = chars.peek() {
+            if c == ',' || c.is_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        match chars.peek() {
+            None | Some(&(_, ']')) => break,
+            Some(&(_, '"')) => {
+                chars.next(); // consume opening quote
+                let mut value = String::new();
+                let mut complete = false;
+
+                while let Some((_, c)) = chars.next() {
+                    match c {
+                        '\\' => match chars.next() {
+                            Some((_, '"')) => value.push('"'),
+                            Some((_, '\\')) => value.push('\\'),
+                            Some((_, '/')) => value.push('/'),
+                            Some((_, 'n')) => value.push('\n'),
+                            Some((_, 'r')) => value.push('\r'),
+                            Some((_, 't')) => value.push('\t'),
+                            Some((_, 'b')) => value.push('\x08'),
+                            Some((_, 'f')) => value.push('\x0C'),
+                            Some((_, 'u')) => {
+                                let hex: String = (0..4)
+                                    .filter_map(|_| chars.next().map(|(_, ch)| ch))
+                                    .collect();
+                                if let Ok(n) = u32::from_str_radix(&hex, 16) {
+                                    if let Some(ch) = char::from_u32(n) {
+                                        value.push(ch);
+                                    }
+                                }
+                            }
+                            Some((_, c)) => value.push(c),
+                            None => break,
+                        },
+                        '"' => {
+                            complete = true;
+                            break;
+                        }
+                        c => value.push(c),
+                    }
+                }
+
+                if complete {
+                    results.push(value);
+                } else {
+                    // Truncation — stop here, don't include the partial string.
+                    break;
+                }
+            }
+            _ => break, // unexpected token
+        }
+    }
+
+    results
 }
 
 /// Remove trailing commas before `]` or `}` so lenient LLM output parses as valid JSON.
@@ -830,6 +968,54 @@ mod tests {
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
         assert!(prompt.contains("articulate what's at stake"));
         assert!(prompt.contains("Investment thesis statement"));
+    }
+
+    #[test]
+    fn test_parse_partial_recovery_truncated_array() {
+        // Simulates a response truncated mid-sentence in the last catalyst.
+        let response = r#"{
+  "catalysts": [
+    "What does the cost of assuming users want introspection reveal about early product bets?",
+    "How does the tension between local and remote compute shape the memory layer?",
+    "What does"#;
+        let resp = parse_catalyst_response(response).unwrap();
+        // Should recover 2 complete catalysts, drop the truncated one.
+        assert_eq!(resp.catalysts.len(), 2);
+        assert!(resp.catalysts[0].text.contains("introspection"));
+        assert!(resp.catalysts[1].text.contains("memory layer"));
+    }
+
+    #[test]
+    fn test_parse_partial_recovery_with_topics() {
+        // Truncated after catalysts array but topics partially present.
+        let response = r#"{
+  "catalysts": [
+    "What does X cost?",
+    "How does Y work?"
+  ],
+  "topicNames": [
+    "cost assumption tradeoff",
+    "tension local rem"#;
+        let resp = parse_catalyst_response(response).unwrap();
+        assert_eq!(resp.catalysts.len(), 2);
+        // First topic complete, second truncated → fallback generated for second.
+        assert_eq!(resp.catalysts[0].topic, "cost assumption tradeoff");
+        assert!(!resp.catalysts[1].topic.is_empty()); // fallback generated
+    }
+
+    #[test]
+    fn test_parse_partial_recovery_empty_fails() {
+        // Only the key came through — no complete strings. Should error, not return empty.
+        let response = r#"{"catalysts": ["#;
+        assert!(parse_catalyst_response(response).is_err());
+    }
+
+    #[test]
+    fn test_parse_smart_quote_normalization() {
+        // Unicode left/right double quotes inside a string value.
+        let response = r#"{"catalysts":["\u201CWhat does it cost?\u201D"],"topicNames":["cost framing"]}"#;
+        let resp = parse_catalyst_response(response).unwrap();
+        assert_eq!(resp.catalysts.len(), 1);
     }
 
     #[test]

@@ -130,6 +130,7 @@ struct DiscoveryEntry {
     entity_name: String,
     entity_type: EntityType,
     catalysts: Vec<String>,
+    failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +248,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut spinner = HelixSpinner::new();
     let mut stage = DisplayStage::Idle;
     let mut rolling_window: Vec<DiscoveryEntry> = Vec::new();
+    let mut failed_entries: Vec<DiscoveryEntry> = Vec::new();
     let mut discovery_completed: usize = 0;
     let mut discovery_total: usize = 0;
     let mut lines_written: u16 = 0;
@@ -264,6 +266,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                             out: &mut io::Stdout,
                             stage: &mut DisplayStage,
                             rolling_window: &mut Vec<DiscoveryEntry>,
+                            failed_entries: &mut Vec<DiscoveryEntry>,
                             discovery_completed: &mut usize,
                             discovery_total: &mut usize,
                             lines_written: &mut u16,
@@ -339,6 +342,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 *discovery_total = total;
                 *discovery_completed = 0;
                 rolling_window.clear();
+                failed_entries.clear();
             }
             DisplayEvent::EntityStarted {
                 entity_name: _,
@@ -360,6 +364,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     entity_name,
                     entity_type,
                     catalysts: catalyst_texts,
+                    failed: false,
                 });
                 if rolling_window.len() > ROLLING_WINDOW_SIZE {
                     rolling_window.remove(0);
@@ -382,21 +387,18 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             } => {
                 *discovery_completed = completed;
                 *discovery_total = total;
-                let short_err = if error.chars().count() > 80 {
-                    let end = error.char_indices().nth(80).map_or(error.len(), |(i, _)| i);
+                let short_err = if error.chars().count() > 60 {
+                    let end = error.char_indices().nth(57).map_or(error.len(), |(i, _)| i);
                     format!("{}…", &error[..end])
                 } else {
                     error
                 };
-                let fail_text = format!("(failed: {})", short_err);
-                rolling_window.push(DiscoveryEntry {
+                failed_entries.push(DiscoveryEntry {
                     entity_name,
                     entity_type,
-                    catalysts: vec![fail_text],
+                    catalysts: vec![short_err],
+                    failed: true,
                 });
-                if rolling_window.len() > ROLLING_WINDOW_SIZE {
-                    rolling_window.remove(0);
-                }
             }
             DisplayEvent::DiscoveryComplete {
                 entities_processed: _,
@@ -574,7 +576,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
         match rx.recv_timeout(FRAME_INTERVAL) {
             Ok(event) => {
                 if handle_event(
-                    event, &mut out, &mut stage, &mut rolling_window,
+                    event, &mut out, &mut stage, &mut rolling_window, &mut failed_entries,
                     &mut discovery_completed, &mut discovery_total,
                     &mut lines_written, &mut spinner,
                     &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
@@ -584,7 +586,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 // Drain all pending events before rendering
                 while let Ok(event) = rx.try_recv() {
                     if handle_event(
-                        event, &mut out, &mut stage, &mut rolling_window,
+                        event, &mut out, &mut stage, &mut rolling_window, &mut failed_entries,
                         &mut discovery_completed, &mut discovery_total,
                         &mut lines_written, &mut spinner,
                         &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
@@ -624,12 +626,12 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             }
 
             let window_len = rolling_window.len();
+            let has_failed = !failed_entries.is_empty();
             for (i, entry) in rolling_window.iter().enumerate() {
-                let is_last = i == window_len - 1 && embedding_status.is_none();
+                let is_last = i == window_len - 1 && !has_failed && embedding_status.is_none();
                 let display_text = if entry.catalysts.is_empty() {
                     None
                 } else {
-                    // Offset by position so each entity cycles independently
                     let idx = (frame_counter + i * 3) % entry.catalysts.len();
                     Some(entry.catalysts[idx].as_str())
                 };
@@ -641,6 +643,24 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     i,
                     window_len,
                     is_last,
+                    false,
+                );
+                lines_written += 1;
+            }
+            // Failed entities pinned at bottom in red
+            let failed_len = failed_entries.len();
+            for (i, entry) in failed_entries.iter().enumerate() {
+                let is_last = i == failed_len - 1 && embedding_status.is_none();
+                let display_text = entry.catalysts.first().map(|s| s.as_str());
+                let _ = tree::render_entity_node(
+                    &mut out,
+                    &entry.entity_name,
+                    &entry.entity_type,
+                    display_text,
+                    i,
+                    failed_len,
+                    is_last,
+                    true,
                 );
                 lines_written += 1;
             }

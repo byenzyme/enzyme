@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
-pub const DEFAULT_MODEL: &str = "google/gemini-2.5-flash-lite";
+pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
 const FREE_CONFIG_URL: &str =
     "https://enzyme-server-production.up.railway.app/enzyme-python/free-config";
 
@@ -268,6 +268,8 @@ struct ChatCompletionResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ChoiceMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -371,14 +373,19 @@ impl LlmClient {
             .await
             .context("Failed to parse LLM API response as JSON")?;
 
-        let content = response_body
+        let choice = response_body
             .choices
             .into_iter()
             .next()
-            .context("LLM API response contained no choices")?
-            .message
-            .content;
+            .context("LLM API response contained no choices")?;
 
+        if let Some(ref reason) = choice.finish_reason {
+            if reason != "stop" {
+                debug!(finish_reason = %reason, "LLM response did not finish normally — output may be truncated");
+            }
+        }
+
+        let content = choice.message.content;
         info!("Received chat completion response ({} chars)", content.len());
 
         Ok(content)
@@ -591,7 +598,7 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     match fetch_free_config().await {
         Ok(cfg) => return Ok(cfg),
         Err(e) => {
-            warn!("Failed to fetch free config from server: {}", e);
+            debug!("Failed to fetch free config from server: {}", e);
         }
     }
 
