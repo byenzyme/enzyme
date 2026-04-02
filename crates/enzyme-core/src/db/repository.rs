@@ -104,8 +104,7 @@ impl Database {
         }
 
         let docs = docs.to_vec();
-        let indexed_at = chrono::Utc::now().timestamp_millis();
-        let chunk_now = chrono::Utc::now().timestamp_millis();
+        let now = chrono::Utc::now().timestamp_millis();
 
         block_in_place_sync(async move {
             let tx = self.conn
@@ -152,7 +151,7 @@ impl Database {
                     Value::Text(doc.created_source.as_str().to_string()),
                     Value::Integer(doc.modified_at),
                     Value::Text(doc.modified_source.as_str().to_string()),
-                    Value::Integer(indexed_at),
+                    Value::Integer(now),
                     Value::Text(metadata),
                 ];
                 tx.execute(
@@ -203,7 +202,7 @@ impl Database {
                             Value::Integer(i as i64),
                             Value::Text(chunk_content.clone()),
                             Value::Integer(word_count),
-                            Value::Integer(chunk_now),
+                            Value::Integer(now),
                         ],
                     )
                     .await?;
@@ -1325,10 +1324,8 @@ impl Database {
                 ],
             )
             .await?;
-            tx.commit().await.context("commit upsert_catalyst_embeddings")?;
-            Ok::<(), anyhow::Error>(())
-        })?;
-        Ok(())
+            tx.commit().await.context("commit upsert_catalyst_embeddings")
+        })
     }
 
     /// Load all catalyst embeddings from the packed table.
@@ -1350,14 +1347,10 @@ impl Database {
 
         let ids: Vec<String> = serde_json::from_str(&ids_json)
             .context("deserialize catalyst ids")?;
-        let embedding_dim = if ids.is_empty() { 384 } else { vectors_blob.len() / ids.len() / 4 * 4 };
+        let embedding_dim = if ids.is_empty() { 384 } else { vectors_blob.len() / ids.len() };
         let results: Vec<(String, Vec<f32>)> = ids
             .into_iter()
-            .zip(
-                vectors_blob
-                    .chunks(embedding_dim.max(4))
-                    .map(blob_to_f32_vec),
-            )
+            .zip(vectors_blob.chunks(embedding_dim).map(blob_to_f32_vec))
             .collect();
         Ok(results)
     }
@@ -1448,6 +1441,6 @@ fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
 
 fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect()
 }
