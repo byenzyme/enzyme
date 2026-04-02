@@ -1,38 +1,255 @@
-# Enzyme — Semantic Search for Agent Runtimes
+# Enzyme — Compile-time semantic memory for agent workspaces
 
-Enzyme compiles a markdown vault into a concept graph with 8ms local queries. This repo packages enzyme as a plugin for [OpenClaw](https://docs.openclaw.ai) and [Hermes](https://github.com/esaradev/hermes-agent), with self-installing binary bootstrap.
+Enzyme is a Hermes plugin and OpenClaw skill that gives agents structural memory over Obsidian vaults, markdown knowledge bases, and any accumulated document corpus. It compiles your workspace into a concept graph with 8ms local semantic search — before the conversation starts.
 
-For the core CLI and how enzyme works, see [jshph/enzyme](https://github.com/jshph/enzyme).
+Every agent session starts from scratch. RAG embeds and retrieves per query. Memory tools store conversation facts and run LLM inference to reason over them. Both cost tokens at query time. Both require tool calls the model has to decide to make, frame correctly, and wait for. Both start empty on day one.
 
-## OpenClaw
+Enzyme is a compile step. It reads your workspace's tags, links, folders, and timestamps, generates thematic questions (catalysts) from the full timeline, and pre-computes every relationship. At query time: a database lookup. No LLM call. No API call. ~8ms on device.
 
-Clone into your workspace or managed skills directory:
+```
+> "Why do we keep rewriting the auth layer?"
+
+  → reaches across the ADR from six months ago, a retro note about scope creep,
+    and a journal entry connecting them — none share keywords with the query.
+    A catalyst bridged them.
+```
+
+One `enzyme petri` call at session start gives the model your trending topics, thematic tensions, and a search vocabulary that reaches content the user's raw words would never match — in 80% fewer tokens than brute-force agent search. The agent arrives knowing the room.
+
+11 MB binary. 23 MB embedding model. Compiles 1,000+ docs in under 20s. $0 per query.
+
+This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://docs.openclaw.ai), with self-installing binary bootstrap. For the core CLI: [jshph/enzyme](https://github.com/jshph/enzyme). Docs and architecture: [enzyme.garden](https://enzyme.garden).
+
+---
+
+## Hermes plugin — Install and quick start
+
+### Install the plugin
+
+```bash
+git clone --depth 1 https://github.com/jshph/enzyme-skill.git /tmp/enzyme-plugin \
+  && mkdir -p ~/.hermes/plugins \
+  && mv /tmp/enzyme-plugin/enzyme ~/.hermes/plugins/enzyme \
+  && rm -rf /tmp/enzyme-plugin
+```
+
+Verify it loaded:
+
+```bash
+hermes plugins list
+```
+
+You should see:
+
+```
+enzyme │ enabled │ 0.x.x │ Vault intelligence — concept graph and semantic search for markdown
+```
+
+> **Why not `hermes plugins install`?** The repo nests the plugin files under `enzyme/`, which Hermes's git installer doesn't auto-discover yet. The clone-and-move above is the reliable path. We're tracking a fix to make `hermes plugins install jshph/enzyme-skill` work natively.
+
+### First session
+
+Start Hermes in your vault directory:
+
+```bash
+cd ~/your-vault
+hermes
+```
+
+On your first session, enzyme will:
+
+1. **Bootstrap the binary** if `enzyme` isn't on PATH (~38 MB download, takes 10-30s)
+2. **Refresh the index** to catch any vault changes since last session
+3. **Register tools** — five tools become available to the model
+
+Just start talking. The model reaches for enzyme tools when it needs vault context — you don't have to ask for it.
+
+Here's what that looks like in practice. Three turns, no explicit tool requests:
+
+```
+You:     What have I been thinking about lately?
+Hermes:  [calls enzyme_petri] Your vault is trending on three threads...
+         enzyme (craft vs speed, operational blockers), people (mentorship
+         and trust, automation vs mastery), strategy (urgency vs ambition)...
+
+You:     Tell me more about the tension between craft and speed.
+Hermes:  [calls enzyme_catalyze "craft speed trade-offs"]
+         [reads inbox/2026-03-11-pricing-call.md, inbox/2025-09-12-design-review.md]
+         You've written about this as a consistent "don't lose the thing that
+         makes the work meaningful" tension. In March you wrote about leaving
+         things when they're most pregnant...
+
+You:     Are there any notes where I've changed my mind about something?
+Hermes:  [calls enzyme_catalyze "changed my mind revised belief"]
+         [greps for "used to think", "now I think"]
+         Yes — though many are "I re-framed this" rather than clean reversals...
+```
+
+The model composed its own search queries, combined enzyme with grep, and read the actual files — all without being told which tools to use or how to formulate queries.
+
+### How the plugin works
+
+The plugin registers three lifecycle hooks and five tools.
+
+**Hooks** run automatically:
+
+| Hook | When | What it does |
+|------|------|--------------|
+| `on_session_start` | Session begins | Bootstraps binary if missing, runs `enzyme refresh` |
+| `pre_llm_call` | First user message | Runs `enzyme petri --query` with the user's message, injects relevant entities and catalysts as ephemeral context |
+| `on_session_end` | Session closes normally | Runs `enzyme refresh` to index notes written during the session |
+
+The `pre_llm_call` hook fires on the first turn to seed the model with vault context. After that, the model uses enzyme tools explicitly when it needs to go deeper — it doesn't run petri on every turn.
+
+**Tools** are available for the model to call as needed:
+
+| Tool | What it does |
+|------|--------------|
+| `enzyme_petri` | Vault overview — trending entities with catalysts and activity trends. Open-ended (no query) for a full picture, or pass a query to rank by relevance. |
+| `enzyme_catalyze` | Semantic search — returns note excerpts, file paths, and the catalysts that bridged the match. |
+| `enzyme_refresh` | Incremental re-index. Fast (~100ms) when nothing changed. |
+| `enzyme_status` | Document count, entity count, embedding coverage, API key status. |
+| `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. |
+
+Tools are gated by `check_fn` — hidden from the model until the enzyme binary is installed and on PATH.
+
+### Optional: Set an API key for catalysts
+
+Enzyme generates catalysts using an LLM. Without an API key, everything works except catalyst regeneration.
+
+Set one of these in your `~/.hermes/.env`:
+
+```bash
+OPENROUTER_API_KEY=your-key    # Free tier works
+# or
+OPENAI_API_KEY=your-key
+```
+
+### Update the plugin
+
+```bash
+cd /tmp && git clone --depth 1 https://github.com/jshph/enzyme-skill.git enzyme-update \
+  && rm -rf ~/.hermes/plugins/enzyme \
+  && mv enzyme-update/enzyme ~/.hermes/plugins/enzyme \
+  && rm -rf enzyme-update
+```
+
+Or if you want to track upstream for easier updates:
+
+```bash
+git clone https://github.com/jshph/enzyme-skill.git ~/.hermes/enzyme-skill-repo
+ln -sfn ~/.hermes/enzyme-skill-repo/enzyme ~/.hermes/plugins/enzyme
+```
+
+Then update with `cd ~/.hermes/enzyme-skill-repo && git pull`.
+
+---
+
+## OpenClaw skill
+
+> **Status:** The OpenClaw integration is designed and documented but hasn't been end-to-end tested yet. The SKILL.md metadata follows the OpenClaw spec, and the install block and skill instructions should work — but edge cases around `kind: "download"` install, `always: true` token cost, and skill directory structure after clone haven't been verified. If you hit issues, please [open an issue](https://github.com/jshph/enzyme/issues) or find us on [Discord](https://discord.gg/nhvsqtKjQd).
+
+### Install the skill
 
 ```bash
 git clone https://github.com/jshph/enzyme-skill.git ~/.openclaw/skills/enzyme
 ```
 
-The SKILL.md loads with `always: true` — enzyme tools are available every session without explicit invocation. On first session, the agent detects whether enzyme is installed and bootstraps it automatically.
+The SKILL.md loads with `always: true` — enzyme is available every session without explicit invocation. On first session, the agent:
 
-**What happens on install:**
-1. Agent checks for `enzyme` on PATH. If missing, runs `install.sh` to download the binary + embedding model (~52 MB total).
-2. Agent checks for `.enzyme/enzyme.db` in the vault. If missing, walks you through guided setup: scans vault structure, proposes entity focus, initializes the index.
-3. Agent writes enzyme tool instructions into your AGENTS.md so future sessions have context without re-running setup.
+1. **Detects `anyBins: ["enzyme"]`** requirement and bootstraps the binary if missing
+2. **Walks you through vault setup** following the setup-guide
+3. **Writes enzyme instructions** into your AGENTS.md for persistence across sessions
 
-After setup, every session automatically refreshes the index and injects relevant vault context before the first model call.
+### First session
 
-## Hermes
+Start OpenClaw in your vault directory:
 
 ```bash
-hermes plugins install jshph/enzyme-skill
+cd ~/your-vault
+openclaw
 ```
 
-The plugin registers five tools (`enzyme_petri`, `enzyme_catalyze`, `enzyme_refresh`, `enzyme_status`, `enzyme_init`) and two lifecycle hooks:
+The agent should run `enzyme refresh` at session start and reach for `enzyme petri` on your first message. The same kinds of prompts work:
 
-- **`on_session_start`** — bootstraps binary if missing, refreshes vault index
-- **`pre_llm_call`** — runs `enzyme petri --query` with the user's message, injects relevant entities and catalysts as context
+- *"What have I been thinking about lately?"*
+- *"Search my vault for anything about feeling stuck"*
+- *"Have I written about the tension between X and Y?"*
 
-Tools are gated by `check_fn` — hidden from the model until the binary is installed.
+### How the skill works
+
+The SKILL.md gives the agent instructions for the full session lifecycle:
+
+| Phase | What the agent does |
+|-------|---------------------|
+| Session start | Runs `enzyme refresh --quiet` to catch vault changes |
+| First message | Runs `enzyme petri` — open-ended if the prompt is broad, or `--query "..."` if the user has a specific direction |
+| Deeper search | Uses `enzyme catalyze` with catalyst vocabulary from petri to reach content the user's words wouldn't match |
+| Writing notes | Follows the note template with existing tags and wikilinks |
+
+Unlike Hermes, OpenClaw doesn't have lifecycle hooks — context injection and refresh are driven by skill instructions rather than automated callbacks. The agent decides when to call enzyme. Petri runs once at the start to seed context, not on every turn.
+
+The same organic behavior applies — the agent composes its own enzyme queries, combines them with file reads and grep, and surfaces vault content without you specifying tools.
+
+### Recommended configuration
+
+After installing the skill, add these to your `openclaw.json`:
+
+**Point memory search at your vault** so OpenClaw's native search also reaches vault content:
+
+```json5
+memorySearch: {
+  extraPaths: ["/path/to/your/vault"]
+}
+```
+
+**Add enzyme refresh to your heartbeat** so the index stays current between sessions. In your `HEARTBEAT.md`:
+
+```markdown
+- [ ] Run `enzyme refresh --quiet` to catch vault changes
+```
+
+**Schedule a daily full re-index** for vaults with external content sources (Readwise syncs, channel captures):
+
+```json5
+cron: {
+  enabled: true
+}
+```
+
+Then tell your agent: *"Create a daily cron job that runs `enzyme refresh --full` at 9 AM."*
+
+**Set your API key** for catalyst generation (optional — enzyme works without it, but catalysts won't regenerate):
+
+```json5
+skills: {
+  entries: {
+    enzyme: {
+      env: {
+        OPENROUTER_API_KEY: "your-key"
+      }
+    }
+  }
+}
+```
+
+Or set `OPENAI_API_KEY` / `OPENROUTER_API_KEY` in your environment. OpenRouter's free tier works.
+
+### Update the skill
+
+```bash
+cd ~/.openclaw/skills/enzyme && git pull
+```
+
+### Open questions
+
+These are untested areas we're tracking:
+
+- **`kind: "download"` installer** — does OpenClaw run the install.sh script correctly, or does it expect an archive? No existing skill uses `kind: "download"`.
+- **`always: true` token cost** — does the full SKILL.md load into every turn's context, or just make the skill available on demand?
+- **Skill directory structure** — after `git clone`, the SKILL.md is at `~/.openclaw/skills/enzyme/enzyme/SKILL.md` (nested). Does OpenClaw resolve this, or does it need to be at `~/.openclaw/skills/enzyme/SKILL.md`?
+
+---
 
 ## Any agent runtime
 
@@ -42,15 +259,37 @@ Install the CLI directly:
 curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
 ```
 
-Then point your agent at `enzyme/SKILL.md` in this repo for the full workflow instructions, or add this to your agent's system prompt:
+Then point your agent at `enzyme/SKILL.md` for the full workflow, or add this to your agent's system prompt:
 
 ```
-enzyme petri --query "user's question"   # get relevant vault context
-enzyme catalyze "query"                  # semantic search by concept
-enzyme refresh --quiet                   # re-index on session start
+On session start, run `enzyme refresh --quiet`.
+On the user's first message, run `enzyme petri --query "their message"` for vault context.
+Use catalyst phrases from petri to compose `enzyme catalyze` queries.
 ```
 
-Use catalyst phrases from petri results to compose catalyze queries — they reach content the user's raw words won't find.
+---
+
+## How compile-time semantic search works
+
+Enzyme is a compile step. The expensive work happens once at init — entity extraction, catalyst generation, similarity pre-computation — and everything after that is fast lookups.
+
+**1. Structure reading** (~2s). Walks the corpus and extracts entities — tags, links, folders — with temporal metadata. When each entity appeared, when it was last active, whether it's accelerating or going dormant.
+
+**2. Embedding** (~5s). Documents split into chunks and embedded with a local ONNX model. No API call. No data leaving the machine.
+
+**3. Catalyst generation** (~10s). For each entity, the engine samples context across temporal eras and generates catalysts — thematic questions that probe what the content is actually about. A catalyst for an entity spanning 18 months doesn't ask "what happened?" It asks something like: *"The team revisited caching three times — once as a performance fix, once as a cost concern, once as a reliability question. What changed between each return?"*
+
+**4. Similarity pre-computation** (~3s). Every catalyst compared against every chunk. Top matches stored. This is what makes queries fast — at query time, there's no vector search. The similarities are already computed.
+
+Catalysts regenerate as the workspace grows. The same entity produces different catalysts six months from now. The questions stay alive where summaries go stale. When the agent writes a note back into the workspace, it enters the same index — the loop compounds.
+
+| Command | Purpose |
+|---------|---------|
+| `enzyme petri` | Vault overview: trending entities with catalysts and activity trends |
+| `enzyme petri --query "..."` | Same, ranked by relevance to a query |
+| `enzyme catalyze "query"` | Semantic search — returns excerpts, file paths, contributing catalysts |
+| `enzyme init` | First-time setup (~10-30s depending on vault size) |
+| `enzyme refresh` | Incremental re-index (fast, skips if unchanged) |
 
 ## What's in this repo
 
@@ -61,7 +300,7 @@ enzyme/
 ├── __init__.py             # Hermes entry point
 ├── schemas.py              # Tool schemas (LLM-facing)
 ├── tools.py                # Tool handlers (shell out to enzyme CLI)
-├── hooks.py                # Lifecycle hooks (session start, pre-LLM)
+├── hooks.py                # Lifecycle hooks (session start, pre-LLM, session end)
 ├── setup.py                # Binary bootstrap logic
 ├── install.sh              # CLI installer (curl-pipe-bash)
 ├── bin/                    # Platform binaries (macOS arm64, Linux x86_64/arm64)
@@ -73,25 +312,9 @@ enzyme/
     └── setup.sh            # Offline setup (uses bundled binaries)
 ```
 
-Two install paths coexist:
-- **Bundled** (`scripts/setup.sh`) — copies platform binary from `bin/`, no network needed. Used by AgentSkills-compatible runtimes.
-- **Download** (`install.sh`) — fetches latest release from GitHub. Used by OpenClaw, Hermes, and manual installs. ~50KB repo without LFS.
-
-## How enzyme works
-
-Enzyme reads the tags, links, folders, and timestamps in your markdown and builds a concept graph. From that structure it generates **catalysts** — thematic questions that surface connections keyword search misses.
-
-A query for "why we keep rewriting the auth layer" finds the ADR from six months ago and a retro note about scope creep — even though neither shares keywords with the query. The catalyst bridged them.
-
-**Core tools:**
-
-| Command | Purpose |
-|---------|---------|
-| `enzyme petri` | Vault overview: trending entities with catalysts and activity trends |
-| `enzyme petri --query "..."` | Same, ranked by relevance to a query |
-| `enzyme catalyze "query"` | Semantic search — returns excerpts, file paths, contributing catalysts |
-| `enzyme init` | First-time setup (~10-30s depending on vault size) |
-| `enzyme refresh` | Incremental re-index (fast, skips if unchanged) |
+Two install paths:
+- **Bundled** (`scripts/setup.sh`) — copies platform binary from `bin/`, no network needed
+- **Download** (`install.sh`) — fetches latest release from GitHub
 
 ## Requirements
 
