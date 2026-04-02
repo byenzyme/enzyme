@@ -67,22 +67,28 @@ Just start talking. The model reaches for enzyme tools when it needs vault conte
 Here's what that looks like in practice. Three turns, no explicit tool requests:
 
 ```
-You:     What have I been thinking about lately?
-Hermes:  [calls enzyme_petri] Your vault is trending on three threads...
-         enzyme (craft vs speed, operational blockers), people (mentorship
-         and trust, automation vs mastery), strategy (urgency vs ambition)...
+You:     What's been active across my notes lately?
+Hermes:  [calls enzyme_petri] Three threads are trending...
+         positioning (messaging keeps shifting — "tool" → "layer" → "engine"),
+         Q1-retro (two team leads flagged the same onboarding bottleneck
+         independently), customer-research (three interviews last week all
+         circled back to trust)...
 
-You:     Tell me more about the tension between craft and speed.
-Hermes:  [calls enzyme_catalyze "craft speed trade-offs"]
-         [reads inbox/2026-03-11-pricing-call.md, inbox/2025-09-12-design-review.md]
-         You've written about this as a consistent "don't lose the thing that
-         makes the work meaningful" tension. In March you wrote about leaving
-         things when they're most pregnant...
+You:     What's the throughline in those customer interviews?
+Hermes:  [calls enzyme_catalyze "customer interviews trust recurring theme"]
+         [reads notes/2026-03-25-sarah-call.md, notes/2026-03-27-marcus-call.md]
+         All three conversations started on pricing but ended on trust.
+         Sarah said "I need to know it won't break mid-quarter." Marcus
+         described evaluating tools as "trying to figure out who's still
+         going to be here in a year." The word "trust" doesn't appear in
+         any of the transcripts — but the concern runs through all of them...
 
-You:     Are there any notes where I've changed my mind about something?
-Hermes:  [calls enzyme_catalyze "changed my mind revised belief"]
-         [greps for "used to think", "now I think"]
-         Yes — though many are "I re-framed this" rather than clean reversals...
+You:     Did we land on final messaging for the launch?
+Hermes:  [calls enzyme_catalyze "launch messaging positioning decided"]
+         [greps for "final", "approved", "go with"]
+         Not yet. The March 20 strategy doc proposed "compile-time memory"
+         as the anchor. The March 28 meeting notes show the team liked it
+         but wanted a customer-facing version. No follow-up after that...
 ```
 
 The model composed its own search queries, combined enzyme with grep, and read the actual files — all without being told which tools to use or how to formulate queries.
@@ -172,9 +178,9 @@ openclaw
 
 The agent should run `enzyme refresh` at session start and reach for `enzyme petri` on your first message. The same kinds of prompts work:
 
-- *"What have I been thinking about lately?"*
-- *"Search my vault for anything about feeling stuck"*
-- *"Have I written about the tension between X and Y?"*
+- *"What's been active across my notes lately?"*
+- *"What's the throughline in those customer interviews?"*
+- *"Did we land on final messaging for the launch?"*
 
 ### How the skill works
 
