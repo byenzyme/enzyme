@@ -27,10 +27,7 @@ This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResear
 ### Install the plugin
 
 ```bash
-git clone --depth 1 https://github.com/jshph/enzyme-skill.git /tmp/enzyme-plugin \
-  && mkdir -p ~/.hermes/plugins \
-  && mv /tmp/enzyme-plugin/enzyme ~/.hermes/plugins/enzyme \
-  && rm -rf /tmp/enzyme-plugin
+hermes plugins install jshph/enzyme-skill
 ```
 
 Verify it loaded:
@@ -44,8 +41,6 @@ You should see:
 ```
 enzyme │ enabled │ 0.x.x │ Vault intelligence — concept graph and semantic search for markdown
 ```
-
-> **Why not `hermes plugins install`?** The repo nests the plugin files under `enzyme/`, which Hermes's git installer doesn't auto-discover yet. The clone-and-move above is the reliable path. We're tracking a fix to make `hermes plugins install jshph/enzyme-skill` work natively.
 
 ### First session
 
@@ -253,7 +248,7 @@ These are untested areas we're tracking:
 
 - **`kind: "download"` installer** — does OpenClaw run the install.sh script correctly, or does it expect an archive? No existing skill uses `kind: "download"`.
 - **`always: true` token cost** — does the full SKILL.md load into every turn's context, or just make the skill available on demand?
-- **Skill directory structure** — after `git clone`, the SKILL.md is at `~/.openclaw/skills/enzyme/enzyme/SKILL.md` (nested). Does OpenClaw resolve this, or does it need to be at `~/.openclaw/skills/enzyme/SKILL.md`?
+- **Skill directory structure** — after `git clone`, does OpenClaw find `SKILL.md` at the repo root correctly?
 
 ---
 
@@ -265,7 +260,7 @@ Install the CLI directly:
 curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
 ```
 
-Then point your agent at `enzyme/SKILL.md` for the full workflow, or add this to your agent's system prompt:
+Then point your agent at `SKILL.md` for the full workflow, or add this to your agent's system prompt:
 
 ```
 On session start, run `enzyme refresh --quiet`.
@@ -300,22 +295,21 @@ Catalysts regenerate as the workspace grows. The same entity produces different 
 ## What's in this repo
 
 ```
-enzyme/
-├── SKILL.md                # Skill instructions (OpenClaw, AgentSkills spec)
-├── plugin.yaml             # Hermes plugin manifest
-├── __init__.py             # Hermes entry point
-├── schemas.py              # Tool schemas (LLM-facing)
-├── tools.py                # Tool handlers (shell out to enzyme CLI)
-├── hooks.py                # Lifecycle hooks (session start, pre-LLM, session end)
-├── setup.py                # Binary bootstrap logic
-├── install.sh              # CLI installer (curl-pipe-bash)
-├── bin/                    # Platform binaries (macOS arm64, Linux x86_64/arm64)
-├── models/                 # Embedding model (~23 MB, bundled via Git LFS)
-├── references/
-│   ├── petri-guide.md      # How to present vault overview results
-│   └── search-guide.md     # How to present search results
-└── scripts/
-    └── setup.sh            # Offline setup (uses bundled binaries)
+SKILL.md                    # Skill instructions (OpenClaw, AgentSkills spec)
+plugin.yaml                 # Hermes plugin manifest
+__init__.py                 # Hermes entry point
+schemas.py                  # Tool schemas (LLM-facing)
+tools.py                    # Tool handlers (shell out to enzyme CLI)
+hooks.py                    # Lifecycle hooks (session start, pre-LLM, session end)
+setup.py                    # Binary bootstrap logic
+install.sh                  # CLI installer (curl-pipe-bash)
+bin/                        # Platform binaries (macOS arm64, Linux x86_64/arm64)
+models/                     # Embedding model (~23 MB, bundled via Git LFS)
+references/
+├── petri-guide.md          # How to present vault overview results
+└── search-guide.md         # How to present search results
+scripts/
+└── setup.sh                # Offline setup (uses bundled binaries)
 ```
 
 Two install paths:

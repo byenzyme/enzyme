@@ -356,39 +356,46 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
           cd skill-repo
 
-          mkdir -p enzyme/bin enzyme/models enzyme/references enzyme/scripts tmp-bin
+          mkdir -p bin models references scripts tmp-bin
+
+          # Remove legacy enzyme/ subdirectory if present (flatten to repo root)
+          rm -rf enzyme
 
           # Extract platform binaries
           for platform in macos-arm64 linux-arm64 linux-x86_64; do
             tar xzf "../artifacts/enzyme-${platform}/enzyme-${platform}.tar.gz" -C tmp-bin
-            mv tmp-bin/enzyme "enzyme/bin/enzyme-${platform}"
-            chmod +x "enzyme/bin/enzyme-${platform}"
+            mv tmp-bin/enzyme "bin/enzyme-${platform}"
+            chmod +x "bin/enzyme-${platform}"
           done
           rm -rf tmp-bin
 
           # Copy model files
-          cp ../model-files/model.onnx enzyme/models/
-          cp ../model-files/tokenizer.json enzyme/models/
+          cp ../model-files/model.onnx models/
+          cp ../model-files/tokenizer.json models/
 
           # Sync agent plugin files (SKILL.md, Hermes adapter, guides, install script)
-          cp ../plugin/agent/SKILL.md enzyme/SKILL.md
-          cp ../plugin/agent/plugin.yaml enzyme/plugin.yaml
-          cp ../plugin/agent/__init__.py enzyme/__init__.py
-          cp ../plugin/agent/schemas.py enzyme/schemas.py
-          cp ../plugin/agent/tools.py enzyme/tools.py
-          cp ../plugin/agent/hooks.py enzyme/hooks.py
-          cp ../plugin/agent/setup.py enzyme/setup.py
-          cp ../plugin/agent/install.sh enzyme/install.sh
-          cp ../plugin/agent/petri-guide.md enzyme/references/petri-guide.md
-          cp ../plugin/agent/search-guide.md enzyme/references/search-guide.md
-          cp ../plugin/agent/scripts/setup.sh enzyme/scripts/setup.sh
+          cp ../plugin/agent/SKILL.md ./SKILL.md
+          cp ../plugin/agent/plugin.yaml ./plugin.yaml
+          cp ../plugin/agent/__init__.py ./__init__.py
+          cp ../plugin/agent/schemas.py ./schemas.py
+          cp ../plugin/agent/tools.py ./tools.py
+          cp ../plugin/agent/hooks.py ./hooks.py
+          cp ../plugin/agent/setup.py ./setup.py
+          cp ../plugin/agent/install.sh ./install.sh
+          cp ../plugin/agent/setup-guide.md ./setup-guide.md
+          cp ../plugin/agent/petri-guide.md ./references/petri-guide.md
+          cp ../plugin/agent/search-guide.md ./references/search-guide.md
+          cp ../plugin/agent/scripts/setup.sh ./scripts/setup.sh
           cp ../plugin/agent/README.md ./README.md
           cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
 
+          # Update .gitattributes for flattened layout
+          printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\nmodels/model.onnx filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
+
           # Update versions
-          sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" enzyme/SKILL.md
-          sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" enzyme/plugin.yaml
-          sed -i "s/EXPECTED_VERSION = \"[^\"]*\"/EXPECTED_VERSION = \"${version}\"/" enzyme/setup.py
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" ./SKILL.md
+          sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" ./plugin.yaml
+          sed -i "s/EXPECTED_VERSION = \"[^\"]*\"/EXPECTED_VERSION = \"${version}\"/" ./setup.py
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
