@@ -592,7 +592,16 @@ pub struct CatalystResponse {
 /// 1. **Object format** (preferred): `{ "catalysts": [...], "topicNames": [...], "eraLabels": [...] }`
 /// 2. **Legacy array format**: `[{ "catalyst": "...", "topic": "..." }, ...]`
 pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
-    let json_str = strip_code_fences(response);
+    let cleaned;
+    let json_str = {
+        let s = strip_code_fences(response);
+        if s.contains(",") {
+            cleaned = strip_trailing_commas(s);
+            &cleaned
+        } else {
+            s
+        }
+    };
 
     // Try the object format first
     if let Ok(payload) = serde_json::from_str::<CatalystPayload>(json_str) {
@@ -629,6 +638,30 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
     let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
 
     Ok(CatalystResponse { pairs, catalysts })
+}
+
+/// Remove trailing commas before `]` or `}` so lenient LLM output parses as valid JSON.
+fn strip_trailing_commas(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            // Scan forward past whitespace to see if the next non-whitespace is ] or }
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
+                // Skip the comma
+                i += 1;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Strip markdown code fences from a response.
