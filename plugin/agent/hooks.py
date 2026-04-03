@@ -3,6 +3,7 @@
 Maps Hermes session events to enzyme CLI operations.
 """
 
+import json
 import os
 import subprocess
 
@@ -99,7 +100,7 @@ def pre_llm_call(**kwargs) -> dict:
     user_message = kwargs.get("user_message", "")
 
     try:
-        cmd = ["enzyme", "petri"]
+        cmd = ["enzyme", "petri", "-n", "5"]
         if user_message and len(user_message.split()) > 3:
             cmd.extend(["--query", user_message])
         result = subprocess.run(
@@ -108,9 +109,22 @@ def pre_llm_call(**kwargs) -> dict:
             text=True,
             timeout=10,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return {"context": result.stdout.strip()}
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+
+        petri = json.loads(result.stdout)
+        compact = []
+        for entity in petri.get("entities", []):
+            catalysts = [c["text"] for c in entity.get("catalysts", [])[:3]]
+            if catalysts:
+                compact.append({
+                    "entity": entity.get("name", ""),
+                    "trend": entity.get("activity_trend", ""),
+                    "catalysts": catalysts,
+                })
+        if compact:
+            return {"context": json.dumps(compact)}
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         pass
 
     return {}
