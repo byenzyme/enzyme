@@ -3,17 +3,23 @@
 Maps Hermes session events to enzyme CLI operations.
 """
 
+import os
 import subprocess
 
 from . import setup
+
+
+def _vault_is_initialized() -> bool:
+    """Check if the current directory has an enzyme index."""
+    return os.path.exists(os.path.join(".enzyme", "enzyme.db"))
 
 
 def on_session_start(**kwargs) -> None:
     """Bootstrap enzyme and refresh the vault index.
 
     Called at the start of every Hermes session. First session:
-    downloads binary + model (~38 MB), then refreshes. Subsequent
-    sessions: skips download, runs the fast staleness check.
+    downloads binary + model (~38 MB), inits the vault, then refreshes.
+    Subsequent sessions: skips download, runs the fast staleness check.
     """
     if not setup.is_enzyme_available():
         setup.ensure_enzyme_installed()
@@ -24,11 +30,18 @@ def on_session_start(**kwargs) -> None:
     if not setup.is_enzyme_current():
         setup.ensure_enzyme_installed()
 
-    subprocess.run(
-        ["enzyme", "refresh", "--quiet"],
-        capture_output=True,
-        timeout=60,
-    )
+    if not _vault_is_initialized():
+        subprocess.run(
+            ["enzyme", "init"],
+            capture_output=True,
+            timeout=120,
+        )
+    else:
+        subprocess.run(
+            ["enzyme", "refresh", "--quiet"],
+            capture_output=True,
+            timeout=60,
+        )
 
 
 def on_session_end(**kwargs) -> None:
