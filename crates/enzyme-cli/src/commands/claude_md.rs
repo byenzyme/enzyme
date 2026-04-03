@@ -51,12 +51,51 @@ Example flow:
 Results include `presentation_guidance` — follow these when framing the surfaced content.
 <!-- enzyme:end -->"#;
 
-pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
-    let claude_md_path = vault_path.join("CLAUDE.md");
+/// Context files checked in priority order. Matches Hermes, Claude Code,
+/// and Cursor discovery — first existing file wins.
+const CONTEXT_FILES: &[&str] = &[
+    ".hermes.md",
+    "HERMES.md",
+    "AGENTS.md",
+    "agents.md",
+    "CLAUDE.md",
+    "claude.md",
+    ".cursorrules",
+];
 
-    let content = if claude_md_path.exists() {
-        fs::read_to_string(&claude_md_path)
-            .context("failed to read existing CLAUDE.md")?
+/// Find the best context file to write to:
+/// 1. If any file already contains the enzyme marker, return it (update in place).
+/// 2. Otherwise return the first file that exists (append to it).
+/// 3. If none exist, default to CLAUDE.md.
+fn find_context_file(vault_path: &Path) -> std::path::PathBuf {
+    // First pass: file that already has our marker
+    for name in CONTEXT_FILES {
+        let path = vault_path.join(name);
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if content.contains(MARKER_START) {
+                    return path;
+                }
+            }
+        }
+    }
+    // Second pass: first existing file
+    for name in CONTEXT_FILES {
+        let path = vault_path.join(name);
+        if path.exists() {
+            return path;
+        }
+    }
+    // Default
+    vault_path.join("CLAUDE.md")
+}
+
+pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
+    let target_path = find_context_file(vault_path);
+
+    let content = if target_path.exists() {
+        fs::read_to_string(&target_path)
+            .with_context(|| format!("failed to read {}", target_path.display()))?
     } else {
         String::new()
     };
@@ -75,8 +114,8 @@ pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
         format!("{}\n\n{}", content.trim_end(), ENZYME_SECTION)
     };
 
-    fs::write(&claude_md_path, new_content)
-        .context("failed to write CLAUDE.md")?;
+    fs::write(&target_path, new_content)
+        .with_context(|| format!("failed to write {}", target_path.display()))?;
 
     Ok(())
 }
@@ -130,6 +169,25 @@ mod tests {
         assert!(content.contains("## Other Section"));
         // Only one start marker
         assert_eq!(content.matches(MARKER_START).count(), 1);
+    }
+
+    #[test]
+    fn prefers_agents_md_over_claude_md() {
+        let dir = TempDir::new().unwrap();
+        let agents_md = dir.path().join("AGENTS.md");
+        fs::write(&agents_md, "# My Agent\n\nSome instructions.\n").unwrap();
+        // Also create CLAUDE.md — should not be touched
+        let claude_md = dir.path().join("CLAUDE.md");
+        fs::write(&claude_md, "# Claude\n").unwrap();
+
+        generate_claude_md(dir.path()).unwrap();
+
+        let agents_content = fs::read_to_string(&agents_md).unwrap();
+        assert!(agents_content.contains(MARKER_START));
+        assert!(agents_content.contains("enzyme petri"));
+        // CLAUDE.md should be untouched
+        let claude_content = fs::read_to_string(&claude_md).unwrap();
+        assert!(!claude_content.contains(MARKER_START));
     }
 
     #[test]
