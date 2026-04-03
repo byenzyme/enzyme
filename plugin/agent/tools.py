@@ -1,15 +1,26 @@
 """Tool handlers for the enzyme Hermes plugin.
 
-Each handler shells out to the enzyme CLI and returns JSON.
-No reimplementation of core logic — the binary does all the work.
+Each handler shells out to the enzyme CLI and returns a JSON string.
+Signature: (args: dict, **kwargs) -> str
 """
 
+import json
+import os
 import subprocess
-from typing import Any
 
 
-def _run_enzyme(args: list[str], timeout: int = 30) -> dict[str, Any]:
-    """Run an enzyme CLI command and return the result."""
+def _ensure_initialized(timeout: int = 120) -> None:
+    """Run enzyme init if the vault has no index yet."""
+    if not os.path.exists(os.path.join(".enzyme", "enzyme.db")):
+        subprocess.run(
+            ["enzyme", "init"],
+            capture_output=True,
+            timeout=timeout,
+        )
+
+
+def _run_enzyme(args: list[str], timeout: int = 30) -> str:
+    """Run an enzyme CLI command and return JSON string."""
     try:
         result = subprocess.run(
             ["enzyme"] + args,
@@ -18,51 +29,52 @@ def _run_enzyme(args: list[str], timeout: int = 30) -> dict[str, Any]:
             timeout=timeout,
         )
         if result.returncode != 0:
-            return {"error": result.stderr.strip() or f"enzyme exited with code {result.returncode}"}
+            return json.dumps({"error": result.stderr.strip() or f"enzyme exited with code {result.returncode}"})
         output = result.stdout.strip()
         if not output:
-            return {"ok": True}
-        # enzyme outputs JSON — return as string for the LLM to read
-        return {"output": output}
+            return json.dumps({"ok": True})
+        return json.dumps({"output": output})
     except subprocess.TimeoutExpired:
-        return {"error": f"enzyme timed out after {timeout}s"}
+        return json.dumps({"error": f"enzyme timed out after {timeout}s"})
     except FileNotFoundError:
-        return {"error": "enzyme binary not found. Run install.sh first."}
+        return json.dumps({"error": "enzyme binary not found. Run install.sh first."})
 
 
-def handle_petri(query: str | None = None, top: int = 10) -> dict[str, Any]:
-    args = ["petri", "-n", str(top)]
+def handle_petri(args: dict, **kwargs) -> str:
+    _ensure_initialized()
+    cmd = ["petri", "-n", str(args.get("top", 10))]
+    query = args.get("query")
     if query:
-        args.extend(["--query", query])
-    return _run_enzyme(args)
+        cmd.extend(["--query", query])
+    return _run_enzyme(cmd)
 
 
-def handle_catalyze(
-    query: str,
-    limit: int = 10,
-    register: str = "explore",
-) -> dict[str, Any]:
-    args = ["catalyze", query, "-n", str(limit)]
+def handle_catalyze(args: dict, **kwargs) -> str:
+    _ensure_initialized()
+    query = args.get("query", "")
+    cmd = ["catalyze", query, "-n", str(args.get("limit", 10))]
+    register = args.get("register", "explore")
     if register != "explore":
-        args.extend(["--register", register])
-    return _run_enzyme(args)
+        cmd.extend(["--register", register])
+    return _run_enzyme(cmd)
 
 
-def handle_refresh(full: bool = False) -> dict[str, Any]:
-    args = ["refresh", "--quiet"]
-    if full:
-        args.append("--full")
-    return _run_enzyme(args, timeout=120)
+def handle_refresh(args: dict, **kwargs) -> str:
+    cmd = ["refresh", "--quiet"]
+    if args.get("full", False):
+        cmd.append("--full")
+    return _run_enzyme(cmd, timeout=120)
 
 
-def handle_status() -> dict[str, Any]:
+def handle_status(args: dict, **kwargs) -> str:
     return _run_enzyme(["status"])
 
 
-def handle_init(guide: str | None = None, quiet: bool = True) -> dict[str, Any]:
-    args = ["init"]
-    if quiet:
-        args.append("--quiet")
+def handle_init(args: dict, **kwargs) -> str:
+    cmd = ["init"]
+    if args.get("quiet", True):
+        cmd.append("--quiet")
+    guide = args.get("guide")
     if guide:
-        args.extend(["--guide", guide])
-    return _run_enzyme(args, timeout=120)
+        cmd.extend(["--guide", guide])
+    return _run_enzyme(cmd, timeout=120)
