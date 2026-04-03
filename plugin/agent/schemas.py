@@ -6,10 +6,11 @@ These schemas are presented to the LLM for tool selection and parameter filling.
 ENZYME_PETRI = {
     "name": "enzyme_petri",
     "description": (
-        "Get a vault overview: trending entities (tags, links, folders) with their "
-        "catalysts (thematic phrases) and activity trends. With --query, results are "
-        "ranked by relevance to the query. Use catalyst phrases from results to "
-        "compose enzyme_catalyze queries."
+        "What is this vault about? Returns the main topics, how recently active "
+        "they are, and thematic questions running through them. Use this when the "
+        "user asks what's here, what they've been thinking about, or to orient "
+        "yourself in a workspace of notes. The thematic questions (catalysts) are "
+        "the vocabulary for enzyme_catalyze queries — pass them as-is or adapt them."
     ),
     "parameters": {
         "type": "object",
@@ -17,8 +18,8 @@ ENZYME_PETRI = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Optional query to rank entities by relevance. "
-                    "Pass the user's message to get focused results."
+                    "Rank topics by relevance to this query. "
+                    "Pass the user's message to focus results."
                 ),
             },
             "top": {
@@ -34,16 +35,22 @@ ENZYME_PETRI = {
 ENZYME_CATALYZE = {
     "name": "enzyme_catalyze",
     "description": (
-        "Semantic search by concept — finds content through pre-computed catalyst "
-        "questions, not keyword matching. Compose queries using catalyst vocabulary "
-        "from enzyme_petri rather than the user's raw words."
+        "Find notes and excerpts across the vault by concept. Searches a "
+        "pre-built index of the user's writing — finds things they forgot they "
+        "wrote, connects notes from different time periods, surfaces patterns "
+        "across hundreds of files. Returns quoted excerpts with file paths and "
+        "dates. Use this instead of grep/search_files when looking for ideas, "
+        "themes, or past thinking — it finds content that keyword search misses."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "The conceptual query to search for.",
+                "description": (
+                    "What to search for. Use catalyst phrases from enzyme_petri "
+                    "for best results — they match the vault's own language."
+                ),
             },
             "limit": {
                 "type": "integer",
@@ -54,8 +61,9 @@ ENZYME_CATALYZE = {
                 "type": "string",
                 "enum": ["explore", "continuity", "reference"],
                 "description": (
-                    "Presentation register. 'explore' (default) for wonder/patterns, "
-                    "'continuity' for restoring context, 'reference' for capture patterns."
+                    "'explore' (default): surface patterns and tensions. "
+                    "'continuity': restore prior decisions and context. "
+                    "'reference': show what the user chose to capture."
                 ),
                 "default": "explore",
             },

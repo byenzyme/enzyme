@@ -106,9 +106,11 @@ def pre_llm_call(**kwargs) -> dict:
                 })
         if compact:
             context = (
-                "Vault indexed by enzyme. Use enzyme_catalyze to search — "
-                "it finds content by concept, not keyword. Use catalyst "
-                "phrases below as query seeds. Do NOT grep for vault content.\n\n"
+                "This is a personal knowledge vault indexed by enzyme. "
+                "The user's notes, highlights, and thinking are searchable "
+                "through the enzyme_petri and enzyme_catalyze tools — use "
+                "those, not grep or search_files, to explore vault content.\n\n"
+                "Active topics and catalyst questions (use as enzyme_catalyze queries):\n\n"
                 + json.dumps(compact)
             )
             return {"context": context}
