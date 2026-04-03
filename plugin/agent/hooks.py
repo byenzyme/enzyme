@@ -123,7 +123,13 @@ def pre_llm_call(**kwargs) -> dict:
                     "catalysts": catalysts,
                 })
         if compact:
-            return {"context": json.dumps(compact)}
+            context = (
+                "Vault indexed by enzyme. Use enzyme_catalyze to search — "
+                "it finds content by concept, not keyword. Use catalyst "
+                "phrases below as query seeds. Do NOT grep for vault content.\n\n"
+                + json.dumps(compact)
+            )
+            return {"context": context}
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         pass
 
