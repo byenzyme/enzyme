@@ -40,9 +40,9 @@ claude plugin install enzyme
 
 Inside Claude Code, invoke `/enzyme` to explore your vault by concept.
 
-### Codex and other MCP clients
+### Codex, OpenCode, and other MCP clients
 
-Enzyme ships a stdio MCP server that works with MCP-compatible clients, including Codex, Claude Desktop, and Cursor. Register `enzyme mcp` in your client's MCP configuration:
+Enzyme ships a stdio MCP server that works with MCP-compatible clients, including Codex, OpenCode, Claude Desktop, and Cursor. Register `enzyme mcp` in your client's MCP configuration:
 
 ```bash
 enzyme mcp
@@ -57,7 +57,7 @@ cd /path/to/your/vault    # any folder of markdown files
 enzyme init                # compiles concept graph — under 20s for 1k docs
 ```
 
-In Claude Code, use `/enzyme`. In Codex and other MCP clients, use the exposed Enzyme MCP tools directly.
+In Claude Code, use `/enzyme`. In Codex, OpenCode, and other MCP clients, use the exposed Enzyme MCP tools directly.
 
 ## What it does
 
