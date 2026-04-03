@@ -15,11 +15,11 @@ def _vault_is_initialized() -> bool:
 
 
 def on_session_start(**kwargs) -> None:
-    """Bootstrap enzyme and refresh the vault index.
+    """Bootstrap the enzyme binary if missing.
 
-    Called at the start of every Hermes session. First session:
-    downloads binary + model (~38 MB), inits the vault, then refreshes.
-    Subsequent sessions: skips download, runs the fast staleness check.
+    Called at the start of every Hermes session. Only handles binary
+    install/update — vault init and refresh happen in pre_llm_call
+    where Hermes blocks before the LLM sees anything.
     """
     if not setup.is_enzyme_available():
         setup.ensure_enzyme_installed()
@@ -29,19 +29,6 @@ def on_session_start(**kwargs) -> None:
 
     if not setup.is_enzyme_current():
         setup.ensure_enzyme_installed()
-
-    if not _vault_is_initialized():
-        subprocess.run(
-            ["enzyme", "init"],
-            capture_output=True,
-            timeout=120,
-        )
-    else:
-        subprocess.run(
-            ["enzyme", "refresh", "--quiet"],
-            capture_output=True,
-            timeout=60,
-        )
 
 
 def on_session_end(**kwargs) -> None:
@@ -88,12 +75,31 @@ def pre_llm_call(**kwargs) -> dict:
     if not kwargs.get("is_first_turn", False):
         return {}
 
+    # First-ever session: init the vault before querying
+    if not _vault_is_initialized():
+        try:
+            subprocess.run(
+                ["enzyme", "init"],
+                capture_output=True,
+                timeout=120,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return {}
+    else:
+        # Subsequent sessions: fast refresh
+        try:
+            subprocess.run(
+                ["enzyme", "refresh", "--quiet"],
+                capture_output=True,
+                timeout=60,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
     user_message = kwargs.get("user_message", "")
 
     try:
         cmd = ["enzyme", "petri"]
-        # Pass the user's message as a query if it's specific enough
-        # to benefit from relevance ranking
         if user_message and len(user_message.split()) > 3:
             cmd.extend(["--query", user_message])
         result = subprocess.run(
