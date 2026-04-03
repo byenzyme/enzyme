@@ -48,8 +48,9 @@ ENZYME_CATALYZE = {
             "query": {
                 "type": "string",
                 "description": (
-                    "What to search for. Use catalyst phrases from enzyme_petri "
-                    "for best results — they match the vault's own language."
+                    "A conceptual query inspired by the user's intent. Use the "
+                    "petri catalysts and entity themes as context to infer a few "
+                    "different angles — don't copy catalyst phrases verbatim."
                 ),
             },
             "limit": {
