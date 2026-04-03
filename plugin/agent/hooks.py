@@ -16,20 +16,23 @@ def _vault_is_initialized() -> bool:
 
 
 def on_session_start(**kwargs) -> None:
-    """Bootstrap the enzyme binary if missing.
+    """Bootstrap enzyme and ensure the vault is indexed.
 
-    Called at the start of every Hermes session. Only handles binary
-    install/update — vault init and refresh happen in pre_llm_call
-    where Hermes blocks before the LLM sees anything.
+    Hermes blocks on this hook before the LLM loop starts.
     """
     if not setup.is_enzyme_available():
         setup.ensure_enzyme_installed()
 
     if not setup.is_enzyme_available():
-        return  # install failed — tools will be gated by check_fn
+        return
 
     if not setup.is_enzyme_current():
         setup.ensure_enzyme_installed()
+
+    if not _vault_is_initialized():
+        subprocess.run(["enzyme", "init"], capture_output=True, timeout=120)
+    else:
+        subprocess.run(["enzyme", "refresh", "--quiet"], capture_output=True, timeout=60)
 
 
 def on_session_end(**kwargs) -> None:
@@ -75,27 +78,6 @@ def pre_llm_call(**kwargs) -> dict:
 
     if not kwargs.get("is_first_turn", False):
         return {}
-
-    # First-ever session: init the vault before querying
-    if not _vault_is_initialized():
-        try:
-            subprocess.run(
-                ["enzyme", "init"],
-                capture_output=True,
-                timeout=120,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return {}
-    else:
-        # Subsequent sessions: fast refresh
-        try:
-            subprocess.run(
-                ["enzyme", "refresh", "--quiet"],
-                capture_output=True,
-                timeout=60,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
 
     user_message = kwargs.get("user_message", "")
 
