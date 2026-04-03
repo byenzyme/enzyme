@@ -58,26 +58,23 @@ def on_session_end(**kwargs) -> None:
     )
 
 
+_cached_context = None
+
+
 def pre_llm_call(**kwargs) -> dict:
-    """Inject vault context on the first turn of a session.
+    """Inject vault context on every turn.
 
-    Hermes passes: session_id, user_message, conversation_history,
-    is_first_turn, model, platform.
-
-    Only fires on the first turn to seed the model with vault context.
-    After that, the model uses enzyme tools explicitly when it needs
-    to go deeper — running petri on every turn would waste tokens and
-    add latency for no benefit.
-
-    If the user's first message has a clear direction, we pass it as
-    a query so petri ranks by relevance. If it's open-ended, we run
-    petri without a query for the full picture.
+    Runs petri once (first turn), caches the result, and injects it
+    on every subsequent turn so the model always knows to use enzyme
+    tools. ~2KB per turn.
     """
+    global _cached_context
+
     if not setup.is_enzyme_available():
         return {}
 
-    if not kwargs.get("is_first_turn", False):
-        return {}
+    if _cached_context is not None:
+        return {"context": _cached_context}
 
     user_message = kwargs.get("user_message", "")
 
@@ -105,7 +102,7 @@ def pre_llm_call(**kwargs) -> dict:
                     "catalysts": catalysts,
                 })
         if compact:
-            context = (
+            _cached_context = (
                 "This is a personal knowledge vault indexed by enzyme. "
                 "The user's notes, highlights, and thinking are searchable "
                 "through the enzyme_petri and enzyme_catalyze tools — use "
@@ -113,7 +110,7 @@ def pre_llm_call(**kwargs) -> dict:
                 "Active topics and catalyst questions (use as enzyme_catalyze queries):\n\n"
                 + json.dumps(compact)
             )
-            return {"context": context}
+            return {"context": _cached_context}
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         pass
 
