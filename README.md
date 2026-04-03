@@ -29,19 +29,23 @@ On macOS you can also use Homebrew:
 brew install jshph/enzyme/enzyme-cli
 ```
 
-Then add the Claude Code plugin:
+Then configure your client:
+
+### Claude Code plugin
 
 ```bash
 claude plugin marketplace add jshph/enzyme
 claude plugin install enzyme
 ```
 
-### MCP server
+Inside Claude Code, invoke `/enzyme` to explore your vault by concept.
 
-If you prefer MCP over the plugin, Enzyme ships a stdio MCP server that works with any MCP-compatible client (Claude Desktop, Cursor, etc):
+### Codex and other MCP clients
+
+Enzyme ships a stdio MCP server that works with MCP-compatible clients, including Codex, Claude Desktop, and Cursor. Register `enzyme mcp` in your client's MCP configuration:
 
 ```bash
-claude mcp add enzyme -- enzyme mcp
+enzyme mcp
 ```
 
 The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you can initialize and explore your vault entirely from the client without running CLI commands separately.
@@ -53,7 +57,7 @@ cd /path/to/your/vault    # any folder of markdown files
 enzyme init                # compiles concept graph — under 20s for 1k docs
 ```
 
-Inside Claude Code, invoke `/enzyme` to explore your vault by concept.
+In Claude Code, use `/enzyme`. In Codex and other MCP clients, use the exposed Enzyme MCP tools directly.
 
 ## What it does
 
