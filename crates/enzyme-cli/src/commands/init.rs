@@ -423,7 +423,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     if !quiet {
         eprintln!();
         eprintln!(
-            "  {}Try:{} claude {}\"explore my vault and tell me what i'm not seeing\"{}",
+            "  {}Try:{} claude {}\"explore with enzyme and tell me what i'm not seeing\"{}",
             crossterm::style::SetForegroundColor(crossterm::style::Color::White),
             crossterm::style::ResetColor,
             crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),

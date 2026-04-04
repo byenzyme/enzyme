@@ -9,7 +9,7 @@ const MARKER_END: &str = "<!-- enzyme:end -->";
 const ENZYME_SECTION: &str = r#"<!-- enzyme:start -->
 ## Enzyme CLI
 
-Use the Enzyme CLI for retrieving context from this vault. Run all commands from the vault root.
+Use the Enzyme CLI for retrieving context from this vault. Run all enzyme commands from the current directory.
 
 ### Working memory
 
