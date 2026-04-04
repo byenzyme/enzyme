@@ -6,6 +6,7 @@ pub mod init;
 pub mod lock;
 pub mod mcp;
 pub mod petri;
+pub mod scan;
 pub mod serve;
 pub mod setup;
 pub mod status;
