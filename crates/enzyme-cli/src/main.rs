@@ -45,6 +45,10 @@ enum Commands {
         #[arg(short, long)]
         quiet: bool,
 
+        /// Emit JSONL progress events to stderr (for GUI integration)
+        #[arg(long)]
+        json_progress: bool,
+
         /// Minimum catalysts for the largest entity (by volume).
         /// Raises the ceiling and boosts the top entity to at least this many.
         #[arg(long)]
@@ -131,6 +135,9 @@ enum Commands {
 
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
+
+    /// Quick vault scan — extract entities without initializing
+    Scan,
 
     /// Start the HTTP API server for the explore UI
     Serve {
@@ -235,11 +242,11 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached, guide, quiet, min_top_catalysts } => {
+        Commands::Init { full, detached, guide, quiet, json_progress, min_top_catalysts } => {
             let vault_guide = resolve_vault_guide(guide);
             let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
 
-            if quiet {
+            if quiet || json_progress {
                 if let Some(result) = init_result {
                     let output = result.to_json(&vault_path)?;
                     println!("{}", serde_json::to_string(&output)?);
@@ -267,6 +274,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
+        }
+        Commands::Scan => {
+            commands::scan::run_scan(&vault_path)?;
         }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
