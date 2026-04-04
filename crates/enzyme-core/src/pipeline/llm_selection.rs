@@ -356,7 +356,7 @@ mod tests {
                     profile: Some("dialectical".to_string()),
                 },
                 SelectedEntity {
-                    entity_ref: "[[Maren Holt]]".to_string(),
+                    entity_ref: "[[deep work]]".to_string(),
                     profile: Some("relational".to_string()),
                 },
                 SelectedEntity {
@@ -378,7 +378,7 @@ mod tests {
         let contents = std::fs::read_to_string(&config_path).unwrap();
         assert!(contents.contains("catalyzedEntities:"));
         assert!(contents.contains("#enzyme"));
-        assert!(contents.contains("[[Maren Holt]]"));
+        assert!(contents.contains("[[deep work]]"));
         assert!(contents.contains("catalystProfile: dialectical"));
         assert!(contents.contains("guideSignal:"));
 

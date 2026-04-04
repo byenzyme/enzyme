@@ -254,14 +254,14 @@ impl<'a> CatalystPipeline<'a> {
         }
 
         // Phase 2: Fire LLM calls with bounded concurrency
-        // Remote providers can handle high parallelism; local models typically
-        // serve one request at a time. Paid OpenRouter has no platform rate
-        // limit (bottleneck is the upstream provider), so we start generous
-        // and let per-task exponential backoff absorb any 429s.
+        // Remote providers can handle moderate parallelism; local models typically
+        // serve one request at a time. We keep concurrency conservative to avoid
+        // 429s from upstream providers, and use a generous timeout to accommodate
+        // retries with exponential backoff.
         let is_remote = self.llm.is_openrouter();
-        let concurrency = if is_remote { 20 } else { 1 };
+        let concurrency = if is_remote { 8 } else { 1 };
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs: u64 = if is_remote { 10 } else { 300 };
+        let entity_timeout_secs: u64 = if is_remote { 30 } else { 300 };
 
         // Build the response_format once based on provider capabilities
         let structured_output = self.llm.structured_output_support();

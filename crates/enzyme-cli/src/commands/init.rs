@@ -73,7 +73,7 @@ impl InitResult {
     }
 }
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<Option<InitResult>> {
+pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, json_progress: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
     // Check for existing enzyme data and offer hard reset
@@ -127,8 +127,14 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         }
     };
 
-    // Start display (quiet mode suppresses all output)
-    let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
+    // Start display
+    let display = if json_progress {
+        InitDisplay::start_json()
+    } else if quiet {
+        InitDisplay::start_quiet()
+    } else {
+        InitDisplay::start()
+    };
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -173,7 +179,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             tx.send(DisplayEvent::LlmSelectionStart).ok();
             let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
             let llm_sel = LlmSelectionPipeline::new(&db, &llm);
-            match llm_sel.run(&sel_result.entities, vault_path, &resolved.model, vault_guide).await {
+            match llm_sel.run(&sel_result.entities, vault_path, resolved.selection_model(), vault_guide).await {
                 Ok(result) => {
                     tx.send(DisplayEvent::LlmSelectionComplete {
                         entities_selected: result.entities.len(),
@@ -483,7 +489,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     drop(db);
 
     // Run init in quiet mode (suppresses all output)
-    let _ = run_init(vault_path, false, false, true, None, None).await?;
+    let _ = run_init(vault_path, false, false, true, false, None, None).await?;
 
     // Store bookkeeping for next staleness check
     let db = Database::open(&paths.vault_db)?;
@@ -895,7 +901,7 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
     };
 
     // Run the full pipeline.
-    let init_result = run_init(vault_path, full, false, quiet, vault_guide, min_top_catalysts).await?;
+    let init_result = run_init(vault_path, full, false, quiet, false, vault_guide, min_top_catalysts).await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;

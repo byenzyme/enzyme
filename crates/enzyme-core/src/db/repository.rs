@@ -541,6 +541,12 @@ impl Database {
     }
 
     /// Get trending entities with guaranteed type diversity.
+    /// Structural/tooling folder names that should never be trending candidates.
+    const EXCLUDED_FOLDER_NAMES: &'static [&'static str] = &[
+        ".claude", ".obsidian", ".enzyme", ".git", ".trash",
+        "templates", "templater", "config", "migrations",
+    ];
+
     pub fn get_trending_entities(
         &self,
         min_tags: usize,
@@ -557,7 +563,20 @@ impl Database {
             }
         };
 
-        let root_entities: Vec<Entity> = all.into_iter().filter(|e| is_root_level(e)).collect();
+        let is_excluded_folder = |e: &Entity| -> bool {
+            e.entity_type == EntityType::Folder
+                && Self::EXCLUDED_FOLDER_NAMES.contains(&e.name.to_lowercase().as_str())
+        };
+
+        // Links referenced in fewer than 3 files are likely document titles, not concepts
+        let is_low_reference_link = |e: &Entity| -> bool {
+            e.entity_type == EntityType::Link && e.frequency < 3
+        };
+
+        let root_entities: Vec<Entity> = all
+            .into_iter()
+            .filter(|e| is_root_level(e) && !is_excluded_folder(e) && !is_low_reference_link(e))
+            .collect();
 
         let mut tags: Vec<Entity> = root_entities
             .iter()

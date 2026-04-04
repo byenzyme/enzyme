@@ -39,6 +39,23 @@ impl ResolvedConfig {
             format!("{}••••{}", &key[..3.min(key.len())], visible)
         }
     }
+
+    /// Model to use for LLM selection (one-shot, needs strong reasoning).
+    ///
+    /// For free-tier users the server may return a cheap catalyst model
+    /// (e.g. flash-lite). Selection is a single call that benefits from a
+    /// more capable model, so we upgrade to DEFAULT_MODEL in that case.
+    pub fn selection_model(&self) -> &str {
+        match self.provider {
+            ConfigProvider::ServerFallback => DEFAULT_MODEL,
+            _ => &self.model,
+        }
+    }
+
+    /// Whether this config came from the free-tier server fallback.
+    pub fn is_free_tier(&self) -> bool {
+        matches!(self.provider, ConfigProvider::ServerFallback)
+    }
 }
 
 /// Shape of the JSON returned by the free-config endpoint.

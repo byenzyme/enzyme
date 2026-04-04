@@ -108,15 +108,21 @@ pub fn selection_json_schema() -> serde_json::Value {
 /// Build the system prompt for LLM entity selection.
 ///
 /// Describes the 6 profiles compactly, entity type syntax, expandable folder
-/// semantics, and asks the LLM to select 15–25 from the trending candidates.
+/// semantics, and asks the LLM to select entities from the trending candidates.
 pub fn build_selection_system_prompt() -> String {
     r##"You are an entity selector for Enzyme, a system that generates thought-provoking catalysts for an Obsidian vault.
 
-Your task: From the trending entities below, select 15–25 that would produce the richest catalysts. You're curating the vault's intellectual surface area.
+Your task: Read the vault's structure and trending entities, then identify the **intellectual architecture** — the folders, tags, and recurring concepts that organize the owner's thinking. Select the fewest entities that cover the most ground.
+
+## Core principle: coverage over activity
+
+Every entity you select will have catalysts generated for it. A folder containing 200 notes produces far richer catalysts than any single note inside it. A tag used across 30 files reveals a thinking pattern; a wikilink referenced once is just a document title.
+
+**Use the `file_count` stat as your primary signal.** High file_count = high coverage = good catalyst target. Prefer 8 high-coverage entities over 20 low-coverage ones.
 
 ## Entity types and syntax
 - Tags: "#tag" (e.g. "#enzyme", "#philosophy/epistemology")
-- Links: "[[Note Name]]" (e.g. "[[Maren Holt]]", "[[product-market fit]]")
+- Links: "[[Note Name]]" (e.g. "[[product-market fit]]", "[[deep work]]")
 - Folders: "folder:name" (e.g. "folder:inbox", "folder:people")
 
 ## Catalyst profiles (assign the best-fit profile per entity)
@@ -127,32 +133,39 @@ Your task: From the trending entities below, select 15–25 that would produce t
 - **strategic** — names positions, bets, and leverage. For strategy, investment, decision-making entities.
 - **reflective** — creates space for personal pattern recognition. For journaling, self-reflection entities.
 
-## Expandable folders and page entities
-Some folder entities include a `<page_entities>` section listing wikilinks that have source files in that folder. These folders should be selected as expandable — they contain meaningful child entities.
+## What to select and what to skip
 
-When a folder has `<page_entities>`, **do NOT select those wikilinks as separate entities** — the folder subsumes them. Only select a wikilink separately if it represents a concept/topic rather than a page inside a folder.
+**Good catalyst targets:**
+- Folders with many files (content collections, people, projects)
+- Tags used across many notes (recurring themes, interests, life areas)
+- Wikilinks referenced across 5+ files (recurring concepts, people, ideas)
 
-Children listed in expandable folders inherit the folder's profile unless overridden.
+**Skip these — they waste catalyst budget:**
+- Individual note titles, article names, or dated entries (e.g. "[[Some Article Highlights]]", "convos/Person - 2026-03-05")
+- Tooling/config folders (e.g. .claude, templates, config)
+- Meta/structural tags (#todo, #note, #template)
+- Wikilinks referenced in only 1-2 files (document titles, not concepts)
+
+## Expandable folders
+
+Some folder entities include a `<page_entities>` section listing wikilinks with source files in that folder. These folders can be marked as expandable.
+
+**Important:** Expandable folder children should only be **recurring concepts or people** — entities that appear across multiple files. Never list individual dated entries, article titles, or single-file documents as children. If a folder's page entities are mostly document titles (articles, conversation logs, highlights), select the folder but leave children empty.
+
+Good children: `["[[alice]]", "[[bob]]"]` (people referenced across the vault)
+Bad children: `["[[convos/Person - 2026-03-05]]", "[[Articles/Some Article Highlights]]"]` (dated entries, individual documents)
 
 ## Vault guide
-A `<vault_guide>` may appear in the user message with directives from the vault owner. Treat it as authoritative intent — it overrides default heuristics. Apply it across all output fields:
-- **Entity selection**: If the guide says certain folders, tags, or links should be entities, include them. If it says something is structural (not semantic), deprioritize or exclude it.
-- **Profiles**: If the guide describes what kind of thinking a category represents, use that to assign profiles.
-- **Expandable folders**: If the guide names folders that contain meaningful sub-entities, expand them.
-- **Exclusions**: If the guide calls something structural or meta, exclude it.
-- **Guide signal**: Incorporate the guide's framing into your read of what's intellectually alive.
-
-## Selection criteria
-- Prefer entities with recent activity and rich context
-- Ensure diversity: mix of tags, links, and folders
-- Avoid meta/structural entities (e.g. #todo, #note, generic folder names)
-- Group related entities under expandable folders when natural
+A `<vault_guide>` may appear in the user message with directives from the vault owner. Treat it as **authoritative intent** — it overrides default heuristics. If the guide names specific folders or tags, include them. If it calls something structural, exclude it.
 
 ## Exclusions
-Identify entities that should be excluded from trending and catalyst generation — structural/meta entities like #todo, #note, #template, generic folder names, or anything that serves an organizational role rather than a thematic one. Respect any exclusions from the vault guide.
+Identify entities that should be excluded — structural/meta entities like #todo, #note, #template, tooling folders, or anything organizational rather than thematic.
 
 ## Guide signal
-Write a 1-2 sentence "guide signal" — what's intellectually alive in this vault right now. This calibrates future catalyst generation. If a vault guide is present, let it inform your read.
+Write a 1-2 sentence read of what's intellectually alive in this vault right now. This calibrates future catalyst generation.
+
+## How many to select
+There is no minimum. A vault with 3 clear pillars needs only 3 entities. A complex vault with many active threads might need 20. **Select only what would produce meaningful catalysts.** Typical range: 5-20 entities.
 
 ## Response format
 Return a JSON object:
@@ -160,8 +173,7 @@ Return a JSON object:
 {
   "catalyzedEntities": [
     {"entityRef": "#tag", "profile": "dialectical"},
-    {"entityRef": "[[Note Name]]", "profile": "synthesis"},
-    {"entityRef": "folder:name", "profile": "operational"}
+    {"entityRef": "folder:name", "profile": "synthesis"}
   ],
   "catalystProfile": "dialectical",
   "guideSignal": "...",
@@ -187,8 +199,9 @@ Return a JSON object:
 /// Build the user prompt wrapping vault context XML.
 pub fn build_selection_user_prompt(vault_context_xml: &str) -> String {
     format!(
-        "Here is the vault's structure and trending entities with recent content excerpts. \
-Select 15–25 entities for catalyst generation.\n\n{vault_context_xml}"
+        "Here is the vault's structure and trending entities. \
+Select entities for catalyst generation — focus on high file_count entities that cover the most ground. \
+Fewer high-coverage entities are better than many low-coverage ones.\n\n{vault_context_xml}"
     )
 }
 
@@ -215,7 +228,7 @@ mod tests {
         let json = r##"{
             "catalyzedEntities": [
                 {"entityRef": "#enzyme", "profile": "dialectical"},
-                {"entityRef": "[[Maren Holt]]", "profile": "relational"}
+                {"entityRef": "[[deep work]]", "profile": "dialectical"}
             ],
             "catalystProfile": "dialectical",
             "guideSignal": "Thinking about craft and tools",
