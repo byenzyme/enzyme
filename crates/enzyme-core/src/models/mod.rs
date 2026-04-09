@@ -13,5 +13,8 @@ pub use embedding::*;
 /// Enzyme stores all timestamps as milliseconds since Unix epoch.
 pub type Timestamp = i64;
 
-/// Embedding vectors are 384-dimensional f32 (snowflake-arctic-embed-xs).
+/// Embedding vector dimensionality. Depends on the active backend.
+#[cfg(feature = "model2vec")]
+pub const EMBEDDING_DIMENSION: usize = 256;
+#[cfg(not(feature = "model2vec"))]
 pub const EMBEDDING_DIMENSION: usize = 384;

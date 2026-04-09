@@ -35,6 +35,9 @@ rten = "0.24"
 rten-tensor = "0.24"
 tokenizers = "0.21"
 
+# Distilled embedding backend
+model2vec = "0.3"
+
 # HNSW
 instant-distance = "0.6"
 

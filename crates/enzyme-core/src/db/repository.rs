@@ -1323,7 +1323,8 @@ impl Database {
         let n = embeddings.len();
         let ids: Vec<String> = embeddings.iter().map(|(id, _)| id.to_string()).collect();
         let ids_json = serde_json::to_string(&ids).context("serialize catalyst ids")?;
-        let mut all_vecs: Vec<u8> = Vec::with_capacity(n * 384 * 4);
+        let dim = embeddings[0].1.len();
+        let mut all_vecs: Vec<u8> = Vec::with_capacity(n * dim * 4);
         for (_, vector) in embeddings {
             all_vecs.extend_from_slice(&f32_vec_to_blob(vector));
         }
@@ -1366,7 +1367,7 @@ impl Database {
 
         let ids: Vec<String> = serde_json::from_str(&ids_json)
             .context("deserialize catalyst ids")?;
-        let embedding_dim = if ids.is_empty() { 384 } else { vectors_blob.len() / ids.len() };
+        let embedding_dim = if ids.is_empty() { return Ok(vec![]); } else { vectors_blob.len() / ids.len() };
         let results: Vec<(String, Vec<f32>)> = ids
             .into_iter()
             .zip(vectors_blob.chunks(embedding_dim).map(blob_to_f32_vec))

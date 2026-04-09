@@ -8,6 +8,9 @@ description = "CLI for Enzyme"
 name = "enzyme"
 path = "src/main.rs"
 
+[features]
+model2vec = ["enzyme-core/model2vec"]
+
 [dependencies]
 enzyme-core = { path = "../enzyme-core" }
 enzyme-api = { path = "../enzyme-api" }
