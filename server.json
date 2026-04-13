@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.jshph/enzyme",
   "title": "Enzyme",
-  "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
-  "version": "0.4.6",
+  "description": "Compiles your content into a concept graph for semantic search and pattern discovery.",
+  "version": "0.5.0",
   "websiteUrl": "https://enzyme.garden",
   "repository": {
     "url": "https://github.com/jshph/enzyme",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.6/enzyme-mcp-0.4.6-macos-arm64.mcpb",
-      "fileSha256": "209da52d1c2ce104b621adbbb4078f99246b4a971d817007e77646088bec22bf",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.0/enzyme-mcp-0.5.0-macos-arm64.mcpb",
+      "fileSha256": "c5a74e8def70ab6c3fd39d158e29676a3a61abe3dfd2cb48e3a82973e9c29384",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -26,8 +26,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.6/enzyme-mcp-0.4.6-linux-x86_64.mcpb",
-      "fileSha256": "ad632852a07617c232e14c4aefc33513e54fa3f89e3e3a207ccba1a4b62c6127",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.0/enzyme-mcp-0.5.0-linux-x86_64.mcpb",
+      "fileSha256": "69b45c575295bcbff836548b3f5b370dd2e9fcc26909ea7b0794049391ea4aa4",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -40,8 +40,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.4.6/enzyme-mcp-0.4.6-linux-arm64.mcpb",
-      "fileSha256": "93043cd3750209ed129b7d13c15559cca4bab9417af18f764ef80ccce8748f47",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.0/enzyme-mcp-0.5.0-linux-arm64.mcpb",
+      "fileSha256": "878a48a85765b2225f84d9375d23f505dfb656df4aacb4cc40b4c389daabea75",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {

@@ -49,12 +49,14 @@ The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you c
 
 ## Quick start
 
-```bash
-cd /path/to/your/vault    # any folder of markdown files
-enzyme init                # compiles concept graph — under 20s for 1k docs
-```
+If you have the Claude Code plugin installed, open your content folder in Claude Code and run `/enzyme`. It handles initialization and walks you through your first exploration.
 
-Inside Claude Code, invoke `/enzyme` to explore your vault by concept.
+To compile standalone (or without Claude Code):
+
+```bash
+cd /path/to/your/content   # any folder of markdown files
+enzyme init                 # compiles concept graph — under 20s for 1k docs
+```
 
 ## What it does
 
@@ -164,7 +166,7 @@ This matters when you're building on imported content (reading highlights, curat
 
 ## Requirements
 
-- A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
+- A folder of markdown files — ADRs, docs, Obsidian vaults, Readwise exports, any `.md` corpus
 - macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
 - Works out of the box via [OpenRouter](https://openrouter.ai)'s free tier — or bring your own API key (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`)
 

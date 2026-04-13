@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install enzyme — local-first knowledge indexing for Obsidian vaults
+# Install enzyme — compiles your content into a concept graph
 # Usage: curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
 
 set -euo pipefail
@@ -113,12 +113,8 @@ esac
 
 # Download embedding model
 echo ""
-echo "Downloading embedding model (~52 MB)..."
+echo "Downloading embedding model (~31 MB)..."
 "$INSTALL_DIR/enzyme" setup
-
-echo ""
-echo "Next steps:"
-echo "  cd /path/to/vault && enzyme init    # initialize your vault"
 
 # Install Claude Code plugin if claude is available
 if command -v claude &>/dev/null; then
@@ -126,8 +122,12 @@ if command -v claude &>/dev/null; then
     echo "Installing Claude Code plugin..."
     claude plugin marketplace add jshph/enzyme 2>/dev/null || true
     claude plugin install enzyme 2>/dev/null || true
-    echo "Plugin installed. Use /enzyme in Claude Code to explore your vault."
+    echo ""
+    echo "Next: open your content folder in Claude Code and run /enzyme"
 else
+    echo ""
+    echo "Next steps:"
+    echo "  cd /path/to/your/content && enzyme init    # compile your concept graph"
     echo ""
     echo "Add the Claude Code plugin:"
     echo "  claude plugin marketplace add jshph/enzyme"
