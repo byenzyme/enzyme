@@ -9,7 +9,10 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
+use std::collections::HashSet;
+
 use enzyme_core::models::{Embedding, Entity, Catalyst, EntityType};
+use enzyme_core::pipeline::entity_map::EntityMap;
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -56,32 +59,26 @@ pub fn build_petri_json(
         build_recency_based(&db, top)?
     };
 
-    // ── Fold page-entity links under their parent folder ───────────────
-    // Check ALL link entities in the result set (not just trending) against
-    // all folders to detect page entities. A link is a page entity if its
-    // source file lives directly inside a folder (e.g. people/Maren Holt.md).
-    let link_names: Vec<&str> = entities.iter()
-        .filter(|(e, _)| e.entity_type == EntityType::Link)
-        .map(|(e, _)| e.name.as_str())
-        .collect();
+    // ── Use EntityMap to fold page-entity links under parent folders ────
+    // EntityMap handles: link-tag dedup, page entity detection across all
+    // folders, and identifying which links are subsumed.
+    let entity_list_only: Vec<Entity> = entities.iter().map(|(e, _)| e.clone()).collect();
+    let entity_map = EntityMap::from_entities(&db, &entity_list_only)?;
 
-    let folder_structure = db.get_folder_structure()?;
-    let mut page_entity_map: HashMap<String, String> = HashMap::new();
-    if !link_names.is_empty() {
-        for folder in &folder_structure {
-            let pages = db.get_folder_page_entities(&folder.name, &link_names)
-                .unwrap_or_default();
-            for pe in pages {
-                page_entity_map.insert(pe, folder.name.clone());
-            }
+    // Build a lookup: link name → folder name for subsumed links
+    let mut page_entity_to_folder: HashMap<&str, &str> = HashMap::new();
+    for fg in &entity_map.folders {
+        for pe in &fg.page_entities {
+            page_entity_to_folder.insert(pe.as_str(), fg.entity.name.as_str());
         }
     }
 
-    // Don't fold a link into a folder if a tag with the same name exists —
-    // the tag is the canonical entity, the link is incidental.
-    let tag_names: std::collections::HashSet<&str> = entities.iter()
-        .filter(|(e, _)| e.entity_type == EntityType::Tag)
-        .map(|(e, _)| e.name.as_str())
+    // Also collect link names that were dropped by link-tag dedup
+    let deduped_link_names: HashSet<&str> = entity_list_only.iter()
+        .filter(|e| e.entity_type == EntityType::Link)
+        .map(|e| e.name.as_str())
+        .filter(|name| !entity_map.links.iter().any(|l| l.name == *name)
+            && !page_entity_to_folder.contains_key(name))
         .collect();
 
     // Partition: top-level entities vs subsumed links grouped by folder
@@ -90,18 +87,20 @@ pub fn build_petri_json(
 
     for entry in &entities {
         if entry.0.entity_type == EntityType::Link {
-            if let Some(folder_name) = page_entity_map.get(&entry.0.name) {
-                // Skip folding if a tag with the same name exists
-                if !tag_names.contains(entry.0.name.as_str()) {
-                    folder_children.entry(folder_name.clone()).or_default().push(entry);
-                    continue;
-                }
+            // Skip links that were deduped against tags
+            if deduped_link_names.contains(entry.0.name.as_str()) {
+                continue;
+            }
+            // Fold page-entity links under their folder
+            if let Some(&folder_name) = page_entity_to_folder.get(entry.0.name.as_str()) {
+                folder_children.entry(folder_name.to_string()).or_default().push(entry);
+                continue;
             }
         }
         top_level.push(entry);
     }
 
-    // Ensure folders with children appear in top_level even if they weren't selected
+    // Track which folders are already in top_level
     let top_level_folder_names: std::collections::HashSet<&str> = top_level.iter()
         .filter(|(e, _)| e.entity_type == EntityType::Folder)
         .map(|(e, _)| e.name.as_str())
