@@ -9,7 +9,8 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::models::{Embedding, EntityType};
+use enzyme_core::models::{Embedding, Entity, Catalyst, EntityType};
+use enzyme_core::pipeline::entity_map::EntityMap;
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -56,64 +57,49 @@ pub fn build_petri_json(
         build_recency_based(&db, top)?
     };
 
+    // ── Fold page-entity links under their parent folder ───────────────
+    // Use EntityMap to detect which links are subsumed by folders.
+    // Their catalysts get nested under the folder instead of appearing
+    // as separate top-level entities.
+    let page_entity_map: HashMap<String, String> = EntityMap::build(&db, 20)
+        .map(|em| {
+            let mut map = HashMap::new();
+            for fg in &em.folders {
+                for pe in &fg.page_entities {
+                    map.insert(pe.clone(), fg.entity.name.clone());
+                }
+            }
+            map
+        })
+        .unwrap_or_default();
+
+    // Partition: top-level entities vs subsumed links grouped by folder
+    let mut top_level: Vec<&(Entity, Vec<Catalyst>)> = Vec::new();
+    let mut folder_children: HashMap<String, Vec<&(Entity, Vec<Catalyst>)>> = HashMap::new();
+
+    for entry in &entities {
+        if entry.0.entity_type == EntityType::Link {
+            if let Some(folder_name) = page_entity_map.get(&entry.0.name) {
+                folder_children.entry(folder_name.clone()).or_default().push(entry);
+                continue;
+            }
+        }
+        top_level.push(entry);
+    }
+
+    // Ensure folders with children appear in top_level even if they weren't selected
+    let top_level_folder_names: std::collections::HashSet<&str> = top_level.iter()
+        .filter(|(e, _)| e.entity_type == EntityType::Folder)
+        .map(|(e, _)| e.name.as_str())
+        .collect();
+
     // Build JSON
     let mut entity_list = Vec::new();
 
-    for (entity, catalysts) in &entities {
-        let now = chrono::Utc::now().timestamp_millis();
-        let last_seen = entity.last_seen.unwrap_or(0);
-        let days_since_last = ((now - last_seen) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+    for (entity, catalysts) in &top_level {
+        let mut entry = build_entity_json(entity, catalysts, &entity_relevances, &catalyst_relevances);
 
-        let activity_trend = if days_since_last <= 7.0 {
-            "active"
-        } else if days_since_last <= 30.0 {
-            "moderate"
-        } else {
-            "dormant"
-        };
-
-        let catalyst_list: Vec<serde_json::Value> = catalysts
-            .iter()
-            .map(|c| {
-                let mut obj = json!({
-                    "text": c.text,
-                    "context": c.context,
-                });
-                if let Some(era) = c.metadata.get("era").and_then(|v| v.as_str()) {
-                    obj.as_object_mut()
-                        .unwrap()
-                        .insert("era".to_string(), json!(era));
-                }
-                if let Some(&rel) = catalyst_relevances.get(&c.id) {
-                    obj.as_object_mut().unwrap().insert(
-                        "relevance".to_string(),
-                        json!((rel * 1000.0).round() / 1000.0),
-                    );
-                }
-                obj
-            })
-            .collect();
-
-        let mut entry = json!({
-            "name": entity.name,
-            "type": entity.entity_type.as_str(),
-            "frequency": entity.frequency,
-            "frequency_12m": entity.trends.frequency_recent,
-            "recency_score": entity.trends.recency_score,
-            "last_seen": last_seen,
-            "days_since_last_seen": days_since_last.round() as i64,
-            "activity_trend": activity_trend,
-            "catalysts": catalyst_list,
-        });
-
-        if let Some(&rel) = entity_relevances.get(&entity.name) {
-            entry.as_object_mut().unwrap().insert(
-                "relevance".to_string(),
-                json!((rel * 1000.0).round() / 1000.0),
-            );
-        }
-
-        // Enrich expandable folders with sampled children
+        // Enrich expandable folders with sampled children (from config)
         if entity.entity_type == EntityType::Folder {
             if let Some(configured_children) = prefs.expandable_folders.get(&entity.name) {
                 let (children, total_count) =
@@ -130,7 +116,6 @@ pub fn build_petri_json(
                     })
                     .collect();
 
-                // Catalyzed children: configured children that actually have catalysts
                 let catalyzed: Vec<String> = configured_children
                     .iter()
                     .filter(|child| {
@@ -152,8 +137,40 @@ pub fn build_petri_json(
                     json!(total_count - sampled_count),
                 );
             }
+
+            // Nest subsumed page-entity children with their catalysts
+            if let Some(children) = folder_children.get(&entity.name) {
+                let nested: Vec<serde_json::Value> = children.iter()
+                    .map(|(child_entity, child_catalysts)| {
+                        build_entity_json(child_entity, child_catalysts, &entity_relevances, &catalyst_relevances)
+                    })
+                    .collect();
+                if !nested.is_empty() {
+                    entry.as_object_mut().unwrap()
+                        .insert("page_entity_children".to_string(), json!(nested));
+                }
+            }
         }
 
+        entity_list.push(entry);
+    }
+
+    // Add synthetic folder entries for folders that have children but weren't in the entity list
+    for (folder_name, children) in &folder_children {
+        if top_level_folder_names.contains(folder_name.as_str()) {
+            continue; // already handled above
+        }
+        let nested: Vec<serde_json::Value> = children.iter()
+            .map(|(child_entity, child_catalysts)| {
+                build_entity_json(child_entity, child_catalysts, &entity_relevances, &catalyst_relevances)
+            })
+            .collect();
+        let entry = json!({
+            "name": folder_name,
+            "type": "folder",
+            "catalysts": [],
+            "page_entity_children": nested,
+        });
         entity_list.push(entry);
     }
 
@@ -184,6 +201,69 @@ pub fn build_petri_json(
     }
 
     Ok(output)
+}
+
+/// Build JSON for a single entity with its catalysts.
+fn build_entity_json(
+    entity: &Entity,
+    catalysts: &[Catalyst],
+    entity_relevances: &HashMap<String, f64>,
+    catalyst_relevances: &HashMap<String, f64>,
+) -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    let last_seen = entity.last_seen.unwrap_or(0);
+    let days_since_last = ((now - last_seen) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+
+    let activity_trend = if days_since_last <= 7.0 {
+        "active"
+    } else if days_since_last <= 30.0 {
+        "moderate"
+    } else {
+        "dormant"
+    };
+
+    let catalyst_list: Vec<serde_json::Value> = catalysts
+        .iter()
+        .map(|c| {
+            let mut obj = json!({
+                "text": c.text,
+                "context": c.context,
+            });
+            if let Some(era) = c.metadata.get("era").and_then(|v| v.as_str()) {
+                obj.as_object_mut()
+                    .unwrap()
+                    .insert("era".to_string(), json!(era));
+            }
+            if let Some(&rel) = catalyst_relevances.get(&c.id) {
+                obj.as_object_mut().unwrap().insert(
+                    "relevance".to_string(),
+                    json!((rel * 1000.0).round() / 1000.0),
+                );
+            }
+            obj
+        })
+        .collect();
+
+    let mut entry = json!({
+        "name": entity.name,
+        "type": entity.entity_type.as_str(),
+        "frequency": entity.frequency,
+        "frequency_12m": entity.trends.frequency_recent,
+        "recency_score": entity.trends.recency_score,
+        "last_seen": last_seen,
+        "days_since_last_seen": days_since_last.round() as i64,
+        "activity_trend": activity_trend,
+        "catalysts": catalyst_list,
+    });
+
+    if let Some(&rel) = entity_relevances.get(&entity.name) {
+        entry.as_object_mut().unwrap().insert(
+            "relevance".to_string(),
+            json!((rel * 1000.0).round() / 1000.0),
+        );
+    }
+
+    entry
 }
 
 /// Select entities by recency score (default behavior when no query is provided).
