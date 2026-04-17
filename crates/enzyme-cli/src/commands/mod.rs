@@ -8,5 +8,6 @@ pub mod mcp;
 pub mod petri;
 pub mod scan;
 pub mod serve;
+pub mod vault_summary;
 pub mod setup;
 pub mod status;

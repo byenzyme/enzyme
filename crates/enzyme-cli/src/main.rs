@@ -53,6 +53,10 @@ enum Commands {
         /// Raises the ceiling and boosts the top entity to at least this many.
         #[arg(long)]
         min_top_catalysts: Option<usize>,
+
+        /// Stop after a specific pipeline stage (e.g. "index")
+        #[arg(long)]
+        stage: Option<String>,
     },
 
     /// Refresh the vault index (alias for init)
@@ -137,7 +141,11 @@ enum Commands {
     Mcp,
 
     /// Quick vault scan — extract entities without initializing
-    Scan,
+    Scan {
+        /// Output a one-line guide string instead of JSON
+        #[arg(long)]
+        guide: bool,
+    },
 
     /// Start the HTTP API server for the explore UI
     Serve {
@@ -242,14 +250,18 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached, guide, quiet, json_progress, min_top_catalysts } => {
-            let vault_guide = resolve_vault_guide(guide);
-            let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
+        Commands::Init { full, detached, guide, quiet, json_progress, min_top_catalysts, stage } => {
+            if stage.as_deref() == Some("index") {
+                commands::init::run_init_index_only(&vault_path, full, quiet).await?;
+            } else {
+                let vault_guide = resolve_vault_guide(guide);
+                let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
 
-            if quiet || json_progress {
-                if let Some(result) = init_result {
-                    let output = result.to_json(&vault_path)?;
-                    println!("{}", serde_json::to_string(&output)?);
+                if quiet || json_progress {
+                    if let Some(result) = init_result {
+                        let output = result.to_json(&vault_path)?;
+                        println!("{}", serde_json::to_string(&output)?);
+                    }
                 }
             }
         }
@@ -275,8 +287,8 @@ async fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
         }
-        Commands::Scan => {
-            commands::scan::run_scan(&vault_path)?;
+        Commands::Scan { guide } => {
+            commands::scan::run_scan(&vault_path, guide)?;
         }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;

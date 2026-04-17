@@ -25,6 +25,7 @@ use enzyme_core::pipeline::staleness::{
 };
 
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
+use super::vault_summary;
 use crate::display::{DisplayEvent, InitDisplay};
 
 /// Stats collected during an init run, used for JSON output in quiet mode.
@@ -71,6 +72,120 @@ impl InitResult {
 
         Ok(output)
     }
+}
+
+/// Run only the indexing stage, print a vault summary, and exit.
+///
+/// Used by `enzyme init --stage index` to populate the DB and show
+/// the user what enzyme found before committing to LLM + catalyst work.
+/// Desktop app uses quiet mode (JSON output) to populate its guide text box.
+pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+
+    // Ensure .enzyme directory exists
+    if let Some(parent) = paths.vault_db.parent() {
+        fs::create_dir_all(parent)
+            .context("failed to create .enzyme directory")?;
+    }
+
+    let db = Database::open(&paths.vault_db)?;
+
+    // Run indexing
+    let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+    let idx_stats = indexing.run(full, |_| {})?;
+
+    debug!(
+        new = idx_stats.files_new,
+        updated = idx_stats.files_updated,
+        deleted = idx_stats.files_deleted,
+        "index-only: indexing complete"
+    );
+
+    // Build and print summary
+    let summary = vault_summary::build_summary(&db, vault_path)?;
+
+    if quiet {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        eprintln!("{}", vault_summary::format_summary_human(&summary));
+    }
+
+    Ok(())
+}
+
+/// Prompt the user after indexing in interactive mode.
+/// Returns the vault guide text (auto-generated or user-edited), or None to abort.
+fn prompt_after_indexing(db: &Database, vault_path: &Path) -> Result<Option<String>> {
+    let summary = vault_summary::build_summary(db, vault_path)?;
+    let human_text = vault_summary::format_summary_human(&summary);
+
+    eprintln!();
+    eprintln!("{}", human_text);
+    eprintln!();
+    eprint!("  Proceed? [Y/edit/n] ");
+    std::io::stderr().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+    let choice = input.trim().to_lowercase();
+
+    match choice.as_str() {
+        "" | "y" | "yes" => {
+            // Auto-construct guide from summary
+            let guide = vault_summary::format_summary_guide(&summary);
+            Ok(Some(guide))
+        }
+        "edit" => {
+            let guide_text = vault_summary::format_summary_guide(&summary);
+            match open_in_editor(&guide_text) {
+                Ok(edited) if !edited.trim().is_empty() => Ok(Some(edited)),
+                Ok(_) => {
+                    eprintln!("  Empty guide — using auto-generated summary.");
+                    Ok(Some(guide_text))
+                }
+                Err(e) => {
+                    eprintln!("  Editor failed: {}. Using auto-generated summary.", e);
+                    Ok(Some(guide_text))
+                }
+            }
+        }
+        "n" | "no" => {
+            eprintln!("  Aborted.");
+            Ok(None)
+        }
+        _ => {
+            eprintln!("  Unrecognized choice — proceeding.");
+            let guide = vault_summary::format_summary_guide(&summary);
+            Ok(Some(guide))
+        }
+    }
+}
+
+/// Open text in the user's preferred editor. Returns the edited text.
+/// Editor resolution: $VISUAL → $EDITOR → vi
+fn open_in_editor(initial_text: &str) -> Result<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    let mut tmpfile = tempfile::NamedTempFile::new()
+        .context("failed to create temp file for editor")?;
+    tmpfile.write_all(initial_text.as_bytes())
+        .context("failed to write to temp file")?;
+    tmpfile.flush()?;
+
+    let status = std::process::Command::new(&editor)
+        .arg(tmpfile.path())
+        .status()
+        .with_context(|| format!("failed to launch editor: {}", editor))?;
+
+    if !status.success() {
+        anyhow::bail!("editor exited with status {}", status);
+    }
+
+    let edited = fs::read_to_string(tmpfile.path())
+        .context("failed to read edited file")?;
+    Ok(edited)
 }
 
 pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<Option<InitResult>> {
@@ -127,36 +242,60 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         }
     };
 
-    // Start display (quiet mode suppresses all output)
+    // ── Step 1: Indexing ───────────────────────────────────────────────────
+    // Run with animated display, then finish it before the interactive prompt.
+    let idx_stats = {
+        let idx_display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
+        let tx = idx_display.sender();
+
+        if let Some(ref cfg) = api_config {
+            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::OpenAiEnv) {
+                tx.send(DisplayEvent::ApiConfig {
+                    base_url: cfg.base_url.clone(),
+                    model: cfg.model.clone(),
+                    masked_key: cfg.masked_api_key(),
+                }).ok();
+            }
+        }
+
+        tx.send(DisplayEvent::IndexingStart).ok();
+        let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+        let tx_idx = tx.clone();
+        let stats = indexing.run(full, |msg| {
+            tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
+        })?;
+
+        tx.send(DisplayEvent::IndexingComplete {
+            files_discovered: stats.files_discovered,
+            files_new: stats.files_new,
+            files_updated: stats.files_updated,
+            files_deleted: stats.files_deleted,
+        }).ok();
+        tx.send(DisplayEvent::Done { duration_ms: 0 }).ok();
+        idx_display.finish();
+        stats
+    };
+
+    // ── Interactive prompt: show vault summary after indexing ────────────
+    // Only on first init (no enzyme-config.yaml yet), interactive TTY, no guide provided.
+    let is_interactive = !quiet && atty::is(atty::Stream::Stdin);
+    let has_config = vault_path.join(".enzyme").join("enzyme-config.yaml").exists()
+        || vault_path.join("enzyme-config.yaml").exists();
+    let is_first_init = !has_config;
+    let vault_guide = if is_interactive && is_first_init && vault_guide.is_none() {
+        match prompt_after_indexing(&db, vault_path)? {
+            Some(guide) => Some(guide),
+            None => return Ok(None), // user aborted
+        }
+    } else {
+        vault_guide.map(|s| s.to_string())
+    };
+    let vault_guide = vault_guide.as_deref();
+
+    // ── Start display for remaining pipeline ────────────────────────────
     let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
-
-    // Show resolved LLM config when using env overrides
-    if let Some(ref cfg) = api_config {
-        if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::OpenAiEnv) {
-            tx.send(DisplayEvent::ApiConfig {
-                base_url: cfg.base_url.clone(),
-                model: cfg.model.clone(),
-                masked_key: cfg.masked_api_key(),
-            }).ok();
-        }
-    }
-
-    // ── Step 1: Indexing ───────────────────────────────────────────────────
-    tx.send(DisplayEvent::IndexingStart).ok();
-    let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
-    let tx_idx = tx.clone();
-    let idx_stats = indexing.run(full, |msg| {
-        tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
-    })?;
-
-    tx.send(DisplayEvent::IndexingComplete {
-        files_discovered: idx_stats.files_discovered,
-        files_new: idx_stats.files_new,
-        files_updated: idx_stats.files_updated,
-        files_deleted: idx_stats.files_deleted,
-    }).ok();
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);

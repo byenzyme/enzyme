@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -69,30 +70,63 @@ impl<'a> IndexingPipeline<'a> {
             paths_to_process = all_paths.clone();
             files_new = paths_to_process.len();
         } else {
-            // Incremental mode: only process new and changed files
+            // Incremental mode: check mtime first, then hash only if mtime changed.
+            //
+            // Phase 1: Partition into new files vs files needing mtime check.
+            let mut new_paths = Vec::new();
+            let mut candidates_to_check: Vec<(PathBuf, &str)> = Vec::new();
+
             for path in &all_paths {
-                let source_ref = path.to_string_lossy().to_string();
-                match existing_hashes.get(&source_ref) {
+                let source_ref = path.to_string_lossy();
+                match existing_hashes.get(source_ref.as_ref()) {
                     None => {
-                        // New file — not yet in the database
-                        paths_to_process.push(path.clone());
-                        files_new += 1;
+                        new_paths.push(path.clone());
                     }
-                    Some(old_hash) => {
-                        // Existing file — check if content changed by computing hash
+                    Some((old_hash, stored_mtime_ms)) => {
+                        // Quick mtime check: stat() is ~1000x cheaper than read+hash
                         let abs_path = self.vault_path.join(path);
-                        if let Ok(content) = std::fs::read_to_string(&abs_path) {
-                            let mut hasher = Sha256::new();
-                            hasher.update(content.as_bytes());
-                            let current_hash = format!("{:x}", hasher.finalize());
-                            if &current_hash != old_hash {
-                                paths_to_process.push(path.clone());
-                                files_updated += 1;
-                            }
+                        let mtime_changed = std::fs::metadata(&abs_path)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .map(|mtime| {
+                                let fs_mtime_ms = mtime
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as i64;
+                                fs_mtime_ms > *stored_mtime_ms
+                            })
+                            .unwrap_or(true); // if stat fails, assume changed
+
+                        if mtime_changed {
+                            candidates_to_check.push((path.clone(), old_hash.as_str()));
                         }
                     }
                 }
             }
+
+            files_new = new_paths.len();
+            paths_to_process.extend(new_paths);
+
+            // Phase 2: For files with newer mtime, read+hash in parallel to confirm change.
+            let vault_root = &self.vault_path;
+            let changed: Vec<PathBuf> = candidates_to_check
+                .par_iter()
+                .filter_map(|(path, old_hash)| {
+                    let abs_path = vault_root.join(path);
+                    let content = std::fs::read_to_string(&abs_path).ok()?;
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let current_hash = format!("{:x}", hasher.finalize());
+                    if current_hash != *old_hash {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            files_updated = changed.len();
+            paths_to_process.extend(changed);
         }
 
         // Find deleted files (present in DB but no longer on disk)

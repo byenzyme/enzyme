@@ -260,12 +260,12 @@ impl Database {
         Ok(rows.into_iter().next())
     }
 
-    /// Return a map of `source_ref -> content_hash` for every document in the database.
-    pub fn get_all_document_hashes(&self) -> Result<HashMap<String, String>> {
+    /// Return a map of `source_ref -> (content_hash, modified_at)` for every document.
+    pub fn get_all_document_hashes(&self) -> Result<HashMap<String, (String, i64)>> {
         let rows = self.query_read(
-            "SELECT source_ref, content_hash FROM docs",
+            "SELECT source_ref, content_hash, modified_at FROM docs",
             vec![],
-            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+            |row| Ok((row.get::<String>(0)?, (row.get::<String>(1)?, row.get::<i64>(2)?))),
         )?;
         Ok(rows.into_iter().collect())
     }

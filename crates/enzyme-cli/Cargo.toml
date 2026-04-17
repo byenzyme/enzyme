@@ -29,9 +29,7 @@ serde = { workspace = true }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"
 fs2 = "0.4"
+tempfile = "3.26.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[dev-dependencies]
-tempfile = "3.26.0"
