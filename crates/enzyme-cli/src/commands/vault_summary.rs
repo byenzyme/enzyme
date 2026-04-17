@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
 
 use enzyme_core::db::Database;
-use enzyme_core::models::EntityType;
+use enzyme_core::pipeline::entity_map::{EntityMap, TagGroup, FolderGroup};
 
 /// A snapshot of vault structure and trending entities, built from the DB.
 #[derive(Debug, Serialize)]
@@ -41,67 +42,66 @@ pub enum Trend {
     New,
 }
 
-/// Build a vault summary from the DB.
+fn entity_trend(frequency: i64, recent: i64) -> Trend {
+    if frequency > 0 && recent == frequency {
+        Trend::New
+    } else if frequency > 0 && (recent as f64 / frequency as f64) > 0.6 {
+        Trend::Growing
+    } else {
+        Trend::Steady
+    }
+}
+
+/// Build a vault summary from the DB using EntityMap.
 pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> {
-    // Total file count
-    let files: usize = db.query_read(
-        "SELECT COUNT(*) FROM docs",
-        vec![],
-        |row| row.get::<i64>(0),
-    )?.first().copied().unwrap_or(0) as usize;
-
-    // Get trending entities (same defaults as SelectionPipeline)
-    let trending = db.get_trending_entities(3, 2, 2, 15)?;
-
-    // Collect all trending link names for page entity detection
-    let trending_links: Vec<&str> = trending.iter()
-        .filter(|e| e.entity_type == EntityType::Link)
-        .map(|e| e.name.as_str())
-        .collect();
+    let entity_map = EntityMap::build(db, 15)?;
 
     let mut entities = Vec::new();
 
-    for entity in &trending {
-        // Children (for tags and folders with hierarchical names)
-        let children = db.get_child_entities(
-            &entity.name,
-            entity.entity_type.as_str(),
-            5,
-        ).unwrap_or_default()
-            .into_iter()
-            .map(|c| SummaryChild { name: c.name, frequency: c.frequency })
-            .collect::<Vec<_>>();
-
-        // Page entities (only for folders)
-        let page_entities = if entity.entity_type == EntityType::Folder && !trending_links.is_empty() {
-            db.get_folder_page_entities(&entity.name, &trending_links).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        // Determine trend
-        let recent = entity.trends.frequency_recent;
-        let total = entity.frequency;
-        let trend = if total > 0 && recent == total {
-            Trend::New
-        } else if total > 0 && (recent as f64 / total as f64) > 0.6 {
-            Trend::Growing
-        } else {
-            Trend::Steady
-        };
+    // Tags
+    for tg in &entity_map.tags {
+        let children: Vec<SummaryChild> = tg.significant_children.iter()
+            .map(|c| SummaryChild { name: c.name.clone(), frequency: c.frequency })
+            .collect();
 
         entities.push(SummaryEntity {
-            name: entity.name.clone(),
-            entity_type: entity.entity_type.as_str().to_string(),
-            frequency: total,
-            recent_12mo: recent,
-            trend,
+            name: tg.entity.name.clone(),
+            entity_type: "tag".to_string(),
+            frequency: tg.entity.frequency,
+            recent_12mo: tg.entity.trends.frequency_recent,
+            trend: entity_trend(tg.entity.frequency, tg.entity.trends.frequency_recent),
             children,
-            page_entities,
+            page_entities: Vec::new(),
         });
     }
 
-    Ok(VaultSummary { files, entities })
+    // Folders
+    for fg in &entity_map.folders {
+        entities.push(SummaryEntity {
+            name: fg.entity.name.clone(),
+            entity_type: "folder".to_string(),
+            frequency: fg.entity.frequency,
+            recent_12mo: fg.entity.trends.frequency_recent,
+            trend: entity_trend(fg.entity.frequency, fg.entity.trends.frequency_recent),
+            children: Vec::new(),
+            page_entities: fg.page_entities.clone(),
+        });
+    }
+
+    // Standalone links
+    for link in &entity_map.links {
+        entities.push(SummaryEntity {
+            name: link.name.clone(),
+            entity_type: "link".to_string(),
+            frequency: link.frequency,
+            recent_12mo: link.trends.frequency_recent,
+            trend: entity_trend(link.frequency, link.trends.frequency_recent),
+            children: Vec::new(),
+            page_entities: Vec::new(),
+        });
+    }
+
+    Ok(VaultSummary { files: entity_map.file_count, entities })
 }
 
 /// Format a vault summary as human-readable text for the terminal.
@@ -128,11 +128,9 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
             prefix, entity.frequency, entity.recent_12mo, trend_label
         ));
 
-        // Show children indented
         if !entity.children.is_empty() {
             let child_names: Vec<String> = entity.children.iter()
                 .map(|c| {
-                    // Strip parent prefix for readability
                     let short = c.name.strip_prefix(&entity.name)
                         .and_then(|s| s.strip_prefix('/'))
                         .unwrap_or(&c.name);
@@ -142,7 +140,6 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
             lines.push(format!("    children: {}", child_names.join(", ")));
         }
 
-        // Show page entities for folders
         if !entity.page_entities.is_empty() {
             let page_names: Vec<String> = entity.page_entities.iter()
                 .map(|p| format!("[[{}]]", p))
@@ -155,37 +152,81 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
 }
 
 /// Format a vault summary as a one-line guide string suitable for `--guide`.
+///
+/// Groups entities by type, folds significant children into parents,
+/// folds page-entity links into their parent folders, and only surfaces
+/// standalone links that aren't subsumed by a folder.
 pub fn format_summary_guide(summary: &VaultSummary) -> String {
-    let mut parts = Vec::new();
-
-    let folders: Vec<_> = summary.entities.iter()
-        .filter(|e| e.entity_type == "folder")
-        .take(8)
-        .map(|e| format!("{}/", e.name))
+    // Track which tags are children of a parent in the summary
+    let child_tag_names: HashSet<&str> = summary.entities.iter()
+        .flat_map(|e| e.children.iter().map(|c| c.name.as_str()))
         .collect();
-    if !folders.is_empty() {
-        parts.push(format!("{} notes across folders like {}", summary.files, folders.join(", ")));
-    } else {
-        parts.push(format!("{} notes", summary.files));
+
+    let mut sections = Vec::new();
+
+    // ── Tags ─────────────────────────────────────────────────────────────
+    let mut tag_parts = Vec::new();
+    for entity in &summary.entities {
+        if entity.entity_type != "tag" { continue; }
+        if entity.name.contains('/') && child_tag_names.contains(entity.name.as_str()) {
+            continue;
+        }
+
+        let significant_children: Vec<&str> = entity.children.iter()
+            .map(|c| {
+                c.name.strip_prefix(&entity.name)
+                    .and_then(|s| s.strip_prefix('/'))
+                    .unwrap_or(&c.name)
+            })
+            .collect();
+
+        if significant_children.is_empty() {
+            tag_parts.push(format!("#{}", entity.name));
+        } else {
+            let subs: Vec<String> = significant_children.iter()
+                .map(|c| format!("#{}/{}", entity.name, c))
+                .collect();
+            tag_parts.push(format!("#{}; subtags {}", entity.name, subs.join(", ")));
+        }
+    }
+    if !tag_parts.is_empty() {
+        sections.push(format!("Main tags: {}.", tag_parts.join(". ")));
     }
 
-    let tags: Vec<_> = summary.entities.iter()
-        .filter(|e| e.entity_type == "tag")
-        .take(10)
-        .map(|e| format!("#{}", e.name))
-        .collect();
-    if !tags.is_empty() {
-        parts.push(format!("frequent tags {}", tags.join(", ")));
+    // ── Folders ──────────────────────────────────────────────────────────
+    let mut folder_parts = Vec::new();
+    for entity in &summary.entities {
+        if entity.entity_type != "folder" { continue; }
+        if entity.name.contains('/') { continue; }
+
+        if entity.page_entities.is_empty() {
+            folder_parts.push(format!("{}/", entity.name));
+        } else {
+            let pages: Vec<String> = entity.page_entities.iter()
+                .take(5)
+                .map(|p| format!("[[{}]]", p))
+                .collect();
+            let suffix = if entity.page_entities.len() > 5 {
+                format!(" and {} more", entity.page_entities.len() - 5)
+            } else {
+                String::new()
+            };
+            folder_parts.push(format!("{}/: {}{}", entity.name, pages.join(", "), suffix));
+        }
+    }
+    if !folder_parts.is_empty() {
+        sections.push(format!("Main folders: {}.", folder_parts.join(". ")));
     }
 
-    let links: Vec<_> = summary.entities.iter()
-        .filter(|e| e.entity_type == "link")
+    // ── Standalone links ────────────────────────────────────────────────
+    let standalone_links: Vec<String> = summary.entities.iter()
+        .filter(|e| e.entity_type == "link" && !e.name.contains('/'))
         .take(8)
         .map(|e| format!("[[{}]]", e.name))
         .collect();
-    if !links.is_empty() {
-        parts.push(format!("hub pages {}", links.join(", ")));
+    if !standalone_links.is_empty() {
+        sections.push(format!("Main links: {}.", standalone_links.join(", ")));
     }
 
-    parts.join(". ")
+    format!("{} notes. {}", summary.files, sections.join(" "))
 }

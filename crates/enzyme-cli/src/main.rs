@@ -154,6 +154,21 @@ enum Commands {
         port: u16,
     },
 
+    /// Dump catalyst prompts to JSONL for training data generation
+    DumpPrompts {
+        /// Output file path (JSONL)
+        #[arg(short, long, default_value = "prompts.jsonl")]
+        output: PathBuf,
+
+        /// Vault guide content
+        #[arg(long)]
+        guide: Option<String>,
+
+        /// Minimum catalysts for the largest entity (by volume)
+        #[arg(long)]
+        min_top_catalysts: Option<usize>,
+    },
+
     /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
     #[command(name = "__daemon", hide = true)]
     Daemon,
@@ -292,6 +307,9 @@ async fn main() -> Result<()> {
         }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
+        }
+        Commands::DumpPrompts { output, guide, min_top_catalysts } => {
+            commands::dump_prompts::run_dump_prompts(&vault_path, &output, guide, min_top_catalysts).await?;
         }
         Commands::Setup { .. } | Commands::Daemon | Commands::Mcp => unreachable!(),
     }

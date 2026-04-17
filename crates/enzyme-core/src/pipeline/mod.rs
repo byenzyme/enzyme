@@ -2,6 +2,7 @@ pub mod indexing;
 pub mod embedding;
 pub mod catalysts;
 pub mod context;
+pub mod entity_map;
 pub mod eras;
 pub mod llm_selection;
 pub mod selection;
