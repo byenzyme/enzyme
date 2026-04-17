@@ -10,7 +10,6 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::{Embedding, Entity, Catalyst, EntityType};
-use enzyme_core::pipeline::entity_map::EntityMap;
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -58,20 +57,32 @@ pub fn build_petri_json(
     };
 
     // ── Fold page-entity links under their parent folder ───────────────
-    // Use EntityMap to detect which links are subsumed by folders.
-    // Their catalysts get nested under the folder instead of appearing
-    // as separate top-level entities.
-    let page_entity_map: HashMap<String, String> = EntityMap::build(&db, 20)
-        .map(|em| {
-            let mut map = HashMap::new();
-            for fg in &em.folders {
-                for pe in &fg.page_entities {
-                    map.insert(pe.clone(), fg.entity.name.clone());
-                }
+    // Check ALL link entities in the result set (not just trending) against
+    // all folders to detect page entities. A link is a page entity if its
+    // source file lives directly inside a folder (e.g. people/Maren Holt.md).
+    let link_names: Vec<&str> = entities.iter()
+        .filter(|(e, _)| e.entity_type == EntityType::Link)
+        .map(|(e, _)| e.name.as_str())
+        .collect();
+
+    let folder_structure = db.get_folder_structure()?;
+    let mut page_entity_map: HashMap<String, String> = HashMap::new();
+    if !link_names.is_empty() {
+        for folder in &folder_structure {
+            let pages = db.get_folder_page_entities(&folder.name, &link_names)
+                .unwrap_or_default();
+            for pe in pages {
+                page_entity_map.insert(pe, folder.name.clone());
             }
-            map
-        })
-        .unwrap_or_default();
+        }
+    }
+
+    // Don't fold a link into a folder if a tag with the same name exists —
+    // the tag is the canonical entity, the link is incidental.
+    let tag_names: std::collections::HashSet<&str> = entities.iter()
+        .filter(|(e, _)| e.entity_type == EntityType::Tag)
+        .map(|(e, _)| e.name.as_str())
+        .collect();
 
     // Partition: top-level entities vs subsumed links grouped by folder
     let mut top_level: Vec<&(Entity, Vec<Catalyst>)> = Vec::new();
@@ -80,8 +91,11 @@ pub fn build_petri_json(
     for entry in &entities {
         if entry.0.entity_type == EntityType::Link {
             if let Some(folder_name) = page_entity_map.get(&entry.0.name) {
-                folder_children.entry(folder_name.clone()).or_default().push(entry);
-                continue;
+                // Skip folding if a tag with the same name exists
+                if !tag_names.contains(entry.0.name.as_str()) {
+                    folder_children.entry(folder_name.clone()).or_default().push(entry);
+                    continue;
+                }
             }
         }
         top_level.push(entry);
