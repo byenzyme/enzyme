@@ -786,13 +786,14 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        // Find matching link entities
+        // Find matching link entities with recent activity
         let all_entities = self.get_all_entities()?;
         Ok(all_entities
             .into_iter()
             .filter(|e| {
                 e.entity_type == EntityType::Link
                     && e.frequency >= 3
+                    && e.trends.frequency_recent > 0
                     && stems.contains(&e.name.to_lowercase())
             })
             .collect())
