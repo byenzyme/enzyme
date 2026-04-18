@@ -183,7 +183,11 @@ impl<'a> SelectionPipeline<'a> {
             .collect())
     }
 
+    /// Maximum page entity children to catalyze per expandable folder.
+    const MAX_FOLDER_CHILDREN: usize = 10;
+
     /// Add page entity children from expandable folders to the entity list.
+    /// Caps at the top N most recent children per folder to control LLM cost.
     fn expand_folder_children(
         db: &Database,
         expandable: &HashMap<String, Vec<String>>,
@@ -199,7 +203,15 @@ impl<'a> SelectionPipeline<'a> {
                 .collect();
 
             if !lookup.is_empty() {
-                let found = db.get_entities_by_names(&lookup)?;
+                let mut found = db.get_entities_by_names(&lookup)?;
+                // Keep only the most recently active children
+                found.sort_by(|a, b| {
+                    b.trends
+                        .recency_score
+                        .partial_cmp(&a.trends.recency_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                found.truncate(Self::MAX_FOLDER_CHILDREN);
                 entities.extend(found);
             }
         }
