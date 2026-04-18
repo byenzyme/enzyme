@@ -1,7 +1,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -133,7 +133,11 @@ impl Message {
 
     /// Message with a cached static prefix and dynamic suffix (for OpenRouter).
     /// Packs both into a single content array with `cache_control: ephemeral` on the prefix.
-    pub fn cached(role: &str, cached_prefix: impl Into<String>, dynamic: impl Into<String>) -> Self {
+    pub fn cached(
+        role: &str,
+        cached_prefix: impl Into<String>,
+        dynamic: impl Into<String>,
+    ) -> Self {
         Self {
             role: role.to_string(),
             content: MessageContent::Parts(vec![
@@ -172,9 +176,7 @@ pub enum ResponseFormat {
     JsonObject,
     /// `{"type": "json_schema", "json_schema": { ... }}` — strict schema.
     #[serde(rename = "json_schema")]
-    JsonSchema {
-        json_schema: JsonSchemaSpec,
-    },
+    JsonSchema { json_schema: JsonSchemaSpec },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -337,6 +339,12 @@ impl LlmClient {
         self.base_url.contains("openrouter.ai")
     }
 
+    /// Whether this client targets a local model server (localhost/127.0.0.1).
+    pub fn is_local(&self) -> bool {
+        let url = self.base_url.to_lowercase();
+        url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
+    }
+
     /// Detect structured output support for this client's provider.
     pub fn structured_output_support(&self) -> StructuredOutputSupport {
         StructuredOutputSupport::detect(&self.base_url)
@@ -361,7 +369,10 @@ impl LlmClient {
             stream: None,
         };
 
-        debug!("Sending chat completion request to {} with model {}", url, model);
+        debug!(
+            "Sending chat completion request to {} with model {}",
+            url, model
+        );
 
         let response = self
             .client
@@ -403,12 +414,13 @@ impl LlmClient {
         }
 
         let content = choice.message.content;
-        info!("Received chat completion response ({} chars)", content.len());
+        info!(
+            "Received chat completion response ({} chars)",
+            content.len()
+        );
 
         Ok(content)
     }
-
-
 
     /// Streaming chat completion that returns a stream of token strings.
     ///
@@ -433,7 +445,10 @@ impl LlmClient {
             stream: Some(true),
         };
 
-        debug!("Sending streaming chat completion request to {} with model {}", url, model);
+        debug!(
+            "Sending streaming chat completion request to {} with model {}",
+            url, model
+        );
 
         let response = self
             .client
@@ -545,7 +560,10 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
         .await
         .context("failed to parse free config response")?;
 
-    info!("Resolved API config from Enzyme server (model={})", resp.model);
+    info!(
+        "Resolved API config from Enzyme server (model={})",
+        resp.model
+    );
 
     Ok(ResolvedConfig {
         api_key: resp.api_key,
@@ -563,14 +581,20 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 /// 3. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     // 1. OPENAI_API_KEY + OPENAI_BASE_URL (both must be set for env override)
-    let has_key = std::env::var("OPENAI_API_KEY").ok().filter(|v| !v.is_empty());
-    let has_url = std::env::var("OPENAI_BASE_URL").ok().filter(|v| !v.is_empty());
+    let has_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let has_url = std::env::var("OPENAI_BASE_URL")
+        .ok()
+        .filter(|v| !v.is_empty());
 
     match (&has_key, &has_url) {
         (Some(key), Some(base_url)) => {
-            let model = std::env::var("OPENAI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-            debug!("Resolved API key from OPENAI_API_KEY (base_url={}, model={})", base_url, model);
+            let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+            debug!(
+                "Resolved API key from OPENAI_API_KEY (base_url={}, model={})",
+                base_url, model
+            );
             return Ok(ResolvedConfig {
                 api_key: key.clone(),
                 base_url: base_url.clone(),
@@ -599,8 +623,7 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
             .with_context(|| format!("Failed to parse auth config at {}", auth_path.display()))?;
 
         if !config.api_key.is_empty() {
-            let model = std::env::var("OPENAI_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+            let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
             debug!("Resolved API key from {}", auth_path.display());
             return Ok(ResolvedConfig {
                 api_key: config.api_key,
