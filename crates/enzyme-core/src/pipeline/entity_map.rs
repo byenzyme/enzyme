@@ -90,6 +90,25 @@ const CHILD_SIGNIFICANCE_RATIO: f64 = 0.10;
 /// Minimum frequency for an all-recent child to be surfaced even below the ratio.
 const ALL_RECENT_MIN_FREQUENCY: i64 = 10;
 
+/// Folders that are structural/generic and should not be selected as top-level entities.
+const EXCLUDED_FOLDERS: &[&str] = &[
+    ".claude",
+    ".obsidian",
+    ".enzyme",
+    ".git",
+    ".trash",
+    "templates",
+    "templater",
+    "config",
+    "migrations",
+    "excalidraw",
+];
+
+const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
+
+/// Tags that correspond to tooling/system concerns, not vault content.
+const EXCLUDED_TAGS: &[&str] = &["excalidraw", "templates", "config", "templater", "migrations"];
+
 impl EntityMap {
     /// Build an EntityMap from the database's trending entities.
     /// Convenience wrapper around `from_entities`.
@@ -329,9 +348,175 @@ impl EntityMap {
             .collect()
     }
 
-    /// Convenience: build from trending entities.
+    /// Build from a coverage-aware shortlist of entities.
+    ///
+    /// Uses marginal file coverage to avoid redundant picks — prefers entities
+    /// that cover distinct parts of the vault over entities that overlap heavily
+    /// with already-selected ones.
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
-        Self::from_trending(db, max_entities)
+        let shortlist = Self::select_shortlist(db, max_entities)?;
+        Self::from_entities(db, &shortlist)
+    }
+
+    /// Coverage-aware greedy entity selection.
+    ///
+    /// Scores entities by a geometric mean of recency and frequency, then picks
+    /// greedily with a marginal coverage signal: each pick's score is adjusted
+    /// by what fraction of its files are not yet covered by earlier picks.
+    ///
+    /// Filtering (child tags, subfolders, system folders) happens here.
+    /// Structural folding (children into parents, links into folders) is left
+    /// to `from_entities`.
+    fn select_shortlist(db: &Database, limit: usize) -> Result<Vec<Entity>> {
+        let all = db.get_all_entities()?;
+        let entity_file_sets = db.get_entity_file_sets()?;
+        let folder_file_sets = db.get_folder_file_sets()?;
+
+        // Pre-compute folder link strength (how many active links live in each folder)
+        let folder_active_links: HashMap<String, usize> = {
+            let link_entities: HashMap<&str, &Entity> = all
+                .iter()
+                .filter(|e| e.entity_type == EntityType::Link)
+                .map(|e| (e.name.as_str(), e))
+                .collect();
+            let mut strength: HashMap<String, usize> = HashMap::new();
+            // Use docs table: for each folder, count how many link entities
+            // have a matching filename in that folder
+            for (folder, files) in &folder_file_sets {
+                let mut active = 0usize;
+                for file_path in files {
+                    if let Some(slash) = file_path.rfind('/') {
+                        let stem = &file_path[slash + 1..];
+                        let stem = stem.strip_suffix(".md").unwrap_or(stem).to_lowercase();
+                        if let Some(link_entity) = link_entities.get(stem.as_str()) {
+                            if link_entity.trends.frequency_recent > 0 {
+                                active += 1;
+                            }
+                        }
+                    }
+                }
+                strength.insert(folder.clone(), active);
+            }
+            strength
+        };
+
+        let excluded_folders: HashSet<&str> = EXCLUDED_FOLDERS.iter().copied().collect();
+        let generic_folders: HashSet<&str> = GENERIC_FOLDERS.iter().copied().collect();
+        let excluded_tags: HashSet<&str> = EXCLUDED_TAGS.iter().copied().collect();
+
+        // Filter to candidates: root-level, non-system, non-generic
+        let candidates: Vec<&Entity> = all
+            .iter()
+            .filter(|e| {
+                match e.entity_type {
+                    EntityType::Folder => {
+                        !e.name.contains('/')
+                            && !excluded_folders.contains(e.name.to_lowercase().as_str())
+                            && !generic_folders.contains(e.name.to_lowercase().as_str())
+                            && !e.name.starts_with('.')
+                    }
+                    EntityType::Tag => {
+                        // Only root tags — EntityMap folds children into parents
+                        !e.name.contains('/')
+                            && !excluded_tags.contains(e.name.to_lowercase().as_str())
+                    }
+                    EntityType::Link => {
+                        !e.name.contains('/') && e.frequency >= 3
+                    }
+                }
+            })
+            .collect();
+
+        let mut picked: Vec<Entity> = Vec::new();
+        let mut covered_files: HashSet<String> = HashSet::new();
+
+        for _ in 0..limit {
+            let picked_keys: HashSet<(&str, &EntityType)> = picked
+                .iter()
+                .map(|e| (e.name.as_str(), &e.entity_type))
+                .collect();
+
+            let mut best: Option<&Entity> = None;
+            let mut best_score: f64 = f64::NEG_INFINITY;
+
+            for entity in &candidates {
+                if picked_keys.contains(&(entity.name.as_str(), &entity.entity_type)) {
+                    continue;
+                }
+
+                let recency_sig = entity.trends.recency_score / 100.0;
+                let freq_sig = (entity.frequency as f64 + 1.0).ln();
+                let freq_recent_sig = (entity.trends.frequency_recent as f64 + 1.0).ln();
+
+                let mut score = 0.7 * (recency_sig.max(0.001) * freq_sig).sqrt()
+                    + 0.5 * freq_recent_sig
+                    + 0.4 * freq_sig;
+
+                // Type baseline
+                match entity.entity_type {
+                    EntityType::Folder => {
+                        score += 1.0;
+                        let active = *folder_active_links
+                            .get(&entity.name.to_lowercase())
+                            .unwrap_or(&0);
+                        score += 0.3 * (active as f64 + 1.0).ln();
+                    }
+                    EntityType::Tag => {
+                        score += 0.8;
+                    }
+                    EntityType::Link => {}
+                }
+
+                // Marginal file coverage
+                let entity_files: HashSet<&String> = match entity.entity_type {
+                    EntityType::Tag | EntityType::Link => entity
+                        .id
+                        .and_then(|id| entity_file_sets.get(&id))
+                        .map(|s| s.iter().collect())
+                        .unwrap_or_default(),
+                    EntityType::Folder => folder_file_sets
+                        .get(&entity.name.to_lowercase())
+                        .map(|s| s.iter().collect())
+                        .unwrap_or_default(),
+                };
+
+                if !entity_files.is_empty() {
+                    let unique = entity_files
+                        .iter()
+                        .filter(|f| !covered_files.contains(**f))
+                        .count();
+                    let marginal = unique as f64 / entity_files.len() as f64;
+                    score += 1.2 * marginal + 0.3 * (unique as f64 + 1.0).ln();
+                    score -= (0.6 * (1.0 - marginal)).min(0.5);
+                }
+
+                if score > best_score {
+                    best = Some(entity);
+                    best_score = score;
+                }
+            }
+
+            let Some(winner) = best else { break };
+            picked.push(winner.clone());
+
+            // Update coverage
+            match winner.entity_type {
+                EntityType::Tag | EntityType::Link => {
+                    if let Some(id) = winner.id {
+                        if let Some(files) = entity_file_sets.get(&id) {
+                            covered_files.extend(files.iter().cloned());
+                        }
+                    }
+                }
+                EntityType::Folder => {
+                    if let Some(files) = folder_file_sets.get(&winner.name.to_lowercase()) {
+                        covered_files.extend(files.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        Ok(picked)
     }
 
     /// Get the page entity map (folder name → link names).

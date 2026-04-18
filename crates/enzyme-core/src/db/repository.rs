@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -7,7 +7,7 @@ use libsql::Value;
 use crate::document::ProcessedDocument;
 use crate::models::*;
 
-use super::connection::{block_in_place_sync, Database};
+use super::connection::{Database, block_in_place_sync};
 
 // ---------------------------------------------------------------------------
 // Context query types
@@ -107,7 +107,8 @@ impl Database {
         let now = chrono::Utc::now().timestamp_millis();
 
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for upsert_documents_batch")?;
@@ -135,9 +136,21 @@ impl Database {
                 };
 
                 if let Some(old_id) = existing_id {
-                    tx.execute("DELETE FROM doc_tags WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
-                    tx.execute("DELETE FROM doc_links WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
-                    tx.execute("DELETE FROM chunks WHERE doc_id = ?1", vec![Value::Integer(old_id)]).await?;
+                    tx.execute(
+                        "DELETE FROM doc_tags WHERE doc_id = ?1",
+                        vec![Value::Integer(old_id)],
+                    )
+                    .await?;
+                    tx.execute(
+                        "DELETE FROM doc_links WHERE doc_id = ?1",
+                        vec![Value::Integer(old_id)],
+                    )
+                    .await?;
+                    tx.execute(
+                        "DELETE FROM chunks WHERE doc_id = ?1",
+                        vec![Value::Integer(old_id)],
+                    )
+                    .await?;
                 }
 
                 let insert_params = vec![
@@ -265,7 +278,12 @@ impl Database {
         let rows = self.query_read(
             "SELECT source_ref, content_hash, modified_at FROM docs",
             vec![],
-            |row| Ok((row.get::<String>(0)?, (row.get::<String>(1)?, row.get::<i64>(2)?))),
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    (row.get::<String>(1)?, row.get::<i64>(2)?),
+                ))
+            },
         )?;
         Ok(rows.into_iter().collect())
     }
@@ -352,16 +370,16 @@ impl Database {
 
     /// Return all `source_ref` values from the docs table.
     pub fn get_all_source_refs(&self) -> Result<Vec<String>> {
-        Ok(self.query_read("SELECT source_ref FROM docs", vec![], |row| {
-            row.get::<String>(0)
-        })?)
+        Ok(
+            self.query_read("SELECT source_ref FROM docs", vec![], |row| {
+                row.get::<String>(0)
+            })?,
+        )
     }
 
     /// Return the total number of documents in the database.
     pub fn get_document_count(&self) -> Result<i64> {
-        let rows = self.query_read("SELECT COUNT(*) FROM docs", vec![], |row| {
-            row.get::<i64>(0)
-        })?;
+        let rows = self.query_read("SELECT COUNT(*) FROM docs", vec![], |row| row.get::<i64>(0))?;
         Ok(rows.into_iter().next().unwrap_or(0))
     }
 
@@ -382,12 +400,17 @@ impl Database {
         let entries: Vec<(String, String, EntityOccurrence)> = entries
             .iter()
             .map(|&(name, entity_type, occ)| {
-                (name.to_string(), entity_type.as_str().to_string(), occ.clone())
+                (
+                    name.to_string(),
+                    entity_type.as_str().to_string(),
+                    occ.clone(),
+                )
             })
             .collect();
 
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for upsert_entities_batch")?;
@@ -506,7 +529,8 @@ impl Database {
         }
         let updates: Vec<(i64, EntityTrends)> = updates.to_vec();
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for update_entity_trends_batch")?;
@@ -535,7 +559,13 @@ impl Database {
              FROM entity_occurrences
              ORDER BY entity_id",
             vec![],
-            |row| Ok((row.get::<i64>(0)?, row.get::<Option<i64>>(1)?, row.get::<i64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<i64>(0)?,
+                    row.get::<Option<i64>>(1)?,
+                    row.get::<i64>(2)?,
+                ))
+            },
         )?;
         Ok(rows)
     }
@@ -543,8 +573,15 @@ impl Database {
     /// Get trending entities with guaranteed type diversity.
     /// Structural/tooling folder names that should never be trending candidates.
     const EXCLUDED_FOLDER_NAMES: &'static [&'static str] = &[
-        ".claude", ".obsidian", ".enzyme", ".git", ".trash",
-        "templates", "templater", "config", "migrations",
+        ".claude",
+        ".obsidian",
+        ".enzyme",
+        ".git",
+        ".trash",
+        "templates",
+        "templater",
+        "config",
+        "migrations",
     ];
 
     pub fn get_trending_entities(
@@ -569,9 +606,8 @@ impl Database {
         };
 
         // Links referenced in fewer than 3 files are likely document titles, not concepts
-        let is_low_reference_link = |e: &Entity| -> bool {
-            e.entity_type == EntityType::Link && e.frequency < 3
-        };
+        let is_low_reference_link =
+            |e: &Entity| -> bool { e.entity_type == EntityType::Link && e.frequency < 3 };
 
         let root_entities: Vec<Entity> = all
             .into_iter()
@@ -674,6 +710,39 @@ impl Database {
             map_entity_row,
         )?;
         Ok(rows)
+    }
+
+    /// Get the set of distinct file_paths for each entity (by entity_id).
+    /// Returns a map from entity_id to a set of file paths.
+    pub fn get_entity_file_sets(&self) -> Result<HashMap<i64, HashSet<String>>> {
+        let rows = self.query_read(
+            "SELECT entity_id, file_path FROM entity_occurrences",
+            vec![],
+            |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?)),
+        )?;
+        let mut map: HashMap<i64, HashSet<String>> = HashMap::new();
+        for (entity_id, file_path) in rows {
+            map.entry(entity_id).or_default().insert(file_path);
+        }
+        Ok(map)
+    }
+
+    /// Get the set of file paths under each top-level folder.
+    /// Returns a map from folder name (lowercase) to a set of source_ref paths.
+    pub fn get_folder_file_sets(&self) -> Result<HashMap<String, HashSet<String>>> {
+        let rows = self.query_read(
+            "SELECT source_ref FROM docs WHERE source_ref LIKE '%/%'",
+            vec![],
+            |row| row.get::<String>(0),
+        )?;
+        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+        for source_ref in rows {
+            if let Some(slash) = source_ref.find('/') {
+                let folder = source_ref[..slash].to_lowercase();
+                map.entry(folder).or_default().insert(source_ref);
+            }
+        }
+        Ok(map)
     }
 
     // -----------------------------------------------------------------------
@@ -912,7 +981,8 @@ impl Database {
     pub fn insert_catalysts(&self, catalysts: &[Catalyst]) -> Result<()> {
         let catalysts = catalysts.to_vec();
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for insert_catalysts")?;
@@ -957,11 +1027,9 @@ impl Database {
 
     /// Get the set of entity names that have at least one catalyst.
     pub fn get_catalyzed_entity_names(&self) -> Result<std::collections::HashSet<String>> {
-        let names = self.query_read(
-            "SELECT DISTINCT entity FROM catalysts",
-            vec![],
-            |row| row.get::<String>(0),
-        )?;
+        let names = self.query_read("SELECT DISTINCT entity FROM catalysts", vec![], |row| {
+            row.get::<String>(0)
+        })?;
         Ok(names.into_iter().collect())
     }
 
@@ -977,12 +1045,14 @@ impl Database {
 
     /// Get the most recent `generated_at` timestamp across all catalysts.
     pub fn get_latest_catalyst_timestamp(&self) -> Result<Option<DateTime<Utc>>> {
-        let rows = self.query_read(
-            "SELECT MAX(generated_at) FROM catalysts",
-            vec![],
-            |row| row.get::<Option<String>>(0),
-        )?;
-        Ok(rows.into_iter().next().flatten().map(|s| parse_datetime_utc(&s)))
+        let rows = self.query_read("SELECT MAX(generated_at) FROM catalysts", vec![], |row| {
+            row.get::<Option<String>>(0)
+        })?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .flatten()
+            .map(|s| parse_datetime_utc(&s)))
     }
 
     /// Count distinct documents that mention a given entity (by entity name).
@@ -1011,7 +1081,8 @@ impl Database {
     pub fn upsert_catalyst_similarities(&self, sims: &[CatalystSimilarity]) -> Result<()> {
         let sims = sims.to_vec();
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for upsert_catalyst_similarities")?;
@@ -1152,17 +1223,16 @@ impl Database {
     }
 
     /// Get the content of a specific chunk by file path and chunk index.
-    pub fn get_chunk_content(
-        &self,
-        file_path: &str,
-        chunk_index: i64,
-    ) -> Result<Option<String>> {
+    pub fn get_chunk_content(&self, file_path: &str, chunk_index: i64) -> Result<Option<String>> {
         let rows = self.query_read(
             "SELECT c.content
              FROM chunks c
              JOIN docs d ON d.id = c.doc_id
              WHERE d.source_ref = ?1 AND c.chunk_index = ?2",
-            vec![Value::Text(file_path.to_string()), Value::Integer(chunk_index)],
+            vec![
+                Value::Text(file_path.to_string()),
+                Value::Integer(chunk_index),
+            ],
             |row| row.get::<String>(0),
         )?;
         Ok(rows.into_iter().next())
@@ -1233,16 +1303,14 @@ impl Database {
     // -----------------------------------------------------------------------
 
     /// Batch-upsert chunk embeddings. Vectors are stored as little-endian f32 BLOBs.
-    pub fn upsert_chunk_embeddings(
-        &self,
-        embeddings: &[(String, u32, Vec<f32>)],
-    ) -> Result<()> {
+    pub fn upsert_chunk_embeddings(&self, embeddings: &[(String, u32, Vec<f32>)]) -> Result<()> {
         if embeddings.is_empty() {
             return Ok(());
         }
         let embeddings = embeddings.to_vec();
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("failed to begin transaction for upsert_chunk_embeddings")?;
@@ -1312,10 +1380,7 @@ impl Database {
     ///
     /// All embeddings are stored as a single row in `catalyst_embeddings_packed`
     /// to eliminate per-row async overhead on the libsql read path.
-    pub fn upsert_catalyst_embeddings(
-        &self,
-        embeddings: &[(&str, &[f32])],
-    ) -> Result<()> {
+    pub fn upsert_catalyst_embeddings(&self, embeddings: &[(&str, &[f32])]) -> Result<()> {
         if embeddings.is_empty() {
             return Ok(());
         }
@@ -1330,11 +1395,13 @@ impl Database {
         }
 
         block_in_place_sync(async move {
-            let tx = self.conn
+            let tx = self
+                .conn
                 .transaction()
                 .await
                 .context("begin upsert_catalyst_embeddings")?;
-            tx.execute("DELETE FROM catalyst_embeddings_packed", ()).await?;
+            tx.execute("DELETE FROM catalyst_embeddings_packed", ())
+                .await?;
             tx.execute(
                 "INSERT INTO catalyst_embeddings_packed (count, ids, vectors) VALUES (?1, ?2, ?3)",
                 vec![
@@ -1344,7 +1411,9 @@ impl Database {
                 ],
             )
             .await?;
-            tx.commit().await.context("commit upsert_catalyst_embeddings")
+            tx.commit()
+                .await
+                .context("commit upsert_catalyst_embeddings")
         })
     }
 
@@ -1365,9 +1434,13 @@ impl Database {
             None => return Ok(vec![]),
         };
 
-        let ids: Vec<String> = serde_json::from_str(&ids_json)
-            .context("deserialize catalyst ids")?;
-        let embedding_dim = if ids.is_empty() { return Ok(vec![]); } else { vectors_blob.len() / ids.len() };
+        let ids: Vec<String> =
+            serde_json::from_str(&ids_json).context("deserialize catalyst ids")?;
+        let embedding_dim = if ids.is_empty() {
+            return Ok(vec![]);
+        } else {
+            vectors_blob.len() / ids.len()
+        };
         let results: Vec<(String, Vec<f32>)> = ids
             .into_iter()
             .zip(vectors_blob.chunks(embedding_dim).map(blob_to_f32_vec))
@@ -1385,8 +1458,8 @@ fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
     let trends: EntityTrends = serde_json::from_str(&trends_str).unwrap_or_default();
 
     let metadata_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
-    let metadata: serde_json::Value =
-        serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Object(Default::default()));
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
 
     Ok(Entity {
         id: Some(row.get::<i64>(0)?),
