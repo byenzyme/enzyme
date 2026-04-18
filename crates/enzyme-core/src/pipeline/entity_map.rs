@@ -356,25 +356,39 @@ impl EntityMap {
     /// Uses marginal file coverage to avoid redundant picks — prefers entities
     /// that cover distinct parts of the vault over entities that overlap heavily
     /// with already-selected ones.
+    /// Minimum fraction of a folder's files that must be active page entity
+    /// links for the folder to be treated as expandable. Structured collections
+    /// like `people/` (30%) pass; catch-alls like `inbox/` (0.4%) don't.
+    const EXPANDABLE_DENSITY_THRESHOLD: f64 = 0.05;
+
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
         let shortlist = Self::select_shortlist(db, max_entities)?;
 
         // Page entity detection needs link entities present. Only add links
-        // that live inside shortlisted folders — avoids surfacing synthetic
-        // folders (daily/, work/) that weren't selected.
-        let shortlist_folders: HashSet<&str> = shortlist
+        // for folders that are structured collections — where a meaningful
+        // fraction of files correspond to named entity links.
+        let shortlist_folders: HashMap<String, i64> = shortlist
             .iter()
             .filter(|e| e.entity_type == EntityType::Folder)
-            .map(|e| e.name.as_str())
+            .map(|e| (e.name.clone(), e.frequency.max(1)))
             .collect();
 
-        let folder_links = db.get_folder_page_entity_links(&shortlist_folders)?;
+        let folder_names: HashSet<&str> = shortlist_folders.keys().map(|s| s.as_str()).collect();
+        let links_by_folder = db.get_folder_page_entity_links_grouped(&folder_names)?;
 
         let shortlist_names: HashSet<String> = shortlist.iter().map(|e| e.name.clone()).collect();
         let mut combined = shortlist;
-        for entity in folder_links {
-            if !shortlist_names.contains(&entity.name) {
-                combined.push(entity);
+
+        for (folder, links) in &links_by_folder {
+            let file_count = shortlist_folders.get(folder.as_str()).copied().unwrap_or(1) as f64;
+            let density = links.len() as f64 / file_count;
+            if density < Self::EXPANDABLE_DENSITY_THRESHOLD {
+                continue;
+            }
+            for entity in links {
+                if !shortlist_names.contains(&entity.name) {
+                    combined.push(entity.clone());
+                }
             }
         }
 

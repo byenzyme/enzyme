@@ -799,6 +799,69 @@ impl Database {
             .collect())
     }
 
+    /// Like `get_folder_page_entity_links`, but returns results grouped by folder.
+    pub fn get_folder_page_entity_links_grouped(
+        &self,
+        folders: &HashSet<&str>,
+    ) -> Result<HashMap<String, Vec<Entity>>> {
+        if folders.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let docs = self.query_read(
+            "SELECT source_ref FROM docs",
+            vec![],
+            |row| row.get::<String>(0),
+        )?;
+
+        // Map: folder → set of doc stems
+        let mut folder_stems: HashMap<String, HashSet<String>> = HashMap::new();
+        for source_ref in &docs {
+            if let Some(slash) = source_ref.find('/') {
+                let folder = source_ref[..slash].to_lowercase();
+                if folders.contains(folder.as_str()) {
+                    let filename = &source_ref[slash + 1..];
+                    if !filename.contains('/') {
+                        let stem = filename
+                            .strip_suffix(".md")
+                            .unwrap_or(filename)
+                            .to_lowercase();
+                        folder_stems.entry(folder).or_default().insert(stem);
+                    }
+                }
+            }
+        }
+
+        if folder_stems.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let all_entities = self.get_all_entities()?;
+        let link_entities: Vec<&Entity> = all_entities
+            .iter()
+            .filter(|e| {
+                e.entity_type == EntityType::Link
+                    && e.frequency >= 3
+                    && e.trends.frequency_recent > 0
+            })
+            .collect();
+
+        let mut result: HashMap<String, Vec<Entity>> = HashMap::new();
+        for (folder, stems) in &folder_stems {
+            let matches: Vec<Entity> = link_entities
+                .iter()
+                .filter(|e| stems.contains(&e.name.to_lowercase()))
+                .cloned()
+                .cloned()
+                .collect();
+            if !matches.is_empty() {
+                result.insert(folder.clone(), matches);
+            }
+        }
+
+        Ok(result)
+    }
+
     // -----------------------------------------------------------------------
     // Context queries (for XML context builder)
     // -----------------------------------------------------------------------
