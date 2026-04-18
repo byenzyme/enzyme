@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -6,20 +7,21 @@ use anyhow::Result;
 use chrono::{Datelike, Utc};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
 use crate::db::Database;
 use crate::llm::{
-    LlmClient, GenerationParams,
-    build_system_prompt, build_user_prompt, parse_catalyst_response,
-    catalyst_json_schema, EraContext, ParsedCatalyst,
-    get_profile, CatalystProfile, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY,
-    DEFAULT_MODEL,
+    CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
+    GenerationParams, LlmClient, ParsedCatalyst, build_system_prompt, build_user_prompt,
+    catalyst_json_schema, get_profile, parse_catalyst_response,
 };
 use crate::models::{Catalyst, Entity};
-use crate::pipeline::eras::{cluster_eras_periodic, assign_occurrences_to_eras, allocate_catalysts_to_eras, sample_contexts_by_era};
+use crate::pipeline::eras::{
+    allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
+    sample_contexts_by_era,
+};
 
 pub struct CatalystPipeline<'a> {
     db: &'a Database,
@@ -130,37 +132,24 @@ impl<'a> CatalystPipeline<'a> {
         Self { db, llm }
     }
 
-    /// Run catalyst generation for the given pre-selected entities.
-    pub async fn run(
+    /// Build entity jobs (system prompt + per-entity user prompts) from entities and config.
+    ///
+    /// This is Phase 1 of the catalyst pipeline — synchronous, DB-bound.
+    /// Extracted so both `run()` and `dump_prompts()` share the same prompt construction.
+    fn build_jobs(
         &self,
         entities: &[Entity],
         config: &CatalystConfig<'_>,
-        on_event: impl Fn(CatalystEvent),
-    ) -> Result<CatalystStats> {
-        let start = Instant::now();
-        let mut stats = CatalystStats {
-            entities_processed: 0,
-            catalysts_generated: 0,
-            errors: Vec::new(),
-            duration_ms: 0,
-            rate_limited: 0,
-        };
-
-        let total = entities.len();
-        info!(total, "generating catalysts for selected entities");
-
-        // Build system prompt once (shared across all entities for caching)
+    ) -> Result<(String, Vec<EntityJob>, Vec<String>)> {
         let system_prompt = build_system_prompt(
             Some(config.format_key),
             config.custom_guidance,
             config.vault_guide,
         );
 
-        // Resolve the default profile once
         let default_profile = get_profile(config.default_profile)
             .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
 
-        // Phase 1: Pre-fetch all context and build LLM prompts (synchronous, DB-bound)
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
 
@@ -170,18 +159,17 @@ impl<'a> CatalystPipeline<'a> {
 
             let occurrences = self.db.get_entity_occurrences(entity_id)?;
 
-            // Resolve per-entity profile
             let profile: &CatalystProfile = config
                 .entity_profiles
                 .get(entity_name)
                 .and_then(|key| get_profile(key))
                 .unwrap_or(default_profile);
 
-            let num_catalysts = config.per_entity_allocations
+            let num_catalysts = config
+                .per_entity_allocations
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
 
-            // Era-aware context sampling
             let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
             let era_context = if eras.len() > 1 {
                 let bucketed = assign_occurrences_to_eras(&eras, &occurrences);
@@ -201,7 +189,6 @@ impl<'a> CatalystPipeline<'a> {
                 None
             };
 
-            // Flat context samples as fallback
             let flat_samples: Vec<String> = occurrences
                 .iter()
                 .filter_map(|o| o.context.clone())
@@ -215,7 +202,10 @@ impl<'a> CatalystPipeline<'a> {
             };
 
             if flat_samples.is_empty() && era_context.is_none() {
-                debug!(entity_name = entity_name.as_str(), "no context samples, skipping");
+                debug!(
+                    entity_name = entity_name.as_str(),
+                    "no context samples, skipping"
+                );
                 skipped.push(entity_name.clone());
                 continue;
             }
@@ -244,6 +234,71 @@ impl<'a> CatalystPipeline<'a> {
             });
         }
 
+        Ok((system_prompt, jobs, skipped))
+    }
+
+    /// Dump prompts to a JSONL file for training data generation.
+    ///
+    /// Runs Phase 1 (prompt building) only — no LLM calls. Each line is:
+    /// `{"entity": "...", "entity_type": "...", "system_prompt": "...", "user_prompt": "..."}`
+    pub fn dump_prompts(
+        &self,
+        entities: &[Entity],
+        config: &CatalystConfig<'_>,
+        output_path: &std::path::Path,
+    ) -> Result<usize> {
+        let (system_prompt, jobs, skipped) = self.build_jobs(entities, config)?;
+
+        info!(
+            jobs = jobs.len(),
+            skipped = skipped.len(),
+            "dumping prompts (no LLM calls)"
+        );
+
+        let mut file = std::fs::File::create(output_path)?;
+
+        // Write system prompt as first line (shared across all entities)
+        let sys_line = serde_json::json!({
+            "_type": "system_prompt",
+            "system_prompt": system_prompt,
+        });
+        writeln!(file, "{}", sys_line)?;
+
+        // Write per-entity prompts
+        for job in &jobs {
+            let line = serde_json::json!({
+                "entity": job.entity_name,
+                "entity_type": job.entity_type,
+                "user_prompt": job.user_prompt,
+            });
+            writeln!(file, "{}", line)?;
+        }
+
+        info!(path = %output_path.display(), count = jobs.len(), "wrote prompt dump");
+        Ok(jobs.len())
+    }
+
+    /// Run catalyst generation for the given pre-selected entities.
+    pub async fn run(
+        &self,
+        entities: &[Entity],
+        config: &CatalystConfig<'_>,
+        on_event: impl Fn(CatalystEvent),
+    ) -> Result<CatalystStats> {
+        let start = Instant::now();
+        let mut stats = CatalystStats {
+            entities_processed: 0,
+            catalysts_generated: 0,
+            errors: Vec::new(),
+            duration_ms: 0,
+            rate_limited: 0,
+        };
+
+        let total = entities.len();
+        info!(total, "generating catalysts for selected entities");
+
+        let (system_prompt, jobs, skipped) = self.build_jobs(entities, config)?;
+
         // Report skipped entities
         for (i, name) in skipped.iter().enumerate() {
             on_event(CatalystEvent::EntitySkipped {
@@ -265,8 +320,8 @@ impl<'a> CatalystPipeline<'a> {
 
         // Build the response_format once based on provider capabilities
         let structured_output = self.llm.structured_output_support();
-        let response_format = structured_output
-            .build_response_format("catalyst_response", catalyst_json_schema());
+        let response_format =
+            structured_output.build_response_format("catalyst_response", catalyst_json_schema());
 
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
@@ -314,22 +369,26 @@ impl<'a> CatalystPipeline<'a> {
                                 last_error = e.to_string();
                                 debug!(
                                     entity_name = entity_name.as_str(),
-                                    attempt,
-                                    "LLM call failed: {}",
-                                    e
+                                    attempt, "LLM call failed: {}", e
                                 );
                                 if attempt < max_attempts - 1 {
                                     // Exponential backoff: 2s, 4s + jitter (0-500ms)
                                     let base_ms = 2000u64 * 2u64.pow(attempt);
                                     let jitter_ms = (entity_name.len() as u64 * 37) % 500;
-                                    let delay = std::time::Duration::from_millis(base_ms + jitter_ms);
+                                    let delay =
+                                        std::time::Duration::from_millis(base_ms + jitter_ms);
                                     tokio::time::sleep(delay).await;
                                 }
                             }
                         }
                     }
-                    Err(anyhow::anyhow!("all {} retry attempts failed: {}", max_attempts, last_error))
-                }).await;
+                    Err(anyhow::anyhow!(
+                        "all {} retry attempts failed: {}",
+                        max_attempts,
+                        last_error
+                    ))
+                })
+                .await;
 
                 let response_text = match result {
                     Ok(Ok(text)) => text,
@@ -342,7 +401,11 @@ impl<'a> CatalystPipeline<'a> {
                         };
                     }
                     Err(_) => {
-                        debug!(entity_name = entity_name.as_str(), timeout_secs = entity_timeout_secs, "entity timed out");
+                        debug!(
+                            entity_name = entity_name.as_str(),
+                            timeout_secs = entity_timeout_secs,
+                            "entity timed out"
+                        );
                         return EntityResult {
                             entity_name,
                             entity_type,
@@ -406,8 +469,7 @@ impl<'a> CatalystPipeline<'a> {
                     if let Some(ref error) = entity_result.error {
                         debug!(
                             entity_name = entity_result.entity_name.as_str(),
-                            "catalyst generation failed: {}",
-                            error
+                            "catalyst generation failed: {}", error
                         );
                         let is_rate_limited = error.contains("429")
                             || error.contains("rate")
@@ -468,8 +530,7 @@ impl<'a> CatalystPipeline<'a> {
 
                         info!(
                             entity_name = entity_result.entity_name.as_str(),
-                            count,
-                            "generated catalysts"
+                            count, "generated catalysts"
                         );
                     }
 
@@ -501,7 +562,10 @@ impl<'a> CatalystPipeline<'a> {
 /// When `min_top_catalysts` is set, the largest entity (by volume) is guaranteed
 /// at least that many catalysts. The base and max are derived accordingly,
 /// matching enzyme-python's `min_top_catalysts` parameter.
-pub fn calculate_allocations(entities: &[Entity], min_top_catalysts: Option<usize>) -> HashMap<String, usize> {
+pub fn calculate_allocations(
+    entities: &[Entity],
+    min_top_catalysts: Option<usize>,
+) -> HashMap<String, usize> {
     let min_per_entity: usize = 3;
     let mut base: usize = 7;
     let mut max_per_entity: usize = 15;
@@ -628,8 +692,16 @@ mod tests {
     fn test_allocation_spans_months() {
         let now = Utc::now();
         let k1 = format!("{:04}-{:02}", now.year(), now.month());
-        let prev_month = if now.month() == 1 { 12 } else { now.month() - 1 };
-        let prev_year = if now.month() == 1 { now.year() - 1 } else { now.year() };
+        let prev_month = if now.month() == 1 {
+            12
+        } else {
+            now.month() - 1
+        };
+        let prev_year = if now.month() == 1 {
+            now.year() - 1
+        } else {
+            now.year()
+        };
         let k2 = format!("{:04}-{:02}", prev_year, prev_month);
         let entities = vec![make_entity("span", HashMap::from([(k1, 4), (k2, 4)]))];
         let allocs = calculate_allocations(&entities, None);

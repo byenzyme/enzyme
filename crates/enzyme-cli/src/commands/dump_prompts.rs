@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 pub async fn run_dump_prompts(
     _vault_path: &Path,

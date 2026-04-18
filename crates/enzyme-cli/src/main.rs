@@ -10,7 +10,10 @@ mod commands;
 mod display;
 
 #[derive(Parser)]
-#[command(name = "enzyme", about = "Local-first knowledge indexing and approximate search")]
+#[command(
+    name = "enzyme",
+    about = "Local-first knowledge indexing and approximate search"
+)]
 #[command(version)]
 struct Cli {
     /// Path to the vault (defaults to current directory)
@@ -205,9 +208,7 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
     }
 
     // Fallback: stderr (non-vault commands, or if file creation failed).
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 }
 
 /// Read vault guide from --guide flag or stdin (if piped).
@@ -265,12 +266,28 @@ async fn main() -> Result<()> {
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
-        Commands::Init { full, detached, guide, quiet, json_progress, min_top_catalysts, stage } => {
+        Commands::Init {
+            full,
+            detached,
+            guide,
+            quiet,
+            json_progress,
+            min_top_catalysts,
+            stage,
+        } => {
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, full, quiet).await?;
             } else {
                 let vault_guide = resolve_vault_guide(guide);
-                let init_result = commands::init::run_init(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
+                let init_result = commands::init::run_init(
+                    &vault_path,
+                    full,
+                    detached,
+                    quiet,
+                    vault_guide.as_deref(),
+                    min_top_catalysts,
+                )
+                .await?;
 
                 if quiet || json_progress {
                     if let Some(result) = init_result {
@@ -280,16 +297,52 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Refresh { full, detached, guide, quiet, min_top_catalysts } => {
+        Commands::Refresh {
+            full,
+            detached,
+            guide,
+            quiet,
+            min_top_catalysts,
+        } => {
             let vault_guide = resolve_vault_guide(guide);
-            commands::init::run_refresh(&vault_path, full, detached, quiet, vault_guide.as_deref(), min_top_catalysts).await?;
+            commands::init::run_refresh(
+                &vault_path,
+                full,
+                detached,
+                quiet,
+                vault_guide.as_deref(),
+                min_top_catalysts,
+            )
+            .await?;
         }
-        Commands::Catalyze { query, limit, target, register } => {
-            commands::catalyze::run_catalyze(&vault_path, &query, limit, target.as_deref(), &register).await?;
+        Commands::Catalyze {
+            query,
+            limit,
+            target,
+            register,
+        } => {
+            commands::catalyze::run_catalyze(
+                &vault_path,
+                &query,
+                limit,
+                target.as_deref(),
+                &register,
+            )
+            .await?;
         }
-        Commands::Petri { top, query, catalyst_budget } => {
+        Commands::Petri {
+            top,
+            query,
+            catalyst_budget,
+        } => {
             let default_top = if query.is_some() { 15 } else { usize::MAX };
-            commands::petri::run_petri(&vault_path, top.unwrap_or(default_top), query.as_deref(), catalyst_budget).await?;
+            commands::petri::run_petri(
+                &vault_path,
+                top.unwrap_or(default_top),
+                query.as_deref(),
+                catalyst_budget,
+            )
+            .await?;
         }
         Commands::Apply {
             target,
@@ -308,8 +361,18 @@ async fn main() -> Result<()> {
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
         }
-        Commands::DumpPrompts { output, guide, min_top_catalysts } => {
-            commands::dump_prompts::run_dump_prompts(&vault_path, &output, guide, min_top_catalysts).await?;
+        Commands::DumpPrompts {
+            output,
+            guide,
+            min_top_catalysts,
+        } => {
+            commands::dump_prompts::run_dump_prompts(
+                &vault_path,
+                &output,
+                guide,
+                min_top_catalysts,
+            )
+            .await?;
         }
         Commands::Setup { .. } | Commands::Daemon | Commands::Mcp => unreachable!(),
     }
