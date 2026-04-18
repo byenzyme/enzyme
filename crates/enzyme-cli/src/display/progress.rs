@@ -3,9 +3,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::{
-    cursor,
+    ExecutableCommand, cursor,
     terminal::{self, ClearType},
-    ExecutableCommand,
 };
 
 use enzyme_core::models::EntityType;
@@ -46,12 +45,6 @@ pub enum DisplayEvent {
         source: SelectionSource,
     },
 
-    // LLM selection
-    LlmSelectionStart,
-    LlmSelectionComplete {
-        entities_selected: usize,
-    },
-    LlmSelectionSkipped(String),
 
     // Discovery (catalyst generation)
     DiscoveryStart {
@@ -208,7 +201,10 @@ impl InitDisplay {
 
     /// Get a clone of the sender for sending events.
     pub fn sender(&self) -> mpsc::Sender<DisplayEvent> {
-        self.sender.as_ref().expect("display already finished").clone()
+        self.sender
+            .as_ref()
+            .expect("display already finished")
+            .clone()
     }
 
     /// Send an event to the display.
@@ -263,20 +259,24 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     // Helper: process a single event, updating state. Returns true if Done.
     #[allow(unused_assignments)]
     let handle_event = |event: DisplayEvent,
-                            out: &mut io::Stdout,
-                            stage: &mut DisplayStage,
-                            rolling_window: &mut Vec<DiscoveryEntry>,
-                            failed_entries: &mut Vec<DiscoveryEntry>,
-                            discovery_completed: &mut usize,
-                            discovery_total: &mut usize,
-                            lines_written: &mut u16,
-                            spinner: &mut HelixSpinner,
-                            catalysts_generated: &mut Option<usize>,
-                            catalyst_errors: &mut Option<(usize, usize)>,
-                            embedding_status: &mut Option<String>|
+                        out: &mut io::Stdout,
+                        stage: &mut DisplayStage,
+                        rolling_window: &mut Vec<DiscoveryEntry>,
+                        failed_entries: &mut Vec<DiscoveryEntry>,
+                        discovery_completed: &mut usize,
+                        discovery_total: &mut usize,
+                        lines_written: &mut u16,
+                        spinner: &mut HelixSpinner,
+                        catalysts_generated: &mut Option<usize>,
+                        catalyst_errors: &mut Option<(usize, usize)>,
+                        embedding_status: &mut Option<String>|
      -> bool {
         match event {
-            DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+            DisplayEvent::ApiConfig {
+                base_url,
+                model,
+                masked_key,
+            } => {
                 let _ = writeln!(
                     out,
                     "  {}LLM:{} {} @ {} (key: {})",
@@ -313,29 +313,11 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     files_deleted,
                 );
             }
-            DisplayEvent::SelectionComplete { count: _, source: _ } => {
+            DisplayEvent::SelectionComplete {
+                count: _,
+                source: _,
+            } => {
                 *stage = DisplayStage::Selecting;
-            }
-            DisplayEvent::LlmSelectionStart => {
-                // Will show spinner in render loop
-            }
-            DisplayEvent::LlmSelectionComplete { entities_selected } => {
-                let _ = writeln!(
-                    out,
-                    "  {}Selected:{} {} entities (LLM-assisted)",
-                    crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
-                    crossterm::style::ResetColor,
-                    entities_selected,
-                );
-            }
-            DisplayEvent::LlmSelectionSkipped(reason) => {
-                let _ = writeln!(
-                    out,
-                    "  {}Selection:{} {}",
-                    crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
-                    crossterm::style::ResetColor,
-                    reason,
-                );
             }
             DisplayEvent::DiscoveryStart { total } => {
                 *stage = DisplayStage::Discovery;
@@ -420,7 +402,11 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     embedding_status.replace(format!("Embedding [{}/{} docs]", done, total));
                 }
             }
-            DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
+            DisplayEvent::EmbeddingComplete {
+                documents,
+                pruned,
+                duration_ms,
+            } => {
                 // Flush the cycling entity display and print final summary lines
                 clear_lines(out, *lines_written);
                 *lines_written = 0;
@@ -446,7 +432,11 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 }
 
                 let secs = duration_ms as f64 / 1000.0;
-                let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
+                let docs_per_sec = if secs > 0.0 {
+                    documents as f64 / secs
+                } else {
+                    0.0
+                };
                 let pruned_suffix = if pruned > 0 {
                     format!(", {} pruned", pruned)
                 } else {
@@ -576,20 +566,36 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
         match rx.recv_timeout(FRAME_INTERVAL) {
             Ok(event) => {
                 if handle_event(
-                    event, &mut out, &mut stage, &mut rolling_window, &mut failed_entries,
-                    &mut discovery_completed, &mut discovery_total,
-                    &mut lines_written, &mut spinner,
-                    &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
+                    event,
+                    &mut out,
+                    &mut stage,
+                    &mut rolling_window,
+                    &mut failed_entries,
+                    &mut discovery_completed,
+                    &mut discovery_total,
+                    &mut lines_written,
+                    &mut spinner,
+                    &mut catalysts_generated,
+                    &mut catalyst_errors,
+                    &mut embedding_status,
                 ) {
                     return;
                 }
                 // Drain all pending events before rendering
                 while let Ok(event) = rx.try_recv() {
                     if handle_event(
-                        event, &mut out, &mut stage, &mut rolling_window, &mut failed_entries,
-                        &mut discovery_completed, &mut discovery_total,
-                        &mut lines_written, &mut spinner,
-                        &mut catalysts_generated, &mut catalyst_errors, &mut embedding_status,
+                        event,
+                        &mut out,
+                        &mut stage,
+                        &mut rolling_window,
+                        &mut failed_entries,
+                        &mut discovery_completed,
+                        &mut discovery_total,
+                        &mut lines_written,
+                        &mut spinner,
+                        &mut catalysts_generated,
+                        &mut catalyst_errors,
+                        &mut embedding_status,
                     ) {
                         return;
                     }
@@ -724,7 +730,11 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
     loop {
         match rx.recv() {
             Ok(event) => match event {
-                DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+                DisplayEvent::ApiConfig {
+                    base_url,
+                    model,
+                    masked_key,
+                } => {
                     println!("  LLM: {} @ {} (key: {})", model, base_url, masked_key);
                 }
                 DisplayEvent::IndexingStart => {
@@ -744,17 +754,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         files_discovered, files_new, files_updated, files_deleted
                     );
                 }
-                DisplayEvent::SelectionComplete { .. } => {
-                }
-                DisplayEvent::LlmSelectionStart => {
-                    println!("Running LLM-assisted entity selection...");
-                }
-                DisplayEvent::LlmSelectionComplete { entities_selected } => {
-                    println!("  Selected: {} entities (LLM-assisted)", entities_selected);
-                }
-                DisplayEvent::LlmSelectionSkipped(reason) => {
-                    println!("  Selection: {}", reason);
-                }
+                DisplayEvent::SelectionComplete { .. } => {}
                 DisplayEvent::DiscoveryStart { total } => {
                     println!("Generating catalysts for {} entities...", total);
                 }
@@ -770,9 +770,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     println!("  [catalyst] [{}/{}] {}", completed, total, entity_name);
                 }
                 DisplayEvent::EntitySkipped {
-                    completed,
-                    total,
-                    ..
+                    completed, total, ..
                 } => {
                     println!("  [skipped] [{}/{}]", completed, total);
                 }
@@ -783,7 +781,10 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     completed,
                     total,
                 } => {
-                    println!("  [catalyst] [{}/{}] {} (failed: {})", completed, total, entity_name, error);
+                    println!(
+                        "  [catalyst] [{}/{}] {} (failed: {})",
+                        completed, total, entity_name, error
+                    );
                 }
                 DisplayEvent::DiscoveryComplete {
                     entities_processed: _,
@@ -800,8 +801,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     };
                     println!(
                         "  Catalysts: {} generated{}",
-                        catalysts_generated,
-                        err_suffix,
+                        catalysts_generated, err_suffix,
                     );
                 }
                 DisplayEvent::EmbeddingStart => {
@@ -812,15 +812,26 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         println!("  [embed] {}/{} documents", done, total);
                     }
                 }
-                DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
+                DisplayEvent::EmbeddingComplete {
+                    documents,
+                    pruned,
+                    duration_ms,
+                } => {
                     let secs = duration_ms as f64 / 1000.0;
-                    let docs_per_sec = if secs > 0.0 { documents as f64 / secs } else { 0.0 };
+                    let docs_per_sec = if secs > 0.0 {
+                        documents as f64 / secs
+                    } else {
+                        0.0
+                    };
                     let pruned_suffix = if pruned > 0 {
                         format!(", {} pruned", pruned)
                     } else {
                         String::new()
                     };
-                    println!("  Embedded: {} recent documents{} ({:.0} docs/sec)", documents, pruned_suffix, docs_per_sec);
+                    println!(
+                        "  Embedded: {} recent documents{} ({:.0} docs/sec)",
+                        documents, pruned_suffix, docs_per_sec
+                    );
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
                     println!("  Embedding skipped: {}", reason);

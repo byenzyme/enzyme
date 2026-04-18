@@ -1,6 +1,6 @@
+use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::fs;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -11,17 +11,18 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{LlmClient, resolve_api_config, DEFAULT_PROFILE_KEY, DEFAULT_FORMAT_KEY};
-use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::pipeline::embedding::EmbeddingPipeline;
-use enzyme_core::pipeline::catalysts::{CatalystPipeline, CatalystConfig, CatalystEvent, calculate_allocations};
+use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient, resolve_api_config};
+use enzyme_core::pipeline::catalysts::{
+    CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
+};
 use enzyme_core::pipeline::context::ContextBuilder;
-use enzyme_core::pipeline::llm_selection::LlmSelectionPipeline;
-use enzyme_core::pipeline::selection::{SelectionPipeline, SelectionSource};
+use enzyme_core::pipeline::embedding::EmbeddingPipeline;
+use enzyme_core::pipeline::indexing::IndexingPipeline;
+use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::pipeline::staleness::{
-    check_catalyst_staleness, load_stored_entity_names, store_staleness_bookkeeping,
-    store_staleness_bookkeeping_partial, StalenessResult,
+    StalenessResult, check_catalyst_staleness, load_stored_entity_names,
+    store_staleness_bookkeeping, store_staleness_bookkeeping_partial,
 };
 
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
@@ -84,8 +85,7 @@ pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> 
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent)
-            .context("failed to create .enzyme directory")?;
+        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
     let db = Database::open(&paths.vault_db)?;
@@ -168,9 +168,10 @@ fn open_in_editor(initial_text: &str) -> Result<String> {
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
 
-    let mut tmpfile = tempfile::NamedTempFile::new()
-        .context("failed to create temp file for editor")?;
-    tmpfile.write_all(initial_text.as_bytes())
+    let mut tmpfile =
+        tempfile::NamedTempFile::new().context("failed to create temp file for editor")?;
+    tmpfile
+        .write_all(initial_text.as_bytes())
         .context("failed to write to temp file")?;
     tmpfile.flush()?;
 
@@ -183,12 +184,18 @@ fn open_in_editor(initial_text: &str) -> Result<String> {
         anyhow::bail!("editor exited with status {}", status);
     }
 
-    let edited = fs::read_to_string(tmpfile.path())
-        .context("failed to read edited file")?;
+    let edited = fs::read_to_string(tmpfile.path()).context("failed to read edited file")?;
     Ok(edited)
 }
 
-pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<Option<InitResult>> {
+pub async fn run_init(
+    vault_path: &Path,
+    full: bool,
+    _detached: bool,
+    quiet: bool,
+    vault_guide: Option<&str>,
+    min_top_catalysts: Option<usize>,
+) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
     // Check for existing enzyme data and offer hard reset
@@ -216,7 +223,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             if input.trim().eq_ignore_ascii_case("y") {
                 if let Some(ref dir) = enzyme_dir {
                     if dir.exists() {
-                        fs::remove_dir_all(dir).context("failed to remove enzyme data directory")?;
+                        fs::remove_dir_all(dir)
+                            .context("failed to remove enzyme data directory")?;
                         eprintln!("Cleared {}", dir.display());
                     }
                 }
@@ -226,8 +234,7 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent)
-            .context("failed to create .enzyme directory")?;
+        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
     // Open database
@@ -245,7 +252,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     // Run with animated display, then finish it before the interactive prompt.
     let idx_stats = {
-        let idx_display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
+        let idx_display = if quiet {
+            InitDisplay::start_quiet()
+        } else {
+            InitDisplay::start()
+        };
         let tx = idx_display.sender();
 
         if let Some(ref cfg) = api_config {
@@ -254,7 +265,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                     base_url: cfg.base_url.clone(),
                     model: cfg.model.clone(),
                     masked_key: cfg.masked_api_key(),
-                }).ok();
+                })
+                .ok();
             }
         }
 
@@ -262,7 +274,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
         let tx_idx = tx.clone();
         let stats = indexing.run(full, |msg| {
-            tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
+            tx_idx
+                .send(DisplayEvent::IndexingProgress(msg.to_string()))
+                .ok();
         })?;
 
         tx.send(DisplayEvent::IndexingComplete {
@@ -270,7 +284,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             files_new: stats.files_new,
             files_updated: stats.files_updated,
             files_deleted: stats.files_deleted,
-        }).ok();
+        })
+        .ok();
         tx.send(DisplayEvent::Done { duration_ms: 0 }).ok();
         idx_display.finish();
         stats
@@ -279,7 +294,10 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     // ── Interactive prompt: show vault summary after indexing ────────────
     // Only on first init (no enzyme-config.yaml yet), interactive TTY, no guide provided.
     let is_interactive = !quiet && atty::is(atty::Stream::Stdin);
-    let has_config = vault_path.join(".enzyme").join("enzyme-config.yaml").exists()
+    let has_config = vault_path
+        .join(".enzyme")
+        .join("enzyme-config.yaml")
+        .exists()
         || vault_path.join("enzyme-config.yaml").exists();
     let is_first_init = !has_config;
     let vault_guide = if is_interactive && is_first_init && vault_guide.is_none() {
@@ -293,40 +311,23 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     let vault_guide = vault_guide.as_deref();
 
     // ── Start display for remaining pipeline ────────────────────────────
-    let display = if quiet { InitDisplay::start_quiet() } else { InitDisplay::start() };
+    let display = if quiet {
+        InitDisplay::start_quiet()
+    } else {
+        InitDisplay::start()
+    };
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
-    let mut sel_result = selection.run()?;
+    let sel_result = selection.run()?;
 
     tx.send(DisplayEvent::SelectionComplete {
         count: sel_result.entities.len(),
         source: sel_result.source.clone(),
-    }).ok();
-
-    // ── Step 2a: LLM-assisted selection (first init only) ────────────────
-    if matches!(sel_result.source, SelectionSource::Trending) {
-        if let Some(ref resolved) = api_config {
-            tx.send(DisplayEvent::LlmSelectionStart).ok();
-            let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
-            let llm_sel = LlmSelectionPipeline::new(&db, &llm);
-            match llm_sel.run(&sel_result.entities, vault_path, resolved.selection_model(), vault_guide).await {
-                Ok(result) => {
-                    tx.send(DisplayEvent::LlmSelectionComplete {
-                        entities_selected: result.entities.len(),
-                    }).ok();
-                    sel_result = result;
-                }
-                Err(e) => {
-                    let msg = format!("LLM selection failed: {e}");
-                    tx.send(DisplayEvent::LlmSelectionSkipped(msg.clone())).ok();
-                    warnings.push(msg);
-                }
-            }
-        }
-    }
+    })
+    .ok();
 
     // ── Step 2b: Build XML context from DB ───────────────────────────────
     let vault_context = {
@@ -363,7 +364,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             let bg_db = Database::open(&db_path)?;
             let pipeline = EmbeddingPipeline::new(&bg_db, svc);
             pipeline.run(|done, total| {
-                tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
+                tx_emb
+                    .send(DisplayEvent::EmbeddingProgress { done, total })
+                    .ok();
             })
         }))
     } else {
@@ -393,7 +396,9 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         let effective_vault_guide = match (vault_guide, vault_context.as_deref()) {
             (Some(guide), Some(context)) => {
                 // User guide takes priority, append DB context as supplementary
-                Some(format!("{guide}\n\n<vault_context>\n{context}\n</vault_context>"))
+                Some(format!(
+                    "{guide}\n\n<vault_context>\n{context}\n</vault_context>"
+                ))
             }
             (Some(guide), None) => Some(guide.to_string()),
             (None, Some(context)) => Some(context.to_string()),
@@ -402,7 +407,10 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
         let effective_vault_guide = effective_vault_guide.as_deref();
 
         let effective_min_top = min_top_catalysts.or_else(|| {
-            enzyme_config.trending.as_ref().and_then(|t| t.min_top_catalysts)
+            enzyme_config
+                .trending
+                .as_ref()
+                .and_then(|t| t.min_top_catalysts)
         });
         let allocations = calculate_allocations(&sel_result.entities, effective_min_top);
 
@@ -424,11 +432,11 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
             per_entity_allocations: Some(&allocations),
         };
 
-        let stats = cat_pipeline.run(
-            &sel_result.entities,
-            &cat_config,
-            move |event| {
-                match event {
+        let stats = cat_pipeline
+            .run(
+                &sel_result.entities,
+                &cat_config,
+                move |event| match event {
                     CatalystEvent::EntityCompleted {
                         entity_name,
                         entity_type,
@@ -436,24 +444,28 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                         completed,
                         total,
                     } => {
-                        tx_cat.send(DisplayEvent::EntityDiscovered {
-                            entity_name,
-                            entity_type: parse_entity_type(&entity_type),
-                            catalyst_texts,
-                            completed,
-                            total,
-                        }).ok();
+                        tx_cat
+                            .send(DisplayEvent::EntityDiscovered {
+                                entity_name,
+                                entity_type: parse_entity_type(&entity_type),
+                                catalyst_texts,
+                                completed,
+                                total,
+                            })
+                            .ok();
                     }
                     CatalystEvent::EntitySkipped {
                         entity_name,
                         completed,
                         total,
                     } => {
-                        tx_cat.send(DisplayEvent::EntitySkipped {
-                            entity_name,
-                            completed,
-                            total,
-                        }).ok();
+                        tx_cat
+                            .send(DisplayEvent::EntitySkipped {
+                                entity_name,
+                                completed,
+                                total,
+                            })
+                            .ok();
                     }
                     CatalystEvent::EntityFailed {
                         entity_name,
@@ -462,30 +474,38 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                         completed,
                         total,
                     } => {
-                        tx_cat.send(DisplayEvent::EntityFailed {
-                            entity_name,
-                            entity_type: parse_entity_type(&entity_type),
-                            error,
-                            completed,
-                            total,
-                        }).ok();
+                        tx_cat
+                            .send(DisplayEvent::EntityFailed {
+                                entity_name,
+                                entity_type: parse_entity_type(&entity_type),
+                                error,
+                                completed,
+                                total,
+                            })
+                            .ok();
                     }
-                    CatalystEvent::EntityStarted { entity_name, entity_type } => {
-                        tx_cat.send(DisplayEvent::EntityStarted {
-                            entity_name,
-                            entity_type: parse_entity_type(&entity_type),
-                        }).ok();
+                    CatalystEvent::EntityStarted {
+                        entity_name,
+                        entity_type,
+                    } => {
+                        tx_cat
+                            .send(DisplayEvent::EntityStarted {
+                                entity_name,
+                                entity_type: parse_entity_type(&entity_type),
+                            })
+                            .ok();
                     }
-                }
-            },
-        ).await?;
+                },
+            )
+            .await?;
 
         tx.send(DisplayEvent::DiscoveryComplete {
             entities_processed: stats.entities_processed,
             catalysts_generated: stats.catalysts_generated,
             errors_count: stats.errors.len(),
             rate_limited: stats.rate_limited,
-        }).ok();
+        })
+        .ok();
 
         Some(stats)
     } else {
@@ -503,7 +523,8 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
                     documents: stats.documents_embedded,
                     pruned: stats.documents_pruned,
                     duration_ms: stats.duration_ms,
-                }).ok();
+                })
+                .ok();
                 Some((stats.documents_embedded, stats.documents_pruned))
             }
             Err(e) => {
@@ -519,23 +540,33 @@ pub async fn run_init(vault_path: &Path, full: bool, _detached: bool, quiet: boo
     let emb_completed = emb_stats.is_some();
 
     // ── Step 7: Similarity computation ────────────────────────────────────
-    if emb_completed && cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
+    if emb_completed
+        && cat_stats
+            .as_ref()
+            .map_or(false, |s| s.catalysts_generated > 0)
+    {
         tx.send(DisplayEvent::SimilarityStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
         let sim_pipeline = SimilarityPipeline::new(&db, svc);
         let tx_sim = tx.clone();
         let sim_stats = sim_pipeline.run(|done, total| {
-            tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
+            tx_sim
+                .send(DisplayEvent::SimilarityProgress { done, total })
+                .ok();
         })?;
 
         tx.send(DisplayEvent::SimilarityComplete {
             catalysts: sim_stats.catalysts_processed,
             documents: sim_stats.documents_compared,
-        }).ok();
+        })
+        .ok();
     }
 
     // ── Step 8: Re-apply targets ──────────────────────────────────────────
-    if cat_stats.as_ref().map_or(false, |s| s.catalysts_generated > 0) {
+    if cat_stats
+        .as_ref()
+        .map_or(false, |s| s.catalysts_generated > 0)
+    {
         reapply_targets(vault_path).await;
     }
 
@@ -639,7 +670,14 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
 /// - `--detached` → `run_refresh_detached` (background lockfile-guarded catalyst run)
 /// - `--quiet` without `--full` → `run_refresh_fast` (sync hot path for hooks)
 /// - Otherwise → interactive full pipeline
-pub async fn run_refresh(vault_path: &Path, full: bool, detached: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<()> {
+pub async fn run_refresh(
+    vault_path: &Path,
+    full: bool,
+    detached: bool,
+    quiet: bool,
+    vault_guide: Option<&str>,
+    min_top_catalysts: Option<usize>,
+) -> Result<()> {
     if detached {
         return run_refresh_detached(vault_path).await;
     }
@@ -683,14 +721,18 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     // invocations (avoids ~650ms cold-start on the first `catalyze` call).
     let svc = get_embedding_service(&paths.home).ok();
 
-    let has_changes = idx_stats.files_new > 0 || idx_stats.files_updated > 0 || idx_stats.files_deleted > 0;
+    let has_changes =
+        idx_stats.files_new > 0 || idx_stats.files_updated > 0 || idx_stats.files_deleted > 0;
     let emb_produced = if has_changes {
         match svc {
             Some(svc) => {
                 let pipeline = EmbeddingPipeline::new(&db, svc);
                 match pipeline.run_since(index_start_ms, |_, _| {}) {
                     Ok(stats) => {
-                        debug!(docs = stats.documents_embedded, "fast refresh: embedding complete");
+                        debug!(
+                            docs = stats.documents_embedded,
+                            "fast refresh: embedding complete"
+                        );
                         stats.documents_embedded > 0
                     }
                     Err(e) => {
@@ -707,11 +749,12 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
 
     // ── Step 3: Similarity (only if new embeddings and catalysts exist) ──
     if emb_produced {
-        let has_catalysts = db.query_read(
-            "SELECT COUNT(*) FROM catalysts",
-            vec![],
-            |row| row.get::<i64>(0),
-        ).map(|rows| rows.first().copied().unwrap_or(0) > 0).unwrap_or(false);
+        let has_catalysts = db
+            .query_read("SELECT COUNT(*) FROM catalysts", vec![], |row| {
+                row.get::<i64>(0)
+            })
+            .map(|rows| rows.first().copied().unwrap_or(0) > 0)
+            .unwrap_or(false);
 
         if has_catalysts {
             if let Ok(svc) = get_embedding_service(&paths.home) {
@@ -760,7 +803,9 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
 /// Acquires a lockfile to prevent concurrent runs.
 async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
-    let enzyme_dir = paths.vault_db.parent()
+    let enzyme_dir = paths
+        .vault_db
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| vault_path.join(".enzyme"));
 
@@ -793,15 +838,23 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     let entities_to_process = match reason.stale_entity_names() {
         Some(stale_names) => {
             // Partial refresh: only regenerate stale entities
-            info!(count = stale_names.len(), "detached refresh: partial regeneration");
-            sel_result.entities.iter()
+            info!(
+                count = stale_names.len(),
+                "detached refresh: partial regeneration"
+            );
+            sel_result
+                .entities
+                .iter()
                 .filter(|e| stale_names.contains(&e.name))
                 .cloned()
                 .collect::<Vec<_>>()
         }
         None => {
             // Full refresh
-            info!(count = sel_result.entities.len(), "detached refresh: full regeneration");
+            info!(
+                count = sel_result.entities.len(),
+                "detached refresh: full regeneration"
+            );
             sel_result.entities.clone()
         }
     };
@@ -823,7 +876,10 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         ctx_builder.build(&entities_to_process, 5, 300).ok()
     };
 
-    let detached_min_top = enzyme_config.trending.as_ref().and_then(|t| t.min_top_catalysts);
+    let detached_min_top = enzyme_config
+        .trending
+        .as_ref()
+        .and_then(|t| t.min_top_catalysts);
     let allocations = calculate_allocations(&entities_to_process, detached_min_top);
 
     let cat_config = CatalystConfig {
@@ -844,11 +900,9 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         per_entity_allocations: Some(&allocations),
     };
 
-    let stats = cat_pipeline.run(
-        &entities_to_process,
-        &cat_config,
-        |_event| {},
-    ).await?;
+    let stats = cat_pipeline
+        .run(&entities_to_process, &cat_config, |_event| {})
+        .await?;
 
     info!(
         entities = stats.entities_processed,
@@ -862,7 +916,8 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         let names: Vec<String> = entities_to_process.iter().map(|e| e.name.clone()).collect();
         store_staleness_bookkeeping_partial(&db, &names)?;
     } else {
-        let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
+        let entity_names: Vec<String> =
+            sel_result.entities.iter().map(|e| e.name.clone()).collect();
         store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
     }
 
@@ -977,8 +1032,8 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
                 libc::setsid();
                 match libc::fork() {
                     -1 => Err(std::io::Error::last_os_error()),
-                    0 => Ok(()),           // grandchild: continue to exec
-                    _ => libc::_exit(0),   // intermediate: exit immediately
+                    0 => Ok(()),         // grandchild: continue to exec
+                    _ => libc::_exit(0), // intermediate: exit immediately
                 }
             });
         }
@@ -1001,7 +1056,13 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
 /// Interactive refresh path — the original full pipeline with display output.
 ///
 /// Used for `enzyme refresh` (no --quiet) and `enzyme refresh --full --quiet`.
-async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vault_guide: Option<&str>, min_top_catalysts: Option<usize>) -> Result<()> {
+async fn run_refresh_interactive(
+    vault_path: &Path,
+    full: bool,
+    quiet: bool,
+    vault_guide: Option<&str>,
+    min_top_catalysts: Option<usize>,
+) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // Capture old entity names before init for diffing.
@@ -1034,7 +1095,15 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
     };
 
     // Run the full pipeline.
-    let init_result = run_init(vault_path, full, false, quiet, vault_guide, min_top_catalysts).await?;
+    let init_result = run_init(
+        vault_path,
+        full,
+        false,
+        quiet,
+        vault_guide,
+        min_top_catalysts,
+    )
+    .await?;
 
     // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;
@@ -1044,8 +1113,7 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
     store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
 
     // Compute entity set diff if we had a previous snapshot.
-    let new_names: std::collections::HashSet<String> =
-        entity_names.iter().cloned().collect();
+    let new_names: std::collections::HashSet<String> = entity_names.iter().cloned().collect();
     let entity_changes = if let Some(ref old_names) = old_entity_names {
         if !old_names.is_empty() {
             let mut added: Vec<&String> = new_names.difference(old_names).collect();
@@ -1054,7 +1122,10 @@ async fn run_refresh_interactive(vault_path: &Path, full: bool, quiet: bool, vau
             removed.sort();
 
             if !added.is_empty() || !removed.is_empty() {
-                Some((added.into_iter().cloned().collect::<Vec<_>>(), removed.into_iter().cloned().collect::<Vec<_>>()))
+                Some((
+                    added.into_iter().cloned().collect::<Vec<_>>(),
+                    removed.into_iter().cloned().collect::<Vec<_>>(),
+                ))
             } else {
                 None
             }
@@ -1177,10 +1248,7 @@ fi
             .or_insert(json!([]));
         ups.as_array_mut().unwrap().push(hook_entry);
 
-        fs::write(
-            &settings_path,
-            serde_json::to_string_pretty(&settings)?,
-        )?;
+        fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
     }
 
     Ok(())
