@@ -7,8 +7,8 @@
 //! - Deduplicating child tags that also appear as standalone entries
 //!
 //! `from_entities` accepts any `&[Entity]` — trending, catalyzed, query-ranked,
-//! or config-selected. `from_trending` is a convenience that feeds in the
-//! trending set.
+//! or config-selected. `build` uses coverage-aware greedy selection;
+//! `from_entities` accepts any pre-selected list.
 
 use std::collections::{HashMap, HashSet};
 
@@ -111,7 +111,10 @@ const EXCLUDED_TAGS: &[&str] = &["excalidraw", "templates", "config", "templater
 
 impl EntityMap {
     /// Build an EntityMap from the database's trending entities.
-    /// Convenience wrapper around `from_entities`.
+    ///
+    /// Deprecated: use `build()` instead, which uses coverage-aware ranking
+    /// rather than recency-only with type quotas.
+    #[deprecated(note = "use EntityMap::build() for coverage-aware selection")]
     pub fn from_trending(db: &Database, max_entities: usize) -> Result<Self> {
         let entities = db.get_trending_entities(3, 2, 2, max_entities)?;
         Self::from_entities(db, &entities)
