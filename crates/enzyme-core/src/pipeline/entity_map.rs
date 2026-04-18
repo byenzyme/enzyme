@@ -361,6 +361,10 @@ impl EntityMap {
     /// like `people/` (30%) pass; catch-alls like `inbox/` (0.4%) don't.
     const EXPANDABLE_DENSITY_THRESHOLD: f64 = 0.05;
 
+    /// Maximum page entity children per expandable folder.
+    /// Kept in sync with `SelectionPipeline::MAX_FOLDER_CHILDREN`.
+    const MAX_FOLDER_CHILDREN: usize = 10;
+
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
         let shortlist = Self::select_shortlist(db, max_entities)?;
 
@@ -379,15 +383,23 @@ impl EntityMap {
         let shortlist_names: HashSet<String> = shortlist.iter().map(|e| e.name.clone()).collect();
         let mut combined = shortlist;
 
-        for (folder, links) in &links_by_folder {
+        for (folder, mut links) in links_by_folder {
             let file_count = shortlist_folders.get(folder.as_str()).copied().unwrap_or(1) as f64;
             let density = links.len() as f64 / file_count;
             if density < Self::EXPANDABLE_DENSITY_THRESHOLD {
                 continue;
             }
+            // Keep only the most recent children, matching the catalyst cap
+            links.sort_by(|a, b| {
+                b.trends
+                    .recency_score
+                    .partial_cmp(&a.trends.recency_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            links.truncate(Self::MAX_FOLDER_CHILDREN);
             for entity in links {
                 if !shortlist_names.contains(&entity.name) {
-                    combined.push(entity.clone());
+                    combined.push(entity);
                 }
             }
         }
