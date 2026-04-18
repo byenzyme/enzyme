@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -26,6 +26,8 @@ pub struct SelectionResult {
     pub entities: Vec<crate::models::Entity>,
     /// Per-entity catalyst profile overrides (entity name -> profile name).
     pub entity_profiles: HashMap<String, String>,
+    /// Folders whose page entities should get individual catalysts.
+    pub expandable_folders: HashMap<String, Vec<String>>,
     /// How the entities were selected.
     pub source: SelectionSource,
 }
@@ -100,36 +102,123 @@ impl<'a> SelectionPipeline<'a> {
             prefs.entity_profiles
         };
 
+        // Detect expandable folders: use config if specified, otherwise detect from DB.
+        let expandable_folders = if !prefs.expandable_folders.is_empty() {
+            let entity_map = EntityMap::from_entities(self.db, &found)?;
+            prefs
+                .expandable_folders
+                .iter()
+                .filter_map(|name| {
+                    entity_map
+                        .folder_group(name)
+                        .map(|fg| (name.clone(), fg.page_entities.clone()))
+                })
+                .collect()
+        } else {
+            Self::detect_expandable_folders(self.db, &found)?
+        };
+
+        // Expand: add page entity children to the entity list
+        Self::expand_folder_children(self.db, &expandable_folders, &mut found)?;
+
         info!(
             count = found.len(),
             profiles = entity_profiles.len(),
+            expandable = expandable_folders.len(),
             "selected entities from config"
         );
 
         Ok(SelectionResult {
             entities: found,
             entity_profiles,
+            expandable_folders,
             source: SelectionSource::Config,
         })
     }
 
     /// Select entities using coverage-aware shortlist + deterministic profiles.
     fn select_shortlist(&self) -> Result<SelectionResult> {
-        let entity_map = EntityMap::build(self.db, 20)?;
-        let entities: Vec<_> = entity_map.all_entities().into_iter().cloned().collect();
+        // Build shortlist for top-level entities (tags + folders)
+        let shortlist = EntityMap::select_shortlist(self.db, 20)?;
+
+        // Build the EntityMap from ALL entities so page entity detection works
+        // (it needs link entities present to detect wikilinks in folders)
+        let all_entities = self.db.get_all_entities()?;
+        let entity_map = EntityMap::from_entities(self.db, &all_entities)?;
+
+        // Use the shortlist as top-level, but pull expandable info from the full map
+        let mut entities = shortlist;
+
+        let shortlist_folders: HashSet<String> = entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Folder)
+            .map(|e| e.name.clone())
+            .collect();
+
+        let expandable_folders: HashMap<String, Vec<String>> = entity_map
+            .folders
+            .iter()
+            .filter(|fg| {
+                !fg.page_entities.is_empty() && shortlist_folders.contains(&fg.entity.name)
+            })
+            .map(|fg| (fg.entity.name.clone(), fg.page_entities.clone()))
+            .collect();
+
+        // Expand: add page entity children to the entity list
+        Self::expand_folder_children(self.db, &expandable_folders, &mut entities)?;
 
         let profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
 
         info!(
             count = entities.len(),
             profiles = profiles.len(),
+            expandable = expandable_folders.len(),
             "selected entities from shortlist"
         );
 
         Ok(SelectionResult {
             entities,
             entity_profiles: profiles,
+            expandable_folders,
             source: SelectionSource::Shortlist,
         })
+    }
+
+    /// Detect folders with page entities (wikilinks that have source files inside).
+    fn detect_expandable_folders(
+        db: &Database,
+        entities: &[crate::models::Entity],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let entity_map = EntityMap::from_entities(db, entities)?;
+        Ok(entity_map
+            .folders
+            .iter()
+            .filter(|fg| !fg.page_entities.is_empty())
+            .map(|fg| (fg.entity.name.clone(), fg.page_entities.clone()))
+            .collect())
+    }
+
+    /// Add page entity children from expandable folders to the entity list.
+    fn expand_folder_children(
+        db: &Database,
+        expandable: &HashMap<String, Vec<String>>,
+        entities: &mut Vec<crate::models::Entity>,
+    ) -> Result<()> {
+        let existing: HashSet<String> = entities.iter().map(|e| e.name.clone()).collect();
+
+        for children in expandable.values() {
+            let lookup: Vec<(&str, EntityType)> = children
+                .iter()
+                .filter(|name| !existing.contains(name.as_str()))
+                .map(|name| (name.as_str(), EntityType::Link))
+                .collect();
+
+            if !lookup.is_empty() {
+                let found = db.get_entities_by_names(&lookup)?;
+                entities.extend(found);
+            }
+        }
+
+        Ok(())
     }
 }

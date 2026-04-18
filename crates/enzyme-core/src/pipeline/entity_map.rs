@@ -358,7 +358,25 @@ impl EntityMap {
     /// with already-selected ones.
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
         let shortlist = Self::select_shortlist(db, max_entities)?;
-        Self::from_entities(db, &shortlist)
+
+        // Page entity detection needs link entities present. The shortlist only
+        // picks tags/folders, so we add all link entities with frequency >= 3
+        // (same threshold as get_trending_entities). These get folded into
+        // their parent folders or surfaced as standalone links by from_entities.
+        let all = db.get_all_entities()?;
+        let shortlist_names: HashSet<String> = shortlist.iter().map(|e| e.name.clone()).collect();
+        let mut combined = shortlist;
+        for entity in all {
+            if entity.entity_type == EntityType::Link
+                && entity.frequency >= 3
+                && !entity.name.contains('/')
+                && !shortlist_names.contains(&entity.name)
+            {
+                combined.push(entity);
+            }
+        }
+
+        Self::from_entities(db, &combined)
     }
 
     /// Coverage-aware greedy entity selection.
@@ -370,7 +388,7 @@ impl EntityMap {
     /// Filtering (child tags, subfolders, system folders) happens here.
     /// Structural folding (children into parents, links into folders) is left
     /// to `from_entities`.
-    fn select_shortlist(db: &Database, limit: usize) -> Result<Vec<Entity>> {
+    pub fn select_shortlist(db: &Database, limit: usize) -> Result<Vec<Entity>> {
         let all = db.get_all_entities()?;
         let entity_file_sets = db.get_entity_file_sets()?;
         let folder_file_sets = db.get_folder_file_sets()?;
