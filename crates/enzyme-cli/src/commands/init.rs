@@ -389,7 +389,7 @@ pub async fn run_init(
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
 
         let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
-        let cat_pipeline = CatalystPipeline::new(&db, &llm);
+        let cat_pipeline = CatalystPipeline::new(&db, &llm, service);
         let tx_cat = tx.clone();
 
         // Merge user-provided vault guide with DB-built context
@@ -430,6 +430,17 @@ pub async fn run_init(
             vault_guide: effective_vault_guide,
             model: &resolved.model,
             per_entity_allocations: Some(&allocations),
+            max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            max_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok()),
         };
 
         let stats = cat_pipeline
@@ -867,7 +878,8 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     // ── Step 4: Run catalyst pipeline ───────────────────────────────────
     let api_config = resolve_api_config().await?;
     let llm = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
-    let cat_pipeline = CatalystPipeline::new(&db, &llm);
+    let svc = get_embedding_service(&paths.home).ok();
+    let cat_pipeline = CatalystPipeline::new(&db, &llm, svc);
 
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
 
@@ -898,6 +910,17 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         vault_guide: vault_context.as_deref(),
         model: &api_config.model,
         per_entity_allocations: Some(&allocations),
+        max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        max_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20),
+        concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok()),
     };
 
     let stats = cat_pipeline

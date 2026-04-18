@@ -42,6 +42,14 @@ pub struct SubfolderStats {
     pub file_count: i64,
 }
 
+/// A chunk joined to its document path for retrieval-time selection.
+#[derive(Debug, Clone)]
+pub struct FileChunk {
+    pub file_path: String,
+    pub chunk_index: u32,
+    pub content: String,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -499,6 +507,38 @@ impl Database {
         Ok(rows)
     }
 
+    /// Load all chunks for the given file paths.
+    pub fn get_chunks_for_files(&self, file_paths: &[String]) -> Result<Vec<FileChunk>> {
+        if file_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (1..=file_paths.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT d.source_ref, c.chunk_index, c.content
+             FROM chunks c
+             JOIN docs d ON d.id = c.doc_id
+             WHERE d.source_ref IN ({placeholders})
+             ORDER BY d.source_ref, c.chunk_index"
+        );
+        let params = file_paths
+            .iter()
+            .cloned()
+            .map(Value::Text)
+            .collect::<Vec<_>>();
+
+        Ok(self.query_read(&sql, params, |row| {
+            Ok(FileChunk {
+                file_path: row.get::<String>(0)?,
+                chunk_index: row.get::<i64>(1)? as u32,
+                content: row.get::<String>(2)?,
+            })
+        })?)
+    }
+
     /// Get the top entities, ordered by the given column.
     pub fn get_top_entities(&self, limit: usize, order_by: &str) -> Result<Vec<Entity>> {
         if order_by == "recency_score" {
@@ -749,20 +789,15 @@ impl Database {
     ///
     /// For each folder, finds documents like `folder/Name.md` and returns
     /// any entity of type "link" whose name matches the doc stem (case-insensitive).
-    pub fn get_folder_page_entity_links(
-        &self,
-        folders: &HashSet<&str>,
-    ) -> Result<Vec<Entity>> {
+    pub fn get_folder_page_entity_links(&self, folders: &HashSet<&str>) -> Result<Vec<Entity>> {
         if folders.is_empty() {
             return Ok(Vec::new());
         }
 
         // Get all doc stems under the target folders
-        let docs = self.query_read(
-            "SELECT source_ref FROM docs",
-            vec![],
-            |row| row.get::<String>(0),
-        )?;
+        let docs = self.query_read("SELECT source_ref FROM docs", vec![], |row| {
+            row.get::<String>(0)
+        })?;
 
         let mut stems: HashSet<String> = HashSet::new();
         for source_ref in &docs {
@@ -808,11 +843,9 @@ impl Database {
             return Ok(HashMap::new());
         }
 
-        let docs = self.query_read(
-            "SELECT source_ref FROM docs",
-            vec![],
-            |row| row.get::<String>(0),
-        )?;
+        let docs = self.query_read("SELECT source_ref FROM docs", vec![], |row| {
+            row.get::<String>(0)
+        })?;
 
         // Map: folder → set of doc stems
         let mut folder_stems: HashMap<String, HashSet<String>> = HashMap::new();

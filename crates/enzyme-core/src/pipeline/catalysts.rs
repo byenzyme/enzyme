@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,21 +11,471 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
-use crate::db::Database;
+use crate::db::{Database, FileChunk};
+use crate::embedding::EmbeddingService;
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
-    GenerationParams, LlmClient, ParsedCatalyst, build_system_prompt, build_user_prompt,
-    catalyst_json_schema, get_profile, parse_catalyst_response,
+    GenerationParams, LlmClient, ParsedCatalyst, build_local_user_prompt, build_system_prompt,
+    build_user_prompt, catalyst_json_schema, get_profile, parse_catalyst_response,
 };
-use crate::models::{Catalyst, Entity};
+use crate::models::{Catalyst, Embedding, Entity, EntityOccurrence, EntityType};
 use crate::pipeline::eras::{
-    allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
+    Era, allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
     sample_contexts_by_era,
 };
+
+/// Default context char budget for local models (~4K tokens of excerpts).
+/// Leaves room for the simplified system prompt (~400 tokens) and output (~500 tokens)
+/// within a 16K per-slot context window.
+const LOCAL_DEFAULT_MAX_CONTEXT_CHARS: usize = 16000;
+const CHUNK_MMR_TOP_K: usize = 50;
+const CHUNK_MMR_LAMBDA: f32 = 0.5;
+
+/// Simplified system prompt for local fine-tuned models.
+/// Profiles, vault overview, and format template are baked in via SFT training.
+const LOCAL_SYSTEM_PROMPT: &str = "\
+You generate catalyst questions for a knowledge base. A catalyst is a \
+single-sentence probing question grounded in specific excerpts from a user's notes.
+
+Good catalysts:
+- Probe tensions, shifts, or what's at stake — not summaries
+- Use vocabulary from the excerpts themselves
+- Each question explores a DIFFERENT facet (different angle, tension, time period)
+- Are retrieval-functional: they'd match relevant content when used as search queries
+
+Bad catalysts:
+- Generic questions answerable without reading the excerpts
+- Multiple catalysts that probe the same thing from slightly different wording
+- Questions using abstract academic language not found in the excerpts
+
+VOCABULARY: Avoid analytical vocabulary that distances the question from lived \
+experience. Specifically banned: \"reveal,\" \"suggest about,\" \"underlying,\" \
+\"foreclose,\" \"manifest,\" \"illuminate,\" \"inherent,\" \"navigate,\" \"in what ways,\" \
+\"intersection of,\" \"the notion of,\" \"the pursuit of,\" \"implicitly,\" \
+\"the architecture of.\" Use words that appeared in the excerpts or that a person \
+would use in conversation.
+
+INSTRUCTIONS:
+1. Ground each catalyst in a specific phrase from the excerpts. Then probe \
+AROUND the grounded meaning — ask about what it costs, what it forecloses, \
+what it's in friction with, or what it quietly assumes.
+2. Each catalyst must be a single sentence question. Keep every catalyst to \
+one sentence. IMPORTANT: Vary your sentence openings — do NOT start multiple \
+catalysts with the same word.
+3. For topicNames: 3-5 lowercase words capturing each inquiry.
+
+Always respond with valid JSON that includes the catalysts and topic names.";
+
+/// Lasso compression: keep head 60% + tail 40% with a `[…]` marker.
+/// Preserves structural bookends (entity/instruction at start and end).
+fn lasso_truncate(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    let marker = "\n[…]\n";
+    let head_budget = (max_chars * 60) / 100;
+    let tail_budget = max_chars
+        .saturating_sub(head_budget)
+        .saturating_sub(marker.len());
+
+    // Snap to char boundaries
+    let head_end = text
+        .char_indices()
+        .take_while(|(i, _)| *i <= head_budget)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let tail_start = text
+        .char_indices()
+        .rev()
+        .take_while(|(i, _)| text.len() - *i <= tail_budget)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+
+    format!("{}{marker}{}", &text[..head_end], &text[tail_start..])
+}
+
+/// Apply context budget: limit sample count, then truncate total chars via lasso.
+fn apply_context_budget(samples: Vec<String>, max_samples: usize, max_chars: usize) -> Vec<String> {
+    let mut samples: Vec<String> = samples.into_iter().take(max_samples).collect();
+    if max_chars == 0 {
+        return samples;
+    }
+
+    let total: usize = samples.iter().map(|s| s.len()).sum();
+    if total <= max_chars {
+        return samples;
+    }
+
+    // Per-sample budget, distributed proportionally
+    let per_sample = max_chars / samples.len().max(1);
+    samples = samples
+        .into_iter()
+        .map(|s| lasso_truncate(&s, per_sample))
+        .collect();
+    samples
+}
+
+#[derive(Clone)]
+struct ChunkCandidate {
+    chunk_index: u32,
+    content: String,
+    timestamp: i64,
+    era_index: usize,
+    relevance: f32,
+    vector: Option<Vec<f32>>,
+}
+
+struct ChunkSelectionPreload {
+    chunk_vectors: HashMap<(String, u32), Vec<f32>>,
+    entity_vectors: Vec<Option<Vec<f32>>>,
+}
+
+struct SelectedContext {
+    era_context: Option<EraContext>,
+    flat_samples: Vec<String>,
+}
+
+fn occurrence_timestamp(occ: &EntityOccurrence) -> i64 {
+    occ.effective_date.unwrap_or(occ.created_at)
+}
+
+fn month_key_from_timestamp(ts: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.format("%Y-%m").to_string())
+}
+
+fn era_index_for_timestamp(eras: &[Era], ts: i64) -> usize {
+    let Some(key) = month_key_from_timestamp(ts) else {
+        return eras.len();
+    };
+    eras.iter()
+        .position(|era| key.as_str() >= era.start.as_str() && key.as_str() <= era.end.as_str())
+        .unwrap_or(eras.len())
+}
+
+fn build_occurrence_context(
+    eras: &[Era],
+    occurrences: &[EntityOccurrence],
+    num_catalysts: usize,
+    max_samples: usize,
+    max_context_chars: usize,
+) -> SelectedContext {
+    let era_context = if eras.len() > 1 {
+        let bucketed = assign_occurrences_to_eras(eras, occurrences);
+        let era_allocs = allocate_catalysts_to_eras(eras, num_catalysts, 1);
+        let samples = sample_contexts_by_era(eras, &bucketed, max_samples);
+
+        let samples = if max_context_chars > 0 {
+            let total: usize = samples.iter().map(|(_, s)| s.len()).sum();
+            if total > max_context_chars {
+                let per_sample = max_context_chars / samples.len().max(1);
+                samples
+                    .into_iter()
+                    .map(|(idx, s)| (idx, lasso_truncate(&s, per_sample)))
+                    .collect()
+            } else {
+                samples
+            }
+        } else {
+            samples
+        };
+
+        if samples.iter().all(|(_, s)| s.is_empty()) {
+            None
+        } else {
+            Some(EraContext {
+                eras: eras.to_vec(),
+                era_allocations: era_allocs,
+                samples,
+            })
+        }
+    } else {
+        None
+    };
+
+    let flat_samples = apply_context_budget(
+        occurrences
+            .iter()
+            .filter_map(|o| o.context.clone())
+            .collect(),
+        max_samples,
+        max_context_chars,
+    );
+
+    SelectedContext {
+        era_context,
+        flat_samples,
+    }
+}
+
+fn push_candidate(
+    selected: &mut Vec<usize>,
+    total_chars: &mut usize,
+    candidates: &[ChunkCandidate],
+    idx: usize,
+    max_samples: usize,
+    max_chars: usize,
+) -> bool {
+    if selected.len() >= max_samples || selected.contains(&idx) {
+        return false;
+    }
+    let len = candidates[idx].content.len();
+    if max_chars > 0 && *total_chars + len > max_chars {
+        return false;
+    }
+    selected.push(idx);
+    *total_chars += len;
+    true
+}
+
+fn mmr_fill(
+    candidates: &[ChunkCandidate],
+    selected: &mut Vec<usize>,
+    total_chars: &mut usize,
+    max_samples: usize,
+    max_chars: usize,
+) {
+    let mut ranked: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.vector.is_some())
+        .map(|(idx, _)| idx)
+        .collect();
+    ranked.sort_by(|a, b| {
+        candidates[*b]
+            .relevance
+            .partial_cmp(&candidates[*a].relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let seed_count = selected.len();
+    let mut candidate_pool: HashSet<usize> = ranked
+        .iter()
+        .copied()
+        .filter(|idx| !selected.contains(idx))
+        .take(CHUNK_MMR_TOP_K + seed_count)
+        .collect();
+    for idx in selected.iter().copied() {
+        candidate_pool.remove(&idx);
+    }
+
+    while !candidate_pool.is_empty() && selected.len() < max_samples {
+        let mut best_idx = None;
+        let mut best_score = f32::NEG_INFINITY;
+
+        for idx in candidate_pool.iter().copied() {
+            let rel = candidates[idx].relevance;
+            let max_sim = selected
+                .iter()
+                .filter_map(|sel_idx| {
+                    let a = candidates[idx].vector.as_ref()?;
+                    let b = candidates[*sel_idx].vector.as_ref()?;
+                    if a.len() != b.len() {
+                        return None;
+                    }
+                    Some(Embedding::cosine_similarity(a, b))
+                })
+                .fold(0.0f32, f32::max);
+            let mmr = CHUNK_MMR_LAMBDA * rel - (1.0 - CHUNK_MMR_LAMBDA) * max_sim;
+            if mmr > best_score {
+                best_score = mmr;
+                best_idx = Some(idx);
+            }
+        }
+
+        let Some(best_idx) = best_idx else {
+            break;
+        };
+        candidate_pool.remove(&best_idx);
+        let _ = push_candidate(
+            selected,
+            total_chars,
+            candidates,
+            best_idx,
+            max_samples,
+            max_chars,
+        );
+    }
+}
+
+fn finalize_chunk_context(
+    eras: &[Era],
+    num_catalysts: usize,
+    candidates: &[ChunkCandidate],
+    selected: &[usize],
+) -> SelectedContext {
+    if eras.len() > 1 {
+        let samples = selected
+            .iter()
+            .map(|idx| {
+                let candidate = &candidates[*idx];
+                (candidate.era_index, candidate.content.clone())
+            })
+            .collect::<Vec<_>>();
+        SelectedContext {
+            era_context: Some(EraContext {
+                eras: eras.to_vec(),
+                era_allocations: allocate_catalysts_to_eras(eras, num_catalysts, 1),
+                samples,
+            }),
+            flat_samples: Vec::new(),
+        }
+    } else {
+        SelectedContext {
+            era_context: None,
+            flat_samples: selected
+                .iter()
+                .map(|idx| candidates[*idx].content.clone())
+                .collect(),
+        }
+    }
+}
+
+fn select_folder_chunks(
+    eras: &[Era],
+    num_catalysts: usize,
+    candidates: &[ChunkCandidate],
+    max_samples: usize,
+    max_context_chars: usize,
+) -> SelectedContext {
+    let mut ranked = candidates.iter().enumerate().collect::<Vec<_>>();
+    ranked.sort_by(|a, b| {
+        b.1.timestamp
+            .cmp(&a.1.timestamp)
+            .then_with(|| a.1.chunk_index.cmp(&b.1.chunk_index))
+    });
+
+    let mut selected = Vec::new();
+    let mut total_chars = 0usize;
+
+    if eras.len() > 1 {
+        for era_idx in 0..eras.len() {
+            if let Some((idx, _)) = ranked.iter().find(|(_, c)| c.era_index == era_idx) {
+                let _ = push_candidate(
+                    &mut selected,
+                    &mut total_chars,
+                    candidates,
+                    *idx,
+                    max_samples,
+                    max_context_chars,
+                );
+            }
+        }
+    }
+
+    for (idx, _) in ranked {
+        if selected.len() >= max_samples {
+            break;
+        }
+        let _ = push_candidate(
+            &mut selected,
+            &mut total_chars,
+            candidates,
+            idx,
+            max_samples,
+            max_context_chars,
+        );
+    }
+
+    finalize_chunk_context(eras, num_catalysts, candidates, &selected)
+}
+
+fn select_semantic_chunks(
+    eras: &[Era],
+    num_catalysts: usize,
+    candidates: &[ChunkCandidate],
+    max_samples: usize,
+    max_context_chars: usize,
+) -> SelectedContext {
+    let mut selected = Vec::new();
+    let mut total_chars = 0usize;
+
+    if eras.len() > 1 {
+        for era_idx in 0..eras.len() {
+            let best_in_era = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.era_index == era_idx && c.vector.is_some())
+                .max_by(|a, b| {
+                    a.1.relevance
+                        .partial_cmp(&b.1.relevance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(idx, _)| idx);
+            if let Some(idx) = best_in_era {
+                let _ = push_candidate(
+                    &mut selected,
+                    &mut total_chars,
+                    candidates,
+                    idx,
+                    max_samples,
+                    max_context_chars,
+                );
+            }
+        }
+    }
+
+    mmr_fill(
+        candidates,
+        &mut selected,
+        &mut total_chars,
+        max_samples,
+        max_context_chars,
+    );
+
+    finalize_chunk_context(eras, num_catalysts, candidates, &selected)
+}
+
+fn build_chunk_candidates(
+    chunks: Vec<FileChunk>,
+    occurrences: &[EntityOccurrence],
+    eras: &[Era],
+    chunk_vectors: Option<&HashMap<(String, u32), Vec<f32>>>,
+    query_vector: Option<&[f32]>,
+) -> Vec<ChunkCandidate> {
+    let mut file_timestamps: HashMap<&str, i64> = HashMap::new();
+    for occ in occurrences {
+        let ts = occurrence_timestamp(occ);
+        file_timestamps
+            .entry(occ.file_path.as_str())
+            .and_modify(|existing| *existing = (*existing).max(ts))
+            .or_insert(ts);
+    }
+
+    chunks
+        .into_iter()
+        .filter_map(|chunk| {
+            let timestamp = *file_timestamps.get(chunk.file_path.as_str())?;
+            let era_index = era_index_for_timestamp(eras, timestamp);
+            let vector = chunk_vectors.and_then(|vectors| {
+                vectors
+                    .get(&(chunk.file_path.clone(), chunk.chunk_index))
+                    .cloned()
+            });
+            let relevance = match (query_vector, vector.as_ref()) {
+                (Some(query), Some(vector)) if query.len() == vector.len() => {
+                    Embedding::cosine_similarity(query, vector)
+                }
+                _ => 0.0,
+            };
+
+            Some(ChunkCandidate {
+                chunk_index: chunk.chunk_index,
+                content: chunk.content,
+                timestamp,
+                era_index,
+                relevance,
+                vector,
+            })
+        })
+        .collect()
+}
 
 pub struct CatalystPipeline<'a> {
     db: &'a Database,
     llm: &'a LlmClient,
+    embedding: Option<&'a EmbeddingService>,
 }
 
 pub struct CatalystStats {
@@ -57,6 +507,14 @@ pub struct CatalystConfig<'a> {
     pub model: &'a str,
     /// Per-entity catalyst count overrides from volume-based allocation.
     pub per_entity_allocations: Option<&'a HashMap<String, usize>>,
+    /// Maximum total characters across all context samples per entity.
+    /// When set, samples are truncated (head+tail with lasso compression)
+    /// to fit within this budget. `0` means unlimited (default).
+    pub max_context_chars: usize,
+    /// Maximum number of context samples per entity (default: 20).
+    pub max_samples: usize,
+    /// LLM concurrency override. If set, overrides the auto-detected value.
+    pub concurrency: Option<usize>,
 }
 
 impl<'a> Default for CatalystConfig<'a> {
@@ -76,6 +534,9 @@ impl<'a> Default for CatalystConfig<'a> {
             vault_guide: None,
             model: DEFAULT_MODEL,
             per_entity_allocations: None,
+            max_context_chars: 0,
+            max_samples: 20,
+            concurrency: None,
         }
     }
 }
@@ -128,8 +589,136 @@ struct EntityResult {
 }
 
 impl<'a> CatalystPipeline<'a> {
-    pub fn new(db: &'a Database, llm: &'a LlmClient) -> Self {
-        Self { db, llm }
+    pub fn new(
+        db: &'a Database,
+        llm: &'a LlmClient,
+        embedding: Option<&'a EmbeddingService>,
+    ) -> Self {
+        Self { db, llm, embedding }
+    }
+
+    fn preload_chunk_selection(&self, entities: &[Entity]) -> Option<ChunkSelectionPreload> {
+        let chunk_vectors = match self.db.get_all_chunk_embeddings() {
+            Ok(rows) if !rows.is_empty() => rows
+                .into_iter()
+                .map(|(file_path, chunk_index, vector)| ((file_path, chunk_index), vector))
+                .collect::<HashMap<_, _>>(),
+            Ok(_) => return None,
+            Err(e) => {
+                warn!("failed to load chunk embeddings, falling back to occurrence contexts: {e}");
+                return None;
+            }
+        };
+
+        let Some(service) = self.embedding else {
+            return Some(ChunkSelectionPreload {
+                chunk_vectors,
+                entity_vectors: vec![None; entities.len()],
+            });
+        };
+
+        let semantic_positions = entities
+            .iter()
+            .enumerate()
+            .filter(|(_, entity)| entity.entity_type != EntityType::Folder)
+            .map(|(idx, entity)| (idx, entity.name.as_str()))
+            .collect::<Vec<_>>();
+
+        let mut entity_vectors = vec![None; entities.len()];
+        if semantic_positions.is_empty() {
+            return Some(ChunkSelectionPreload {
+                chunk_vectors,
+                entity_vectors,
+            });
+        }
+
+        let names = semantic_positions
+            .iter()
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>();
+        match service.embed_documents(&names) {
+            Ok(vectors) => {
+                for ((idx, _), vector) in semantic_positions.into_iter().zip(vectors.into_iter()) {
+                    entity_vectors[idx] = Some(vector);
+                }
+            }
+            Err(e) => {
+                warn!("failed to embed entity names, semantic chunk scoring disabled: {e}");
+            }
+        }
+
+        Some(ChunkSelectionPreload {
+            chunk_vectors,
+            entity_vectors,
+        })
+    }
+
+    fn build_chunk_context(
+        &self,
+        entity: &Entity,
+        occurrences: &[EntityOccurrence],
+        eras: &[Era],
+        num_catalysts: usize,
+        max_samples: usize,
+        max_context_chars: usize,
+        preload: Option<&ChunkSelectionPreload>,
+        entity_idx: usize,
+    ) -> Result<Option<SelectedContext>> {
+        let file_paths = occurrences
+            .iter()
+            .map(|occ| occ.file_path.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if file_paths.is_empty() {
+            return Ok(None);
+        }
+
+        let chunks = self.db.get_chunks_for_files(&file_paths)?;
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        let chunk_vectors = preload.map(|p| &p.chunk_vectors);
+        let query_vector = preload
+            .and_then(|p| p.entity_vectors.get(entity_idx))
+            .and_then(|v| v.as_deref());
+        let candidates =
+            build_chunk_candidates(chunks, occurrences, eras, chunk_vectors, query_vector);
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let selected = match entity.entity_type {
+            EntityType::Folder => select_folder_chunks(
+                eras,
+                num_catalysts,
+                &candidates,
+                max_samples,
+                max_context_chars,
+            ),
+            EntityType::Tag | EntityType::Link => {
+                let scorable = candidates
+                    .iter()
+                    .any(|c| c.vector.is_some() && c.relevance > 0.0);
+                if !scorable {
+                    return Ok(None);
+                }
+                select_semantic_chunks(
+                    eras,
+                    num_catalysts,
+                    &candidates,
+                    max_samples,
+                    max_context_chars,
+                )
+            }
+        };
+
+        if selected.era_context.is_none() && selected.flat_samples.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(selected))
+        }
     }
 
     /// Build entity jobs (system prompt + per-entity user prompts) from entities and config.
@@ -141,19 +730,47 @@ impl<'a> CatalystPipeline<'a> {
         entities: &[Entity],
         config: &CatalystConfig<'_>,
     ) -> Result<(String, Vec<EntityJob>, Vec<String>)> {
-        let system_prompt = build_system_prompt(
-            Some(config.format_key),
-            config.custom_guidance,
-            config.vault_guide,
-        );
+        let is_local = self.llm.is_local();
+
+        let system_prompt = if is_local {
+            // Simplified system prompt for local models (~400 tokens).
+            // Profiles, vault overview, and format template are baked into
+            // the fine-tuned model via SFT. Only core instructions remain.
+            info!("using simplified system prompt for local model");
+            LOCAL_SYSTEM_PROMPT.to_string()
+        } else {
+            build_system_prompt(
+                Some(config.format_key),
+                config.custom_guidance,
+                config.vault_guide,
+            )
+        };
+
+        // Auto-apply context budget for local models if not explicitly set.
+        let max_context_chars = if config.max_context_chars == 0 && is_local {
+            info!(
+                budget = LOCAL_DEFAULT_MAX_CONTEXT_CHARS,
+                "auto-setting context budget for local model"
+            );
+            LOCAL_DEFAULT_MAX_CONTEXT_CHARS
+        } else {
+            config.max_context_chars
+        };
+
+        let max_samples = if is_local && config.max_samples > 10 {
+            10 // Cap samples for local models to keep prompts manageable
+        } else {
+            config.max_samples
+        };
 
         let default_profile = get_profile(config.default_profile)
             .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
+        let chunk_preload = self.preload_chunk_selection(entities);
 
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
 
-        for entity in entities {
+        for (entity_idx, entity) in entities.iter().enumerate() {
             let entity_id = entity.id.unwrap_or(0);
             let entity_name = &entity.name;
 
@@ -171,29 +788,28 @@ impl<'a> CatalystPipeline<'a> {
                 .unwrap_or(config.catalysts_per_entity);
 
             let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
-            let era_context = if eras.len() > 1 {
-                let bucketed = assign_occurrences_to_eras(&eras, &occurrences);
-                let era_allocs = allocate_catalysts_to_eras(&eras, num_catalysts, 1);
-                let samples = sample_contexts_by_era(&eras, &bucketed, 20);
-
-                if samples.iter().all(|(_, s)| s.is_empty()) {
-                    None
-                } else {
-                    Some(EraContext {
-                        eras: eras.clone(),
-                        era_allocations: era_allocs,
-                        samples,
-                    })
-                }
-            } else {
-                None
-            };
-
-            let flat_samples: Vec<String> = occurrences
-                .iter()
-                .filter_map(|o| o.context.clone())
-                .take(20)
-                .collect();
+            let selected_context = self
+                .build_chunk_context(
+                    entity,
+                    &occurrences,
+                    &eras,
+                    num_catalysts,
+                    max_samples,
+                    max_context_chars,
+                    chunk_preload.as_ref(),
+                    entity_idx,
+                )?
+                .unwrap_or_else(|| {
+                    build_occurrence_context(
+                        &eras,
+                        &occurrences,
+                        num_catalysts,
+                        max_samples,
+                        max_context_chars,
+                    )
+                });
+            let era_context = selected_context.era_context;
+            let flat_samples = selected_context.flat_samples;
 
             let context_samples = if era_context.is_some() {
                 &[] as &[String]
@@ -210,16 +826,25 @@ impl<'a> CatalystPipeline<'a> {
                 continue;
             }
 
-            let user_prompt = build_user_prompt(
-                entity_name,
-                context_samples,
-                num_catalysts,
-                profile,
-                config.format_key,
-                config.guide_signal,
-                Some(entity),
-                era_context.as_ref(),
-            );
+            let user_prompt = if is_local {
+                build_local_user_prompt(
+                    entity_name,
+                    context_samples,
+                    num_catalysts,
+                    era_context.as_ref(),
+                )
+            } else {
+                build_user_prompt(
+                    entity_name,
+                    context_samples,
+                    num_catalysts,
+                    profile,
+                    config.format_key,
+                    config.guide_signal,
+                    Some(entity),
+                    era_context.as_ref(),
+                )
+            };
 
             debug!(
                 entity_name = entity_name.as_str(),
@@ -314,7 +939,7 @@ impl<'a> CatalystPipeline<'a> {
         // 429s from upstream providers, and use a generous timeout to accommodate
         // retries with exponential backoff.
         let is_remote = self.llm.is_openrouter();
-        let concurrency = if is_remote { 8 } else { 1 };
+        let concurrency = config.concurrency.unwrap_or(if is_remote { 8 } else { 1 });
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let entity_timeout_secs: u64 = if is_remote { 30 } else { 300 };
 
@@ -635,6 +1260,7 @@ pub fn calculate_allocations(
 mod tests {
     use super::*;
     use crate::models::{EntityTrends, EntityType};
+    use crate::pipeline::eras::Era;
 
     fn make_entity(name: &str, buckets: HashMap<String, i64>) -> Entity {
         Entity {
@@ -650,6 +1276,33 @@ mod tests {
                 timeline_buckets: buckets,
             },
             metadata: serde_json::json!({}),
+        }
+    }
+
+    fn make_era(label: &str, start: &str, end: &str, count: i64) -> Era {
+        Era {
+            label: label.to_string(),
+            start: start.to_string(),
+            end: end.to_string(),
+            count,
+        }
+    }
+
+    fn make_chunk_candidate(
+        chunk_index: u32,
+        content: &str,
+        timestamp: i64,
+        era_index: usize,
+        relevance: f32,
+        vector: Option<Vec<f32>>,
+    ) -> ChunkCandidate {
+        ChunkCandidate {
+            chunk_index,
+            content: content.to_string(),
+            timestamp,
+            era_index,
+            relevance,
+            vector,
         }
     }
 
@@ -722,5 +1375,66 @@ mod tests {
         assert!(allocs["big"] >= 25);
         // Small entity should stay low
         assert!(allocs["small"] <= 5);
+    }
+
+    #[test]
+    fn test_select_folder_chunks_covers_each_era() {
+        let eras = vec![
+            make_era("2025-Q1", "2025-01", "2025-03", 3),
+            make_era("2025-Q2", "2025-04", "2025-06", 4),
+        ];
+        let candidates = vec![
+            make_chunk_candidate(0, "old era older chunk", 100, 0, 0.0, None),
+            make_chunk_candidate(1, "old era newer chunk", 200, 0, 0.0, None),
+            make_chunk_candidate(2, "new era chunk", 300, 1, 0.0, None),
+        ];
+
+        let selected = select_folder_chunks(&eras, 3, &candidates, 2, 0);
+        let era_context = selected.era_context.expect("expected era context");
+
+        assert_eq!(era_context.samples.len(), 2);
+        assert!(
+            era_context
+                .samples
+                .iter()
+                .any(|(era, text)| { *era == 0 && text == "old era newer chunk" })
+        );
+        assert!(
+            era_context
+                .samples
+                .iter()
+                .any(|(era, text)| *era == 1 && text == "new era chunk")
+        );
+    }
+
+    #[test]
+    fn test_select_semantic_chunks_seeds_eras_before_mmr_fill() {
+        let eras = vec![
+            make_era("2025-Q1", "2025-01", "2025-03", 2),
+            make_era("2025-Q2", "2025-04", "2025-06", 2),
+        ];
+        let candidates = vec![
+            make_chunk_candidate(0, "alpha focus", 100, 0, 0.95, Some(vec![1.0, 0.0])),
+            make_chunk_candidate(1, "alpha duplicate", 110, 0, 0.90, Some(vec![0.99, 0.01])),
+            make_chunk_candidate(2, "beta contrast", 200, 1, 0.80, Some(vec![0.7, 0.3])),
+            make_chunk_candidate(3, "beta weak", 210, 1, 0.20, Some(vec![0.0, 1.0])),
+        ];
+
+        let selected = select_semantic_chunks(&eras, 3, &candidates, 3, 0);
+        let era_context = selected.era_context.expect("expected era context");
+
+        assert_eq!(era_context.samples.len(), 3);
+        assert!(
+            era_context
+                .samples
+                .iter()
+                .any(|(era, text)| *era == 0 && text == "alpha focus")
+        );
+        assert!(
+            era_context
+                .samples
+                .iter()
+                .any(|(era, text)| *era == 1 && text == "beta contrast")
+        );
     }
 }

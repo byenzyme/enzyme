@@ -13,7 +13,7 @@ pub mod schema;
 
 pub use connection::Database;
 pub use errors::DbError;
-pub use repository::{FolderChild, FolderStats, SubfolderStats};
+pub use repository::{FileChunk, FolderChild, FolderStats, SubfolderStats};
 
 #[cfg(test)]
 mod tests {
@@ -232,8 +232,11 @@ mod tests {
         )
         .unwrap();
 
-        db.execute_write("DELETE FROM docs WHERE id = ?1", vec![Value::Integer(doc_id)])
-            .unwrap();
+        db.execute_write(
+            "DELETE FROM docs WHERE id = ?1",
+            vec![Value::Integer(doc_id)],
+        )
+        .unwrap();
 
         let tag_count: Vec<i64> = db
             .query_read("SELECT COUNT(*) FROM doc_tags", vec![], |row| {
@@ -551,7 +554,10 @@ mod tests {
             "INSERT INTO doc_tags (doc_id, tag) VALUES (?1, 'dup')",
             vec![Value::Integer(doc_id)],
         );
-        assert!(result.is_err(), "duplicate (doc_id, tag) should be rejected");
+        assert!(
+            result.is_err(),
+            "duplicate (doc_id, tag) should be rejected"
+        );
     }
 
     // -- upsert_documents_batch -----------------------------------------------
@@ -741,9 +747,11 @@ mod tests {
         )
         .unwrap();
         let id1: i64 = db
-            .query_read("SELECT id FROM docs WHERE source_ref = 'a.md'", vec![], |r| {
-                r.get::<i64>(0)
-            })
+            .query_read(
+                "SELECT id FROM docs WHERE source_ref = 'a.md'",
+                vec![],
+                |r| r.get::<i64>(0),
+            )
             .unwrap()[0];
         db.execute_write(
             "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
@@ -766,9 +774,11 @@ mod tests {
         )
         .unwrap();
         let id3: i64 = db
-            .query_read("SELECT id FROM docs WHERE source_ref = 'c.md'", vec![], |r| {
-                r.get::<i64>(0)
-            })
+            .query_read(
+                "SELECT id FROM docs WHERE source_ref = 'c.md'",
+                vec![],
+                |r| r.get::<i64>(0),
+            )
             .unwrap()[0];
         db.execute_write(
             "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
