@@ -16,6 +16,7 @@ use anyhow::Result;
 
 use crate::db::Database;
 use crate::models::{Entity, EntityType};
+use crate::pipeline::selection_steps;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntityKey {
@@ -107,19 +108,15 @@ const EXCLUDED_FOLDERS: &[&str] = &[
 const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
 
 /// Tags that correspond to tooling/system concerns, not vault content.
-const EXCLUDED_TAGS: &[&str] = &["excalidraw", "templates", "config", "templater", "migrations"];
+const EXCLUDED_TAGS: &[&str] = &[
+    "excalidraw",
+    "templates",
+    "config",
+    "templater",
+    "migrations",
+];
 
 impl EntityMap {
-    /// Build an EntityMap from the database's trending entities.
-    ///
-    /// Deprecated: use `build()` instead, which uses coverage-aware ranking
-    /// rather than recency-only with type quotas.
-    #[deprecated(note = "use EntityMap::build() for coverage-aware selection")]
-    pub fn from_trending(db: &Database, max_entities: usize) -> Result<Self> {
-        let entities = db.get_trending_entities(3, 2, 2, max_entities)?;
-        Self::from_entities(db, &entities)
-    }
-
     /// Build an EntityMap from an arbitrary list of entities.
     ///
     /// This is the core folding logic. It accepts any entity list —
@@ -356,55 +353,12 @@ impl EntityMap {
     /// Uses marginal file coverage to avoid redundant picks — prefers entities
     /// that cover distinct parts of the vault over entities that overlap heavily
     /// with already-selected ones.
-    /// Minimum fraction of a folder's files that must be active page entity
-    /// links for the folder to be treated as expandable. Structured collections
-    /// like `people/` (30%) pass; catch-alls like `inbox/` (0.4%) don't.
-    const EXPANDABLE_DENSITY_THRESHOLD: f64 = 0.05;
-
-    /// Maximum page entity children per expandable folder.
-    /// Kept in sync with `SelectionPipeline::MAX_FOLDER_CHILDREN`.
-    const MAX_FOLDER_CHILDREN: usize = 10;
-
+    /// Convenience wrapper over the shared deterministic step pipeline.
+    ///
+    /// This keeps `EntityMap` usable for structural/presentation callers while
+    /// the actual selection/finalization policy lives in `selection_steps`.
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
-        let shortlist = Self::select_shortlist(db, max_entities)?;
-
-        // Page entity detection needs link entities present. Only add links
-        // for folders that are structured collections — where a meaningful
-        // fraction of files correspond to named entity links.
-        let shortlist_folders: HashMap<String, i64> = shortlist
-            .iter()
-            .filter(|e| e.entity_type == EntityType::Folder)
-            .map(|e| (e.name.clone(), e.frequency.max(1)))
-            .collect();
-
-        let folder_names: HashSet<&str> = shortlist_folders.keys().map(|s| s.as_str()).collect();
-        let links_by_folder = db.get_folder_page_entity_links_grouped(&folder_names)?;
-
-        let shortlist_names: HashSet<String> = shortlist.iter().map(|e| e.name.clone()).collect();
-        let mut combined = shortlist;
-
-        for (folder, mut links) in links_by_folder {
-            let file_count = shortlist_folders.get(folder.as_str()).copied().unwrap_or(1) as f64;
-            let density = links.len() as f64 / file_count;
-            if density < Self::EXPANDABLE_DENSITY_THRESHOLD {
-                continue;
-            }
-            // Keep only the most recent children, matching the catalyst cap
-            links.sort_by(|a, b| {
-                b.trends
-                    .recency_score
-                    .partial_cmp(&a.trends.recency_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            links.truncate(Self::MAX_FOLDER_CHILDREN);
-            for entity in links {
-                if !shortlist_names.contains(&entity.name) {
-                    combined.push(entity);
-                }
-            }
-        }
-
-        Self::from_entities(db, &combined)
+        Ok(selection_steps::build_shortlist_selection(db, max_entities)?.entity_map)
     }
 
     /// Coverage-aware greedy entity selection.
@@ -469,9 +423,7 @@ impl EntityMap {
                         !e.name.contains('/')
                             && !excluded_tags.contains(e.name.to_lowercase().as_str())
                     }
-                    EntityType::Link => {
-                        !e.name.contains('/') && e.frequency >= 3
-                    }
+                    EntityType::Link => !e.name.contains('/') && e.frequency >= 3,
                 }
             })
             .collect();

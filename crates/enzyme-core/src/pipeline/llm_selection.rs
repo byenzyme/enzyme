@@ -13,6 +13,9 @@ use crate::models::Entity;
 use crate::pipeline::context::ContextBuilder;
 use crate::pipeline::entity_map::EntityMap;
 use crate::pipeline::selection::{SelectionPipeline, SelectionResult};
+use crate::pipeline::selection_steps::{
+    CATALYZED_FOLDER_CHILD_LIMIT, select_folder_children,
+};
 
 pub struct LlmSelectionPipeline<'a> {
     db: &'a Database,
@@ -92,7 +95,7 @@ impl<'a> LlmSelectionPipeline<'a> {
         };
 
         // Post-process: deterministically set expandable folders based on page entities
-        post_process_expandable_folders(&mut selection, &ctx_result.entity_map);
+        post_process_expandable_folders(self.db, &mut selection, &ctx_result.entity_map);
 
         info!(
             entities = selection.catalyzed_entities.len(),
@@ -117,60 +120,62 @@ impl<'a> LlmSelectionPipeline<'a> {
 ///
 /// Also deduplicates: removes wikilinks from `catalyzed_entities` that are
 /// children of an expandable folder (the folder subsumes them).
-fn post_process_expandable_folders(selection: &mut SelectionResponse, entity_map: &EntityMap) {
+fn post_process_expandable_folders(
+    db: &Database,
+    selection: &mut SelectionResponse,
+    entity_map: &EntityMap,
+) {
     let folders_with_page_entities = entity_map.folder_page_entity_map();
     if folders_with_page_entities.is_empty() {
         return;
     }
 
-    // Build a set of existing expandable folder refs for merging
-    let existing_expandable: std::collections::HashSet<String> = selection
-        .expandable_folders
+    let folder_profiles: std::collections::HashMap<String, Option<String>> = selection
+        .catalyzed_entities
         .iter()
-        .map(|f| f.folder_ref.clone())
+        .filter_map(|entity| {
+            entity
+                .entity_ref
+                .strip_prefix("folder:")
+                .map(|name| (format!("folder:{name}"), entity.profile.clone()))
+        })
         .collect();
 
-    // For each folder entity in the selection that has page entities,
-    // ensure it's in expandable_folders with its children
-    for entity in &selection.catalyzed_entities {
-        let folder_name = if let Some(name) = entity.entity_ref.strip_prefix("folder:") {
-            name
-        } else {
+    let mut folder_refs: Vec<String> = folder_profiles.keys().cloned().collect();
+    for folder in &selection.expandable_folders {
+        if !folder_refs.contains(&folder.folder_ref) {
+            folder_refs.push(folder.folder_ref.clone());
+        }
+    }
+
+    // For each selected expandable folder, deterministically replace its children.
+    for folder_ref in folder_refs {
+        let Some(folder_name) = folder_ref.strip_prefix("folder:") else {
+            continue;
+        };
+        let Some(page_entities) = folders_with_page_entities.get(folder_name) else {
             continue;
         };
 
-        if let Some(page_entities) = folders_with_page_entities.get(folder_name) {
-            let folder_ref = entity.entity_ref.clone();
+        let children =
+            select_folder_children(db, folder_name, page_entities, CATALYZED_FOLDER_CHILD_LIMIT);
+        let profile = folder_profiles.get(&folder_ref).cloned().flatten();
 
-            if existing_expandable.contains(&folder_ref) {
-                // Already expandable from LLM — merge children
-                if let Some(existing) = selection
-                    .expandable_folders
-                    .iter_mut()
-                    .find(|f| f.folder_ref == folder_ref)
-                {
-                    // Add any page entities not already in children
-                    let existing_children: std::collections::HashSet<String> =
-                        existing.children.iter().cloned().collect();
-                    for pe in page_entities {
-                        let wikilink = format!("[[{}]]", pe);
-                        if !existing_children.contains(&wikilink) {
-                            existing.children.push(wikilink);
-                        }
-                    }
-                }
-            } else {
-                // Not yet expandable — promote it
-                let children: Vec<String> = page_entities
-                    .iter()
-                    .map(|pe| format!("[[{}]]", pe))
-                    .collect();
-                selection.expandable_folders.push(ExpandableFolder {
-                    folder_ref,
-                    children,
-                    profile: entity.profile.clone(),
-                });
+        if let Some(existing) = selection
+            .expandable_folders
+            .iter_mut()
+            .find(|f| f.folder_ref == folder_ref)
+        {
+            existing.children = children;
+            if existing.profile.is_none() {
+                existing.profile = profile;
             }
+        } else {
+            selection.expandable_folders.push(ExpandableFolder {
+                folder_ref,
+                children,
+                profile,
+            });
         }
     }
 
@@ -228,27 +233,11 @@ fn write_config(vault_path: &Path, selection: &SelectionResponse) -> Result<()> 
             .map(|p| format!("\n      profile: {p}"))
             .unwrap_or_default();
 
-        if folder.children.is_empty() {
-            // No children — write expandable folder without children key
-            yaml.push_str(&format!(
-                "  - \"{}\":\n      expandable: true{}\n",
-                yaml_escape(&folder.folder_ref),
-                profile_str,
-            ));
-        } else {
-            let children_str: String = folder
-                .children
-                .iter()
-                .map(|c| format!("\n        - \"{}\"", yaml_escape(c)))
-                .collect();
-
-            yaml.push_str(&format!(
-                "  - \"{}\":\n      expandable: true\n      children:{}{}\n",
-                yaml_escape(&folder.folder_ref),
-                children_str,
-                profile_str,
-            ));
-        }
+        yaml.push_str(&format!(
+            "  - \"{}\":\n      expandable: true{}\n",
+            yaml_escape(&folder.folder_ref),
+            profile_str,
+        ));
     }
 
     // Then write non-folder entities
@@ -361,28 +350,96 @@ mod tests {
         }
     }
 
-    fn make_entity_map() -> EntityMap {
-        let db = Database::open_in_memory().unwrap();
+    fn insert_doc(db: &Database, source_ref: &str) {
         let now = chrono::Utc::now().timestamp_millis();
         db.execute_write(
             "INSERT INTO docs (source_ref, title, content, content_hash, created_at, created_source, modified_at, modified_source, indexed_at)
              VALUES (?1, ?2, '', 'hash', ?3, 'test', ?3, 'test', ?3)",
             vec![
-                Value::Text("people/Alice.md".to_string()),
-                Value::Text("people/Alice.md".to_string()),
+                Value::Text(source_ref.to_string()),
+                Value::Text(source_ref.to_string()),
+                Value::Integer(now),
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_entity(db: &Database, name: &str, entity_type: EntityType, frequency: i64) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let trends = serde_json::to_string(&EntityTrends {
+            frequency_recent: frequency,
+            recency_score: frequency as f64,
+            timeline_buckets: HashMap::new(),
+        })
+        .unwrap();
+        db.execute_write(
+            "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5, '{}')",
+            vec![
+                Value::Text(name.to_string()),
+                Value::Text(entity_type.as_str().to_string()),
+                Value::Integer(frequency),
+                Value::Integer(now),
+                Value::Text(trends),
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_link_reference(db: &Database, source_ref: &str, link: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        db.execute_write(
+            "INSERT INTO docs (source_ref, title, content, content_hash, created_at, created_source, modified_at, modified_source, indexed_at)
+             VALUES (?1, ?2, '', 'hash', ?3, 'test', ?3, 'test', ?3)",
+            vec![
+                Value::Text(source_ref.to_string()),
+                Value::Text(source_ref.to_string()),
                 Value::Integer(now),
             ],
         )
         .unwrap();
 
-        EntityMap::from_entities(
+        let doc_id: i64 = db
+            .query_read(
+                "SELECT id FROM docs WHERE source_ref = ?1",
+                vec![Value::Text(source_ref.to_string())],
+                |row| row.get::<i64>(0),
+            )
+            .unwrap()[0];
+
+        db.execute_write(
+            "INSERT INTO doc_links (doc_id, link) VALUES (?1, ?2)",
+            vec![Value::Integer(doc_id), Value::Text(link.to_string())],
+        )
+        .unwrap();
+    }
+
+    fn make_entity_map() -> (Database, EntityMap) {
+        let db = Database::open_in_memory().unwrap();
+        insert_doc(&db, "people/Alice.md");
+        insert_doc(&db, "people/Bob.md");
+        insert_doc(&db, "people/Carol.md");
+
+        insert_entity(&db, "alice", EntityType::Link, 8);
+        insert_entity(&db, "bob", EntityType::Link, 6);
+        insert_entity(&db, "carol", EntityType::Link, 4);
+
+        insert_link_reference(&db, "notes/ref-a.md", "alice");
+        insert_link_reference(&db, "notes/ref-b.md", "alice");
+        insert_link_reference(&db, "notes/ref-c.md", "bob");
+
+        let map = EntityMap::from_entities(
             &db,
             &[
                 make_entity("people", EntityType::Folder, 12),
                 make_entity("alice", EntityType::Link, 8),
+                make_entity("bob", EntityType::Link, 6),
+                make_entity("carol", EntityType::Link, 4),
             ],
         )
-        .unwrap()
+        .unwrap();
+
+        (db, map)
     }
 
     #[test]
@@ -460,8 +517,9 @@ mod tests {
         let config_path = vault_path.join(".enzyme").join("enzyme-config.yaml");
         let contents = std::fs::read_to_string(&config_path).unwrap();
         assert!(contents.contains("expandable: true"));
-        assert!(contents.contains("[[ari]]"));
-        assert!(contents.contains("[[jonah]]"));
+        assert!(!contents.contains("children:"));
+        assert!(!contents.contains("[[ari]]"));
+        assert!(!contents.contains("[[jonah]]"));
 
         // Verify it parses back
         let config: EnzymeConfig = serde_yaml::from_str(&contents).unwrap();
@@ -565,12 +623,15 @@ mod tests {
             excluded_entities: vec![],
         };
 
-        let entity_map = make_entity_map();
-        post_process_expandable_folders(&mut selection, &entity_map);
+        let (db, entity_map) = make_entity_map();
+        post_process_expandable_folders(&db, &mut selection, &entity_map);
 
         assert_eq!(selection.expandable_folders.len(), 1);
         assert_eq!(selection.expandable_folders[0].folder_ref, "folder:people");
-        assert_eq!(selection.expandable_folders[0].children, vec!["[[alice]]"]);
+        assert_eq!(
+            selection.expandable_folders[0].children,
+            vec!["[[alice]]", "[[bob]]", "[[carol]]"]
+        );
         assert_eq!(
             selection.expandable_folders[0].profile.as_deref(),
             Some("relational")
@@ -590,16 +651,53 @@ mod tests {
             guide_signal: None,
             expandable_folders: vec![ExpandableFolder {
                 folder_ref: "folder:people".to_string(),
-                children: vec!["[[alice]]".to_string()],
+                children: vec!["[[carol]]".to_string()],
                 profile: Some("relational".to_string()),
             }],
             excluded_entities: vec![],
         };
 
-        let entity_map = make_entity_map();
-        post_process_expandable_folders(&mut selection, &entity_map);
+        let (db, entity_map) = make_entity_map();
+        post_process_expandable_folders(&db, &mut selection, &entity_map);
 
         assert_eq!(selection.expandable_folders.len(), 1);
-        assert_eq!(selection.expandable_folders[0].children, vec!["[[alice]]"]);
+        assert_eq!(
+            selection.expandable_folders[0].children,
+            vec!["[[alice]]", "[[bob]]", "[[carol]]"]
+        );
+    }
+
+    #[test]
+    fn test_post_process_expandable_folders_replaces_llm_children_for_expandable_only_folder() {
+        let mut selection = SelectionResponse {
+            catalyzed_entities: vec![],
+            catalyst_profile: None,
+            guide_signal: None,
+            expandable_folders: vec![ExpandableFolder {
+                folder_ref: "folder:people".to_string(),
+                children: vec![
+                    "[[stale one]]".to_string(),
+                    "[[stale two]]".to_string(),
+                    "[[stale three]]".to_string(),
+                    "[[stale four]]".to_string(),
+                ],
+                profile: Some("relational".to_string()),
+            }],
+            excluded_entities: vec![],
+        };
+
+        let (db, entity_map) = make_entity_map();
+        post_process_expandable_folders(&db, &mut selection, &entity_map);
+
+        assert_eq!(selection.expandable_folders.len(), 1);
+        assert_eq!(selection.expandable_folders[0].folder_ref, "folder:people");
+        assert_eq!(
+            selection.expandable_folders[0].children,
+            vec!["[[alice]]", "[[bob]]", "[[carol]]"]
+        );
+        assert_eq!(
+            selection.expandable_folders[0].profile.as_deref(),
+            Some("relational")
+        );
     }
 }

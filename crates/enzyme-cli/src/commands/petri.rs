@@ -13,7 +13,9 @@ use enzyme_core::models::{Catalyst, Embedding, Entity, EntityType};
 use enzyme_core::pipeline::entity_map::{
     EntityDisposition, EntityKey, EntityMap, FolderGroup, FolderOrigin,
 };
-use enzyme_core::pipeline::llm_selection::select_folder_children;
+use enzyme_core::pipeline::selection_steps::{
+    CATALYZED_FOLDER_CHILD_LIMIT, select_folder_children,
+};
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -208,8 +210,12 @@ fn enrich_folder_entry(
             })
             .collect();
 
-        let catalyzed =
-            select_folder_children(db, &folder_group.entity.name, &folder_group.page_entities);
+        let catalyzed = select_folder_children(
+            db,
+            &folder_group.entity.name,
+            &folder_group.page_entities,
+            CATALYZED_FOLDER_CHILD_LIMIT,
+        );
 
         let sampled_count = sampled.len() as i64;
         let obj = entry.as_object_mut().unwrap();

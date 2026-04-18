@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use enzyme_core::db::Database;
-use enzyme_core::pipeline::entity_map::EntityMap;
+use enzyme_core::pipeline::selection_steps;
 
 /// A snapshot of vault structure and trending entities, built from the DB.
 #[derive(Debug, Serialize)]
@@ -54,7 +54,8 @@ fn entity_trend(frequency: i64, recent: i64) -> Trend {
 
 /// Build a vault summary from the DB using EntityMap.
 pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> {
-    let entity_map = EntityMap::build(db, 15)?;
+    let materialized = selection_steps::build_shortlist_selection(db, 15)?;
+    let entity_map = materialized.entity_map;
 
     let mut entities = Vec::new();
 
