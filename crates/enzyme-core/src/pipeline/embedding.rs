@@ -49,11 +49,20 @@ impl<'a> EmbeddingPipeline<'a> {
     }
 
     /// Run embedding only for documents indexed since `since_ms` (epoch millis).
-    pub fn run_since(&self, since_ms: i64, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+    pub fn run_since(
+        &self,
+        since_ms: i64,
+        on_progress: impl Fn(usize, usize),
+    ) -> Result<EmbeddingStats> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
     }
 
-    fn run_inner(&self, max_docs: Option<usize>, indexed_since: Option<i64>, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+    fn run_inner(
+        &self,
+        max_docs: Option<usize>,
+        indexed_since: Option<i64>,
+        on_progress: impl Fn(usize, usize),
+    ) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
         // Step 1: Prune stale chunk embeddings for deleted docs.
@@ -63,7 +72,9 @@ impl<'a> EmbeddingPipeline<'a> {
         }
 
         // Step 2: Find documents needing embedding
-        let docs_needing = self.db.get_documents_needing_embedding(max_docs, indexed_since)?;
+        let docs_needing = self
+            .db
+            .get_documents_needing_embedding(max_docs, indexed_since)?;
         if docs_needing.is_empty() {
             info!("No documents need embedding");
             return Ok(EmbeddingStats {
@@ -95,7 +106,11 @@ impl<'a> EmbeddingPipeline<'a> {
         }
 
         let total_chunks = flat_chunks.len();
-        info!(total_chunks, total_docs = non_empty_docs.len(), "embedding all chunks in cross-document batches");
+        info!(
+            total_chunks,
+            total_docs = non_empty_docs.len(),
+            "embedding all chunks in cross-document batches"
+        );
 
         // Step 4: Embed all chunks at once.
         let total_non_empty = non_empty_docs.len();
@@ -160,9 +175,7 @@ impl<'a> EmbeddingPipeline<'a> {
 
         info!(
             documents_embedded,
-            chunks_embedded,
-            duration_ms,
-            "embedding complete"
+            chunks_embedded, duration_ms, "embedding complete"
         );
 
         Ok(EmbeddingStats {

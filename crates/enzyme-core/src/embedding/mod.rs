@@ -20,22 +20,22 @@ mod backend;
 mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_server;
-pub mod model_files;
-mod normalize;
 #[cfg(feature = "model2vec")]
 mod model2vec_backend;
+pub mod model_files;
+mod normalize;
 mod rten_backend;
 mod service;
 
 pub use backend::EmbeddingBackend;
 pub use daemon_client::DaemonClient;
 pub use daemon_server::DaemonServer;
-pub use model_files::{ModelFiles, resolve_model_files};
-pub use normalize::{l2_normalize, mean_pool};
-#[cfg(feature = "model2vec")]
-pub use model2vec_backend::DistilledBackend;
 #[cfg(feature = "model2vec")]
 pub use model_files::resolve_distilled_model_files;
+pub use model_files::{ModelFiles, resolve_model_files};
+#[cfg(feature = "model2vec")]
+pub use model2vec_backend::DistilledBackend;
+pub use normalize::{l2_normalize, mean_pool};
 pub use rten_backend::RtenBackend;
 pub use service::EmbeddingService;
 
@@ -64,7 +64,11 @@ pub fn get_embedding_service(enzyme_home: &Path) -> Result<&'static EmbeddingSer
 fn create_embedding_service(enzyme_home: &Path) -> Result<EmbeddingService> {
     let model_files = resolve_distilled_model_files(enzyme_home)?;
     let backend = DistilledBackend::load(&model_files.model_dir)?;
-    info!(backend = backend.name(), dim = backend.dimension(), "using distilled embedding backend");
+    info!(
+        backend = backend.name(),
+        dim = backend.dimension(),
+        "using distilled embedding backend"
+    );
     Ok(EmbeddingService::new(Box::new(backend)))
 }
 
@@ -78,8 +82,7 @@ fn create_embedding_service(enzyme_home: &Path) -> Result<EmbeddingService> {
         Err(e) => {
             warn!("daemon unavailable, falling back to in-process RtenBackend: {e}");
             let model_files = resolve_model_files(enzyme_home)?;
-            let backend =
-                RtenBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
+            let backend = RtenBackend::load(&model_files.model_path, &model_files.tokenizer_path)?;
             Ok(EmbeddingService::new(Box::new(backend)))
         }
     }

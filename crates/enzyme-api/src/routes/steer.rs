@@ -5,15 +5,15 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::warn;
 
-use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_api_config, ResponseFormat};
+use enzyme_core::llm::{GenerationParams, LlmClient, Message, ResponseFormat, resolve_api_config};
 // Note: steer doesn't have a strict schema — response is parsed as generic JSON Value.
 // We use JsonObject here since we just need valid JSON, not a specific shape.
 
-use crate::prompts;
 use crate::AppState;
+use crate::prompts;
 
 #[derive(Deserialize)]
 struct SteerRequest {
@@ -25,9 +25,8 @@ async fn steer(
     Json(request): Json<SteerRequest>,
 ) -> Result<Json<Value>, StatusCode> {
     // Load steering petri context (with full catalyst texts + topic names)
-    let petri_context =
-        enzyme_core::query::format_steering_petri_context(&state.vault_path, 15)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let petri_context = enzyme_core::query::format_steering_petri_context(&state.vault_path, 15)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let api_config = resolve_api_config()
         .await
@@ -63,9 +62,8 @@ async fn steer(
         })?;
 
     // Parse the response as JSON; pass through if valid, wrap if not
-    let parsed: Value = serde_json::from_str(&response).unwrap_or_else(|_| {
-        json!({ "suggestions": [] })
-    });
+    let parsed: Value =
+        serde_json::from_str(&response).unwrap_or_else(|_| json!({ "suggestions": [] }));
 
     Ok(Json(parsed))
 }

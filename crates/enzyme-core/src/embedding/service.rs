@@ -113,8 +113,8 @@ impl EmbeddingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A mock backend that returns a constant vector for each input.
     /// Tracks how many times `embed_batch` was called.
@@ -278,6 +278,11 @@ mod tests {
         let service = EmbeddingService::new(Box::new(FailBackend));
         let result = service.embed_documents(&["hello"]);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("simulated failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("simulated failure")
+        );
     }
 }

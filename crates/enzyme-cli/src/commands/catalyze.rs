@@ -11,7 +11,13 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::ContentRegister;
 use enzyme_core::search::context::ContextSearch;
 
-pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: Option<&Path>, register_str: &str) -> Result<()> {
+pub async fn run_catalyze(
+    vault_path: &Path,
+    query: &str,
+    limit: usize,
+    target: Option<&Path>,
+    register_str: &str,
+) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
@@ -24,11 +30,10 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
         return Ok(());
     }
 
-    let register = ContentRegister::from_str_opt(register_str)
-        .unwrap_or_else(|| {
-            tracing::warn!("unknown register '{}', defaulting to explore", register_str);
-            ContentRegister::Explore
-        });
+    let register = ContentRegister::from_str_opt(register_str).unwrap_or_else(|| {
+        tracing::warn!("unknown register '{}', defaulting to explore", register_str);
+        ContentRegister::Explore
+    });
 
     let db = Database::open(&paths.vault_db)?;
 
@@ -71,7 +76,10 @@ pub async fn run_catalyze(vault_path: &Path, query: &str, limit: usize, target: 
     if let Some(obj) = output.as_object_mut() {
         obj.insert("query".into(), json!(query));
         obj.insert("search_strategy".into(), json!("catalyze"));
-        obj.insert("processing_time".into(), json!((processing_time * 1000.0).round() / 1000.0));
+        obj.insert(
+            "processing_time".into(),
+            json!((processing_time * 1000.0).round() / 1000.0),
+        );
         obj.insert("total_results".into(), json!(response.results.len()));
     }
 

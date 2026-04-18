@@ -25,11 +25,7 @@ impl Embedding {
             norm_b += b[i] * b[i];
         }
         let denom = norm_a.sqrt() * norm_b.sqrt();
-        if denom == 0.0 {
-            0.0
-        } else {
-            dot / denom
-        }
+        if denom == 0.0 { 0.0 } else { dot / denom }
     }
 
     /// Validate that the embedding has the expected dimensionality.

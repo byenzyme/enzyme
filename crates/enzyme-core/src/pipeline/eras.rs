@@ -66,7 +66,12 @@ pub fn cluster_eras(timeline_buckets: &HashMap<String, i64>, min_notes: i64) -> 
             let end = group.last().unwrap().0.to_string();
             let count: i64 = group.iter().map(|(_, c)| c).sum();
             let label = format_era_label(&start, &end);
-            Era { label, start, end, count }
+            Era {
+                label,
+                start,
+                end,
+                count,
+            }
         })
         .collect();
 
@@ -152,9 +157,9 @@ pub fn assign_occurrences_to_eras<'a>(
     for occ in occurrences {
         let month_key = occurrence_month_key(occ);
         let era_idx = match month_key {
-            Some(ref key) => eras
-                .iter()
-                .position(|era| key.as_str() >= era.start.as_str() && key.as_str() <= era.end.as_str()),
+            Some(ref key) => eras.iter().position(|era| {
+                key.as_str() >= era.start.as_str() && key.as_str() <= era.end.as_str()
+            }),
             None => None,
         };
         match era_idx {
@@ -189,7 +194,9 @@ pub fn allocate_catalysts_to_eras(eras: &[Era], total: usize, min_per_era: usize
             // Fill remaining from most recent backward
             let mut remaining = total - 1;
             for i in (1..eras.len()).rev() {
-                if remaining == 0 { break; }
+                if remaining == 0 {
+                    break;
+                }
                 allocs[i] = min_per_era.min(remaining);
                 remaining -= allocs[i];
             }
@@ -219,7 +226,9 @@ pub fn allocate_catalysts_to_eras(eras: &[Era], total: usize, min_per_era: usize
     let distributed: usize = allocs.iter().sum();
     let mut leftover = total.saturating_sub(distributed);
     for i in (0..eras.len()).rev() {
-        if leftover == 0 { break; }
+        if leftover == 0 {
+            break;
+        }
         allocs[i] += 1;
         leftover -= 1;
     }
@@ -263,7 +272,9 @@ pub fn sample_contexts_by_era(
         let mut indices: Vec<usize> = (0..slots.len()).collect();
         indices.sort_by(|a, b| slots[*b].cmp(&slots[*a]));
         for &i in &indices {
-            if excess == 0 { break; }
+            if excess == 0 {
+                break;
+            }
             let trim = (slots[i] - 1).min(excess);
             slots[i] -= trim;
             excess -= trim;
@@ -272,7 +283,9 @@ pub fn sample_contexts_by_era(
 
     let mut results: Vec<(usize, String)> = Vec::new();
     for (era_idx, slot_count) in slots.iter().enumerate() {
-        if era_idx >= bucketed_occs.len() { break; }
+        if era_idx >= bucketed_occs.len() {
+            break;
+        }
         let occs = &bucketed_occs[era_idx];
         let contexts: Vec<_> = occs
             .iter()
@@ -327,7 +340,9 @@ fn bucket_monthly(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
 fn bucket_quarterly(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
     let mut quarters: HashMap<(i32, i32), i64> = HashMap::new();
     for (key, &count) in timeline_buckets {
-        if count <= 0 { continue; }
+        if count <= 0 {
+            continue;
+        }
         let (y, m) = parse_month_key(key);
         let q = (m - 1) / 3;
         *quarters.entry((y, q)).or_insert(0) += count;
@@ -362,7 +377,9 @@ fn bucket_hybrid(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
     let mut recent_quarters: HashMap<(i32, i32), i64> = HashMap::new();
 
     for (key, &count) in timeline_buckets {
-        if count <= 0 { continue; }
+        if count <= 0 {
+            continue;
+        }
         let (y, m) = parse_month_key(key);
 
         if y * 12 + m < cutoff_y * 12 + cutoff_m {
@@ -427,8 +444,7 @@ fn parse_month_key(key: &str) -> (i32, i32) {
 
 fn occurrence_month_key(occ: &EntityOccurrence) -> Option<String> {
     let ts = occ.effective_date.unwrap_or(occ.created_at);
-    chrono::DateTime::from_timestamp_millis(ts)
-        .map(|dt| dt.format("%Y-%m").to_string())
+    chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.format("%Y-%m").to_string())
 }
 
 /// Build a human-readable label for an era span.
@@ -457,9 +473,18 @@ fn format_era_label(start: &str, end: &str) -> String {
 fn format_month(key: &str) -> String {
     let (y, m) = parse_month_key(key);
     let month_name = match m {
-        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
-        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
-        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     };
     format!("{} {}", month_name, y)
@@ -467,7 +492,9 @@ fn format_month(key: &str) -> String {
 
 /// Merge era at `idx` into its nearest neighbor.
 fn merge_into_neighbor(eras: &mut Vec<Era>, idx: usize) {
-    if eras.len() <= 1 { return; }
+    if eras.len() <= 1 {
+        return;
+    }
 
     let merge_into = if idx == 0 {
         1
@@ -503,7 +530,9 @@ fn merge_into_neighbor(eras: &mut Vec<Era>, idx: usize) {
 /// Merge eras below `min_notes` into their nearest neighbor.
 fn merge_thin_eras(eras: &mut Vec<Era>, min_notes: i64) {
     loop {
-        if eras.len() <= 1 { break; }
+        if eras.len() <= 1 {
+            break;
+        }
         let thin_idx = match eras.iter().position(|e| e.count < min_notes) {
             Some(i) => i,
             None => break,
@@ -551,11 +580,7 @@ mod tests {
 
     #[test]
     fn consecutive_months_stay_together() {
-        let b = buckets(&[
-            ("2025-01", 3),
-            ("2025-02", 4),
-            ("2025-03", 5),
-        ]);
+        let b = buckets(&[("2025-01", 3), ("2025-02", 4), ("2025-03", 5)]);
         let eras = cluster_eras(&b, 3);
         assert_eq!(eras.len(), 1);
         assert_eq!(eras[0].count, 12);
@@ -586,8 +611,18 @@ mod tests {
     #[test]
     fn catalyst_allocation_respects_minimum() {
         let eras = vec![
-            Era { label: "A".into(), start: "2025-01".into(), end: "2025-03".into(), count: 20 },
-            Era { label: "B".into(), start: "2025-06".into(), end: "2025-08".into(), count: 5 },
+            Era {
+                label: "A".into(),
+                start: "2025-01".into(),
+                end: "2025-03".into(),
+                count: 20,
+            },
+            Era {
+                label: "B".into(),
+                start: "2025-06".into(),
+                end: "2025-08".into(),
+                count: 5,
+            },
         ];
         let allocs = allocate_catalysts_to_eras(&eras, 7, 2);
         assert_eq!(allocs.iter().sum::<usize>(), 7);
@@ -596,9 +631,12 @@ mod tests {
 
     #[test]
     fn catalyst_allocation_single_era() {
-        let eras = vec![
-            Era { label: "A".into(), start: "2025-01".into(), end: "2025-03".into(), count: 10 },
-        ];
+        let eras = vec![Era {
+            label: "A".into(),
+            start: "2025-01".into(),
+            end: "2025-03".into(),
+            count: 10,
+        }];
         let allocs = allocate_catalysts_to_eras(&eras, 7, 2);
         assert_eq!(allocs, vec![7]);
     }
@@ -617,9 +655,16 @@ mod tests {
         let allocs = allocate_catalysts_to_eras(&eras, 7, 1);
         assert_eq!(allocs.iter().sum::<usize>(), 7);
         // Oldest era should get at least 1
-        assert!(allocs[0] >= 1, "oldest era should get at least 1, got {}", allocs[0]);
+        assert!(
+            allocs[0] >= 1,
+            "oldest era should get at least 1, got {}",
+            allocs[0]
+        );
         // No era should get 0 if possible, but with 8 eras and 7 budget, one must
         // The one that gets 0 should NOT be the oldest or most recent
-        assert!(allocs.last().unwrap() >= &1, "most recent era should get at least 1");
+        assert!(
+            allocs.last().unwrap() >= &1,
+            "most recent era should get at least 1"
+        );
     }
 }
