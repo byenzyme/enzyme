@@ -223,18 +223,38 @@ fn enrich_folder_entry(
         );
     }
 
-    if let Some(children) = page_entity_children {
-        let nested: Vec<serde_json::Value> = children
-            .iter()
-            .map(|(child_entity, child_catalysts)| {
-                build_entity_json(
-                    child_entity,
-                    child_catalysts,
-                    entity_relevances,
-                    catalyst_relevances,
-                )
-            })
-            .collect();
+    // Show all catalyzed page entity children from the DB, not just
+    // query-matched ones. This ensures expandable folders always surface
+    // their full child set.
+    {
+        let all_page_links = db.get_folder_page_entity_links(&std::collections::HashSet::from([
+            folder_group.entity.name.as_str(),
+        ]))?;
+        let mut nested: Vec<serde_json::Value> = Vec::new();
+        for link_entity in &all_page_links {
+            let catalysts = db.get_catalysts_for_entity(&link_entity.name)?;
+            if catalysts.is_empty() {
+                continue;
+            }
+            let mut child_json =
+                build_entity_json(link_entity, &catalysts, entity_relevances, catalyst_relevances);
+            // Prefer query-matched version if available (has relevance scores)
+            if let Some(children) = page_entity_children {
+                for (ce, cc) in children.iter() {
+                    if ce.name == link_entity.name {
+                        child_json =
+                            build_entity_json(ce, cc, entity_relevances, catalyst_relevances);
+                    }
+                }
+            }
+            nested.push(child_json);
+        }
+        // Sort by recency
+        nested.sort_by(|a, b| {
+            let ra = a.get("recency_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let rb = b.get("recency_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+        });
         if !nested.is_empty() {
             entry
                 .as_object_mut()
