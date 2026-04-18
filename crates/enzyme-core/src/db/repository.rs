@@ -745,6 +745,59 @@ impl Database {
         Ok(map)
     }
 
+    /// Get link entities whose source files live inside the given folders.
+    ///
+    /// For each folder, finds documents like `folder/Name.md` and returns
+    /// any entity of type "link" whose name matches the doc stem (case-insensitive).
+    pub fn get_folder_page_entity_links(
+        &self,
+        folders: &HashSet<&str>,
+    ) -> Result<Vec<Entity>> {
+        if folders.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Get all doc stems under the target folders
+        let docs = self.query_read(
+            "SELECT source_ref FROM docs",
+            vec![],
+            |row| row.get::<String>(0),
+        )?;
+
+        let mut stems: HashSet<String> = HashSet::new();
+        for source_ref in &docs {
+            if let Some(slash) = source_ref.find('/') {
+                let folder = &source_ref[..slash];
+                if folders.contains(&*folder.to_lowercase()) {
+                    let filename = &source_ref[slash + 1..];
+                    // Only direct children (no sub-subfolders)
+                    if !filename.contains('/') {
+                        let stem = filename
+                            .strip_suffix(".md")
+                            .unwrap_or(filename)
+                            .to_lowercase();
+                        stems.insert(stem);
+                    }
+                }
+            }
+        }
+
+        if stems.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Find matching link entities
+        let all_entities = self.get_all_entities()?;
+        Ok(all_entities
+            .into_iter()
+            .filter(|e| {
+                e.entity_type == EntityType::Link
+                    && e.frequency >= 3
+                    && stems.contains(&e.name.to_lowercase())
+            })
+            .collect())
+    }
+
     // -----------------------------------------------------------------------
     // Context queries (for XML context builder)
     // -----------------------------------------------------------------------

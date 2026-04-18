@@ -359,19 +359,21 @@ impl EntityMap {
     pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
         let shortlist = Self::select_shortlist(db, max_entities)?;
 
-        // Page entity detection needs link entities present. The shortlist only
-        // picks tags/folders, so we add all link entities with frequency >= 3
-        // (same threshold as get_trending_entities). These get folded into
-        // their parent folders or surfaced as standalone links by from_entities.
-        let all = db.get_all_entities()?;
+        // Page entity detection needs link entities present. Only add links
+        // that live inside shortlisted folders — avoids surfacing synthetic
+        // folders (daily/, work/) that weren't selected.
+        let shortlist_folders: HashSet<&str> = shortlist
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Folder)
+            .map(|e| e.name.as_str())
+            .collect();
+
+        let folder_links = db.get_folder_page_entity_links(&shortlist_folders)?;
+
         let shortlist_names: HashSet<String> = shortlist.iter().map(|e| e.name.clone()).collect();
         let mut combined = shortlist;
-        for entity in all {
-            if entity.entity_type == EntityType::Link
-                && entity.frequency >= 3
-                && !entity.name.contains('/')
-                && !shortlist_names.contains(&entity.name)
-            {
+        for entity in folder_links {
+            if !shortlist_names.contains(&entity.name) {
                 combined.push(entity);
             }
         }

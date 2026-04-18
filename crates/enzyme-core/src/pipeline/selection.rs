@@ -138,29 +138,14 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Select entities using coverage-aware shortlist + deterministic profiles.
     fn select_shortlist(&self) -> Result<SelectionResult> {
-        // Build shortlist for top-level entities (tags + folders)
-        let shortlist = EntityMap::select_shortlist(self.db, 20)?;
-
-        // Build the EntityMap from ALL entities so page entity detection works
-        // (it needs link entities present to detect wikilinks in folders)
-        let all_entities = self.db.get_all_entities()?;
-        let entity_map = EntityMap::from_entities(self.db, &all_entities)?;
-
-        // Use the shortlist as top-level, but pull expandable info from the full map
-        let mut entities = shortlist;
-
-        let shortlist_folders: HashSet<String> = entities
-            .iter()
-            .filter(|e| e.entity_type == EntityType::Folder)
-            .map(|e| e.name.clone())
-            .collect();
+        // EntityMap::build handles shortlist + scoped page entity detection
+        let entity_map = EntityMap::build(self.db, 20)?;
+        let mut entities: Vec<_> = entity_map.all_entities().into_iter().cloned().collect();
 
         let expandable_folders: HashMap<String, Vec<String>> = entity_map
             .folders
             .iter()
-            .filter(|fg| {
-                !fg.page_entities.is_empty() && shortlist_folders.contains(&fg.entity.name)
-            })
+            .filter(|fg| !fg.page_entities.is_empty())
             .map(|fg| (fg.entity.name.clone(), fg.page_entities.clone()))
             .collect();
 
