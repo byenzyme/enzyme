@@ -5,7 +5,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use enzyme_core::db::Database;
-use enzyme_core::pipeline::entity_map::{EntityMap, TagGroup, FolderGroup};
+use enzyme_core::pipeline::entity_map::EntityMap;
 
 /// A snapshot of vault structure and trending entities, built from the DB.
 #[derive(Debug, Serialize)]
@@ -60,8 +60,13 @@ pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> 
 
     // Tags
     for tg in &entity_map.tags {
-        let children: Vec<SummaryChild> = tg.significant_children.iter()
-            .map(|c| SummaryChild { name: c.name.clone(), frequency: c.frequency })
+        let children: Vec<SummaryChild> = tg
+            .significant_children
+            .iter()
+            .map(|c| SummaryChild {
+                name: c.name.clone(),
+                frequency: c.frequency,
+            })
             .collect();
 
         entities.push(SummaryEntity {
@@ -101,7 +106,10 @@ pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> 
         });
     }
 
-    Ok(VaultSummary { files: entity_map.file_count, entities })
+    Ok(VaultSummary {
+        files: entity_map.file_count,
+        entities,
+    })
 }
 
 /// Format a vault summary as human-readable text for the terminal.
@@ -129,9 +137,13 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
         ));
 
         if !entity.children.is_empty() {
-            let child_names: Vec<String> = entity.children.iter()
+            let child_names: Vec<String> = entity
+                .children
+                .iter()
                 .map(|c| {
-                    let short = c.name.strip_prefix(&entity.name)
+                    let short = c
+                        .name
+                        .strip_prefix(&entity.name)
                         .and_then(|s| s.strip_prefix('/'))
                         .unwrap_or(&c.name);
                     short.to_string()
@@ -141,7 +153,9 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
         }
 
         if !entity.page_entities.is_empty() {
-            let page_names: Vec<String> = entity.page_entities.iter()
+            let page_names: Vec<String> = entity
+                .page_entities
+                .iter()
                 .map(|p| format!("[[{}]]", p))
                 .collect();
             lines.push(format!("    → {}", page_names.join(", ")));
@@ -158,7 +172,9 @@ pub fn format_summary_human(summary: &VaultSummary) -> String {
 /// standalone links that aren't subsumed by a folder.
 pub fn format_summary_guide(summary: &VaultSummary) -> String {
     // Track which tags are children of a parent in the summary
-    let child_tag_names: HashSet<&str> = summary.entities.iter()
+    let child_tag_names: HashSet<&str> = summary
+        .entities
+        .iter()
         .flat_map(|e| e.children.iter().map(|c| c.name.as_str()))
         .collect();
 
@@ -167,14 +183,19 @@ pub fn format_summary_guide(summary: &VaultSummary) -> String {
     // ── Tags ─────────────────────────────────────────────────────────────
     let mut tag_parts = Vec::new();
     for entity in &summary.entities {
-        if entity.entity_type != "tag" { continue; }
+        if entity.entity_type != "tag" {
+            continue;
+        }
         if entity.name.contains('/') && child_tag_names.contains(entity.name.as_str()) {
             continue;
         }
 
-        let significant_children: Vec<&str> = entity.children.iter()
+        let significant_children: Vec<&str> = entity
+            .children
+            .iter()
             .map(|c| {
-                c.name.strip_prefix(&entity.name)
+                c.name
+                    .strip_prefix(&entity.name)
                     .and_then(|s| s.strip_prefix('/'))
                     .unwrap_or(&c.name)
             })
@@ -183,7 +204,8 @@ pub fn format_summary_guide(summary: &VaultSummary) -> String {
         if significant_children.is_empty() {
             tag_parts.push(format!("#{}", entity.name));
         } else {
-            let subs: Vec<String> = significant_children.iter()
+            let subs: Vec<String> = significant_children
+                .iter()
                 .map(|c| format!("#{}/{}", entity.name, c))
                 .collect();
             tag_parts.push(format!("#{}; subtags {}", entity.name, subs.join(", ")));
@@ -196,13 +218,19 @@ pub fn format_summary_guide(summary: &VaultSummary) -> String {
     // ── Folders ──────────────────────────────────────────────────────────
     let mut folder_parts = Vec::new();
     for entity in &summary.entities {
-        if entity.entity_type != "folder" { continue; }
-        if entity.name.contains('/') { continue; }
+        if entity.entity_type != "folder" {
+            continue;
+        }
+        if entity.name.contains('/') {
+            continue;
+        }
 
         if entity.page_entities.is_empty() {
             folder_parts.push(format!("{}/", entity.name));
         } else {
-            let pages: Vec<String> = entity.page_entities.iter()
+            let pages: Vec<String> = entity
+                .page_entities
+                .iter()
                 .take(5)
                 .map(|p| format!("[[{}]]", p))
                 .collect();
@@ -219,7 +247,9 @@ pub fn format_summary_guide(summary: &VaultSummary) -> String {
     }
 
     // ── Standalone links ────────────────────────────────────────────────
-    let standalone_links: Vec<String> = summary.entities.iter()
+    let standalone_links: Vec<String> = summary
+        .entities
+        .iter()
         .filter(|e| e.entity_type == "link" && !e.name.contains('/'))
         .take(8)
         .map(|e| format!("[[{}]]", e.name))

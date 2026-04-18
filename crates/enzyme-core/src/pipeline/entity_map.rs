@@ -17,6 +17,41 @@ use anyhow::Result;
 use crate::db::Database;
 use crate::models::{Entity, EntityType};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityKey {
+    pub name: String,
+    pub entity_type: EntityType,
+}
+
+impl EntityKey {
+    pub fn new(name: impl Into<String>, entity_type: EntityType) -> Self {
+        Self {
+            name: name.into(),
+            entity_type,
+        }
+    }
+}
+
+impl From<&Entity> for EntityKey {
+    fn from(entity: &Entity) -> Self {
+        Self::new(entity.name.clone(), entity.entity_type.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntityDisposition {
+    TopLevel,
+    FoldedIntoTag { parent_name: String },
+    FoldedIntoFolder { folder_name: String },
+    ShadowedByTag { tag_name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderOrigin {
+    Input,
+    Synthetic,
+}
+
 /// A structured view of the vault's entity landscape.
 #[derive(Debug, Clone)]
 pub struct EntityMap {
@@ -28,6 +63,8 @@ pub struct EntityMap {
     pub links: Vec<Entity>,
     /// Total file count in the vault.
     pub file_count: usize,
+    /// Structural disposition for each input entity.
+    dispositions: HashMap<EntityKey, EntityDisposition>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +81,8 @@ pub struct FolderGroup {
     pub entity: Entity,
     /// Links that have source files inside this folder.
     pub page_entities: Vec<String>,
+    /// Whether this folder was present in the input or synthesized structurally.
+    pub origin: FolderOrigin,
 }
 
 /// Threshold: a child is "significant" if its frequency is >10% of the parent's.
@@ -66,29 +105,46 @@ impl EntityMap {
     /// The folding decisions (page entities, children, dedup) are
     /// applied uniformly regardless of how the entities were selected.
     pub fn from_entities(db: &Database, entities: &[Entity]) -> Result<Self> {
-        let file_count: usize = db.query_read(
-            "SELECT COUNT(*) FROM docs",
-            vec![],
-            |row| row.get::<i64>(0),
-        )?.first().copied().unwrap_or(0) as usize;
+        let file_count: usize = db
+            .query_read("SELECT COUNT(*) FROM docs", vec![], |row| row.get::<i64>(0))?
+            .first()
+            .copied()
+            .unwrap_or(0) as usize;
+
+        let mut dispositions: HashMap<EntityKey, EntityDisposition> = HashMap::new();
 
         // ── Link-tag dedup ──────────────────────────────────────────────
         // If both [[enzyme]] (link) and #enzyme (tag) exist, drop the link.
         // The tag is the canonical entity.
-        let tag_names: HashSet<&str> = entities.iter()
+        let tag_names: HashSet<&str> = entities
+            .iter()
             .filter(|e| e.entity_type == EntityType::Tag)
             .map(|e| e.name.as_str())
             .collect();
 
-        let entities: Vec<&Entity> = entities.iter()
+        let entities: Vec<&Entity> = entities
+            .iter()
             .filter(|e| {
-                !(e.entity_type == EntityType::Link && tag_names.contains(e.name.as_str()))
+                if e.entity_type == EntityType::Link && tag_names.contains(e.name.as_str()) {
+                    dispositions.insert(
+                        EntityKey::from(*e),
+                        EntityDisposition::ShadowedByTag {
+                            tag_name: e.name.clone(),
+                        },
+                    );
+                    return false;
+                }
+                dispositions
+                    .entry(EntityKey::from(*e))
+                    .or_insert(EntityDisposition::TopLevel);
+                true
             })
             .collect();
 
         // ── Page entity detection ───────────────────────────────────────
         // Check all link entities against all folders to find page entities.
-        let link_names: Vec<&str> = entities.iter()
+        let link_names: Vec<&str> = entities
+            .iter()
             .filter(|e| e.entity_type == EntityType::Link)
             .map(|e| e.name.as_str())
             .collect();
@@ -97,7 +153,8 @@ impl EntityMap {
         let mut folder_page_map: HashMap<String, Vec<String>> = HashMap::new();
         if !link_names.is_empty() {
             for folder in &folder_structure {
-                let pages = db.get_folder_page_entities(&folder.name, &link_names)
+                let pages = db
+                    .get_folder_page_entities(&folder.name, &link_names)
                     .unwrap_or_default();
                 if !pages.is_empty() {
                     folder_page_map.insert(folder.name.clone(), pages);
@@ -106,7 +163,8 @@ impl EntityMap {
         }
 
         // Set of all link names subsumed by folders
-        let subsumed_links: HashSet<String> = folder_page_map.values()
+        let subsumed_links: HashSet<String> = folder_page_map
+            .values()
             .flat_map(|pages| pages.iter().cloned())
             .collect();
 
@@ -114,19 +172,19 @@ impl EntityMap {
         let mut folded_children: HashSet<String> = HashSet::new();
         let mut tags = Vec::new();
 
-        let parent_tags: Vec<&Entity> = entities.iter()
+        let parent_tags: Vec<&Entity> = entities
+            .iter()
             .filter(|e| e.entity_type == EntityType::Tag && !e.name.contains('/'))
             .copied()
             .collect();
 
         for parent in &parent_tags {
-            let all_children = db.get_child_entities(
-                &parent.name,
-                parent.entity_type.as_str(),
-                20,
-            ).unwrap_or_default();
+            let all_children = db
+                .get_child_entities(&parent.name, parent.entity_type.as_str(), 20)
+                .unwrap_or_default();
 
-            let significant: Vec<Entity> = all_children.into_iter()
+            let significant: Vec<Entity> = all_children
+                .into_iter()
                 .filter(|c| {
                     let ratio = c.frequency as f64 / parent.frequency.max(1) as f64;
                     let all_recent = c.trends.frequency_recent == c.frequency;
@@ -158,6 +216,22 @@ impl EntityMap {
             }
         }
 
+        for entity in &entities {
+            if entity.entity_type != EntityType::Tag || !entity.name.contains('/') {
+                continue;
+            }
+            if let Some((parent_name, _)) = entity.name.split_once('/') {
+                if folded_children.contains(&entity.name) {
+                    dispositions.insert(
+                        EntityKey::from(*entity),
+                        EntityDisposition::FoldedIntoTag {
+                            parent_name: parent_name.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+
         // ── Build folder groups ─────────────────────────────────────────
         let mut folders = Vec::new();
         let mut seen_folders: HashSet<String> = HashSet::new();
@@ -170,6 +244,7 @@ impl EntityMap {
                 folders.push(FolderGroup {
                     entity: (*entity).clone(),
                     page_entities,
+                    origin: FolderOrigin::Input,
                 });
             }
         }
@@ -193,25 +268,63 @@ impl EntityMap {
             folders.push(FolderGroup {
                 entity,
                 page_entities: pages,
+                origin: FolderOrigin::Synthetic,
             });
         }
 
+        let folder_name_by_page_entity: HashMap<String, String> = folders
+            .iter()
+            .flat_map(|folder| {
+                folder
+                    .page_entities
+                    .iter()
+                    .cloned()
+                    .map(move |page_entity| (page_entity, folder.entity.name.clone()))
+            })
+            .collect();
+
+        for entity in &entities {
+            if entity.entity_type == EntityType::Link {
+                if let Some(folder_name) = folder_name_by_page_entity.get(&entity.name) {
+                    dispositions.insert(
+                        EntityKey::from(*entity),
+                        EntityDisposition::FoldedIntoFolder {
+                            folder_name: folder_name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
         // ── Standalone links ────────────────────────────────────────────
-        let links: Vec<Entity> = entities.into_iter()
+        let links: Vec<Entity> = entities
+            .iter()
             .filter(|e| {
                 e.entity_type == EntityType::Link
                     && !e.name.contains('/')
                     && !subsumed_links.contains(&e.name)
             })
+            .copied()
             .cloned()
             .collect();
 
-        Ok(EntityMap { tags, folders, links, file_count })
+        for entity in &links {
+            dispositions.insert(EntityKey::from(entity), EntityDisposition::TopLevel);
+        }
+
+        Ok(EntityMap {
+            tags,
+            folders,
+            links,
+            file_count,
+            dispositions,
+        })
     }
 
     /// Names of all links that were subsumed by folders (page entities).
     pub fn subsumed_link_names(&self) -> HashSet<String> {
-        self.folders.iter()
+        self.folders
+            .iter()
             .flat_map(|f| f.page_entities.iter().cloned())
             .collect()
     }
@@ -223,10 +336,32 @@ impl EntityMap {
 
     /// Get the page entity map (folder name → link names).
     pub fn folder_page_entity_map(&self) -> HashMap<String, Vec<String>> {
-        self.folders.iter()
+        self.folders
+            .iter()
             .filter(|f| !f.page_entities.is_empty())
             .map(|f| (f.entity.name.clone(), f.page_entities.clone()))
             .collect()
+    }
+
+    pub fn disposition_for(&self, entity: &Entity) -> EntityDisposition {
+        self.dispositions
+            .get(&EntityKey::from(entity))
+            .cloned()
+            .unwrap_or(EntityDisposition::TopLevel)
+    }
+
+    pub fn disposition_for_key(&self, key: &EntityKey) -> Option<&EntityDisposition> {
+        self.dispositions.get(key)
+    }
+
+    pub fn folder_group(&self, folder_name: &str) -> Option<&FolderGroup> {
+        self.folders
+            .iter()
+            .find(|folder| folder.entity.name == folder_name)
+    }
+
+    pub fn tag_group(&self, tag_name: &str) -> Option<&TagGroup> {
+        self.tags.iter().find(|tag| tag.entity.name == tag_name)
     }
 
     /// All entities as a flat list.
@@ -302,7 +437,8 @@ mod tests {
                 V::Integer(frequency),
                 V::Integer(now),
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // ── Link-tag dedup ──────────────────────────────────────────────────
@@ -323,6 +459,12 @@ mod tests {
         // "enzyme" link should be gone, "alice" should remain
         assert_eq!(map.links.len(), 1);
         assert_eq!(map.links[0].name, "alice");
+        assert_eq!(
+            map.disposition_for(&entities[1]),
+            EntityDisposition::ShadowedByTag {
+                tag_name: "enzyme".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -358,6 +500,12 @@ mod tests {
         assert_eq!(map.folders[0].entity.name, "people");
         assert_eq!(map.folders[0].page_entities, vec!["alice smith"]);
         assert!(map.links.is_empty(), "alice smith should be subsumed");
+        assert_eq!(
+            map.disposition_for(&entities[1]),
+            EntityDisposition::FoldedIntoFolder {
+                folder_name: "people".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -390,8 +538,13 @@ mod tests {
 
         // people/ should be added synthetically
         assert_eq!(map.folders.len(), 2);
-        let people = map.folders.iter().find(|f| f.entity.name == "people").unwrap();
+        let people = map
+            .folders
+            .iter()
+            .find(|f| f.entity.name == "people")
+            .unwrap();
         assert_eq!(people.page_entities, vec!["alice"]);
+        assert_eq!(people.origin, FolderOrigin::Synthetic);
         assert!(map.links.is_empty());
     }
 
@@ -404,9 +557,7 @@ mod tests {
         insert_entity(&db, "enzyme", "tag", 100);
         insert_entity(&db, "enzyme/pmf", "tag", 50); // 50% of parent
 
-        let entities = vec![
-            make_entity("enzyme", EntityType::Tag, 100),
-        ];
+        let entities = vec![make_entity("enzyme", EntityType::Tag, 100)];
 
         let map = EntityMap::from_entities(&db, &entities).unwrap();
 
@@ -421,9 +572,7 @@ mod tests {
         insert_entity(&db, "enzyme", "tag", 100);
         insert_entity(&db, "enzyme/tiny", "tag", 5); // 5% of parent
 
-        let entities = vec![
-            make_entity("enzyme", EntityType::Tag, 100),
-        ];
+        let entities = vec![make_entity("enzyme", EntityType::Tag, 100)];
 
         let map = EntityMap::from_entities(&db, &entities).unwrap();
 
@@ -448,6 +597,12 @@ mod tests {
         assert_eq!(map.tags.len(), 1);
         assert_eq!(map.tags[0].entity.name, "enzyme");
         assert_eq!(map.tags[0].significant_children.len(), 1);
+        assert_eq!(
+            map.disposition_for(&entities[1]),
+            EntityDisposition::FoldedIntoTag {
+                parent_name: "enzyme".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -483,7 +638,7 @@ mod tests {
             make_entity("storytelling", EntityType::Tag, 100),
             make_entity("storytelling", EntityType::Link, 80), // should be deduped
             make_entity("maren holt", EntityType::Link, 50),   // should fold into people/
-            make_entity("ari", EntityType::Link, 40),            // should fold into people/
+            make_entity("ari", EntityType::Link, 40),           // should fold into people/
             make_entity("inbox", EntityType::Folder, 500),
         ];
 
@@ -497,7 +652,11 @@ mod tests {
 
         // Folders: inbox (no page entities) + people/ (synthetic, with maren holt + ari)
         assert_eq!(map.folders.len(), 2);
-        let people = map.folders.iter().find(|f| f.entity.name == "people").unwrap();
+        let people = map
+            .folders
+            .iter()
+            .find(|f| f.entity.name == "people")
+            .unwrap();
         assert!(people.page_entities.contains(&"maren holt".to_string()));
         assert!(people.page_entities.contains(&"ari".to_string()));
 

@@ -71,6 +71,12 @@ The petri contains trending entities with their catalysts. Each entity has:
 - **Temporal metadata**: first_seen, last_seen, total_mentions, recency_score
 - **Catalysts**: convergences where the vault's language has gathered — handles that reach content generic terms won't find
 
+Some entities also carry light hierarchy:
+- **significant_children**: subthemes nested under a parent tag
+- **page_entity_children**: concrete people/concepts folded under a folder
+
+Read these as supporting evidence beneath the parent, not as separate top-level pillars unless the conversation clearly requires breaking them out.
+
 The catalysts encode the vault's own vocabulary for these themes. They're the entry points the vault has grown; reaching for them connects you to what the vault has already mapped.
 
 Reference specifics when grounding observations:
@@ -97,6 +103,8 @@ Some folders contain **individually meaningful entities** — people, concepts, 
 3. **Signal depth**: The `additional_children_available` count indicates there's more to explore if the user wants
 
 **The children are already surfaced** — your job is to make meaning from them, not to offer to look them up. Reference specific children when they connect to other themes in the petri.
+
+When `page_entity_children` are present on a folder, treat them the same way: concrete examples that clarify what lives inside the cluster, not a second list of independent main entities.
 
 **Do NOT:**
 - List all sampled children mechanically as a bulleted list

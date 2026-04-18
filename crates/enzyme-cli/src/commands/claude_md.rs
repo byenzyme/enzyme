@@ -22,6 +22,9 @@ after the user's first message:
 - **Broad prompt** ("hey", "explore my ideas", "what have I been thinking about"):
   `enzyme petri` — returns the full landscape: top entities by recency with all their catalysts.
 
+When petri includes nested children under a tag or folder, read them as evidence inside that parent cluster,
+not as separate top-level themes by default.
+
 Use the catalyst phrases as vocabulary for composing `enzyme catalyze` queries — they connect
 to pre-computed content that the user's raw words won't find.
 
@@ -100,19 +103,17 @@ pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
         String::new()
     };
 
-    let new_content = if let (Some(start), Some(end)) = (
-        content.find(MARKER_START),
-        content.find(MARKER_END),
-    ) {
-        // Replace existing section
-        let end = end + MARKER_END.len();
-        format!("{}{}{}", &content[..start], ENZYME_SECTION, &content[end..])
-    } else if content.is_empty() {
-        ENZYME_SECTION.to_string()
-    } else {
-        // Append to existing file
-        format!("{}\n\n{}", content.trim_end(), ENZYME_SECTION)
-    };
+    let new_content =
+        if let (Some(start), Some(end)) = (content.find(MARKER_START), content.find(MARKER_END)) {
+            // Replace existing section
+            let end = end + MARKER_END.len();
+            format!("{}{}{}", &content[..start], ENZYME_SECTION, &content[end..])
+        } else if content.is_empty() {
+            ENZYME_SECTION.to_string()
+        } else {
+            // Append to existing file
+            format!("{}\n\n{}", content.trim_end(), ENZYME_SECTION)
+        };
 
     fs::write(&target_path, new_content)
         .with_context(|| format!("failed to write {}", target_path.display()))?;

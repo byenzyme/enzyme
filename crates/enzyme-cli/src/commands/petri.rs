@@ -5,14 +5,15 @@ use anyhow::Result;
 use serde_json::json;
 use tracing::debug;
 
-use enzyme_core::config::enzyme_config::EnzymeConfig;
+use enzyme_core::config::enzyme_config::{EnzymeConfig, ParsedEntity};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use std::collections::HashSet;
 
-use enzyme_core::models::{Embedding, Entity, Catalyst, EntityType};
-use enzyme_core::pipeline::entity_map::EntityMap;
+use enzyme_core::models::{Catalyst, Embedding, Entity, EntityType};
+use enzyme_core::pipeline::entity_map::{
+    EntityDisposition, EntityKey, EntityMap, FolderGroup, FolderOrigin,
+};
 
 /// Build the petri JSON value from the vault database.
 /// Assumes the DB exists — callers must guard this.
@@ -59,131 +60,105 @@ pub fn build_petri_json(
         build_recency_based(&db, top)?
     };
 
-    // ── Use EntityMap to fold page-entity links under parent folders ────
-    // EntityMap handles: link-tag dedup, page entity detection across all
-    // folders, and identifying which links are subsumed.
+    // Canonical structural facts for the selected entity set.
     let entity_list_only: Vec<Entity> = entities.iter().map(|(e, _)| e.clone()).collect();
     let entity_map = EntityMap::from_entities(&db, &entity_list_only)?;
 
-    // Build a lookup: link name → folder name for subsumed links
-    let mut page_entity_to_folder: HashMap<&str, &str> = HashMap::new();
-    for fg in &entity_map.folders {
-        for pe in &fg.page_entities {
-            page_entity_to_folder.insert(pe.as_str(), fg.entity.name.as_str());
-        }
-    }
-
-    // Also collect link names that were dropped by link-tag dedup
-    let deduped_link_names: HashSet<&str> = entity_list_only.iter()
-        .filter(|e| e.entity_type == EntityType::Link)
-        .map(|e| e.name.as_str())
-        .filter(|name| !entity_map.links.iter().any(|l| l.name == *name)
-            && !page_entity_to_folder.contains_key(name))
-        .collect();
-
-    // Partition: top-level entities vs subsumed links grouped by folder
+    let mut tag_children: HashMap<String, Vec<&(Entity, Vec<Catalyst>)>> = HashMap::new();
     let mut top_level: Vec<&(Entity, Vec<Catalyst>)> = Vec::new();
     let mut folder_children: HashMap<String, Vec<&(Entity, Vec<Catalyst>)>> = HashMap::new();
 
     for entry in &entities {
-        if entry.0.entity_type == EntityType::Link {
-            // Skip links that were deduped against tags
-            if deduped_link_names.contains(entry.0.name.as_str()) {
-                continue;
+        match entity_map.disposition_for(&entry.0) {
+            EntityDisposition::TopLevel => top_level.push(entry),
+            EntityDisposition::FoldedIntoTag { parent_name } => {
+                tag_children.entry(parent_name).or_default().push(entry);
             }
-            // Fold page-entity links under their folder
-            if let Some(&folder_name) = page_entity_to_folder.get(entry.0.name.as_str()) {
-                folder_children.entry(folder_name.to_string()).or_default().push(entry);
+            EntityDisposition::FoldedIntoFolder { folder_name } => {
+                folder_children.entry(folder_name).or_default().push(entry);
+            }
+            EntityDisposition::ShadowedByTag { .. } => {
                 continue;
             }
         }
-        top_level.push(entry);
     }
 
-    // Track which folders are already in top_level
-    let top_level_folder_names: std::collections::HashSet<&str> = top_level.iter()
-        .filter(|(e, _)| e.entity_type == EntityType::Folder)
-        .map(|(e, _)| e.name.as_str())
+    let top_level_keys: HashMap<EntityKey, &(Entity, Vec<Catalyst>)> = top_level
+        .iter()
+        .map(|entry| (EntityKey::from(&entry.0), *entry))
         .collect();
 
     // Build JSON
     let mut entity_list = Vec::new();
 
     for (entity, catalysts) in &top_level {
-        let mut entry = build_entity_json(entity, catalysts, &entity_relevances, &catalyst_relevances);
+        let mut entry =
+            build_entity_json(entity, catalysts, &entity_relevances, &catalyst_relevances);
 
-        // Enrich expandable folders with sampled children (from config)
-        if entity.entity_type == EntityType::Folder {
-            if let Some(configured_children) = prefs.expandable_folders.get(&entity.name) {
-                let (children, total_count) =
-                    db.get_folder_children_by_references(&entity.name, 10)?;
-
-                let sampled: Vec<serde_json::Value> = children
+        if entity.entity_type == EntityType::Tag {
+            if let Some(children) = tag_children.get(&entity.name) {
+                let nested: Vec<serde_json::Value> = children
                     .iter()
-                    .map(|c| {
-                        json!({
-                            "entity": format!("[[{}]]", c.name),
-                            "reference_count": c.reference_count,
-                            "last_seen": c.last_seen,
-                        })
-                    })
-                    .collect();
-
-                let catalyzed: Vec<String> = configured_children
-                    .iter()
-                    .filter(|child| {
-                        db.get_catalysts_for_entity(&child.name)
-                            .map(|cats| !cats.is_empty())
-                            .unwrap_or(false)
-                    })
-                    .map(|child| format!("[[{}]]", child.name))
-                    .collect();
-
-                let sampled_count = sampled.len() as i64;
-                let obj = entry.as_object_mut().unwrap();
-                obj.insert("expandable".to_string(), json!(true));
-                obj.insert("total_children".to_string(), json!(total_count));
-                obj.insert("sampled_children".to_string(), json!(sampled));
-                obj.insert("catalyzed_children".to_string(), json!(catalyzed));
-                obj.insert(
-                    "additional_children_available".to_string(),
-                    json!(total_count - sampled_count),
-                );
-            }
-
-            // Nest subsumed page-entity children with their catalysts
-            if let Some(children) = folder_children.get(&entity.name) {
-                let nested: Vec<serde_json::Value> = children.iter()
                     .map(|(child_entity, child_catalysts)| {
-                        build_entity_json(child_entity, child_catalysts, &entity_relevances, &catalyst_relevances)
+                        build_entity_json(
+                            child_entity,
+                            child_catalysts,
+                            &entity_relevances,
+                            &catalyst_relevances,
+                        )
                     })
                     .collect();
                 if !nested.is_empty() {
-                    entry.as_object_mut().unwrap()
-                        .insert("page_entity_children".to_string(), json!(nested));
+                    entry
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("significant_children".to_string(), json!(nested));
                 }
+            }
+        }
+
+        if entity.entity_type == EntityType::Folder {
+            if let Some(folder_group) = entity_map.folder_group(&entity.name) {
+                enrich_folder_entry(
+                    &db,
+                    folder_group,
+                    &prefs.expandable_folders,
+                    folder_children.get(&entity.name),
+                    &mut entry,
+                    &entity_relevances,
+                    &catalyst_relevances,
+                )?;
             }
         }
 
         entity_list.push(entry);
     }
 
-    // Add synthetic folder entries for folders that have children but weren't in the entity list
-    for (folder_name, children) in &folder_children {
-        if top_level_folder_names.contains(folder_name.as_str()) {
-            continue; // already handled above
+    for folder_group in &entity_map.folders {
+        let key = EntityKey::from(&folder_group.entity);
+        if top_level_keys.contains_key(&key) || folder_group.origin != FolderOrigin::Synthetic {
+            continue;
         }
-        let nested: Vec<serde_json::Value> = children.iter()
-            .map(|(child_entity, child_catalysts)| {
-                build_entity_json(child_entity, child_catalysts, &entity_relevances, &catalyst_relevances)
-            })
-            .collect();
-        let entry = json!({
-            "name": folder_name,
-            "type": "folder",
-            "catalysts": [],
-            "page_entity_children": nested,
-        });
+
+        let mut entry = build_entity_json(
+            &folder_group.entity,
+            &[],
+            &entity_relevances,
+            &catalyst_relevances,
+        );
+        enrich_folder_entry(
+            &db,
+            folder_group,
+            &prefs.expandable_folders,
+            folder_children.get(&folder_group.entity.name),
+            &mut entry,
+            &entity_relevances,
+            &catalyst_relevances,
+        )?;
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("synthetic".to_string(), json!(true));
         entity_list.push(entry);
     }
 
@@ -214,6 +189,75 @@ pub fn build_petri_json(
     }
 
     Ok(output)
+}
+
+fn enrich_folder_entry(
+    db: &Database,
+    folder_group: &FolderGroup,
+    expandable_folders: &HashMap<String, Vec<ParsedEntity>>,
+    page_entity_children: Option<&Vec<&(Entity, Vec<Catalyst>)>>,
+    entry: &mut serde_json::Value,
+    entity_relevances: &HashMap<String, f64>,
+    catalyst_relevances: &HashMap<String, f64>,
+) -> Result<()> {
+    if let Some(configured_children) = expandable_folders.get(&folder_group.entity.name) {
+        let (children, total_count) =
+            db.get_folder_children_by_references(&folder_group.entity.name, 10)?;
+
+        let sampled: Vec<serde_json::Value> = children
+            .iter()
+            .map(|c| {
+                json!({
+                    "entity": format!("[[{}]]", c.name),
+                    "reference_count": c.reference_count,
+                    "last_seen": c.last_seen,
+                })
+            })
+            .collect();
+
+        let catalyzed: Vec<String> = configured_children
+            .iter()
+            .filter(|child| {
+                db.get_catalysts_for_entity(&child.name)
+                    .map(|cats| !cats.is_empty())
+                    .unwrap_or(false)
+            })
+            .map(|child| format!("[[{}]]", child.name))
+            .collect();
+
+        let sampled_count = sampled.len() as i64;
+        let obj = entry.as_object_mut().unwrap();
+        obj.insert("expandable".to_string(), json!(true));
+        obj.insert("total_children".to_string(), json!(total_count));
+        obj.insert("sampled_children".to_string(), json!(sampled));
+        obj.insert("catalyzed_children".to_string(), json!(catalyzed));
+        obj.insert(
+            "additional_children_available".to_string(),
+            json!(total_count - sampled_count),
+        );
+    }
+
+    if let Some(children) = page_entity_children {
+        let nested: Vec<serde_json::Value> = children
+            .iter()
+            .map(|(child_entity, child_catalysts)| {
+                build_entity_json(
+                    child_entity,
+                    child_catalysts,
+                    entity_relevances,
+                    catalyst_relevances,
+                )
+            })
+            .collect();
+        if !nested.is_empty() {
+            entry
+                .as_object_mut()
+                .unwrap()
+                .insert("page_entity_children".to_string(), json!(nested));
+        }
+    }
+
+    Ok(())
 }
 
 /// Build JSON for a single entity with its catalysts.
@@ -283,7 +327,12 @@ fn build_entity_json(
 fn build_recency_based(
     db: &Database,
     top: usize,
-) -> Result<Vec<(enzyme_core::models::Entity, Vec<enzyme_core::models::Catalyst>)>> {
+) -> Result<
+    Vec<(
+        enzyme_core::models::Entity,
+        Vec<enzyme_core::models::Catalyst>,
+    )>,
+> {
     let catalyzed_names = db.get_catalyzed_entity_names()?;
     let candidates = db.get_top_entities(top.saturating_mul(3), "recency_score")?;
     let selected: Vec<_> = candidates
@@ -314,7 +363,12 @@ fn build_query_aware(
     catalyst_budget: usize,
     entity_rel: &mut HashMap<String, f64>,
     catalyst_rel: &mut HashMap<String, f64>,
-) -> Result<Vec<(enzyme_core::models::Entity, Vec<enzyme_core::models::Catalyst>)>> {
+) -> Result<
+    Vec<(
+        enzyme_core::models::Entity,
+        Vec<enzyme_core::models::Catalyst>,
+    )>,
+> {
     let service = get_embedding_service(&paths.home)?;
     let query_vec = service.embed_query(query)?;
 
@@ -328,10 +382,8 @@ fn build_query_aware(
     if cached.is_empty() {
         anyhow::bail!("no cached catalyst embeddings");
     }
-    let cache_map: HashMap<&str, &Vec<f32>> = cached
-        .iter()
-        .map(|(id, vec)| (id.as_str(), vec))
-        .collect();
+    let cache_map: HashMap<&str, &Vec<f32>> =
+        cached.iter().map(|(id, vec)| (id.as_str(), vec)).collect();
 
     // Compute per-catalyst cosine similarity (use indices to avoid borrow issues)
     let cat_sims: Vec<(usize, f32)> = catalysts
@@ -354,12 +406,9 @@ fn build_query_aware(
     }
 
     // Load entity metadata for recency scores
-    let all_entities =
-        db.get_top_entities(entity_groups.len().max(100), "recency_score")?;
-    let entity_map: HashMap<&str, &enzyme_core::models::Entity> = all_entities
-        .iter()
-        .map(|e| (e.name.as_str(), e))
-        .collect();
+    let all_entities = db.get_top_entities(entity_groups.len().max(100), "recency_score")?;
+    let entity_map: HashMap<&str, &enzyme_core::models::Entity> =
+        all_entities.iter().map(|e| (e.name.as_str(), e)).collect();
 
     let max_recency = all_entities
         .iter()
@@ -382,10 +431,7 @@ fn build_query_aware(
         })
         .collect();
 
-    scored.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(top);
 
     // Build result with top K catalysts per entity
@@ -395,10 +441,7 @@ fn build_query_aware(
             entity_rel.insert(name.clone(), *relevance);
 
             let mut group = entity_groups.remove(name.as_str()).unwrap_or_default();
-            group.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            group.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             group.truncate(catalyst_budget);
 
             let cats: Vec<enzyme_core::models::Catalyst> = group
@@ -433,4 +476,167 @@ pub async fn run_petri(
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use enzyme_core::db::Database;
+    use enzyme_core::models::{Catalyst, EntityTrends};
+    use tempfile::TempDir;
+
+    fn create_test_vault() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".enzyme")).unwrap();
+        dir
+    }
+
+    fn open_test_db(vault_path: &Path) -> Database {
+        let paths = EnzymePaths::new(vault_path).unwrap();
+        Database::open(&paths.vault_db).unwrap()
+    }
+
+    fn insert_doc(db: &Database, source_ref: &str) {
+        let now = Utc::now().timestamp_millis();
+        db.execute_write(
+            &format!(
+                "INSERT INTO docs (source_ref, title, content, content_hash, created_at, created_source, modified_at, modified_source, indexed_at)
+                 VALUES ('{source_ref}', '{source_ref}', '', 'hash', {now}, 'test', {now}, 'test', {now})"
+            ),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    fn insert_entity(
+        db: &Database,
+        name: &str,
+        entity_type: EntityType,
+        frequency: i64,
+        recency_score: f64,
+    ) {
+        let now = Utc::now().timestamp_millis();
+        let trends = serde_json::to_string(&EntityTrends {
+            frequency_recent: frequency,
+            recency_score,
+            timeline_buckets: HashMap::new(),
+        })
+        .unwrap();
+
+        db.execute_write(
+            &format!(
+                "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends, metadata)
+                 VALUES ('{name}', '{}', {frequency}, {now}, {now}, '{}', '{{}}')",
+                entity_type.as_str(),
+                trends.replace('\'', "''"),
+            ),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    fn insert_catalyst(db: &Database, entity: &str, id: &str, text: &str) {
+        db.insert_catalysts(&[Catalyst {
+            id: id.to_string(),
+            text: text.to_string(),
+            entity: entity.to_string(),
+            context: "test".to_string(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+    }
+
+    #[test]
+    fn petri_nests_significant_tag_children() {
+        let vault = create_test_vault();
+        let db = open_test_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100, 100.0);
+        insert_entity(&db, "enzyme/pmf", EntityType::Tag, 40, 80.0);
+        insert_catalyst(&db, "enzyme", "cat-parent", "parent catalyst");
+        insert_catalyst(&db, "enzyme/pmf", "cat-child", "child catalyst");
+
+        let json = build_petri_json(vault.path(), 10, None, None).unwrap();
+        let entities = json["entities"].as_array().unwrap();
+
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0]["name"], "enzyme");
+        let children = entities[0]["significant_children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["name"], "enzyme/pmf");
+        assert_eq!(children[0]["type"], "tag");
+    }
+
+    #[test]
+    fn petri_surfaces_synthetic_folder_page_entity_children() {
+        let vault = create_test_vault();
+        let db = open_test_db(vault.path());
+
+        insert_doc(&db, "people/Alice Smith.md");
+        insert_entity(&db, "alice smith", EntityType::Link, 30, 90.0);
+        insert_catalyst(&db, "alice smith", "cat-alice", "alice catalyst");
+
+        let json = build_petri_json(vault.path(), 10, None, None).unwrap();
+        let entities = json["entities"].as_array().unwrap();
+
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0]["name"], "people");
+        assert_eq!(entities[0]["type"], "folder");
+        assert_eq!(entities[0]["synthetic"], true);
+
+        let children = entities[0]["page_entity_children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["name"], "alice smith");
+        assert_eq!(children[0]["type"], "link");
+    }
+
+    #[test]
+    fn petri_does_not_duplicate_folded_or_shadowed_entities_at_top_level() {
+        let vault = create_test_vault();
+        let db = open_test_db(vault.path());
+
+        insert_doc(&db, "people/Alice.md");
+        insert_entity(&db, "enzyme", EntityType::Tag, 100, 100.0);
+        insert_entity(&db, "enzyme/pmf", EntityType::Tag, 40, 80.0);
+        insert_entity(&db, "alice", EntityType::Link, 30, 70.0);
+        insert_entity(&db, "shadow", EntityType::Tag, 25, 60.0);
+        insert_entity(&db, "shadow", EntityType::Link, 20, 50.0);
+
+        insert_catalyst(&db, "enzyme", "cat-enzyme", "parent catalyst");
+        insert_catalyst(&db, "enzyme/pmf", "cat-pmf", "child catalyst");
+        insert_catalyst(&db, "alice", "cat-alice", "alice catalyst");
+        insert_catalyst(&db, "shadow", "cat-shadow", "shadow catalyst");
+
+        let json = build_petri_json(vault.path(), 10, None, None).unwrap();
+        let entities = json["entities"].as_array().unwrap();
+
+        let top_level_names: Vec<&str> = entities
+            .iter()
+            .filter_map(|entity| entity["name"].as_str())
+            .collect();
+
+        assert!(top_level_names.contains(&"enzyme"));
+        assert!(top_level_names.contains(&"people"));
+        assert!(top_level_names.contains(&"shadow"));
+        assert!(!top_level_names.contains(&"enzyme/pmf"));
+        assert!(!top_level_names.contains(&"alice"));
+
+        let enzyme = entities
+            .iter()
+            .find(|entity| entity["name"] == "enzyme")
+            .unwrap();
+        let tag_children = enzyme["significant_children"].as_array().unwrap();
+        assert_eq!(tag_children.len(), 1);
+        assert_eq!(tag_children[0]["name"], "enzyme/pmf");
+
+        let people = entities
+            .iter()
+            .find(|entity| entity["name"] == "people")
+            .unwrap();
+        let page_children = people["page_entity_children"].as_array().unwrap();
+        assert_eq!(page_children.len(), 1);
+        assert_eq!(page_children[0]["name"], "alice");
+    }
 }
