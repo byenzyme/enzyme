@@ -1,14 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use chrono::Utc;
 use serde::Deserialize;
 
-use crate::config::CustomProfileGuidance;
+use super::catalyst_profiles::{
+    CatalystFormat, CatalystProfile, DEFAULT_FORMAT_KEY, ENABLED_PROFILE_KEYS, full_guidance_lines,
+    get_format, get_profile,
+};
 use crate::models::Entity;
 use crate::pipeline::eras::Era;
-use super::catalyst_profiles::{
-    CatalystFormat, CatalystProfile, ENABLED_PROFILE_KEYS,
-    full_guidance_lines, get_format, get_profile, DEFAULT_FORMAT_KEY,
-};
 
 // ---------------------------------------------------------------------------
 // JSON response types
@@ -69,7 +68,6 @@ pub fn catalyst_json_schema() -> serde_json::Value {
 /// - Enzyme guide content for vault context (if available)
 pub fn build_system_prompt(
     format_key: Option<&str>,
-    custom_guidance: Option<&CustomProfileGuidance>,
     vault_guide: Option<&str>,
 ) -> String {
     let fmt = format_key
@@ -117,7 +115,7 @@ Always respond with valid JSON that includes the catalysts and topic names.",
     );
 
     // All profiles section
-    let profiles_section = build_profiles_section(custom_guidance);
+    let profiles_section = build_profiles_section();
 
     let mut prompt = format!("{base}\n\n{profiles_section}");
 
@@ -137,66 +135,8 @@ entity relates to the broader landscape of inquiry.\n\n\
 }
 
 /// Build the `<catalyst_profiles>` section listing all 6 profiles.
-fn build_profiles_section(custom_guidance: Option<&CustomProfileGuidance>) -> String {
+fn build_profiles_section() -> String {
     let mut lines: Vec<String> = vec!["<catalyst_profiles>".into(), String::new()];
-
-    // Custom domain guidance (prepended to all profiles)
-    if let Some(cg) = custom_guidance {
-        let has_vocab = cg
-            .domain_vocabulary
-            .as_ref()
-            .map_or(false, |v| {
-                !v.metaphors.is_empty()
-                    || !v.named_concepts.is_empty()
-                    || !v.structural_patterns.is_empty()
-            });
-
-        if !cg.guidance_lines.is_empty() || has_vocab {
-            lines.push("## Domain-Specific Theoretical Frame".into());
-            lines.push(String::new());
-
-            if let Some(ref frame) = cg.theoretical_frame {
-                lines.push(frame.clone());
-                lines.push(String::new());
-            }
-
-            if let Some(ref vocab) = cg.domain_vocabulary {
-                let any = !vocab.metaphors.is_empty()
-                    || !vocab.named_concepts.is_empty()
-                    || !vocab.structural_patterns.is_empty();
-                if any {
-                    lines.push("**Domain Vocabulary (probe around these terms):**".into());
-                    if !vocab.metaphors.is_empty() {
-                        lines.push(format!(
-                            "- Metaphors/imagery: {}",
-                            vocab.metaphors.join(", ")
-                        ));
-                    }
-                    if !vocab.named_concepts.is_empty() {
-                        lines.push(format!(
-                            "- Named concepts: {}",
-                            vocab.named_concepts.join(", ")
-                        ));
-                    }
-                    if !vocab.structural_patterns.is_empty() {
-                        lines.push(format!(
-                            "- Structural patterns: {}",
-                            vocab.structural_patterns.join(", ")
-                        ));
-                    }
-                    lines.push(String::new());
-                }
-            }
-
-            if !cg.guidance_lines.is_empty() {
-                lines.push("**Apply this lens across all profiles:**".into());
-                for g in &cg.guidance_lines {
-                    lines.push(format!("- {g}"));
-                }
-                lines.push(String::new());
-            }
-        }
-    }
 
     // Each profile
     for key in ENABLED_PROFILE_KEYS {
@@ -352,12 +292,9 @@ pub fn build_user_prompt(
     num_catalysts: usize,
     profile: &CatalystProfile,
     format_key: &str,
-    guide_signal: Option<&str>,
     entity: Option<&Entity>,
-    era_context: Option<&EraContext>,
 ) -> String {
-    let fmt = get_format(format_key)
-        .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
+    let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
 
     // Profile selection header
     let mut prompt = format!(
@@ -366,64 +303,11 @@ Apply the guidance and approach from the {} profile defined in the system prompt
         profile.display_name, profile.key, profile.display_name,
     );
 
-    // Optional guide signal
-    if let Some(signal) = guide_signal {
-        prompt.push_str(&format!(
-            "\n\nUSER CONTEXT (from vault guide):\n\
-{signal}\n\n\
-Use this context to calibrate your catalyst questions. The user has expressed intellectual \
-preoccupations or tensions — probe around or underneath these rather than asking about them \
-directly. Let this inform the angle of your questions without constraining them."
-        ));
-    }
-
-    // Context section — era-grouped if available, flat otherwise
-    if let Some(ec) = era_context {
-        if ec.eras.len() > 1 {
-            // Group samples by era
-            for (era_idx, era) in ec.eras.iter().enumerate() {
-                let era_samples: Vec<&str> = ec.samples
-                    .iter()
-                    .filter(|(idx, _)| *idx == era_idx)
-                    .map(|(_, s)| s.as_str())
-                    .collect();
-                if !era_samples.is_empty() {
-                    prompt.push_str(&format!(
-                        "\n\n<vault_context era=\"{}\" notes=\"{}\">\n{}\n</vault_context>",
-                        era.label, era.count, era_samples.join("\n\n")
-                    ));
-                }
-            }
-            // Unmatched samples
-            let unmatched: Vec<&str> = ec.samples
-                .iter()
-                .filter(|(idx, _)| *idx == ec.eras.len())
-                .map(|(_, s)| s.as_str())
-                .collect();
-            if !unmatched.is_empty() {
-                prompt.push_str(&format!(
-                    "\n\n<vault_context era=\"undated\">\n{}\n</vault_context>",
-                    unmatched.join("\n\n")
-                ));
-            }
-        } else {
-            // Single or no eras — flat context
-            let context_section: String = ec.samples
-                .iter()
-                .map(|(_, s)| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n");
-            prompt.push_str(&format!(
-                "\n\n<vault_context>\n{context_section}\n</vault_context>"
-            ));
-        }
-    } else {
-        let max_samples = context_samples.len().min(20);
-        let context_section: String = context_samples[..max_samples].join("\n\n");
-        prompt.push_str(&format!(
-            "\n\n<vault_context>\n{context_section}\n</vault_context>"
-        ));
-    }
+    let max_samples = context_samples.len().min(20);
+    let context_section: String = context_samples[..max_samples].join("\n\n");
+    prompt.push_str(&format!(
+        "\n\n<vault_context>\n{context_section}\n</vault_context>"
+    ));
 
     // Entity focus
     prompt.push_str(&format!(
@@ -438,43 +322,9 @@ directly. Let this inform the angle of your questions without constraining them.
         }
     }
 
-    // Era coverage instructions
-    if let Some(ec) = era_context {
-        if ec.eras.len() > 1 {
-            let mut era_lines: Vec<String> = Vec::new();
-            let mut accounted = 0usize;
-            for (i, era) in ec.eras.iter().enumerate() {
-                let alloc = ec.era_allocations.get(i).copied().unwrap_or(1);
-                era_lines.push(format!(
-                    "- \"{}\" ({} notes): min {} catalyst{}",
-                    era.label, era.count, alloc,
-                    if alloc != 1 { "s" } else { "" }
-                ));
-                accounted += alloc;
-            }
-            let free = num_catalysts.saturating_sub(accounted);
-            prompt.push_str(&format!(
-                "\n\n<era_coverage>\n\
-Each era in the context above represents a distinct period of engagement with this entity. \
-Ensure temporal coverage — ground at least the minimum number of catalysts in excerpts from each era:\n\
-{}\n\
-{}\
-The differences between eras often hold the most interesting material — probe what shifted, \
-what recurred, or what was left behind between periods.\n\
-</era_coverage>",
-                era_lines.join("\n"),
-                if free > 0 {
-                    format!("Remaining {} catalyst{}: allocate freely to wherever the richest material is.\n",
-                        free, if free != 1 { "s" } else { "" })
-                } else {
-                    String::new()
-                },
-            ));
-        }
-    }
-
     // Register detection + engagement shape preamble
-    prompt.push_str("\n\n\
+    prompt.push_str(
+        "\n\n\
 Before generating catalysts, read the excerpts for register and engagement shape:\n\
 \n\
 Register — adapt your probing depth to what the content actually is:\n\
@@ -495,11 +345,11 @@ probe what would reopen them.\n\
 \n\
 The register and engagement shape determine HOW you aim the probe. The selected profile \
 determines WHAT to probe for. Catalysts must still be retrieval-functional — each one should \
-embed well against vault passages and surface relevant content when used as a search query.");
+embed well against vault passages and surface relevant content when used as a search query.",
+    );
 
     // Format-specific instructions
-    let (periphery_instruction, format_instruction, placeholder_label) =
-        format_instructions(fmt);
+    let (periphery_instruction, format_instruction, placeholder_label) = format_instructions(fmt);
 
     // Catalyst / topic placeholders
     let catalyst_placeholders: String = (0..num_catalysts)
@@ -511,28 +361,12 @@ embed well against vault passages and surface relevant content when used as a se
         .collect::<Vec<_>>()
         .join(",\n");
 
-    let has_eras = era_context.map_or(false, |ec| ec.eras.len() > 1);
-    let era_instruction = if has_eras {
-        "\n4. For eraLabels: the era label (from the era attributes on vault_context) that each catalyst is grounded in."
-    } else {
-        ""
-    };
-    let era_json = if has_eras {
-        let era_placeholders: String = (0..num_catalysts)
-            .map(|i| format!("    \"[era label {}]\"", i + 1))
-            .collect::<Vec<_>>()
-            .join(",\n");
-        format!(",\n  \"eraLabels\": [\n{era_placeholders}\n  ]")
-    } else {
-        String::new()
-    };
-
     prompt.push_str(&format!(
         "\n\n\
 Now attend to the excerpts and:\n\
 1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
 2. {format_instruction}\n\
-3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").{era_instruction}\n\n\
+3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -540,8 +374,55 @@ Return a JSON object with:\n\
   ],\n\
   \"topicNames\": [\n\
 {topic_placeholders}\n\
-  ]{era_json}\n\
+  ]\n\
 }}"
+    ));
+
+    prompt
+}
+
+/// Simplified user prompt for local fine-tuned models.
+///
+/// Strips profile selection, register detection, engagement shape, and format
+/// template — all baked into the model via SFT. Just context + entity + count.
+pub fn build_local_user_prompt(
+    entity_name: &str,
+    context_samples: &[String],
+    num_catalysts: usize,
+    era_context: Option<&EraContext>,
+) -> String {
+    let mut prompt = String::new();
+
+    // Context section
+    if let Some(ec) = era_context {
+        for (era_idx, era) in ec.eras.iter().enumerate() {
+            let era_samples: Vec<&str> = ec
+                .samples
+                .iter()
+                .filter(|(idx, _)| *idx == era_idx)
+                .map(|(_, s)| s.as_str())
+                .collect();
+            if !era_samples.is_empty() {
+                prompt.push_str(&format!(
+                    "<vault_context era=\"{}\">\n{}\n</vault_context>\n\n",
+                    era.label,
+                    era_samples.join("\n\n")
+                ));
+            }
+        }
+    } else if !context_samples.is_empty() {
+        let context_section = context_samples.join("\n\n");
+        prompt.push_str(&format!(
+            "<vault_context>\n{context_section}\n</vault_context>\n\n"
+        ));
+    }
+
+    prompt.push_str(&format!(
+        "<entity>Focus entity: {entity_name}</entity>\n\n\
+         Generate {num_catalysts} catalyst questions grounded in these excerpts. \
+         Each catalyst should probe a different facet — different tensions, angles, \
+         or time periods. Return JSON:\n\
+         {{\"catalysts\": [...], \"topicNames\": [...]}}"
     ));
 
     prompt
@@ -632,10 +513,17 @@ fn build_from_payload(payload: CatalystPayload) -> CatalystResponse {
                 .cloned()
                 .unwrap_or_else(|| generate_fallback_topic(&text));
             let era_label = payload.era_labels.get(i).cloned();
-            ParsedCatalyst { text, topic, era_label }
+            ParsedCatalyst {
+                text,
+                topic,
+                era_label,
+            }
         })
         .collect();
-    let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+    let pairs = catalysts
+        .iter()
+        .map(|c| (c.text.clone(), c.topic.clone()))
+        .collect();
     CatalystResponse { pairs, catalysts }
 }
 
@@ -648,7 +536,10 @@ fn build_from_entries(entries: Vec<CatalystEntry>) -> CatalystResponse {
             era_label: None,
         })
         .collect();
-    let pairs = catalysts.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
+    let pairs = catalysts
+        .iter()
+        .map(|c| (c.text.clone(), c.topic.clone()))
+        .collect();
     CatalystResponse { pairs, catalysts }
 }
 
@@ -680,12 +571,22 @@ fn try_recover_partial(json: &str) -> Option<CatalystResponse> {
                 .cloned()
                 .unwrap_or_else(|| generate_fallback_topic(&text));
             let era_label = era_labels.get(i).cloned();
-            ParsedCatalyst { text, topic, era_label }
+            ParsedCatalyst {
+                text,
+                topic,
+                era_label,
+            }
         })
         .collect();
 
-    let pairs = parsed.iter().map(|c| (c.text.clone(), c.topic.clone())).collect();
-    Some(CatalystResponse { pairs, catalysts: parsed })
+    let pairs = parsed
+        .iter()
+        .map(|c| (c.text.clone(), c.topic.clone()))
+        .collect();
+    Some(CatalystResponse {
+        pairs,
+        catalysts: parsed,
+    })
 }
 
 /// Locate a named key in JSON and extract its complete string array values.
@@ -707,7 +608,10 @@ fn find_and_extract_strings(json: &str, key: &str) -> Option<Vec<String>> {
 /// Walk a JSON array literal (starting with `[`) and return every fully-formed
 /// string value encountered before truncation or the closing `]`.
 fn extract_complete_strings_from_array(array_json: &str) -> Vec<String> {
-    let rest = match array_json.trim_start_matches(|c: char| c.is_whitespace()).strip_prefix('[') {
+    let rest = match array_json
+        .trim_start_matches(|c: char| c.is_whitespace())
+        .strip_prefix('[')
+    {
         Some(r) => r,
         None => return vec![],
     };
@@ -787,7 +691,9 @@ fn strip_trailing_commas(s: &str) -> String {
         if bytes[i] == b',' {
             // Scan forward past whitespace to see if the next non-whitespace is ] or }
             let mut j = i + 1;
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r') {
+            while j < bytes.len()
+                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
+            {
                 j += 1;
             }
             if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
@@ -823,19 +729,41 @@ pub(crate) fn strip_code_fences(response: &str) -> &str {
 
 /// Generate a simple fallback topic from catalyst text.
 fn generate_fallback_topic(text: &str) -> String {
-    let cleaned = text
-        .to_lowercase()
-        .replace('?', "")
-        .replace('.', "");
+    let cleaned = text.to_lowercase().replace('?', "").replace('.', "");
     let words: Vec<&str> = cleaned
         .split_whitespace()
-        .filter(|w| !matches!(
-            *w,
-            "how" | "what" | "why" | "when" | "where" | "who" | "which"
-                | "does" | "do" | "is" | "are" | "can" | "could" | "would"
-                | "should" | "the" | "a" | "an" | "in" | "of" | "to" | "and"
-                | "or" | "for" | "with" | "that" | "this"
-        ))
+        .filter(|w| {
+            !matches!(
+                *w,
+                "how"
+                    | "what"
+                    | "why"
+                    | "when"
+                    | "where"
+                    | "who"
+                    | "which"
+                    | "does"
+                    | "do"
+                    | "is"
+                    | "are"
+                    | "can"
+                    | "could"
+                    | "would"
+                    | "should"
+                    | "the"
+                    | "a"
+                    | "an"
+                    | "in"
+                    | "of"
+                    | "to"
+                    | "and"
+                    | "or"
+                    | "for"
+                    | "with"
+                    | "that"
+                    | "this"
+            )
+        })
         .take(5)
         .collect();
     words.join(" ")
@@ -849,11 +777,11 @@ fn generate_fallback_topic(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::llm::catalyst_profiles::{PROFILE_DIALECTICAL, PROFILE_OPERATIONAL};
-    use crate::config::{DomainVocabulary};
 
     #[test]
     fn test_parse_object_format() {
-        let json = r#"{"catalysts":["Where does X?","What about Y?"],"topicNames":["topic a","topic b"]}"#;
+        let json =
+            r#"{"catalysts":["Where does X?","What about Y?"],"topicNames":["topic a","topic b"]}"#;
         let resp = parse_catalyst_response(json).unwrap();
         assert_eq!(resp.pairs.len(), 2);
         assert_eq!(resp.pairs[0].0, "Where does X?");
@@ -889,7 +817,7 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_default() {
-        let prompt = build_system_prompt(None, None, None);
+        let prompt = build_system_prompt(None, None);
         assert!(prompt.contains("single sentence questions"));
         assert!(prompt.contains("<catalyst_profiles>"));
         assert!(prompt.contains("Dialectical"));
@@ -899,37 +827,17 @@ mod tests {
 
     #[test]
     fn test_build_system_prompt_thesis_format() {
-        let prompt = build_system_prompt(Some("thesis"), None, None);
+        let prompt = build_system_prompt(Some("thesis"), None);
         assert!(prompt.contains("investment theses"));
         assert!(prompt.contains("Where value is accruing"));
     }
 
     #[test]
     fn test_build_system_prompt_with_vault_guide() {
-        let prompt = build_system_prompt(None, None, Some("My vault guide content"));
+        let prompt = build_system_prompt(None, Some("My vault guide content"));
         assert!(prompt.contains("<vault_overview>"));
         assert!(prompt.contains("My vault guide content"));
         assert!(prompt.contains("</vault_overview>"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_with_custom_guidance() {
-        let cg = CustomProfileGuidance {
-            base_profile: None,
-            guidance_lines: vec!["Custom lens one".into()],
-            domain_vocabulary: Some(DomainVocabulary {
-                metaphors: vec!["gardening".into()],
-                named_concepts: vec!["emergence".into()],
-                structural_patterns: vec![],
-            }),
-            theoretical_frame: Some("A custom frame".into()),
-        };
-        let prompt = build_system_prompt(None, Some(&cg), None);
-        assert!(prompt.contains("Domain-Specific Theoretical Frame"));
-        assert!(prompt.contains("A custom frame"));
-        assert!(prompt.contains("gardening"));
-        assert!(prompt.contains("emergence"));
-        assert!(prompt.contains("Custom lens one"));
     }
 
     #[test]
@@ -941,8 +849,6 @@ mod tests {
             3,
             &PROFILE_DIALECTICAL,
             "question",
-            None,
-            None,
             None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Dialectical"));
@@ -961,8 +867,6 @@ mod tests {
             2,
             &PROFILE_OPERATIONAL,
             "thesis",
-            None,
-            None,
             None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
@@ -1013,25 +917,9 @@ mod tests {
     #[test]
     fn test_parse_smart_quote_normalization() {
         // Unicode left/right double quotes inside a string value.
-        let response = r#"{"catalysts":["\u201CWhat does it cost?\u201D"],"topicNames":["cost framing"]}"#;
+        let response =
+            r#"{"catalysts":["\u201CWhat does it cost?\u201D"],"topicNames":["cost framing"]}"#;
         let resp = parse_catalyst_response(response).unwrap();
         assert_eq!(resp.catalysts.len(), 1);
-    }
-
-    #[test]
-    fn test_build_user_prompt_with_guide_signal() {
-        let samples = vec!["excerpt".into()];
-        let prompt = build_user_prompt(
-            "test",
-            &samples,
-            2,
-            &PROFILE_DIALECTICAL,
-            "question",
-            Some("User is interested in X"),
-            None,
-            None,
-        );
-        assert!(prompt.contains("USER CONTEXT (from vault guide):"));
-        assert!(prompt.contains("User is interested in X"));
     }
 }

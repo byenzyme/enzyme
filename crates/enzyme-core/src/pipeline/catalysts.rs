@@ -10,7 +10,6 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::config::CustomProfileGuidance;
 use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
@@ -497,10 +496,6 @@ pub struct CatalystConfig<'a> {
     pub default_profile: &'a str,
     /// Catalyst output format key (question, thesis, claim).
     pub format_key: &'a str,
-    /// Custom profile guidance from vault guide generator.
-    pub custom_guidance: Option<&'a CustomProfileGuidance>,
-    /// Optional guide signal for calibrating catalyst generation.
-    pub guide_signal: Option<&'a str>,
     /// Optional ENZYME_GUIDE content for vault context.
     pub vault_guide: Option<&'a str>,
     /// LLM model to use for catalyst generation.
@@ -529,8 +524,6 @@ impl<'a> Default for CatalystConfig<'a> {
             catalysts_per_entity: 7,
             default_profile: DEFAULT_PROFILE_KEY,
             format_key: DEFAULT_FORMAT_KEY,
-            custom_guidance: None,
-            guide_signal: None,
             vault_guide: None,
             model: DEFAULT_MODEL,
             per_entity_allocations: None,
@@ -841,11 +834,7 @@ impl<'a> CatalystPipeline<'a> {
             info!("using simplified system prompt for local model");
             LOCAL_SYSTEM_PROMPT.to_string()
         } else {
-            build_system_prompt(
-                Some(config.format_key),
-                config.custom_guidance,
-                config.vault_guide,
-            )
+            build_system_prompt(Some(config.format_key), config.vault_guide)
         };
 
         // Auto-apply context budget for local models if not explicitly set.
@@ -912,12 +901,7 @@ impl<'a> CatalystPipeline<'a> {
                 });
             let era_context = selected_context.era_context;
             let flat_samples = selected_context.flat_samples;
-
-            let context_samples = if era_context.is_some() {
-                &[] as &[String]
-            } else {
-                &flat_samples
-            };
+            let context_samples = &flat_samples;
 
             if flat_samples.is_empty() && era_context.is_none() {
                 debug!(
@@ -942,9 +926,7 @@ impl<'a> CatalystPipeline<'a> {
                     num_catalysts,
                     profile,
                     config.format_key,
-                    config.guide_signal,
                     Some(entity),
-                    era_context.as_ref(),
                 )
             };
 

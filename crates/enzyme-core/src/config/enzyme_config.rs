@@ -1,63 +1,45 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::config::paths::EnzymePaths;
 use crate::models::EntityType;
 
-// ---------------------------------------------------------------------------
-// YAML schema types
-// ---------------------------------------------------------------------------
-
-/// Top-level `enzyme-config.yaml` that lives at `<vault>/.enzyme/enzyme-config.yaml`
-/// (or `<vault>/enzyme-config.yaml` for backwards compat).
+/// Top-level config view for a specific vault.
+///
+/// Data is loaded from the global `~/.enzyme/config.toml`, merged with the
+/// current vault's section. For backward compatibility, if that TOML file does
+/// not exist we still read legacy vault-local `enzyme-config.yaml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnzymeConfig {
-    /// User-curated entities for catalyst generation.
     #[serde(default)]
     pub catalyzed_entities: Vec<CatalyzedEntity>,
-
-    /// Default catalyst generation profile for the vault.
+    #[serde(default)]
+    pub pinned_entities: Vec<CatalyzedEntity>,
     #[serde(default)]
     pub catalyst_profile: Option<String>,
-
-    /// Trending distribution overrides.
     #[serde(default)]
-    pub trending: Option<TrendingConfig>,
-
-    /// Catalyst output format (question, thesis, claim).
+    pub trending: Option<SelectionConfig>,
     #[serde(default)]
     pub catalyst_format: Option<String>,
-
-    /// Custom profile guidance from vault guide generator.
-    #[serde(default)]
-    pub custom_profile_guidance: Option<CustomProfileGuidance>,
-
-    /// Optional guide signal for calibrating catalyst generation.
-    #[serde(default)]
-    pub guide_signal: Option<String>,
-
-    /// Tags to exclude from trending selection.
     #[serde(default)]
     pub excluded_tags: Vec<String>,
-
-    /// Links to exclude from trending selection.
     #[serde(default)]
     pub excluded_links: Vec<String>,
-
-    /// Folders to exclude from trending selection.
     #[serde(default)]
     pub excluded_folders: Vec<String>,
 }
 
-/// A single entry in `catalyzedEntities`.
+/// A single entry in the config.
 ///
-/// Supports two YAML forms:
+/// Supports:
 /// - Simple string: `"#tag"` or `"folder:inbox"` or `"[[Note]]"`
-/// - Map with options: `"#tag": { profile: "strategic" }`
+/// - Legacy YAML map with options: `"#tag": { profile: "strategic" }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CatalyzedEntity {
@@ -65,18 +47,22 @@ pub enum CatalyzedEntity {
     WithOptions(HashMap<String, EntityOptions>),
 }
 
-/// Per-entity options in the config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityOptions {
     pub profile: Option<String>,
     #[serde(default)]
     pub expandable: bool,
-    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_null_as_empty_vec"
+    )]
     pub children: Vec<String>,
 }
 
-/// Deserialize a `Vec<String>` that tolerates YAML `null` (treats it as `[]`).
-fn deserialize_null_as_empty_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+fn deserialize_null_as_empty_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -84,35 +70,8 @@ where
     Ok(opt.unwrap_or_default())
 }
 
-/// Custom profile guidance from vault guide generator.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomProfileGuidance {
-    #[serde(default)]
-    pub base_profile: Option<String>,
-    #[serde(default)]
-    pub guidance_lines: Vec<String>,
-    #[serde(default)]
-    pub domain_vocabulary: Option<DomainVocabulary>,
-    #[serde(default)]
-    pub theoretical_frame: Option<String>,
-}
-
-/// Domain-specific vocabulary for custom guidance.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DomainVocabulary {
-    #[serde(default)]
-    pub metaphors: Vec<String>,
-    #[serde(default)]
-    pub named_concepts: Vec<String>,
-    #[serde(default)]
-    pub structural_patterns: Vec<String>,
-}
-
-/// Override trending distribution minimums.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrendingConfig {
+pub struct SelectionConfig {
     #[serde(default = "default_min_tags")]
     pub minimum_tags: usize,
     #[serde(default = "default_min_links")]
@@ -121,19 +80,24 @@ pub struct TrendingConfig {
     pub minimum_folders: usize,
     #[serde(default = "default_total_limit")]
     pub total_limit: usize,
-    /// Minimum catalysts for the largest entity (by volume).
-    /// When set, derives base allocation as ~60% of this value and raises the
-    /// per-entity ceiling accordingly. Matches enzyme-python's `min_top_catalysts`.
     #[serde(default)]
     pub min_top_catalysts: Option<usize>,
 }
 
-fn default_min_tags() -> usize { 8 }
-fn default_min_links() -> usize { 6 }
-fn default_min_folders() -> usize { 6 }
-fn default_total_limit() -> usize { 30 }
+fn default_min_tags() -> usize {
+    8
+}
+fn default_min_links() -> usize {
+    6
+}
+fn default_min_folders() -> usize {
+    6
+}
+fn default_total_limit() -> usize {
+    30
+}
 
-impl Default for TrendingConfig {
+impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             minimum_tags: default_min_tags(),
@@ -145,41 +109,152 @@ impl Default for TrendingConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parsed output
-// ---------------------------------------------------------------------------
-
-/// A parsed entity reference from the config.
 #[derive(Debug, Clone)]
 pub struct ParsedEntity {
-    /// The entity name as stored in the DB (e.g. `"enzyme"`, `"maren holt"`, `"inbox"`).
     pub name: String,
-    /// The entity type inferred from the prefix.
     pub entity_type: EntityType,
 }
 
-/// Normalized output from parsing the config.
 #[derive(Debug, Clone, Default)]
 pub struct EntityPreferences {
-    /// Entities to generate catalysts for.
     pub entities: Vec<ParsedEntity>,
-    /// Per-entity catalyst profile overrides (entity name -> profile).
     pub entity_profiles: HashMap<String, String>,
-    /// Expandable folders and their children (folder name -> child names).
-    pub expandable_folders: HashMap<String, Vec<ParsedEntity>>,
-    /// Entity names to exclude.
+    pub expandable_folders: HashSet<String>,
     pub excluded_names: Vec<ParsedEntity>,
 }
 
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GlobalTomlConfig {
+    #[serde(default)]
+    defaults: DefaultsTomlSection,
+    #[serde(default)]
+    vaults: HashMap<String, VaultTomlSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefaultsTomlSection {
+    #[serde(default)]
+    catalyst_profile: Option<String>,
+    #[serde(default)]
+    catalyst_format: Option<String>,
+    #[serde(default = "default_min_tags")]
+    minimum_tags: usize,
+    #[serde(default = "default_min_links")]
+    minimum_links: usize,
+    #[serde(default = "default_min_folders")]
+    minimum_folders: usize,
+    #[serde(default = "default_total_limit")]
+    total_limit: usize,
+}
+
+impl Default for DefaultsTomlSection {
+    fn default() -> Self {
+        Self {
+            catalyst_profile: None,
+            catalyst_format: None,
+            minimum_tags: default_min_tags(),
+            minimum_links: default_min_links(),
+            minimum_folders: default_min_folders(),
+            total_limit: default_total_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct VaultTomlSection {
+    #[serde(default)]
+    excluded_tags: Vec<String>,
+    #[serde(default)]
+    excluded_links: Vec<String>,
+    #[serde(default)]
+    excluded_folders: Vec<String>,
+    #[serde(default)]
+    min_top_catalysts: Option<usize>,
+    #[serde(default)]
+    entities: Vec<String>,
+    #[serde(default)]
+    pinned_entities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyYamlConfig {
+    #[serde(default)]
+    catalyzed_entities: Vec<CatalyzedEntity>,
+    #[serde(default)]
+    catalyst_profile: Option<String>,
+    #[serde(default)]
+    trending: Option<SelectionConfig>,
+    #[serde(default)]
+    catalyst_format: Option<String>,
+    #[serde(default)]
+    excluded_tags: Vec<String>,
+    #[serde(default)]
+    excluded_links: Vec<String>,
+    #[serde(default)]
+    excluded_folders: Vec<String>,
+}
 
 impl EnzymeConfig {
-    /// Load the config from the vault. Tries `<vault>/.enzyme/enzyme-config.yaml`
-    /// first, then `<vault>/enzyme-config.yaml` for backwards compatibility.
-    /// Returns `None` if no config file exists.
+    pub fn config_path() -> Result<PathBuf> {
+        Ok(EnzymePaths::enzyme_home()?.join("config.toml"))
+    }
+
     pub fn load(vault_path: &Path) -> Result<Option<Self>> {
+        let config_path = Self::config_path()?;
+        if config_path.exists() {
+            debug!(?config_path, "loading enzyme config from global TOML");
+            let global = load_global_toml(&config_path)?;
+            return Ok(Some(Self::from_global_config(vault_path, &global)));
+        }
+
+        Self::load_legacy_yaml(vault_path)
+    }
+
+    fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
+        let key = canonical_vault_key(vault_path);
+        let vault = global
+            .vaults
+            .get(&key)
+            .or_else(|| global.vaults.get(&vault_path.to_string_lossy().to_string()));
+
+        let trending = SelectionConfig {
+            minimum_tags: global.defaults.minimum_tags,
+            minimum_links: global.defaults.minimum_links,
+            minimum_folders: global.defaults.minimum_folders,
+            total_limit: global.defaults.total_limit,
+            min_top_catalysts: vault.and_then(|v| v.min_top_catalysts),
+        };
+
+        Self {
+            catalyzed_entities: vault
+                .map(|v| {
+                    v.entities
+                        .iter()
+                        .cloned()
+                        .map(CatalyzedEntity::Simple)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pinned_entities: vault
+                .map(|v| {
+                    v.pinned_entities
+                        .iter()
+                        .cloned()
+                        .map(CatalyzedEntity::Simple)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            catalyst_profile: global.defaults.catalyst_profile.clone(),
+            trending: Some(trending),
+            catalyst_format: global.defaults.catalyst_format.clone(),
+            excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
+            excluded_links: vault.map(|v| v.excluded_links.clone()).unwrap_or_default(),
+            excluded_folders: vault.map(|v| v.excluded_folders.clone()).unwrap_or_default(),
+        }
+    }
+
+    fn load_legacy_yaml(vault_path: &Path) -> Result<Option<Self>> {
         let enzyme_dir_path = vault_path.join(".enzyme").join("enzyme-config.yaml");
         let root_path = vault_path.join("enzyme-config.yaml");
 
@@ -188,25 +263,32 @@ impl EnzymeConfig {
         } else if root_path.exists() {
             root_path
         } else {
-            debug!("no enzyme-config.yaml found");
+            debug!("no config.toml or legacy enzyme-config.yaml found");
             return Ok(None);
         };
 
-        debug!(?config_path, "loading enzyme config");
-        let contents = std::fs::read_to_string(&config_path)
+        let contents = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
 
-        let config: EnzymeConfig = serde_yaml::from_str(&contents)
+        let legacy: LegacyYamlConfig = serde_yaml::from_str(&contents)
             .with_context(|| format!("failed to parse {}", config_path.display()))?;
 
-        Ok(Some(config))
+        Ok(Some(Self {
+            catalyzed_entities: legacy.catalyzed_entities,
+            pinned_entities: Vec::new(),
+            catalyst_profile: legacy.catalyst_profile,
+            trending: legacy.trending,
+            catalyst_format: legacy.catalyst_format,
+            excluded_tags: legacy.excluded_tags,
+            excluded_links: legacy.excluded_links,
+            excluded_folders: legacy.excluded_folders,
+        }))
     }
 
-    /// Parse the config into normalized entity preferences.
     pub fn parse_preferences(&self) -> EntityPreferences {
         let mut prefs = EntityPreferences::default();
 
-        for entry in &self.catalyzed_entities {
+        for entry in self.pinned_entities.iter().chain(self.catalyzed_entities.iter()) {
             match entry {
                 CatalyzedEntity::Simple(raw) => {
                     if let Some(parsed) = parse_entity_ref(raw) {
@@ -219,36 +301,14 @@ impl EnzymeConfig {
                             continue;
                         };
 
-                        // Record profile override
                         if let Some(ref profile) = options.profile {
                             prefs
                                 .entity_profiles
                                 .insert(parsed.name.clone(), profile.clone());
                         }
 
-                        // Handle expandable folders
                         if options.expandable {
-                            let children: Vec<ParsedEntity> = options
-                                .children
-                                .iter()
-                                .filter_map(|c| parse_entity_ref(c))
-                                .collect();
-
-                            // Also add children as top-level entities
-                            for child in &children {
-                                prefs.entities.push(child.clone());
-                                // Inherit parent's profile if child doesn't have its own
-                                if let Some(ref profile) = options.profile {
-                                    prefs
-                                        .entity_profiles
-                                        .entry(child.name.clone())
-                                        .or_insert_with(|| profile.clone());
-                                }
-                            }
-
-                            prefs
-                                .expandable_folders
-                                .insert(parsed.name.clone(), children);
+                            prefs.expandable_folders.insert(parsed.name.clone());
                         }
 
                         prefs.entities.push(parsed);
@@ -257,7 +317,6 @@ impl EnzymeConfig {
             }
         }
 
-        // Parse excluded entities
         for tag in &self.excluded_tags {
             if let Some(parsed) = parse_entity_ref(&format!("#{tag}")) {
                 prefs.excluded_names.push(parsed);
@@ -277,45 +336,99 @@ impl EnzymeConfig {
         prefs
     }
 
-    /// Whether the config has any user-curated entities.
     pub fn has_curated_entities(&self) -> bool {
-        !self.catalyzed_entities.is_empty()
+        !self.catalyzed_entities.is_empty() || !self.pinned_entities.is_empty()
     }
 
-    /// Persist `min_top_catalysts` into the trending config and save to disk.
-    ///
-    /// This ensures that CLI flags like `--min-top-catalysts` survive across
-    /// refreshes, which read from the config file rather than CLI args.
     pub fn persist_min_top_catalysts(&mut self, vault_path: &Path, value: usize) -> Result<()> {
-        let trending = self.trending.get_or_insert_with(TrendingConfig::default);
+        let trending = self.trending.get_or_insert_with(SelectionConfig::default);
         trending.min_top_catalysts = Some(value);
         self.save(vault_path)
     }
 
-    /// Save the config back to `<vault>/.enzyme/enzyme-config.yaml`.
+    pub fn set_auto_selected_entities(
+        &mut self,
+        vault_path: &Path,
+        entity_refs: Vec<String>,
+    ) -> Result<()> {
+        self.catalyzed_entities = entity_refs.into_iter().map(CatalyzedEntity::Simple).collect();
+        self.save(vault_path)
+    }
+
     pub fn save(&self, vault_path: &Path) -> Result<()> {
-        let config_path = vault_path.join(".enzyme").join("enzyme-config.yaml");
-        let yaml = serde_yaml::to_string(self)
-            .context("failed to serialize enzyme config")?;
-        // Prepend a comment so users know the file is editable
-        let contents = format!(
-            "# Auto-generated by enzyme init (LLM selection)\n\
-             # Edit this file to customize which entities get catalysts.\n\n\
-             {yaml}"
-        );
-        std::fs::write(&config_path, contents)
+        let config_path = Self::config_path()?;
+        let mut global = if config_path.exists() {
+            load_global_toml(&config_path)?
+        } else {
+            GlobalTomlConfig::default()
+        };
+
+        global.defaults.catalyst_profile = self.catalyst_profile.clone();
+        global.defaults.catalyst_format = self.catalyst_format.clone();
+        if let Some(ref trending) = self.trending {
+            global.defaults.minimum_tags = trending.minimum_tags;
+            global.defaults.minimum_links = trending.minimum_links;
+            global.defaults.minimum_folders = trending.minimum_folders;
+            global.defaults.total_limit = trending.total_limit;
+        }
+
+        let entry = global
+            .vaults
+            .entry(canonical_vault_key(vault_path))
+            .or_default();
+        entry.excluded_tags = self.excluded_tags.clone();
+        entry.excluded_links = self.excluded_links.clone();
+        entry.excluded_folders = self.excluded_folders.clone();
+        entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
+        entry.entities = self
+            .catalyzed_entities
+            .iter()
+            .filter_map(entity_ref_string)
+            .collect();
+        entry.pinned_entities = self
+            .pinned_entities
+            .iter()
+            .filter_map(entity_ref_string)
+            .collect();
+
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let contents =
+            toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
+        fs::write(&config_path, contents)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
         debug!(?config_path, "saved enzyme config");
         Ok(())
     }
 }
 
-/// Parse a raw entity reference string into a name and type.
-///
-/// Formats:
-/// - `#tag` or `#tag/subtag` -> Tag, name = `"tag"` / `"tag/subtag"`
-/// - `[[Note Name]]` -> Link, name = `"note name"` (lowercased)
-/// - `folder:path` -> Folder, name = `"path"`
+fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if contents.trim().is_empty() {
+        return Ok(GlobalTomlConfig::default());
+    }
+    toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn canonical_vault_key(vault_path: &Path) -> String {
+    vault_path
+        .canonicalize()
+        .unwrap_or_else(|_| vault_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn entity_ref_string(entity: &CatalyzedEntity) -> Option<String> {
+    match entity {
+        CatalyzedEntity::Simple(raw) => Some(raw.clone()),
+        CatalyzedEntity::WithOptions(map) => map.keys().next().cloned(),
+    }
+}
+
 fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
     let trimmed = raw.trim();
 
@@ -348,7 +461,6 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
             entity_type: EntityType::Folder,
         })
     } else {
-        // Unknown format — skip
         None
     }
 }
@@ -356,6 +468,7 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_parse_entity_ref_tag() {
@@ -395,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_config_yaml() {
+    fn test_parse_legacy_yaml_config() {
         let yaml = r##"
 catalyzedEntities:
   - "#enzyme":
@@ -414,18 +527,78 @@ excludedTags:
   - todo
 "##;
 
-        let config: EnzymeConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: LegacyYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.catalyzed_entities.len(), 4);
         assert_eq!(config.catalyst_profile, Some("dialectical".to_string()));
-        assert_eq!(config.excluded_tags.len(), 2);
 
-        let prefs = config.parse_preferences();
-        // 4 top-level + 2 children from expandable folder
-        assert_eq!(prefs.entities.len(), 6);
-        assert_eq!(prefs.entity_profiles.get("enzyme"), Some(&"operational".to_string()));
-        assert_eq!(prefs.entity_profiles.get("people"), Some(&"relational".to_string()));
-        // Children inherit parent profile
-        assert_eq!(prefs.entity_profiles.get("ari"), Some(&"relational".to_string()));
-        assert!(prefs.expandable_folders.contains_key("people"));
+        let merged = EnzymeConfig {
+            catalyzed_entities: config.catalyzed_entities,
+            pinned_entities: Vec::new(),
+            catalyst_profile: config.catalyst_profile,
+            trending: config.trending,
+            catalyst_format: config.catalyst_format,
+            excluded_tags: config.excluded_tags,
+            excluded_links: config.excluded_links,
+            excluded_folders: config.excluded_folders,
+        };
+        let prefs = merged.parse_preferences();
+        assert_eq!(prefs.entities.len(), 4);
+        assert_eq!(
+            prefs.entity_profiles.get("enzyme"),
+            Some(&"operational".to_string())
+        );
+        assert_eq!(
+            prefs.entity_profiles.get("people"),
+            Some(&"relational".to_string())
+        );
+        assert!(prefs.expandable_folders.contains("people"));
+    }
+
+    #[test]
+    fn test_save_and_load_global_toml() {
+        let tmp = TempDir::new().unwrap();
+        let old_home = std::env::var("ENZYME_HOME").ok();
+        // SAFETY: test-only, single-threaded
+        unsafe { std::env::set_var("ENZYME_HOME", tmp.path()) };
+
+        let vault = tmp.path().join("vault");
+        fs::create_dir_all(&vault).unwrap();
+
+        let config = EnzymeConfig {
+            catalyzed_entities: vec![CatalyzedEntity::Simple("#enzyme".to_string())],
+            pinned_entities: vec![CatalyzedEntity::Simple("[[Maren Holt]]".to_string())],
+            catalyst_profile: Some("dialectical".to_string()),
+            trending: Some(SelectionConfig {
+                minimum_tags: 9,
+                minimum_links: 7,
+                minimum_folders: 5,
+                total_limit: 21,
+                min_top_catalysts: Some(13),
+            }),
+            catalyst_format: Some("question".to_string()),
+            excluded_tags: vec!["todo".to_string()],
+            excluded_links: vec!["Template".to_string()],
+            excluded_folders: vec!["templates".to_string()],
+        };
+
+        config.save(&vault).unwrap();
+
+        let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
+        assert_eq!(loaded.catalyst_profile.as_deref(), Some("dialectical"));
+        assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
+        assert_eq!(loaded.catalyzed_entities.len(), 1);
+        assert_eq!(loaded.pinned_entities.len(), 1);
+        assert_eq!(
+            loaded.trending.as_ref().and_then(|t| t.min_top_catalysts),
+            Some(13)
+        );
+
+        // SAFETY: test-only, single-threaded
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("ENZYME_HOME", v),
+                None => std::env::remove_var("ENZYME_HOME"),
+            }
+        }
     }
 }

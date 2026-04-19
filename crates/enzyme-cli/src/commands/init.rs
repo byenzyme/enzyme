@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -113,81 +112,6 @@ pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> 
     Ok(())
 }
 
-/// Prompt the user after indexing in interactive mode.
-/// Returns the vault guide text (auto-generated or user-edited), or None to abort.
-fn prompt_after_indexing(db: &Database, vault_path: &Path) -> Result<Option<String>> {
-    let summary = vault_summary::build_summary(db, vault_path)?;
-    let human_text = vault_summary::format_summary_human(&summary);
-
-    eprintln!();
-    eprintln!("{}", human_text);
-    eprintln!();
-    eprint!("  Proceed? [Y/edit/n] ");
-    std::io::stderr().flush().ok();
-
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
-    let choice = input.trim().to_lowercase();
-
-    match choice.as_str() {
-        "" | "y" | "yes" => {
-            // Auto-construct guide from summary
-            let guide = vault_summary::format_summary_guide(&summary);
-            Ok(Some(guide))
-        }
-        "edit" => {
-            let guide_text = vault_summary::format_summary_guide(&summary);
-            match open_in_editor(&guide_text) {
-                Ok(edited) if !edited.trim().is_empty() => Ok(Some(edited)),
-                Ok(_) => {
-                    eprintln!("  Empty guide — using auto-generated summary.");
-                    Ok(Some(guide_text))
-                }
-                Err(e) => {
-                    eprintln!("  Editor failed: {}. Using auto-generated summary.", e);
-                    Ok(Some(guide_text))
-                }
-            }
-        }
-        "n" | "no" => {
-            eprintln!("  Aborted.");
-            Ok(None)
-        }
-        _ => {
-            eprintln!("  Unrecognized choice — proceeding.");
-            let guide = vault_summary::format_summary_guide(&summary);
-            Ok(Some(guide))
-        }
-    }
-}
-
-/// Open text in the user's preferred editor. Returns the edited text.
-/// Editor resolution: $VISUAL → $EDITOR → vi
-fn open_in_editor(initial_text: &str) -> Result<String> {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
-
-    let mut tmpfile =
-        tempfile::NamedTempFile::new().context("failed to create temp file for editor")?;
-    tmpfile
-        .write_all(initial_text.as_bytes())
-        .context("failed to write to temp file")?;
-    tmpfile.flush()?;
-
-    let status = std::process::Command::new(&editor)
-        .arg(tmpfile.path())
-        .status()
-        .with_context(|| format!("failed to launch editor: {}", editor))?;
-
-    if !status.success() {
-        anyhow::bail!("editor exited with status {}", status);
-    }
-
-    let edited = fs::read_to_string(tmpfile.path()).context("failed to read edited file")?;
-    Ok(edited)
-}
-
 pub async fn run_init(
     vault_path: &Path,
     full: bool,
@@ -198,40 +122,6 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    // Check for existing enzyme data and offer hard reset
-    if !quiet && atty::is(atty::Stream::Stdin) {
-        let enzyme_dir = paths.vault_db.parent().map(|p| p.to_path_buf());
-
-        let enzyme_exists = enzyme_dir.as_ref().map_or(false, |d| d.exists());
-
-        if enzyme_exists {
-            let mut dirs_found = Vec::new();
-            if enzyme_exists {
-                dirs_found.push(enzyme_dir.as_ref().unwrap().display().to_string());
-            }
-
-            eprintln!("Found existing enzyme data:");
-            for d in &dirs_found {
-                eprintln!("  {}", d);
-            }
-            eprint!("Clear and hard reset? [y/N] ");
-            std::io::stderr().flush().ok();
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).ok();
-
-            if input.trim().eq_ignore_ascii_case("y") {
-                if let Some(ref dir) = enzyme_dir {
-                    if dir.exists() {
-                        fs::remove_dir_all(dir)
-                            .context("failed to remove enzyme data directory")?;
-                        eprintln!("Cleared {}", dir.display());
-                    }
-                }
-            }
-        }
-    }
-
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
@@ -291,23 +181,7 @@ pub async fn run_init(
         stats
     };
 
-    // ── Interactive prompt: show vault summary after indexing ────────────
-    // Only on first init (no enzyme-config.yaml yet), interactive TTY, no guide provided.
-    let is_interactive = !quiet && atty::is(atty::Stream::Stdin);
-    let has_config = vault_path
-        .join(".enzyme")
-        .join("enzyme-config.yaml")
-        .exists()
-        || vault_path.join("enzyme-config.yaml").exists();
-    let is_first_init = !has_config;
-    let vault_guide = if is_interactive && is_first_init && vault_guide.is_none() {
-        match prompt_after_indexing(&db, vault_path)? {
-            Some(guide) => Some(guide),
-            None => return Ok(None), // user aborted
-        }
-    } else {
-        vault_guide.map(|s| s.to_string())
-    };
+    let vault_guide = vault_guide.map(|s| s.to_string());
     let vault_guide = vault_guide.as_deref();
 
     // ── Start display for remaining pipeline ────────────────────────────
@@ -318,10 +192,21 @@ pub async fn run_init(
     };
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
+    let mut enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
+    let selected_entity_refs: Vec<String> = sel_result
+        .entities
+        .iter()
+        .map(|entity| match entity.entity_type {
+            enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
+            enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),
+            enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
+        })
+        .collect();
+    enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
 
     tx.send(DisplayEvent::SelectionComplete {
         count: sel_result.entities.len(),
@@ -374,9 +259,6 @@ pub async fn run_init(
     };
 
     // ── Step 5: Catalyst generation in foreground ─────────────────────────
-    // Load enzyme config for catalyst profile/format settings
-    let mut enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-
     // Persist --min-top-catalysts to config so refreshes respect it
     if let Some(mtc) = min_top_catalysts {
         if let Err(e) = enzyme_config.persist_min_top_catalysts(vault_path, mtc) {
@@ -425,8 +307,6 @@ pub async fn run_init(
                 .catalyst_format
                 .as_deref()
                 .unwrap_or(DEFAULT_FORMAT_KEY),
-            custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
-            guide_signal: enzyme_config.guide_signal.as_deref(),
             vault_guide: effective_vault_guide,
             model: &resolved.model,
             per_entity_allocations: Some(&allocations),
@@ -602,6 +482,10 @@ pub async fn run_init(
 
     // Show starter prompt and bonsai CTA on interactive init
     if !quiet {
+        if let Ok(config_path) = EnzymeConfig::config_path() {
+            eprintln!("  Config saved to {}", config_path.display());
+            eprintln!();
+        }
         eprintln!();
         eprintln!(
             "  {}Try:{} claude {}\"explore with enzyme and tell me what i'm not seeing\"{}",
@@ -905,8 +789,6 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
             .catalyst_format
             .as_deref()
             .unwrap_or(DEFAULT_FORMAT_KEY),
-        custom_guidance: enzyme_config.custom_profile_guidance.as_ref(),
-        guide_signal: enzyme_config.guide_signal.as_deref(),
         vault_guide: vault_context.as_deref(),
         model: &api_config.model,
         per_entity_allocations: Some(&allocations),

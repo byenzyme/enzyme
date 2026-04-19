@@ -38,9 +38,9 @@ impl<'a> ContextBuilder<'a> {
 
     /// Build vault context XML and detect page entities for expandable folder decisions.
     ///
-    /// Page entities are trending wikilinks that have source files inside a folder.
-    /// For example, if `folder:people` is trending and `people/Alice Smith.md` exists
-    /// with `[[alice smith]]` also trending, then `people` has page entity `alice smith`.
+    /// Page entities are wikilinks whose source files live inside a folder.
+    /// For example, if `folder:people` is selected and `people/Alice Smith.md` exists,
+    /// then `[[alice smith]]` is a page entity of `people`.
     pub fn build_with_page_entities(
         &self,
         entities: &[Entity],
