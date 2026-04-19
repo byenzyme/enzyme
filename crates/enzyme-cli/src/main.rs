@@ -172,9 +172,6 @@ enum Commands {
         min_top_catalysts: Option<usize>,
     },
 
-    /// Internal: run the embedding daemon (auto-started by CLI, not user-facing)
-    #[command(name = "__daemon", hide = true)]
-    Daemon,
 }
 
 fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
@@ -248,10 +245,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // These commands don't need a vault path — log to stderr.
-    if matches!(cli.command, Commands::Daemon) {
-        init_tracing(cli.verbose, None);
-        return commands::daemon::run_daemon().await;
-    }
     if let Commands::Setup { check } = cli.command {
         init_tracing(cli.verbose, None);
         return commands::setup::run_setup(check).await;
@@ -374,7 +367,7 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Setup { .. } | Commands::Daemon | Commands::Mcp => unreachable!(),
+        Commands::Setup { .. } | Commands::Mcp => unreachable!(),
     }
 
     Ok(())

@@ -4,34 +4,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Which embedding runtime to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingBackend {
-    /// Pure-Rust ONNX runtime (rten). Default, no native dependencies.
-    Rten,
-    /// ONNX Runtime with CPU execution provider.
-    OrtCpu,
-    /// ONNX Runtime with CoreML execution provider (macOS only).
-    OrtCoreml,
-}
-
-impl Default for EmbeddingBackend {
-    fn default() -> Self {
-        Self::Rten
-    }
-}
-
-impl EmbeddingBackend {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Rten => "rten",
-            Self::OrtCpu => "ort_cpu",
-            Self::OrtCoreml => "ort_coreml",
-        }
-    }
-}
-
 /// File include/exclude patterns for vault indexing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilePatterns {
@@ -70,9 +42,6 @@ pub struct VaultConfig {
     /// Named context for this vault (allows multiple indexes per vault in the future).
     #[serde(default = "default_context_name")]
     pub context_name: String,
-    /// Which embedding backend to use for this vault.
-    #[serde(default)]
-    pub embedding_backend: EmbeddingBackend,
     /// File include/exclude patterns.
     #[serde(default)]
     pub file_patterns: FilePatterns,
@@ -87,7 +56,6 @@ impl Default for VaultConfig {
         Self {
             vault_path: PathBuf::new(),
             context_name: default_context_name(),
-            embedding_backend: EmbeddingBackend::default(),
             file_patterns: FilePatterns::default(),
         }
     }
@@ -113,10 +81,7 @@ impl VaultConfig {
         }
 
         let contents = fs::read_to_string(config_path).with_context(|| {
-            format!(
-                "failed to read vault config from {}",
-                config_path.display()
-            )
+            format!("failed to read vault config from {}", config_path.display())
         })?;
 
         if contents.trim().is_empty() {
@@ -127,10 +92,7 @@ impl VaultConfig {
         }
 
         let mut config: Self = serde_yaml::from_str(&contents).with_context(|| {
-            format!(
-                "failed to parse vault config at {}",
-                config_path.display()
-            )
+            format!("failed to parse vault config at {}", config_path.display())
         })?;
 
         config.vault_path = vault_path;
@@ -173,30 +135,8 @@ mod tests {
     fn test_defaults() {
         let config = VaultConfig::default();
         assert_eq!(config.context_name, "default");
-        assert_eq!(config.embedding_backend, EmbeddingBackend::Rten);
         assert_eq!(config.file_patterns.include, vec!["**/*.md"]);
         assert!(!config.file_patterns.exclude.is_empty());
-    }
-
-    #[test]
-    fn test_embedding_backend_serde() {
-        let yaml = "rten";
-        let backend: EmbeddingBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend, EmbeddingBackend::Rten);
-
-        let yaml = "ort_coreml";
-        let backend: EmbeddingBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend, EmbeddingBackend::OrtCoreml);
-
-        let serialized = serde_yaml::to_string(&EmbeddingBackend::OrtCpu).unwrap();
-        assert!(serialized.trim().contains("ort_cpu"));
-    }
-
-    #[test]
-    fn test_embedding_backend_as_str() {
-        assert_eq!(EmbeddingBackend::Rten.as_str(), "rten");
-        assert_eq!(EmbeddingBackend::OrtCpu.as_str(), "ort_cpu");
-        assert_eq!(EmbeddingBackend::OrtCoreml.as_str(), "ort_coreml");
     }
 
     #[test]
@@ -207,7 +147,6 @@ mod tests {
 
         assert_eq!(config.vault_path, vault_path);
         assert_eq!(config.context_name, "default");
-        assert_eq!(config.embedding_backend, EmbeddingBackend::Rten);
     }
 
     #[test]
@@ -229,7 +168,6 @@ mod tests {
         let config = VaultConfig {
             vault_path: vault_path.clone(),
             context_name: "research".to_string(),
-            embedding_backend: EmbeddingBackend::OrtCoreml,
             file_patterns: FilePatterns {
                 include: vec!["**/*.md".to_string(), "**/*.txt".to_string()],
                 exclude: vec![".git/**".to_string()],
@@ -241,7 +179,6 @@ mod tests {
         let loaded = VaultConfig::load(&vault_path).unwrap();
         assert_eq!(loaded.vault_path, vault_path);
         assert_eq!(loaded.context_name, "research");
-        assert_eq!(loaded.embedding_backend, EmbeddingBackend::OrtCoreml);
         assert_eq!(loaded.file_patterns.include.len(), 2);
         assert_eq!(loaded.file_patterns.exclude, vec![".git/**"]);
     }
@@ -250,12 +187,9 @@ mod tests {
     fn test_yaml_deserialization_partial() {
         let yaml = r#"
 context_name: notes
-embedding_backend: ort_cpu
 "#;
         let config: VaultConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.context_name, "notes");
-        assert_eq!(config.embedding_backend, EmbeddingBackend::OrtCpu);
-        // file_patterns should get its default
         assert_eq!(config.file_patterns, FilePatterns::default());
     }
 
@@ -265,7 +199,6 @@ embedding_backend: ort_cpu
         let yaml = "{}";
         let config: VaultConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.context_name, "default");
-        assert_eq!(config.embedding_backend, EmbeddingBackend::Rten);
         assert_eq!(config.file_patterns, FilePatterns::default());
     }
 
@@ -286,8 +219,10 @@ embedding_backend: ort_cpu
         assert!(patterns.exclude.contains(&".obsidian/**".to_string()));
         assert!(patterns.exclude.contains(&".git/**".to_string()));
         assert!(patterns.exclude.contains(&".enzyme/**".to_string()));
-        assert!(patterns
-            .exclude
-            .contains(&".enzyme-embeddings/**".to_string()));
+        assert!(
+            patterns
+                .exclude
+                .contains(&".enzyme-embeddings/**".to_string())
+        );
     }
 }

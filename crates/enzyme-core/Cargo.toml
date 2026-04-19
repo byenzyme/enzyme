@@ -9,9 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 libsql = { workspace = true }
-rten = { workspace = true }
-rten-tensor = { workspace = true }
-tokenizers = { workspace = true }
+model2vec = { workspace = true }
 instant-distance = { workspace = true }
 pulldown-cmark = { workspace = true }
 rayon = { workspace = true }
@@ -29,14 +27,6 @@ tokio = { workspace = true }
 futures = "0.3"
 async-stream = "0.3"
 
-[features]
-default = ["model2vec"]
-model2vec = ["dep:model2vec"]
-
-[dependencies.model2vec]
-workspace = true
-optional = true
-
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -44,4 +34,3 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "catalyze"
 harness = false
-

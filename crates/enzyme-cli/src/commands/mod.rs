@@ -1,7 +1,6 @@
 pub mod apply;
 pub mod catalyze;
 pub mod claude_md;
-pub mod daemon;
 pub mod dump_prompts;
 pub mod init;
 pub mod lock;
