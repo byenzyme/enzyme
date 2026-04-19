@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::config::CustomProfileGuidance;
 use crate::db::{Database, FileChunk};
-use crate::embedding::EmbeddingService;
+use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
     GenerationParams, LlmClient, ParsedCatalyst, build_local_user_prompt, build_system_prompt,
@@ -597,6 +597,10 @@ impl<'a> CatalystPipeline<'a> {
         Self { db, llm, embedding }
     }
 
+    /// Maximum word count for an occurrence context to be considered an inline
+    /// lasso extract (vs a full note body from frontmatter).
+    const INLINE_CONTEXT_MAX_WORDS: usize = 400;
+
     fn preload_chunk_selection(&self, entities: &[Entity]) -> Option<ChunkSelectionPreload> {
         let chunk_vectors = match self.db.get_all_chunk_embeddings() {
             Ok(rows) if !rows.is_empty() => rows
@@ -617,33 +621,131 @@ impl<'a> CatalystPipeline<'a> {
             });
         };
 
-        let semantic_positions = entities
+        let mut entity_vectors = vec![None; entities.len()];
+
+        // Tags and folders: embed the entity name directly.
+        let name_positions: Vec<(usize, &str)> = entities
             .iter()
             .enumerate()
-            .filter(|(_, entity)| entity.entity_type != EntityType::Folder)
-            .map(|(idx, entity)| (idx, entity.name.as_str()))
-            .collect::<Vec<_>>();
+            .filter(|(_, e)| e.entity_type == EntityType::Tag)
+            .map(|(idx, e)| (idx, e.name.as_str()))
+            .collect();
 
-        let mut entity_vectors = vec![None; entities.len()];
-        if semantic_positions.is_empty() {
-            return Some(ChunkSelectionPreload {
-                chunk_vectors,
-                entity_vectors,
-            });
-        }
-
-        let names = semantic_positions
-            .iter()
-            .map(|(_, name)| *name)
-            .collect::<Vec<_>>();
-        match service.embed_documents(&names) {
-            Ok(vectors) => {
-                for ((idx, _), vector) in semantic_positions.into_iter().zip(vectors.into_iter()) {
-                    entity_vectors[idx] = Some(vector);
+        if !name_positions.is_empty() {
+            let names: Vec<&str> = name_positions.iter().map(|(_, n)| *n).collect();
+            match service.embed_documents(&names) {
+                Ok(vectors) => {
+                    for ((idx, _), vector) in
+                        name_positions.into_iter().zip(vectors.into_iter())
+                    {
+                        entity_vectors[idx] = Some(vector);
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to embed tag names: {e}");
                 }
             }
-            Err(e) => {
-                warn!("failed to embed entity names, semantic chunk scoring disabled: {e}");
+        }
+
+        // Links: embed inline occurrence contexts and use centroid.
+        // Falls back to entity name when no inline contexts exist.
+        let link_positions: Vec<(usize, &Entity)> = entities
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.entity_type == EntityType::Link)
+            .collect();
+
+        if !link_positions.is_empty() {
+            // Collect inline contexts for all links, plus fallback names
+            let mut centroid_texts: Vec<(usize, Vec<String>)> = Vec::new();
+            let mut fallback_positions: Vec<(usize, &str)> = Vec::new();
+
+            for &(idx, entity) in &link_positions {
+                let entity_id = entity.id.unwrap_or(0);
+                let inline_contexts: Vec<String> = self
+                    .db
+                    .get_entity_occurrences(entity_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|occ| {
+                        let ctx = occ.context?;
+                        if ctx.split_whitespace().count() < Self::INLINE_CONTEXT_MAX_WORDS {
+                            Some(ctx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if inline_contexts.is_empty() {
+                    fallback_positions.push((idx, entity.name.as_str()));
+                } else {
+                    centroid_texts.push((idx, inline_contexts));
+                }
+            }
+
+            // Embed all inline contexts in one batch, then compute per-entity centroids
+            if !centroid_texts.is_empty() {
+                let dim = service.dimension();
+                let mut all_texts: Vec<&str> = Vec::new();
+                let mut ranges: Vec<(usize, usize, usize)> = Vec::new(); // (entity_idx, start, count)
+
+                for (idx, contexts) in &centroid_texts {
+                    let start = all_texts.len();
+                    all_texts.extend(contexts.iter().map(|s| s.as_str()));
+                    ranges.push((*idx, start, contexts.len()));
+                }
+
+                match service.embed_documents(&all_texts) {
+                    Ok(vectors) => {
+                        for (entity_idx, start, count) in ranges {
+                            let mut centroid = vec![0.0f32; dim];
+                            for v in &vectors[start..start + count] {
+                                for (c, val) in centroid.iter_mut().zip(v.iter()) {
+                                    *c += val;
+                                }
+                            }
+                            for c in centroid.iter_mut() {
+                                *c /= count as f32;
+                            }
+                            l2_normalize(&mut centroid);
+                            entity_vectors[entity_idx] = Some(centroid);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("failed to embed link contexts, falling back to names: {e}");
+                        // Move all centroid entities to fallback
+                        for (idx, entity) in &link_positions {
+                            if entity_vectors[*idx].is_none() {
+                                fallback_positions.push((*idx, entity.name.as_str()));
+                            }
+                        }
+                        // Deduplicate fallback positions
+                        fallback_positions.sort_by_key(|(idx, _)| *idx);
+                        fallback_positions.dedup_by_key(|(idx, _)| *idx);
+                    }
+                }
+            }
+
+            // Embed fallback names (links with no inline contexts)
+            if !fallback_positions.is_empty() {
+                let names: Vec<&str> = fallback_positions.iter().map(|(_, n)| *n).collect();
+                debug!(
+                    count = fallback_positions.len(),
+                    "link entities with no inline contexts, using name embedding"
+                );
+                match service.embed_documents(&names) {
+                    Ok(vectors) => {
+                        for ((idx, _), vector) in
+                            fallback_positions.into_iter().zip(vectors.into_iter())
+                        {
+                            entity_vectors[idx] = Some(vector);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("failed to embed fallback link names: {e}");
+                    }
+                }
             }
         }
 
