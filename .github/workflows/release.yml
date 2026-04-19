@@ -152,11 +152,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
-          mkdir -p model-files
+          mkdir -p model-files/distilled
           gh release download --repo "$RELEASE_REPO" \
-            --pattern 'model.onnx' \
+            --pattern 'model.safetensors' \
             --pattern 'tokenizer.json' \
-            --dir model-files \
+            --pattern 'config.json' \
+            --dir model-files/distilled \
             || echo "Warning: could not download model files from previous release (expected on first release)"
 
       - name: Generate server.json for MCP Registry
@@ -222,10 +223,11 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256' -o -name '*.mcpb' -o -name 'server.json')
 
-          # Include model files if available
+          # Include distilled model files if available
           model_files=""
-          [ -f model-files/model.onnx ] && model_files="$model_files model-files/model.onnx"
-          [ -f model-files/tokenizer.json ] && model_files="$model_files model-files/tokenizer.json"
+          [ -f model-files/distilled/model.safetensors ] && model_files="$model_files model-files/distilled/model.safetensors"
+          [ -f model-files/distilled/tokenizer.json ] && model_files="$model_files model-files/distilled/tokenizer.json"
+          [ -f model-files/distilled/config.json ] && model_files="$model_files model-files/distilled/config.json"
 
           # Delete existing release if re-publishing the same tag
           gh release delete "$tag" --repo "$RELEASE_REPO" --yes 2>/dev/null || true
@@ -254,15 +256,16 @@ jobs:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          mkdir -p model-files
+          mkdir -p model-files/distilled
           gh release download "$tag" --repo "$RELEASE_REPO" \
-            --pattern 'model.onnx' \
+            --pattern 'model.safetensors' \
             --pattern 'tokenizer.json' \
-            --dir model-files
+            --pattern 'config.json' \
+            --dir model-files/distilled
 
       - name: Bundle binaries and model into plugin
         run: |
-          mkdir -p plugin/bin plugin/models tmp-bin
+          mkdir -p plugin/bin plugin/models/distilled tmp-bin
 
           # Extract platform binaries into a temp dir to avoid overwriting
           # the committed wrapper script (plugin/bin/enzyme)
@@ -272,9 +275,10 @@ jobs:
           tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
           mv tmp-bin/enzyme plugin/bin/enzyme-linux-arm64
 
-          # Copy model files
-          cp model-files/model.onnx plugin/models/
-          cp model-files/tokenizer.json plugin/models/
+          # Copy distilled model files
+          cp model-files/distilled/model.safetensors plugin/models/distilled/
+          cp model-files/distilled/tokenizer.json plugin/models/distilled/
+          cp model-files/distilled/config.json plugin/models/distilled/
 
           # Ensure executability
           chmod +x plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64 plugin/bin/enzyme-linux-arm64
@@ -339,11 +343,12 @@ jobs:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
         run: |
           tag="${GITHUB_REF_NAME}"
-          mkdir -p model-files
+          mkdir -p model-files/distilled
           gh release download "$tag" --repo "$RELEASE_REPO" \
-            --pattern 'model.onnx' \
+            --pattern 'model.safetensors' \
             --pattern 'tokenizer.json' \
-            --dir model-files
+            --pattern 'config.json' \
+            --dir model-files/distilled
 
       - name: Update enzyme-skill repo
         env:
@@ -356,7 +361,7 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
           cd skill-repo
 
-          mkdir -p bin models references scripts tmp-bin
+          mkdir -p bin models/distilled references scripts tmp-bin
 
           # Remove legacy enzyme/ subdirectory if present (flatten to repo root)
           rm -rf enzyme
@@ -369,9 +374,10 @@ jobs:
           done
           rm -rf tmp-bin
 
-          # Copy model files
-          cp ../model-files/model.onnx models/
-          cp ../model-files/tokenizer.json models/
+          # Copy distilled model files
+          cp ../model-files/distilled/model.safetensors models/distilled/
+          cp ../model-files/distilled/tokenizer.json models/distilled/
+          cp ../model-files/distilled/config.json models/distilled/
 
           # Sync agent plugin files (SKILL.md, Hermes adapter, guides, install script)
           cp ../plugin/agent/SKILL.md ./SKILL.md
@@ -390,7 +396,7 @@ jobs:
           cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
 
           # Update .gitattributes for flattened layout
-          printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\nmodels/model.onnx filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
+          printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\nmodels/distilled/model.safetensors filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
 
           # Update versions
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" ./SKILL.md

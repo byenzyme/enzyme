@@ -1,55 +1,37 @@
 # Embedding Model
 
-**Model**: [MongoDB/mdbr-leaf-ir](https://huggingface.co/MongoDB/mdbr-leaf-ir) (23M params, 384d)
-**Format**: ONNX int4 weight-only quantized (`MatMulNBitsQuantizer`, block_size=32)
-**Size**: ~52 MB (down from 87 MB FP32)
-**Tokenizer**: HuggingFace `tokenizer.json` with `padding=Fixed(128)`
+**Model**: [minishlab/potion-base-8M](https://huggingface.co/minishlab/potion-base-8M) (distilled via model2vec)
+**Format**: SafeTensors (model2vec distilled — static token embeddings, no transformer inference)
+**Size**: ~29 MB
+**Tokenizer**: HuggingFace `tokenizer.json`
 
 ## Files
 
-| File | Tracked | Description |
-|------|---------|-------------|
-| `model.onnx` | No (gitignored, 52 MB) | Int4 quantized ONNX model |
-| `tokenizer.json` | Yes (695 KB) | Tokenizer config with padding/truncation |
+| File | Location | Description |
+|------|----------|-------------|
+| `model.safetensors` | `distilled/` | Distilled static embedding weights |
+| `tokenizer.json` | `distilled/` | Tokenizer config |
+| `config.json` | `distilled/` | Model config |
 
 ## Restoring ~/.enzyme
 
-If `~/.enzyme/` gets wiped, restore from this directory:
+If `~/.enzyme/` gets wiped, restore via the CLI:
 
 ```bash
-make install-model
+enzyme setup
 ```
 
 Or manually:
 
 ```bash
-mkdir -p ~/.enzyme/models
-cp models/model.onnx ~/.enzyme/models/
-cp models/tokenizer.json ~/.enzyme/models/
-```
-
-## Re-downloading model.onnx
-
-If `models/model.onnx` is missing from the repo (fresh clone), regenerate it from the
-HuggingFace source using the conversion script in enzyme-python:
-
-```bash
-cd ../enzyme-python
-python scripts/convert_leaf_ir.py --format onnx --validate
-cp src/models/embeddings_onnx/model.onnx ../enzyme-rust/models/
-```
-
-Or extract from enzyme-python git history:
-
-```bash
-cd ../enzyme-python
-git show fb35cea:src/models/embeddings_onnx/model.onnx > ../enzyme-rust/models/model.onnx
+mkdir -p ~/.enzyme/models/distilled
+cp models/distilled/model.safetensors ~/.enzyme/models/distilled/
+cp models/distilled/tokenizer.json ~/.enzyme/models/distilled/
+cp models/distilled/config.json ~/.enzyme/models/distilled/
 ```
 
 ## Provenance
 
-- **Source model**: `MongoDB/mdbr-leaf-ir-asym` from HuggingFace
-- **Quantization**: onnxruntime `MatMulNBitsQuantizer` (int4, symmetric, block_size=32)
-- **Conversion script**: `enzyme-python/scripts/convert_leaf_ir.py`
-- **Conversion commit**: `fb35cea` in enzyme-python ("chore: update embedding models")
-- **Architecture**: identical to `all-MiniLM-L6-v2` (6-layer BERT, 384 hidden, 12 heads)
+- **Source model**: `minishlab/potion-base-8M` from HuggingFace
+- **Technique**: model2vec distillation — replaces transformer inference with static token embedding lookup
+- **Previous model**: `MongoDB/mdbr-leaf-ir` (ONNX, rten backend) — superseded by model2vec for faster inference and smaller binary

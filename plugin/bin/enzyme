@@ -39,6 +39,6 @@ if [ ! -x "$ENZYME_BIN" ]; then
 fi
 
 # Point the model resolver at the bundled model files.
-export ENZYME_MODEL_DIR="${PLUGIN_ROOT}/models"
+export ENZYME_MODEL_DIR="${PLUGIN_ROOT}/models/distilled"
 
 exec "$ENZYME_BIN" "$@"

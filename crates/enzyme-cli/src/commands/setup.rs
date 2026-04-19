@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 const MODEL_URL: &str =
-    "https://github.com/jshph/enzyme/releases/latest/download/model.onnx";
+    "https://github.com/jshph/enzyme/releases/latest/download/model.safetensors";
 const TOKENIZER_URL: &str =
     "https://github.com/jshph/enzyme/releases/latest/download/tokenizer.json";
+const CONFIG_URL: &str = "https://github.com/jshph/enzyme/releases/latest/download/config.json";
 
 /// Bump this when swapping to a new model so existing installs re-download.
-const MODEL_VERSION: &str = "arctic-xs-v1";
+const MODEL_VERSION: &str = "potion-base-8M-v1";
 
 fn models_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("ENZYME_MODEL_DIR") {
@@ -17,11 +18,14 @@ fn models_dir() -> Result<PathBuf> {
         }
     }
     let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".enzyme").join("models"))
+    Ok(home.join(".enzyme").join("models").join("distilled"))
 }
 
 fn model_present(dir: &Path) -> bool {
-    if !dir.join("model.onnx").exists() || !dir.join("tokenizer.json").exists() {
+    if !dir.join("model.safetensors").exists()
+        || !dir.join("tokenizer.json").exists()
+        || !dir.join("config.json").exists()
+    {
         return false;
     }
     // Check version marker — forces re-download when model changes.
@@ -84,8 +88,9 @@ pub async fn run_setup(check: bool) -> Result<()> {
         .await
         .context("Failed to create models directory")?;
 
-    download_file(MODEL_URL, &dir.join("model.onnx")).await?;
+    download_file(MODEL_URL, &dir.join("model.safetensors")).await?;
     download_file(TOKENIZER_URL, &dir.join("tokenizer.json")).await?;
+    download_file(CONFIG_URL, &dir.join("config.json")).await?;
 
     // Write version marker so future upgrades can detect stale models.
     std::fs::write(dir.join(".model_version"), MODEL_VERSION)

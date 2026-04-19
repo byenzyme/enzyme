@@ -49,18 +49,18 @@ fi
 
 # Copy model files into the cache dir.
 MODEL_DIR="${CACHE_DIR}/models"
-if [ ! -f "${MODEL_DIR}/model.onnx" ]; then
-    mkdir -p "$MODEL_DIR"
-    cp "${SKILL_ROOT}/models/model.onnx" "$MODEL_DIR/"
-    cp "${SKILL_ROOT}/models/tokenizer.json" "$MODEL_DIR/"
-    [ -f "${SKILL_ROOT}/models/.model_version" ] && cp "${SKILL_ROOT}/models/.model_version" "$MODEL_DIR/"
+if [ ! -f "${MODEL_DIR}/distilled/model.safetensors" ]; then
+    mkdir -p "$MODEL_DIR/distilled"
+    cp "${SKILL_ROOT}/models/distilled/model.safetensors" "$MODEL_DIR/distilled/"
+    cp "${SKILL_ROOT}/models/distilled/tokenizer.json" "$MODEL_DIR/distilled/"
+    cp "${SKILL_ROOT}/models/distilled/config.json" "$MODEL_DIR/distilled/"
 fi
 
 # Create a wrapper in PATH.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/enzyme" << 'WRAPPER'
 #!/bin/sh
-export ENZYME_MODEL_DIR="$HOME/.cache/enzyme/models"
+export ENZYME_MODEL_DIR="$HOME/.cache/enzyme/models/distilled"
 exec "$HOME/.cache/enzyme/enzyme" "$@"
 WRAPPER
 chmod +x "$HOME/.local/bin/enzyme"

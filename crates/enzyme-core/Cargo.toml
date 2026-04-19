@@ -30,6 +30,7 @@ futures = "0.3"
 async-stream = "0.3"
 
 [features]
+default = ["model2vec"]
 model2vec = ["dep:model2vec"]
 
 [dependencies.model2vec]

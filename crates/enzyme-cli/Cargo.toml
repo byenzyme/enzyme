@@ -9,6 +9,7 @@ name = "enzyme"
 path = "src/main.rs"
 
 [features]
+default = ["model2vec"]
 model2vec = ["enzyme-core/model2vec"]
 
 [dependencies]
