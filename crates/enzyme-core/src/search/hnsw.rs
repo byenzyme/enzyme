@@ -71,16 +71,10 @@ impl HnswIndex {
         let n = points.len();
         let dim = points[0].0.len();
 
-        let (raw_points, values): (Vec<Point>, Vec<String>) = points
-            .into_iter()
-            .map(|(vec, id)| (Point(vec), id))
-            .unzip();
+        let (raw_points, values): (Vec<Point>, Vec<String>) =
+            points.into_iter().map(|(vec, id)| (Point(vec), id)).unzip();
 
-        info!(
-            num_points = n,
-            dimension = dim,
-            "building HNSW index"
-        );
+        info!(num_points = n, dimension = dim, "building HNSW index");
 
         let map = Builder::default().build(raw_points, values);
 
@@ -119,11 +113,7 @@ impl HnswIndex {
             })
             .collect();
 
-        debug!(
-            k,
-            returned = results.len(),
-            "HNSW search completed"
-        );
+        debug!(k, returned = results.len(), "HNSW search completed");
 
         Ok(results)
     }
@@ -132,7 +122,6 @@ impl HnswIndex {
     pub fn is_built(&self) -> bool {
         self.map.is_some()
     }
-
 }
 
 impl Default for HnswIndex {

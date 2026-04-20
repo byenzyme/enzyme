@@ -31,7 +31,11 @@ enum ParseState {
     /// Inside the array, looking for `{` to start an object.
     InArray,
     /// Inside an object, tracking brace depth.
-    InObject { depth: usize, in_string: bool, escape_next: bool },
+    InObject {
+        depth: usize,
+        in_string: bool,
+        escape_next: bool,
+    },
     /// Array closed, done.
     Done,
 }
@@ -68,7 +72,11 @@ pub fn extract_segments(tokens: &[String]) -> Vec<SynthesisSegment> {
                     }
                     // Skip whitespace and commas between objects
                 }
-                ParseState::InObject { depth, in_string, escape_next } => {
+                ParseState::InObject {
+                    depth,
+                    in_string,
+                    escape_next,
+                } => {
                     object_buf.push(ch);
 
                     if *escape_next {
@@ -90,7 +98,9 @@ pub fn extract_segments(tokens: &[String]) -> Vec<SynthesisSegment> {
                                 *depth -= 1;
                                 if *depth == 0 {
                                     // Complete object — try to parse it
-                                    if let Ok(segment) = serde_json::from_str::<SynthesisSegment>(&object_buf) {
+                                    if let Ok(segment) =
+                                        serde_json::from_str::<SynthesisSegment>(&object_buf)
+                                    {
                                         segments.push(segment);
                                     }
                                     object_buf.clear();
@@ -147,7 +157,11 @@ impl SegmentExtractor {
                         self.state = ParseState::Done;
                     }
                 }
-                ParseState::InObject { depth, in_string, escape_next } => {
+                ParseState::InObject {
+                    depth,
+                    in_string,
+                    escape_next,
+                } => {
                     self.object_buf.push(ch);
 
                     if *escape_next {
@@ -168,7 +182,9 @@ impl SegmentExtractor {
                             '}' => {
                                 *depth -= 1;
                                 if *depth == 0 {
-                                    if let Ok(segment) = serde_json::from_str::<SynthesisSegment>(&self.object_buf) {
+                                    if let Ok(segment) =
+                                        serde_json::from_str::<SynthesisSegment>(&self.object_buf)
+                                    {
                                         segments.push(segment);
                                     }
                                     self.object_buf.clear();

@@ -6,7 +6,6 @@
 ///   - A held contradiction (both things true)
 ///   - An aspiration (current self ↔ desired self)
 ///   - A resistance (wanting to engage ↔ wanting to avoid)
-
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -201,11 +200,7 @@ drawn from the excerpts.",
     ],
 };
 
-pub const CATALYST_FORMATS: &[&CatalystFormat] = &[
-    &FORMAT_QUESTION,
-    &FORMAT_THESIS,
-    &FORMAT_CLAIM,
-];
+pub const CATALYST_FORMATS: &[&CatalystFormat] = &[&FORMAT_QUESTION, &FORMAT_THESIS, &FORMAT_CLAIM];
 
 // ---------------------------------------------------------------------------
 // The 6 catalyst profiles
@@ -230,7 +225,9 @@ what they actually think.",
         "What sits uneasily beside the conclusion about {{concept}} — what did settling it foreclose?",
         "What would have to be given up to resolve the tension between {{position_a}} and {{position_b}}?",
     ],
-    footer: Some("Consider whether the user has been circling this entity repeatedly and might benefit from synthesis, action, or closure instead of more discovery."),
+    footer: Some(
+        "Consider whether the user has been circling this entity repeatedly and might benefit from synthesis, action, or closure instead of more discovery.",
+    ),
     detection_patterns: &[
         "General-purpose thinking with diverse topics and perspectives",
         "Philosophical or analytical approach to varied subjects",
@@ -267,7 +264,9 @@ collected information into personal implication.",
         "What passage from {{entity}} speaks to the unfinished thinking on {{thread}}?",
         "What keeps drawing attention to {{theme}} across saved sources — what need is it serving?",
     ],
-    footer: Some("The goal is personal resonance, not comprehensive synthesis. One genuine connection beats cataloging everything."),
+    footer: Some(
+        "The goal is personal resonance, not comprehensive synthesis. One genuine connection beats cataloging everything.",
+    ),
     detection_patterns: &[
         "Imported highlights and annotations from reading",
         "Readwise synced content with source metadata",
@@ -303,7 +302,9 @@ users reflect on who matters and why.",
         "Where does {{person}} connect to {{project}} in ways not yet made explicit?",
         "What would shift if what goes unsaid with {{person}} were said?",
     ],
-    footer: Some("Some relationships need tending, some need honest evaluation, some need release. Surface which this might be."),
+    footer: Some(
+        "Some relationships need tending, some need honest evaluation, some need release. Surface which this might be.",
+    ),
     detection_patterns: &[
         "Notes about specific people with interaction history",
         "Contact information and relationship context",
@@ -339,7 +340,9 @@ might be avoiding.",
         "Where does {{project}} depend on a decision that everyone treats as already made but nobody explicitly chose?",
         "What pattern in the meeting notes suggests the real constraint on {{project}} isn't the one being discussed?",
     ],
-    footer: Some("Operational clarity often comes from naming what's stuck, not adding more tasks."),
+    footer: Some(
+        "Operational clarity often comes from naming what's stuck, not adding more tasks.",
+    ),
     detection_patterns: &[
         "Project notes with tasks, timelines, or status updates",
         "Meeting notes with attendees and action items",
@@ -375,7 +378,9 @@ gathering information to avoid deciding.",
         "Where does the analysis of {{decision}} gather information that delays rather than clarifies?",
         "What constraint from {{stakeholder}} forecloses options not yet acknowledged?",
     ],
-    footer: Some("Strategic clarity often comes from naming the trade-off, not from more analysis."),
+    footer: Some(
+        "Strategic clarity often comes from naming the trade-off, not from more analysis.",
+    ),
     detection_patterns: &[
         "Decision logs with options and criteria",
         "Strategic planning with trade-off analysis",
@@ -411,7 +416,9 @@ something else—a piece of writing, a decision, a conversation.",
         "What is the writing on {{experience}} protecting by not saying it directly?",
         "Where does the entry on {{moment}} contain raw material that speaks to {{thread}}?",
     ],
-    footer: Some("Reflective work moves at its own pace. Surface what's ready, don't force production."),
+    footer: Some(
+        "Reflective work moves at its own pace. Surface what's ready, don't force production.",
+    ),
     detection_patterns: &[
         "Daily notes and journal entries",
         "Timestamped reflections and processing",
@@ -486,10 +493,14 @@ pub fn presentation_guidance_for_entity(
         .or(default_profile)
         .unwrap_or(DEFAULT_PROFILE_KEY);
 
-    let profile = get_profile(profile_key)
-        .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
+    let profile =
+        get_profile(profile_key).unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
 
-    profile.presentation_guidance.iter().map(|s| s.to_string()).collect()
+    profile
+        .presentation_guidance
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Return presentation guidance for a non-explore register.
@@ -540,11 +551,19 @@ mod tests {
     #[test]
     fn test_full_guidance_lines() {
         let lines = full_guidance_lines(&PROFILE_DIALECTICAL);
-        assert_eq!(lines.len(), CORE_CATALYST_GUIDANCE.len() + PROFILE_DIALECTICAL.guidance_lines.len());
+        assert_eq!(
+            lines.len(),
+            CORE_CATALYST_GUIDANCE.len() + PROFILE_DIALECTICAL.guidance_lines.len()
+        );
         // First lines should be core guidance
         assert!(lines[0].starts_with("Probe tensions"));
         // Last lines should be profile-specific
-        assert!(lines.last().unwrap().starts_with("Honor the full lifecycle"));
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .starts_with("Honor the full lifecycle")
+        );
     }
 
     #[test]

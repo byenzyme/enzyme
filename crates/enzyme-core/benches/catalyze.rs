@@ -7,7 +7,7 @@
 /// This replaces the earlier two-binary comparison (catalyze_rusqlite /
 /// catalyze_libsql).  Since rusqlite has been dropped, a single bench against
 /// the production layer is sufficient for ongoing regression tracking.
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use enzyme_core::db::Database;
 use tempfile::TempDir;
 
@@ -39,9 +39,8 @@ fn seed_db(db: &Database) {
     }
 
     // Catalyst embeddings (packed)
-    let embeddings: Vec<(&str, Vec<f32>)> = (0..N_CATALYSTS)
-        .map(|i| ("", make_embedding(i)))
-        .collect();
+    let embeddings: Vec<(&str, Vec<f32>)> =
+        (0..N_CATALYSTS).map(|i| ("", make_embedding(i))).collect();
     // We can't easily pass &str refs here, so build the owned version
     let ids: Vec<String> = (0..N_CATALYSTS).map(|i| format!("cat_{i}")).collect();
     let id_refs: Vec<(&str, &[f32])> = ids
@@ -97,11 +96,15 @@ fn bench_similarities_for_catalyst(c: &mut Criterion) {
     let db = Database::open(dir.path().join("bench.db")).unwrap();
     seed_db(&db);
 
-    let mut group =
-        c.benchmark_group(format!("get_similarities_for_catalyst/{N_SIMILARITIES}_rows"));
+    let mut group = c.benchmark_group(format!(
+        "get_similarities_for_catalyst/{N_SIMILARITIES}_rows"
+    ));
     group.bench_function("libsql", |b| {
         b.iter(|| {
-            black_box(db.get_similarities_for_catalyst("cat_0", N_SIMILARITIES).unwrap())
+            black_box(
+                db.get_similarities_for_catalyst("cat_0", N_SIMILARITIES)
+                    .unwrap(),
+            )
         })
     });
     group.finish();

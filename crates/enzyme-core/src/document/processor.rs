@@ -8,12 +8,11 @@ use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
 
-use super::chunking::{chunk_document, DEFAULT_CHUNK_SIZE_CHARS};
+use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
-use super::extract::{extract_entities, ExtractedEntities};
-use super::frontmatter::{parse_frontmatter, strip_frontmatter, Frontmatter};
+use super::extract::{ExtractedEntities, extract_entities};
+use super::frontmatter::{Frontmatter, parse_frontmatter, strip_frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
-
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -431,10 +430,7 @@ Second paragraph here.
             assert!(result.is_ok(), "all files should process successfully");
         }
 
-        let source_refs: Vec<String> = results
-            .into_iter()
-            .map(|r| r.unwrap().source_ref)
-            .collect();
+        let source_refs: Vec<String> = results.into_iter().map(|r| r.unwrap().source_ref).collect();
         assert!(source_refs.contains(&"a.md".to_string()));
         assert!(source_refs.contains(&"b.md".to_string()));
         assert!(source_refs.contains(&"c.md".to_string()));

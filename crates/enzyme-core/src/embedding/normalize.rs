@@ -110,10 +110,7 @@ mod tests {
         let mut v = vec![3.0, 4.0];
         l2_normalize(&mut v);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-6,
-            "expected unit norm, got {norm}"
-        );
+        assert!((norm - 1.0).abs() < 1e-6, "expected unit norm, got {norm}");
         assert!((v[0] - 0.6).abs() < 1e-6);
         assert!((v[1] - 0.8).abs() < 1e-6);
     }
@@ -139,10 +136,7 @@ mod tests {
         let mut v = vec![-3.0, 4.0];
         l2_normalize(&mut v);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-6,
-            "expected unit norm, got {norm}"
-        );
+        assert!((norm - 1.0).abs() < 1e-6, "expected unit norm, got {norm}");
     }
 
     #[test]
@@ -157,10 +151,7 @@ mod tests {
         let mut v: Vec<f32> = (1..=384).map(|i| i as f32).collect();
         l2_normalize(&mut v);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 1e-5,
-            "expected unit norm, got {norm}"
-        );
+        assert!((norm - 1.0).abs() < 1e-5, "expected unit norm, got {norm}");
     }
 
     // ---- mean_pool tests ----

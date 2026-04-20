@@ -30,16 +30,27 @@ pub struct AppState {
 }
 
 fn mime_for_path(path: &str) -> &'static str {
-    if path.ends_with(".html") { "text/html; charset=utf-8" }
-    else if path.ends_with(".js") { "application/javascript; charset=utf-8" }
-    else if path.ends_with(".css") { "text/css; charset=utf-8" }
-    else if path.ends_with(".woff2") { "font/woff2" }
-    else if path.ends_with(".woff") { "font/woff" }
-    else if path.ends_with(".svg") { "image/svg+xml" }
-    else if path.ends_with(".png") { "image/png" }
-    else if path.ends_with(".ico") { "image/x-icon" }
-    else if path.ends_with(".json") { "application/json" }
-    else { "application/octet-stream" }
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".ico") {
+        "image/x-icon"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 async fn serve_embedded(req: Request) -> Response {
@@ -60,11 +71,14 @@ async fn serve_embedded(req: Request) -> Response {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, if resolved_path.starts_with("assets/") {
-                "public, max-age=31536000, immutable"
-            } else {
-                "no-cache"
-            }),
+            (
+                header::CACHE_CONTROL,
+                if resolved_path.starts_with("assets/") {
+                    "public, max-age=31536000, immutable"
+                } else {
+                    "no-cache"
+                },
+            ),
         ],
         file.data.to_vec(),
     )

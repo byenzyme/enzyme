@@ -95,10 +95,7 @@ impl StalenessResult {
 ///
 /// All stale entities are collected (not short-circuited) so callers can decide
 /// between a partial refresh (few entities) and a full refresh (many entities).
-pub fn check_catalyst_staleness(
-    db: &Database,
-    vault_path: &Path,
-) -> Result<StalenessResult> {
+pub fn check_catalyst_staleness(db: &Database, vault_path: &Path) -> Result<StalenessResult> {
     // --- Check 0: Do catalysts exist at all? ---
     let latest_ts = db.get_latest_catalyst_timestamp()?;
     if latest_ts.is_none() {
@@ -129,9 +126,7 @@ pub fn check_catalyst_staleness(
                 let delta = current_count - old_count;
                 info!(
                     entity = entity_name.as_str(),
-                    old_count,
-                    current_count,
-                    "entity has new content — stale"
+                    old_count, current_count, "entity has new content — stale"
                 );
                 stale_entities.push(StaleEntity {
                     name: entity_name.clone(),
@@ -183,10 +178,7 @@ pub fn store_staleness_bookkeeping(
 
 /// Record bookkeeping for a partial refresh — updates doc counts only for the
 /// specified entities, preserving counts for all others.
-pub fn store_staleness_bookkeeping_partial(
-    db: &Database,
-    entity_names: &[String],
-) -> Result<()> {
+pub fn store_staleness_bookkeeping_partial(db: &Database, entity_names: &[String]) -> Result<()> {
     // Load existing counts and merge in the refreshed entities
     let mut counts = load_stored_doc_counts(db)?;
     for name in entity_names {
@@ -274,6 +266,9 @@ mod tests {
 
         let result = check_catalyst_staleness(&db, dir.path()).unwrap();
         assert!(result.is_stale());
-        assert!(matches!(result, StalenessResult::Stale(StaleReason::NoCatalysts)));
+        assert!(matches!(
+            result,
+            StalenessResult::Stale(StaleReason::NoCatalysts)
+        ));
     }
 }

@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod config;
 pub mod db;
 pub mod document;
@@ -7,4 +8,3 @@ pub mod models;
 pub mod pipeline;
 pub mod query;
 pub mod search;
-pub mod catalog;

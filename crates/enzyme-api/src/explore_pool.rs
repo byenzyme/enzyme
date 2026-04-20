@@ -10,8 +10,8 @@ use std::time::{Instant, SystemTime};
 use anyhow::Result;
 use tracing::info;
 
-use enzyme_core::db::Database;
 use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::db::Database;
 use enzyme_core::search::hnsw::HnswIndex;
 
 /// Metadata about a single catalyst in the pool.
@@ -94,7 +94,6 @@ impl ExplorePool {
         // Pre-render pool context markdown
         let pool_context = Self::render_pool_context(&catalyst_metadata);
 
-
         let elapsed = start.elapsed();
         info!(
             catalysts = catalyst_metadata.len(),
@@ -122,7 +121,11 @@ impl ExplorePool {
     }
 
     /// Search the HNSW index for catalysts most similar to a query embedding.
-    pub fn search_catalysts(&self, query_embedding: &[f32], top_k: usize) -> Result<Vec<(String, f32)>> {
+    pub fn search_catalysts(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(String, f32)>> {
         let results = self.hnsw_index.search(query_embedding, top_k)?;
         Ok(results.into_iter().map(|r| (r.id, r.similarity)).collect())
     }
@@ -142,10 +145,7 @@ impl ExplorePool {
         let mut by_entity: HashMap<&str, Vec<&str>> = HashMap::new();
 
         for cat in catalysts {
-            by_entity
-                .entry(&cat.entity)
-                .or_default()
-                .push(&cat.text);
+            by_entity.entry(&cat.entity).or_default().push(&cat.text);
         }
 
         for (entity, texts) in &by_entity {

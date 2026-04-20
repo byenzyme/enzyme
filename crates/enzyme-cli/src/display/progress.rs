@@ -45,7 +45,6 @@ pub enum DisplayEvent {
         source: SelectionSource,
     },
 
-
     // Discovery (catalyst generation)
     DiscoveryStart {
         total: usize,

@@ -61,10 +61,7 @@ mod tests {
 
         impl EmbeddingBackend for Echo {
             fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-                Ok(texts
-                    .iter()
-                    .map(|t| vec![t.len() as f32; 3])
-                    .collect())
+                Ok(texts.iter().map(|t| vec![t.len() as f32; 3]).collect())
             }
 
             fn dimension(&self) -> usize {

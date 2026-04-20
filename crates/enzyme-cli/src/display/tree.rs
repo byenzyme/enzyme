@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crossterm::style::{SetForegroundColor, ResetColor, Color};
+use crossterm::style::{Color, ResetColor, SetForegroundColor};
 
 use enzyme_core::models::EntityType;
 
@@ -57,7 +57,11 @@ pub fn render_entity_node(
         } else {
             text.to_string()
         };
-        let text_color = if failed { Color::DarkRed } else { Color::DarkGrey };
+        let text_color = if failed {
+            Color::DarkRed
+        } else {
+            Color::DarkGrey
+        };
         write!(
             writer,
             " {dim}{arrow} {text}{reset}",

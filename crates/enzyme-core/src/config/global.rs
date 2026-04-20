@@ -89,15 +89,12 @@ impl GlobalConfig {
     pub fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create config directory {}",
-                    parent.display()
-                )
+                format!("failed to create config directory {}", parent.display())
             })?;
         }
 
-        let yaml = serde_yaml::to_string(self)
-            .context("failed to serialize global config to YAML")?;
+        let yaml =
+            serde_yaml::to_string(self).context("failed to serialize global config to YAML")?;
 
         fs::write(path, yaml)
             .with_context(|| format!("failed to write global config to {}", path.display()))?;
@@ -106,11 +103,7 @@ impl GlobalConfig {
     }
 
     /// Register or update a vault entry and optionally set it as default.
-    pub fn register_vault(
-        &mut self,
-        vault_path: PathBuf,
-        set_default: bool,
-    ) {
+    pub fn register_vault(&mut self, vault_path: PathBuf, set_default: bool) {
         self.vaults
             .entry(vault_path.clone())
             .or_insert_with(|| VaultEntry {
@@ -187,8 +180,7 @@ mod tests {
         assert_eq!(loaded.default_vault, config.default_vault);
         assert_eq!(loaded.vaults.len(), 2);
         assert_eq!(
-            loaded.vaults[&PathBuf::from("/Users/alice/vault")]
-                .catalyst_profile,
+            loaded.vaults[&PathBuf::from("/Users/alice/vault")].catalyst_profile,
             Some("research".to_string()),
         );
         assert!(
@@ -262,8 +254,7 @@ vaults:
         );
         assert_eq!(config.vaults.len(), 2);
         assert_eq!(
-            config.vaults[&PathBuf::from("/home/user/notes")]
-                .catalyst_profile,
+            config.vaults[&PathBuf::from("/home/user/notes")].catalyst_profile,
             Some("personal".to_string()),
         );
     }

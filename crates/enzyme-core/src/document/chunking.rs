@@ -199,9 +199,7 @@ fn split_sentences(text: &str) -> Vec<String> {
         if (chars[i] == '.' || chars[i] == '!' || chars[i] == '?') && i + 1 < len {
             if chars[i + 1].is_whitespace() {
                 // Check if next non-whitespace char is uppercase or we're at the end.
-                let next_nonws = chars[i + 1..]
-                    .iter()
-                    .find(|c| !c.is_whitespace());
+                let next_nonws = chars[i + 1..].iter().find(|c| !c.is_whitespace());
                 if next_nonws.is_none() || next_nonws.is_some_and(|c| c.is_uppercase()) {
                     sentences.push(current.trim().to_string());
                     current.clear();
@@ -367,9 +365,18 @@ mod tests {
     #[test]
     fn test_multiple_paragraphs_boundary() {
         // Use paragraphs large enough to exceed MIN_CHUNK_SIZE_CHARS individually.
-        let p1 = format!("Alpha paragraph with enough content to stand alone. {}", "x".repeat(80));
-        let p2 = format!("Beta paragraph with enough content to stand alone. {}", "y".repeat(80));
-        let p3 = format!("Gamma paragraph with enough content to stand alone. {}", "z".repeat(80));
+        let p1 = format!(
+            "Alpha paragraph with enough content to stand alone. {}",
+            "x".repeat(80)
+        );
+        let p2 = format!(
+            "Beta paragraph with enough content to stand alone. {}",
+            "y".repeat(80)
+        );
+        let p3 = format!(
+            "Gamma paragraph with enough content to stand alone. {}",
+            "z".repeat(80)
+        );
         let content = format!("{}\n\n{}\n\n{}", p1, p2, p3);
 
         // chunk_size fits p1+p2 but not p1+p2+p3
@@ -384,7 +391,10 @@ mod tests {
     #[test]
     fn test_small_heading_merged_into_next_chunk() {
         // A heading alone should be merged into the following paragraph.
-        let content = format!("# Chapter Title\n\n{}", "Some real content here. ".repeat(10));
+        let content = format!(
+            "# Chapter Title\n\n{}",
+            "Some real content here. ".repeat(10)
+        );
         let chunks = chunk_document(&content, 2048);
 
         assert_eq!(chunks.len(), 1);

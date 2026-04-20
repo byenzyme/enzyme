@@ -6,15 +6,15 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_api_config};
 
-use crate::explore_pool::ExplorePool;
 use crate::AppState;
+use crate::explore_pool::ExplorePool;
 
 #[derive(Deserialize)]
 struct WarmRequest {
@@ -64,7 +64,8 @@ async fn warm(
                 if let Ok(top_catalysts) = pool.search_catalysts(&query_vec, 12) {
                     // Send a minimal request to warm the provider cache
                     if let Ok(api_config) = resolve_api_config().await {
-                        let client = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
+                        let client =
+                            LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
                         let _ = client
                             .chat_completion(
                                 &api_config.model,
@@ -77,7 +78,10 @@ async fn warm(
                             )
                             .await;
 
-                        info!("LLM cache warmed with {} catalyst context", top_catalysts.len());
+                        info!(
+                            "LLM cache warmed with {} catalyst context",
+                            top_catalysts.len()
+                        );
                     }
                 }
             }

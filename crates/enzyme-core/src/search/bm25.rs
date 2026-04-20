@@ -157,7 +157,11 @@ impl Bm25Index {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(k);
 
         debug!(
@@ -330,11 +334,7 @@ mod tests {
 
     #[test]
     fn test_k_limits_results() {
-        let index = build_index(&[
-            ("a", "word word word"),
-            ("b", "word word"),
-            ("c", "word"),
-        ]);
+        let index = build_index(&[("a", "word word word"), ("b", "word word"), ("c", "word")]);
 
         let results = index.search("word", 2);
         assert_eq!(results.len(), 2);

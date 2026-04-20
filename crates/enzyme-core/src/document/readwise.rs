@@ -132,9 +132,7 @@ fn parse_highlight_block(block: &str) -> ReadwiseHighlight {
 
 /// Find the position of a `**Note**:` marker in the block.
 fn find_note_marker(block: &str) -> Option<usize> {
-    block
-        .find("**Note**:")
-        .or_else(|| block.find("**Note:**"))
+    block.find("**Note**:").or_else(|| block.find("**Note:**"))
 }
 
 /// Chunk Readwise highlights into groups, keeping highlight+note as atomic units.
@@ -194,10 +192,7 @@ pub fn chunk_readwise_highlights(
 
 /// Get the first N words of a string.
 fn first_n_words(s: &str, n: usize) -> String {
-    s.split_whitespace()
-        .take(n)
-        .collect::<Vec<_>>()
-        .join(" ")
+    s.split_whitespace().take(n).collect::<Vec<_>>().join(" ")
 }
 
 /// Get the last N words of a string.
@@ -309,12 +304,10 @@ Second highlight
 
     #[test]
     fn test_chunk_readwise_highlights_single_group() {
-        let highlights = vec![
-            ReadwiseHighlight {
-                text: "Only highlight".to_string(),
-                note: None,
-            },
-        ];
+        let highlights = vec![ReadwiseHighlight {
+            text: "Only highlight".to_string(),
+            note: None,
+        }];
 
         let chunks = chunk_readwise_highlights(&highlights, 5, 10);
         assert_eq!(chunks.len(), 1);

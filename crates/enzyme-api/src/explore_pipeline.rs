@@ -83,8 +83,12 @@ pub struct ExploreRequest {
     pub results_per_query: usize,
 }
 
-fn default_max_queries() -> usize { 3 }
-fn default_results_per_query() -> usize { 5 }
+fn default_max_queries() -> usize {
+    3
+}
+fn default_results_per_query() -> usize {
+    5
+}
 
 #[derive(Deserialize)]
 struct DecompositionResponse {
@@ -164,9 +168,8 @@ async fn run_synthesis(
         message: "Weaving findings together...".to_string(),
     });
 
-    let synthesis_prompt = format!(
-        "## Original Question\n{query}\n\n## Findings\n{findings_context}"
-    );
+    let synthesis_prompt =
+        format!("## Original Question\n{query}\n\n## Findings\n{findings_context}");
 
     match client
         .chat_completion_streaming(
@@ -301,16 +304,14 @@ pub async fn run_standard_pipeline(
         )
         .await
     {
-        Ok(response) => {
-            match serde_json::from_str::<DecompositionResponse>(&response) {
-                Ok(parsed) => {
-                    let mut queries = parsed.queries;
-                    queries.truncate(request.max_queries);
-                    queries
-                }
-                Err(_) => vec![request.query.clone()],
+        Ok(response) => match serde_json::from_str::<DecompositionResponse>(&response) {
+            Ok(parsed) => {
+                let mut queries = parsed.queries;
+                queries.truncate(request.max_queries);
+                queries
             }
-        }
+            Err(_) => vec![request.query.clone()],
+        },
         Err(e) => {
             warn!("Decomposition failed, using original query: {e}");
             vec![request.query.clone()]
@@ -515,9 +516,11 @@ pub async fn run_fast_pipeline(
                             .flatten()
                             .unwrap_or_default();
 
-                        let entry = doc_scores
-                            .entry(sd.file_path.clone())
-                            .or_insert((0.0, 0, content.clone()));
+                        let entry = doc_scores.entry(sd.file_path.clone()).or_insert((
+                            0.0,
+                            0,
+                            content.clone(),
+                        ));
                         if sd.similarity > entry.0 {
                             entry.0 = sd.similarity;
                         }

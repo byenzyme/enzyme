@@ -52,10 +52,7 @@ pub fn extract_date_from_path(rel_path: &Path) -> Option<DateTime<Utc>> {
     }
 
     // Collect path components for strategies 5 and 6
-    let components: Vec<&str> = rel_path
-        .iter()
-        .filter_map(|c| c.to_str())
-        .collect();
+    let components: Vec<&str> = rel_path.iter().filter_map(|c| c.to_str()).collect();
 
     // Strategy 5: YYYY/MM/DD path components
     if let Some(dt) = parse_ymd_path_components(&components) {

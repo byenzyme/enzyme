@@ -2,9 +2,9 @@
 //!
 //! Usage: cargo run -p enzyme-core --example era_diagnostic -- ~/obsidian
 
-use std::env;
 use enzyme_core::db::Database;
-use enzyme_core::pipeline::eras::{cluster_eras_periodic, allocate_catalysts_to_eras};
+use enzyme_core::pipeline::eras::{allocate_catalysts_to_eras, cluster_eras_periodic};
+use std::env;
 
 fn main() {
     let vault_path = env::args().nth(1).unwrap_or_else(|| {
@@ -15,7 +15,9 @@ fn main() {
     let db_path = format!("{}/.enzyme/enzyme.db", vault_path);
     let db = Database::open(&db_path).expect("failed to open database");
 
-    let entities = db.get_top_entities(20, "recency_score").expect("failed to get entities");
+    let entities = db
+        .get_top_entities(20, "recency_score")
+        .expect("failed to get entities");
 
     let budget = 7usize;
 
@@ -38,9 +40,18 @@ fn main() {
         let span = format!("{} to {}", keys.first().unwrap(), keys.last().unwrap());
         let span_months = buckets.len();
 
-        let mode = if span_months <= 6 { "monthly" } else if span_months <= 36 { "quarterly" } else { "hybrid" };
+        let mode = if span_months <= 6 {
+            "monthly"
+        } else if span_months <= 36 {
+            "quarterly"
+        } else {
+            "hybrid"
+        };
 
-        println!("\n[{}] {} (freq={}, span={}, mode={})", entity.entity_type, name, freq, span, mode);
+        println!(
+            "\n[{}] {} (freq={}, span={}, mode={})",
+            entity.entity_type, name, freq, span, mode
+        );
 
         if eras.len() <= 1 {
             println!("  1 era (flat)");

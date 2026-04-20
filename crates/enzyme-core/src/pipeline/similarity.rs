@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Catalyst, Embedding, CatalystSimilarity};
+use crate::models::{Catalyst, CatalystSimilarity, Embedding};
 
 pub struct SimilarityPipeline<'a> {
     db: &'a Database,
@@ -125,7 +125,10 @@ impl<'a> SimilarityPipeline<'a> {
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        info!(catalysts_processed = total, similarities_computed, duration_ms, "similarity computation complete");
+        info!(
+            catalysts_processed = total,
+            similarities_computed, duration_ms, "similarity computation complete"
+        );
 
         Ok(SimilarityStats {
             catalysts_processed: total,

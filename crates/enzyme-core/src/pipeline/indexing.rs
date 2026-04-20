@@ -92,7 +92,8 @@ impl<'a> IndexingPipeline<'a> {
                                 let fs_mtime_ms = mtime
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
-                                    .as_millis() as i64;
+                                    .as_millis()
+                                    as i64;
                                 fs_mtime_ms > *stored_mtime_ms
                             })
                             .unwrap_or(true); // if stat fails, assume changed
@@ -156,7 +157,10 @@ impl<'a> IndexingPipeline<'a> {
 
         // Step 7: Delete removed files from the database
         if !deleted_paths.is_empty() {
-            on_progress(&format!("Deleting {} removed files...", deleted_paths.len()));
+            on_progress(&format!(
+                "Deleting {} removed files...",
+                deleted_paths.len()
+            ));
             self.db.delete_documents_by_paths(&deleted_paths)?;
         }
 
@@ -227,9 +231,10 @@ impl<'a> IndexingPipeline<'a> {
                 .unwrap_or_default();
 
             // Full file body (frontmatter stripped) for document-level entities
-            let full_body: Option<String> = doc.chunks.first().map(|_| {
-                crate::document::strip_frontmatter(&doc.content).to_string()
-            });
+            let full_body: Option<String> = doc
+                .chunks
+                .first()
+                .map(|_| crate::document::strip_frontmatter(&doc.content).to_string());
 
             for tag in &doc.tags {
                 let context = if fm_tags.contains(tag.as_str()) {
@@ -378,8 +383,7 @@ impl<'a> IndexingPipeline<'a> {
 
         for (entity_id, effective_date_opt, created_at) in &all_occ_dates {
             let effective_date = effective_date_opt.unwrap_or(*created_at);
-            let age_days =
-                ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+            let age_days = ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
 
             let acc = accums.entry(*entity_id).or_insert_with(|| Accum {
                 weighted_sum: 0.0,
@@ -416,11 +420,14 @@ impl<'a> IndexingPipeline<'a> {
 
                 let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
 
-                Some((entity_id, EntityTrends {
-                    frequency_recent,
-                    recency_score,
-                    timeline_buckets,
-                }))
+                Some((
+                    entity_id,
+                    EntityTrends {
+                        frequency_recent,
+                        recency_score,
+                        timeline_buckets,
+                    },
+                ))
             })
             .collect();
 
@@ -433,11 +440,11 @@ impl<'a> IndexingPipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Catalyst;
     use crate::models::EntityType;
     use crate::pipeline::staleness::{
-        check_catalyst_staleness, store_staleness_bookkeeping, StalenessResult, StaleReason,
+        StaleReason, StalenessResult, check_catalyst_staleness, store_staleness_bookkeeping,
     };
-    use crate::models::Catalyst;
     use std::path::Path;
 
     fn test_db() -> Database {
@@ -504,10 +511,11 @@ mod tests {
         assert!(!entities.is_empty(), "entities should have been extracted");
 
         // Trending scores should be non-zero for at least some entities
-        let has_nonzero = entities
-            .iter()
-            .any(|e| e.trends.recency_score > 0.0);
-        assert!(has_nonzero, "at least one entity should have a non-zero recency score");
+        let has_nonzero = entities.iter().any(|e| e.trends.recency_score > 0.0);
+        assert!(
+            has_nonzero,
+            "at least one entity should have a non-zero recency score"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -542,7 +550,11 @@ mod tests {
 
         let count_before = db.get_document_count().unwrap();
 
-        write_md(vault.path(), "new-one.md", "# New One\nContent with #newtag.\n");
+        write_md(
+            vault.path(),
+            "new-one.md",
+            "# New One\nContent with #newtag.\n",
+        );
         write_md(
             vault.path(),
             "new-two.md",
@@ -599,7 +611,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .content_hash;
-        assert_ne!(hash_before, hash_after, "content hash should change after modification");
+        assert_ne!(
+            hash_before, hash_after,
+            "content hash should change after modification"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -713,12 +728,22 @@ mod tests {
         pipeline.run(false, |_| {}).unwrap();
 
         let result = check_catalyst_staleness(&db, vault.path()).unwrap();
-        assert!(result.is_stale(), "should be stale after adding 4 new files mentioning alpha");
+        assert!(
+            result.is_stale(),
+            "should be stale after adding 4 new files mentioning alpha"
+        );
         match result {
             StalenessResult::Stale(StaleReason::EntitiesStale { stale_entities }) => {
-                assert!(stale_entities.iter().any(|e| e.name == "alpha"), "alpha should be stale");
+                assert!(
+                    stale_entities.iter().any(|e| e.name == "alpha"),
+                    "alpha should be stale"
+                );
                 let alpha = stale_entities.iter().find(|e| e.name == "alpha").unwrap();
-                assert!(alpha.delta >= 3, "delta should be >= 3, got {}", alpha.delta);
+                assert!(
+                    alpha.delta >= 3,
+                    "delta should be >= 3, got {}",
+                    alpha.delta
+                );
             }
             other => panic!("expected EntitiesStale, got {:?}", other),
         }
@@ -774,7 +799,10 @@ mod tests {
                 &format!("doc-{:04}.md", i),
                 &format!(
                     "---\ntitle: Document {}\ntags:\n  - bulk\n---\n# Document {}\nSome content for document number {}. References [[Ref {}]].\n",
-                    i, i, i, i % 10
+                    i,
+                    i,
+                    i,
+                    i % 10
                 ),
             );
         }
@@ -841,7 +869,10 @@ mod tests {
                 occ.file_path
             );
             let ctx = occ.context.as_ref().unwrap();
-            assert!(!ctx.is_empty(), "folder occurrence context should not be empty");
+            assert!(
+                !ctx.is_empty(),
+                "folder occurrence context should not be empty"
+            );
             // Folder entities should get full file body, not just 200 chars
             assert!(
                 ctx.contains("researcher") || ctx.contains("collaborates"),
@@ -879,8 +910,14 @@ mod tests {
 
         let ctx = occs[0].context.as_ref().expect("should have context");
         // Full body should contain both first and last paragraph
-        assert!(ctx.contains("Paragraph one"), "should contain start of body");
-        assert!(ctx.contains("Final paragraph"), "should contain end of body");
+        assert!(
+            ctx.contains("Paragraph one"),
+            "should contain start of body"
+        );
+        assert!(
+            ctx.contains("Final paragraph"),
+            "should contain end of body"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -955,7 +992,10 @@ mod tests {
         assert_eq!(occs.len(), 1);
 
         let ctx = occs[0].context.as_ref().expect("should have context");
-        assert!(ctx.contains("First paragraph"), "should contain start of body");
+        assert!(
+            ctx.contains("First paragraph"),
+            "should contain start of body"
+        );
         assert!(ctx.contains("Final notes"), "should contain end of body");
     }
 }

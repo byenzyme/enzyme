@@ -71,8 +71,15 @@ fn run_scan_filesystem(vault_path: &Path, guide: bool) -> Result<()> {
     if guide {
         let mut parts = Vec::new();
         if !folders.is_empty() {
-            let names: Vec<_> = folders.iter().take(8).map(|(n, _)| format!("{n}/")).collect();
-            parts.push(format!("{file_count} notes across folders like {}", names.join(", ")));
+            let names: Vec<_> = folders
+                .iter()
+                .take(8)
+                .map(|(n, _)| format!("{n}/"))
+                .collect();
+            parts.push(format!(
+                "{file_count} notes across folders like {}",
+                names.join(", ")
+            ));
         } else {
             parts.push(format!("{file_count} notes"));
         }
@@ -81,13 +88,20 @@ fn run_scan_filesystem(vault_path: &Path, guide: bool) -> Result<()> {
             parts.push(format!("frequent tags {}", names.join(", ")));
         }
         if !links.is_empty() {
-            let names: Vec<_> = links.iter().take(8).map(|(n, _)| format!("[[{n}]]")).collect();
+            let names: Vec<_> = links
+                .iter()
+                .take(8)
+                .map(|(n, _)| format!("[[{n}]]"))
+                .collect();
             parts.push(format!("hub pages {}", names.join(", ")));
         }
         println!("{}", parts.join(". "));
     } else {
         let to_json = |entries: &[(String, usize)]| -> Vec<serde_json::Value> {
-            entries.iter().map(|(name, count)| json!({"name": name, "count": count})).collect()
+            entries
+                .iter()
+                .map(|(name, count)| json!({"name": name, "count": count}))
+                .collect()
         };
         let output = json!({
             "files": file_count,

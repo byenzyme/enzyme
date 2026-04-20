@@ -74,11 +74,7 @@ impl Database {
     // -- Convenience wrappers -------------------------------------------------
 
     /// Execute a write statement and return the number of rows changed.
-    pub fn execute_write(
-        &self,
-        sql: &str,
-        params: Vec<libsql::Value>,
-    ) -> Result<usize, DbError> {
+    pub fn execute_write(&self, sql: &str, params: Vec<libsql::Value>) -> Result<usize, DbError> {
         let sql = sql.to_owned();
         block_in_place_sync(async move {
             self.conn

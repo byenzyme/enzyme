@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-use crate::db::Database;
 use crate::config::paths::EnzymePaths;
+use crate::db::Database;
 
 /// Format the top entities and their catalysts as a compact context string
 /// for LLM decomposition and synthesis prompts.

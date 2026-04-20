@@ -60,12 +60,11 @@ impl CatalyzeResponse {
         match register {
             ContentRegister::Explore => {
                 for catalyst in &mut self.top_contributing_catalysts {
-                    catalyst.presentation_guidance =
-                        crate::llm::presentation_guidance_for_entity(
-                            &catalyst.entity,
-                            entity_profiles,
-                            default_profile,
-                        );
+                    catalyst.presentation_guidance = crate::llm::presentation_guidance_for_entity(
+                        &catalyst.entity,
+                        entity_profiles,
+                        default_profile,
+                    );
                 }
             }
             _ => {
@@ -91,10 +90,7 @@ pub struct ContextSearch<'a> {
 }
 
 impl<'a> ContextSearch<'a> {
-    pub fn new(
-        db: &'a Database,
-        service: &'a EmbeddingService,
-    ) -> Self {
+    pub fn new(db: &'a Database, service: &'a EmbeddingService) -> Self {
         Self {
             db,
             target_db: None,
@@ -140,10 +136,8 @@ impl<'a> ContextSearch<'a> {
         let emb_db = self.target_db.unwrap_or(self.db);
         let cached = emb_db.get_all_catalyst_embeddings()?;
         let cat_embeddings = if !cached.is_empty() {
-            let cache_map: HashMap<&str, &Vec<f32>> = cached
-                .iter()
-                .map(|(id, vec)| (id.as_str(), vec))
-                .collect();
+            let cache_map: HashMap<&str, &Vec<f32>> =
+                cached.iter().map(|(id, vec)| (id.as_str(), vec)).collect();
 
             let mut vecs = Vec::with_capacity(catalysts.len());
             let mut all_hit = true;
@@ -160,7 +154,10 @@ impl<'a> ContextSearch<'a> {
                 debug!("using cached catalyst embeddings ({} vectors)", vecs.len());
                 vecs
             } else {
-                debug!("catalyst cache stale, re-embedding {} catalysts", catalysts.len());
+                debug!(
+                    "catalyst cache stale, re-embedding {} catalysts",
+                    catalysts.len()
+                );
                 let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
                 self.service.embed_documents(&cat_texts)?
             }
@@ -185,7 +182,10 @@ impl<'a> ContextSearch<'a> {
             .iter()
             .map(|(idx, sim)| {
                 let c = &catalysts[*idx];
-                (c.id.clone(), (c.text.as_str(), c.entity.as_str(), *sim as f64))
+                (
+                    c.id.clone(),
+                    (c.text.as_str(), c.entity.as_str(), *sim as f64),
+                )
             })
             .collect();
 
@@ -206,8 +206,8 @@ impl<'a> ContextSearch<'a> {
         for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
             let relevance = *cat_sim as f64;
-            let sims = sim_repo
-                .get_similarities_for_catalyst(&catalyst.id, context_per_catalyst)?;
+            let sims =
+                sim_repo.get_similarities_for_catalyst(&catalyst.id, context_per_catalyst)?;
 
             for sim in &sims {
                 let key = format!("{}:{}", sim.file_path, sim.chunk_index);
@@ -264,7 +264,11 @@ impl<'a> ContextSearch<'a> {
             });
         }
 
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Fetch content for top limit*3 candidates BEFORE dedup/truncation
         let fetch_count = (limit * 3).min(scored.len());

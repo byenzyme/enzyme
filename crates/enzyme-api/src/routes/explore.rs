@@ -2,14 +2,14 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::post;
 use axum::{Json, Router};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::explore_pipeline::{self, ExploreEvent, ExploreRequest};
 use crate::AppState;
+use crate::explore_pipeline::{self, ExploreEvent, ExploreRequest};
 
 fn event_to_sse(event: &ExploreEvent) -> Event {
     match event {
@@ -48,10 +48,7 @@ async fn explore(
         // Check if pool is loaded and fresh
         let use_fast_path = {
             let pool_guard = state.pool.read().await;
-            pool_guard
-                .as_ref()
-                .map(|p| !p.is_stale())
-                .unwrap_or(false)
+            pool_guard.as_ref().map(|p| !p.is_stale()).unwrap_or(false)
         };
 
         let events = if use_fast_path {

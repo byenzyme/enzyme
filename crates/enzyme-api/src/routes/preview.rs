@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::warn;
 
 use enzyme_core::config::paths::EnzymePaths;
@@ -73,9 +73,7 @@ async fn preview(
     for (catalyst_id, _) in &top_catalysts {
         if let Some(sims) = pool.get_similarities(catalyst_id) {
             for sd in sims {
-                let entry = doc_scores
-                    .entry(sd.file_path.clone())
-                    .or_insert((0.0, 0));
+                let entry = doc_scores.entry(sd.file_path.clone()).or_insert((0.0, 0));
                 if sd.similarity > entry.0 {
                     entry.0 = sd.similarity;
                 }

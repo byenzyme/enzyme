@@ -108,8 +108,7 @@ fn is_numeric_only(s: &str) -> bool {
 /// Matches 3, 4, 6, or 8 hex digit patterns (e.g., "fff", "ff0000", "1a2b3c4d").
 fn is_hex_color(s: &str) -> bool {
     let len = s.len();
-    (len == 3 || len == 4 || len == 6 || len == 8)
-        && s.bytes().all(|b| b.is_ascii_hexdigit())
+    (len == 3 || len == 4 || len == 6 || len == 8) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Check if a link target is a bare date (YYYY-MM-DD).
@@ -197,7 +196,10 @@ fn extract_inline_tags(content: &str, tags: &mut HashSet<String>) {
                 let start = i + 1;
                 let mut end = start;
                 while end < len
-                    && (chars[end].is_alphanumeric() || chars[end] == '-' || chars[end] == '_' || chars[end] == '/')
+                    && (chars[end].is_alphanumeric()
+                        || chars[end] == '-'
+                        || chars[end] == '_'
+                        || chars[end] == '/')
                 {
                     end += 1;
                 }
@@ -258,7 +260,11 @@ fn extract_folders(file_path: &Path) -> Vec<String> {
     let mut folders = Vec::new();
     let components: Vec<&str> = file_path
         .parent()
-        .map(|p| p.components().map(|c| c.as_os_str().to_str().unwrap_or("")).collect())
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_str().unwrap_or(""))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mut prefix = String::new();
@@ -398,7 +404,11 @@ Another #real-tag
         let content = "Link to [[folder/subfolder/Note Name]]";
         let entities = extract_entities(content, &PathBuf::from("note.md"), &[]);
 
-        assert!(entities.links.contains(&"folder/subfolder/note name".to_string()));
+        assert!(
+            entities
+                .links
+                .contains(&"folder/subfolder/note name".to_string())
+        );
     }
 
     #[test]
@@ -500,8 +510,16 @@ Another #real-tag
         ];
         let entities = extract_entities("content", &PathBuf::from("note.md"), &frontmatter_tags);
 
-        assert!(!entities.tags.contains(&"readwise/source/reader".to_string()));
-        assert!(!entities.tags.contains(&"readwise/source/kindle".to_string()));
+        assert!(
+            !entities
+                .tags
+                .contains(&"readwise/source/reader".to_string())
+        );
+        assert!(
+            !entities
+                .tags
+                .contains(&"readwise/source/kindle".to_string())
+        );
         assert!(entities.tags.contains(&"pkm".to_string()));
     }
 

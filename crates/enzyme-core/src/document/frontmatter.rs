@@ -79,17 +79,36 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
         .collect();
 
     // Dates — try field name aliases in priority order
-    static CREATED_FIELDS: &[&str] = &["created", "date", "date_created", "date created", "createdAt", "created_at"];
-    static MODIFIED_FIELDS: &[&str] = &["modified", "updated", "date_modified", "date modified", "lastModified", "last_modified", "updatedAt"];
+    static CREATED_FIELDS: &[&str] = &[
+        "created",
+        "date",
+        "date_created",
+        "date created",
+        "createdAt",
+        "created_at",
+    ];
+    static MODIFIED_FIELDS: &[&str] = &[
+        "modified",
+        "updated",
+        "date_modified",
+        "date modified",
+        "lastModified",
+        "last_modified",
+        "updatedAt",
+    ];
 
     for &key in CREATED_FIELDS {
-        if fm.created.is_some() { break; }
+        if fm.created.is_some() {
+            break;
+        }
         if let Some(val) = mapping.get(key) {
             fm.created = value_to_datetime(val);
         }
     }
     for &key in MODIFIED_FIELDS {
-        if fm.modified.is_some() { break; }
+        if fm.modified.is_some() {
+            break;
+        }
         if let Some(val) = mapping.get(key) {
             fm.modified = value_to_datetime(val);
         }
@@ -319,15 +338,15 @@ fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
 
     // Try date-only formats
     static DATE_FORMATS: &[&str] = &[
-        "%Y-%m-%d",       // 2024-01-15
-        "%d/%m/%Y",       // 15/01/2024
-        "%m/%d/%Y",       // 01/15/2024
-        "%Y/%m/%d",       // 2024/01/15
-        "%B %d, %Y",      // January 15, 2024
-        "%b %d, %Y",      // Jan 15, 2024
-        "%d %B %Y",       // 15 January 2024
-        "%d-%m-%Y",       // 15-01-2024
-        "%m-%d-%Y",       // 01-15-2024
+        "%Y-%m-%d",  // 2024-01-15
+        "%d/%m/%Y",  // 15/01/2024
+        "%m/%d/%Y",  // 01/15/2024
+        "%Y/%m/%d",  // 2024/01/15
+        "%B %d, %Y", // January 15, 2024
+        "%b %d, %Y", // Jan 15, 2024
+        "%d %B %Y",  // 15 January 2024
+        "%d-%m-%Y",  // 15-01-2024
+        "%m-%d-%Y",  // 01-15-2024
     ];
 
     for fmt in DATE_FORMATS {
