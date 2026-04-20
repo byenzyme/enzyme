@@ -197,9 +197,18 @@ pub async fn run_init(
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
+    // Write only base entities to TOML — exclude children that get auto-expanded
+    // from expandable folders at runtime.
+    let expanded_children: std::collections::HashSet<String> = sel_result
+        .expandable_folders
+        .values()
+        .flatten()
+        .cloned()
+        .collect();
     let selected_entity_refs: Vec<String> = sel_result
         .entities
         .iter()
+        .filter(|entity| !expanded_children.contains(&entity.name))
         .map(|entity| match entity.entity_type {
             enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
             enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),

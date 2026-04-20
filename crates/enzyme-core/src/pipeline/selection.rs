@@ -133,3 +133,244 @@ impl<'a> SelectionPipeline<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::enzyme_config::EnzymeConfig;
+    use crate::config::paths::EnzymePaths;
+    use crate::db::Database;
+    use crate::models::{EntityTrends, EntityType};
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// Serialize tests that modify ENZYME_HOME to avoid env var races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Set up a temp vault with .enzyme dir and return (vault_dir, enzyme_home_dir).
+    /// Sets ENZYME_HOME so config.toml goes to the temp dir.
+    /// Caller MUST hold ENV_LOCK.
+    fn setup_test_env() -> (TempDir, TempDir) {
+        let vault = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(vault.path().join(".enzyme")).unwrap();
+        // SAFETY: test-only, serialized by ENV_LOCK
+        unsafe { std::env::set_var("ENZYME_HOME", home.path()) };
+        (vault, home)
+    }
+
+    fn restore_env(old: Option<String>) {
+        // SAFETY: test-only, serialized by ENV_LOCK
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("ENZYME_HOME", v),
+                None => std::env::remove_var("ENZYME_HOME"),
+            }
+        }
+    }
+
+    fn open_db(vault_path: &std::path::Path) -> Database {
+        let paths = EnzymePaths::new(vault_path).unwrap();
+        Database::open(&paths.vault_db).unwrap()
+    }
+
+    fn insert_entity(db: &Database, name: &str, entity_type: EntityType, frequency: i64) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let trends = serde_json::to_string(&EntityTrends {
+            frequency_recent: frequency,
+            recency_score: frequency as f64,
+            timeline_buckets: HashMap::new(),
+        })
+        .unwrap();
+        db.execute_write(
+            &format!(
+                "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends, metadata)
+                 VALUES ('{name}', '{}', {frequency}, {now}, {now}, '{}', '{{}}')",
+                entity_type.as_str(),
+                trends.replace('\'', "''"),
+            ),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    fn insert_doc(db: &Database, source_ref: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        db.execute_write(
+            &format!(
+                "INSERT INTO docs (source_ref, title, content, content_hash, created_at, created_source, modified_at, modified_source, indexed_at)
+                 VALUES ('{source_ref}', '{source_ref}', '', 'hash-{source_ref}', {now}, 'test', {now}, 'test', {now})"
+            ),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selection_uses_shortlist_without_toml() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "ethics", EntityType::Tag, 80);
+        insert_entity(&db, "inbox", EntityType::Folder, 60);
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Shortlist));
+        assert_eq!(result.entities.len(), 3);
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn selection_uses_config_from_toml() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "ethics", EntityType::Tag, 80);
+        insert_entity(&db, "inbox", EntityType::Folder, 60);
+        insert_entity(&db, "pkm", EntityType::Tag, 40);
+
+        // Write TOML with only 2 entities
+        let mut config = EnzymeConfig::default();
+        config.set_auto_selected_entities(
+            vault.path(),
+            vec!["#enzyme".to_string(), "#ethics".to_string()],
+        ).unwrap();
+
+        // Verify TOML was written and loads back
+        let loaded = EnzymeConfig::load(vault.path()).unwrap();
+        assert!(loaded.is_some(), "config should load from TOML");
+        assert!(loaded.as_ref().unwrap().has_curated_entities(),
+            "config should have curated entities");
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config),
+            "expected Config source, got {:?}", result.source);
+        assert_eq!(result.entities.len(), 2);
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"enzyme"));
+        assert!(names.contains(&"ethics"));
+        assert!(!names.contains(&"pkm"));
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn selection_auto_expands_folder_from_toml() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        // Create folder with page entities above density threshold
+        insert_entity(&db, "people", EntityType::Folder, 20);
+        insert_entity(&db, "alice", EntityType::Link, 30);
+        insert_entity(&db, "bob", EntityType::Link, 25);
+        insert_doc(&db, "people/Alice.md");
+        insert_doc(&db, "people/Bob.md");
+
+        // Write TOML with just the folder — no children listed
+        let mut config = EnzymeConfig::default();
+        config.set_auto_selected_entities(
+            vault.path(),
+            vec!["folder:people".to_string()],
+        ).unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config));
+        // Folder + expanded children
+        assert!(result.entities.len() > 1);
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"people"));
+        assert!(names.contains(&"alice") || names.contains(&"bob"),
+            "expected at least one child to be expanded, got: {:?}", names);
+        // Expandable folders map should contain people
+        assert!(result.expandable_folders.contains_key("people"));
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn pinned_entities_survive_auto_selection_update() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "ethics", EntityType::Tag, 80);
+        insert_entity(&db, "pinned-tag", EntityType::Tag, 10);
+
+        // Write TOML with pinned entity
+        let config_path = EnzymeConfig::config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let vault_key = vault.path().canonicalize().unwrap();
+        std::fs::write(&config_path, format!(
+            "[defaults]\nminimum_tags = 8\nminimum_links = 6\nminimum_folders = 6\ntotal_limit = 30\n\n\
+             [vaults.\"{}\"]\nentities = [\"#enzyme\"]\npinned_entities = [\"#pinned-tag\"]\n",
+            vault_key.display()
+        )).unwrap();
+
+        // Overwrite auto-selected entities
+        let mut config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        config.set_auto_selected_entities(
+            vault.path(),
+            vec!["#ethics".to_string()],
+        ).unwrap();
+
+        // Reload and verify pinned survived
+        let reloaded = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        let prefs = reloaded.parse_preferences();
+        let names: Vec<&str> = prefs.entities.iter().map(|e| e.name.as_str()).collect();
+
+        // pinned_entities are parsed first, then catalyzed_entities
+        assert!(names.contains(&"pinned-tag"), "pinned entity should survive");
+        assert!(names.contains(&"ethics"), "new auto-selected entity should be present");
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn toml_excluded_entities_are_filtered() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "todo", EntityType::Tag, 80);
+        insert_entity(&db, "inbox", EntityType::Folder, 60);
+
+        let config_path = EnzymeConfig::config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let vault_key = vault.path().canonicalize().unwrap();
+        std::fs::write(&config_path, format!(
+            "[defaults]\nminimum_tags = 8\nminimum_links = 6\nminimum_folders = 6\ntotal_limit = 30\n\n\
+             [vaults.\"{}\"]\nentities = [\"#enzyme\", \"#todo\", \"folder:inbox\"]\n\
+             excluded_tags = [\"todo\"]\npinned_entities = []\n",
+            vault_key.display()
+        )).unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"enzyme"));
+        assert!(!names.contains(&"todo"), "excluded tag should be filtered");
+        assert!(names.contains(&"inbox"));
+
+        restore_env(old);
+    }
+}
