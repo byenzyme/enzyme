@@ -50,25 +50,16 @@ pub fn build_shortlist_selection(db: &Database, limit: usize) -> Result<Material
 }
 
 /// Build the curated selection pipeline:
-/// curated entities -> explicit/auto expandable folders -> expand child links -> assign profiles.
+/// curated entities -> detect expandable folders -> expand child links -> assign profiles.
 pub fn build_curated_selection(
     db: &Database,
     base_entities: Vec<Entity>,
-    explicit_expandable_folders: &HashSet<String>,
-    explicit_profiles: HashMap<String, String>,
 ) -> Result<MaterializedSelection> {
-    let expandable_folders = if explicit_expandable_folders.is_empty() {
-        auto_expandable_folders(db, &base_entities)?
-    } else {
-        explicit_expandable_folder_children(db, &base_entities, explicit_expandable_folders)?
-    };
-
+    let expandable_folders = auto_expandable_folders(db, &base_entities)?;
     let final_entities = expand_with_folder_children(db, &base_entities, &expandable_folders)?;
     let entity_map = EntityMap::from_entities(db, &final_entities)?;
-
-    let mut entity_profiles =
+    let entity_profiles =
         profile_assignment::assign_profiles(&final_entities, &HashMap::new(), None);
-    entity_profiles.extend(explicit_profiles);
 
     Ok(MaterializedSelection {
         base_entities,
@@ -165,31 +156,14 @@ fn auto_expandable_folders(
     db: &Database,
     entities: &[Entity],
 ) -> Result<HashMap<String, Vec<String>>> {
-    let folder_scope = folder_scope(entities, None);
-    load_expandable_folder_children(db, &folder_scope, true)
+    let folders = folder_scope(entities);
+    load_expandable_folder_children(db, &folders, true)
 }
 
-fn explicit_expandable_folder_children(
-    db: &Database,
-    entities: &[Entity],
-    explicit_folders: &HashSet<String>,
-) -> Result<HashMap<String, Vec<String>>> {
-    let folder_scope = folder_scope(entities, Some(explicit_folders));
-    load_expandable_folder_children(db, &folder_scope, false)
-}
-
-fn folder_scope(
-    entities: &[Entity],
-    only_folders: Option<&HashSet<String>>,
-) -> HashMap<String, i64> {
+fn folder_scope(entities: &[Entity]) -> HashMap<String, i64> {
     entities
         .iter()
         .filter(|entity| entity.entity_type == EntityType::Folder)
-        .filter(|entity| {
-            only_folders
-                .map(|folders| folders.contains(&entity.name))
-                .unwrap_or(true)
-        })
         .map(|entity| (entity.name.clone(), entity.frequency.max(1)))
         .collect()
 }
@@ -347,15 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn explicit_expandable_folder_loads_page_entities_from_db() {
+    fn auto_expandable_folder_loads_page_entities_from_db() {
         let db = test_db();
         insert_doc(&db, "people/Alice Smith.md");
         insert_entity(&db, "alice smith", "link", 12, 4);
 
         let selected = vec![make_entity("people", EntityType::Folder, 20)];
-        let explicit = HashSet::from(["people".to_string()]);
 
-        let result = build_curated_selection(&db, selected, &explicit, HashMap::new()).unwrap();
+        let result = build_curated_selection(&db, selected).unwrap();
 
         assert_eq!(
             result.expandable_folders.get("people"),
@@ -392,18 +365,4 @@ mod tests {
         assert_eq!(alice_count, 1);
     }
 
-    #[test]
-    fn explicit_profiles_override_deterministic_assignment() {
-        let db = test_db();
-        let selected = vec![make_entity("people", EntityType::Folder, 20)];
-        let explicit = HashSet::new();
-        let explicit_profiles = HashMap::from([("people".to_string(), "strategic".to_string())]);
-
-        let result = build_curated_selection(&db, selected, &explicit, explicit_profiles).unwrap();
-
-        assert_eq!(
-            result.entity_profiles.get("people").map(String::as_str),
-            Some("strategic")
-        );
-    }
 }

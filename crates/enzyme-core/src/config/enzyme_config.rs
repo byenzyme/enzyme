@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -118,8 +118,6 @@ pub struct ParsedEntity {
 #[derive(Debug, Clone, Default)]
 pub struct EntityPreferences {
     pub entities: Vec<ParsedEntity>,
-    pub entity_profiles: HashMap<String, String>,
-    pub expandable_folders: HashSet<String>,
     pub excluded_names: Vec<ParsedEntity>,
 }
 
@@ -296,22 +294,10 @@ impl EnzymeConfig {
                     }
                 }
                 CatalyzedEntity::WithOptions(map) => {
-                    for (raw, options) in map {
-                        let Some(parsed) = parse_entity_ref(raw) else {
-                            continue;
-                        };
-
-                        if let Some(ref profile) = options.profile {
-                            prefs
-                                .entity_profiles
-                                .insert(parsed.name.clone(), profile.clone());
+                    for (raw, _options) in map {
+                        if let Some(parsed) = parse_entity_ref(raw) {
+                            prefs.entities.push(parsed);
                         }
-
-                        if options.expandable {
-                            prefs.expandable_folders.insert(parsed.name.clone());
-                        }
-
-                        prefs.entities.push(parsed);
                     }
                 }
             }
@@ -543,15 +529,6 @@ excludedTags:
         };
         let prefs = merged.parse_preferences();
         assert_eq!(prefs.entities.len(), 4);
-        assert_eq!(
-            prefs.entity_profiles.get("enzyme"),
-            Some(&"operational".to_string())
-        );
-        assert_eq!(
-            prefs.entity_profiles.get("people"),
-            Some(&"relational".to_string())
-        );
-        assert!(prefs.expandable_folders.contains("people"));
     }
 
     #[test]

@@ -64,10 +64,9 @@ pub async fn run_catalyze(
 
     // Enrich with register-appropriate presentation guidance
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-    let prefs = enzyme_config.parse_preferences();
     let response = response.with_presentation_guidance(
         register,
-        &prefs.entity_profiles,
+        &std::collections::HashMap::new(),
         enzyme_config.catalyst_profile.as_deref(),
     );
 

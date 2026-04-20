@@ -97,8 +97,6 @@ impl<'a> SelectionPipeline<'a> {
         let materialized = selection_steps::build_curated_selection(
             self.db,
             found,
-            &prefs.expandable_folders,
-            prefs.entity_profiles,
         )?;
 
         info!(
