@@ -373,4 +373,71 @@ mod tests {
 
         restore_env(old);
     }
+
+    #[test]
+    fn toml_entities_missing_from_db_are_skipped_gracefully() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        // Only "enzyme" exists in DB — "ethics" is in TOML but not in DB
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+
+        let mut config = EnzymeConfig::default();
+        config.set_auto_selected_entities(
+            vault.path(),
+            vec!["#enzyme".to_string(), "#ethics".to_string()],
+        ).unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config));
+        // Only enzyme should be selected — ethics is silently skipped
+        assert_eq!(result.entities.len(), 1);
+        assert_eq!(result.entities[0].name, "enzyme");
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn config_path_preserves_user_entity_list() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "ethics", EntityType::Tag, 80);
+        insert_entity(&db, "pkm", EntityType::Tag, 40);
+
+        // User wrote TOML with specific entities
+        let mut config = EnzymeConfig::default();
+        config.set_auto_selected_entities(
+            vault.path(),
+            vec!["#enzyme".to_string(), "#ethics".to_string()],
+        ).unwrap();
+
+        // Selection uses the config path
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+        assert!(matches!(result.source, SelectionSource::Config));
+
+        // Simulate what init does: write back the selected entities
+        let entity_refs: Vec<String> = result.entities.iter().map(|e| format!("#{}", e.name)).collect();
+        let mut config2 = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        config2.set_auto_selected_entities(vault.path(), entity_refs).unwrap();
+
+        // Reload — should still be the same two, not shortlist's three
+        let reloaded = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        let prefs = reloaded.parse_preferences();
+        let names: Vec<&str> = prefs.entities.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"enzyme"));
+        assert!(names.contains(&"ethics"));
+        assert!(!names.contains(&"pkm"));
+
+        restore_env(old);
+    }
 }
