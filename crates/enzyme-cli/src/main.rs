@@ -277,6 +277,7 @@ async fn main() -> Result<()> {
                     full,
                     detached,
                     quiet,
+                    json_progress,
                     vault_guide.as_deref(),
                     min_top_catalysts,
                 )

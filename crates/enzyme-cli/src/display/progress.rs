@@ -198,6 +198,21 @@ impl InitDisplay {
         }
     }
 
+    /// Start in JSON streaming mode — emits one JSON object per line to stdout.
+    pub fn start_json() -> Self {
+        let (tx, rx) = mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            run_json_display(rx);
+        });
+
+        Self {
+            sender: Some(tx),
+            handle: Some(handle),
+            is_tty: false,
+        }
+    }
+
     /// Get a clone of the sender for sending events.
     pub fn sender(&self) -> mpsc::Sender<DisplayEvent> {
         self.sender
@@ -845,6 +860,90 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     return;
                 }
             },
+            Err(_) => return,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON streaming display (for desktop app / programmatic consumers)
+// ---------------------------------------------------------------------------
+
+fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
+    use serde_json::json;
+
+    loop {
+        match rx.recv() {
+            Ok(event) => {
+                let obj = match event {
+                    DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+                        json!({"stage": "api_config", "base_url": base_url, "model": model, "key": masked_key})
+                    }
+                    DisplayEvent::IndexingStart => {
+                        json!({"stage": "indexing", "status": "start"})
+                    }
+                    DisplayEvent::IndexingProgress(msg) => {
+                        json!({"stage": "indexing", "status": "progress", "message": msg})
+                    }
+                    DisplayEvent::IndexingComplete { files_discovered, files_new, files_updated, files_deleted } => {
+                        json!({"stage": "indexing", "status": "complete", "files": files_discovered, "new": files_new, "updated": files_updated, "deleted": files_deleted})
+                    }
+                    DisplayEvent::SelectionComplete { count, .. } => {
+                        json!({"stage": "selection", "status": "complete", "entities": count})
+                    }
+                    DisplayEvent::DiscoveryStart { total } => {
+                        json!({"stage": "catalysts", "status": "start", "total": total})
+                    }
+                    DisplayEvent::EntityStarted { entity_name, entity_type } => {
+                        json!({"stage": "catalysts", "status": "entity_started", "entity": entity_name, "type": entity_type.as_str()})
+                    }
+                    DisplayEvent::EntityDiscovered { entity_name, entity_type, catalyst_texts, completed, total } => {
+                        json!({"stage": "catalysts", "status": "entity_done", "entity": entity_name, "type": entity_type.as_str(), "catalysts": catalyst_texts, "completed": completed, "total": total})
+                    }
+                    DisplayEvent::EntitySkipped { entity_name, completed, total } => {
+                        json!({"stage": "catalysts", "status": "entity_skipped", "entity": entity_name, "completed": completed, "total": total})
+                    }
+                    DisplayEvent::EntityFailed { entity_name, entity_type, error, completed, total } => {
+                        json!({"stage": "catalysts", "status": "entity_failed", "entity": entity_name, "type": entity_type.as_str(), "error": error, "completed": completed, "total": total})
+                    }
+                    DisplayEvent::DiscoveryComplete { entities_processed, catalysts_generated, errors_count, rate_limited } => {
+                        json!({"stage": "catalysts", "status": "complete", "entities": entities_processed, "catalysts": catalysts_generated, "errors": errors_count, "rate_limited": rate_limited})
+                    }
+                    DisplayEvent::EmbeddingStart => {
+                        json!({"stage": "embedding", "status": "start"})
+                    }
+                    DisplayEvent::EmbeddingProgress { done, total } => {
+                        json!({"stage": "embedding", "status": "progress", "done": done, "total": total})
+                    }
+                    DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
+                        json!({"stage": "embedding", "status": "complete", "documents": documents, "pruned": pruned, "duration_ms": duration_ms})
+                    }
+                    DisplayEvent::EmbeddingSkipped(reason) => {
+                        json!({"stage": "embedding", "status": "skipped", "reason": reason})
+                    }
+                    DisplayEvent::EmbeddingFailed(err) => {
+                        json!({"stage": "embedding", "status": "failed", "error": err})
+                    }
+                    DisplayEvent::ApiSkipped(reason) => {
+                        json!({"stage": "api", "status": "skipped", "reason": reason})
+                    }
+                    DisplayEvent::SimilarityStart => {
+                        json!({"stage": "similarity", "status": "start"})
+                    }
+                    DisplayEvent::SimilarityProgress { done, total } => {
+                        json!({"stage": "similarity", "status": "progress", "done": done, "total": total})
+                    }
+                    DisplayEvent::SimilarityComplete { catalysts, documents } => {
+                        json!({"stage": "similarity", "status": "complete", "catalysts": catalysts, "documents": documents})
+                    }
+                    DisplayEvent::Done { duration_ms } => {
+                        let obj = json!({"stage": "done", "duration_ms": duration_ms});
+                        println!("{}", serde_json::to_string(&obj).unwrap());
+                        return;
+                    }
+                };
+                println!("{}", serde_json::to_string(&obj).unwrap());
+            }
             Err(_) => return,
         }
     }

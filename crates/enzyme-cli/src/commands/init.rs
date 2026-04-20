@@ -117,6 +117,7 @@ pub async fn run_init(
     full: bool,
     _detached: bool,
     quiet: bool,
+    json_progress: bool,
     vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<Option<InitResult>> {
@@ -142,7 +143,9 @@ pub async fn run_init(
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     // Run with animated display, then finish it before the interactive prompt.
     let idx_stats = {
-        let idx_display = if quiet {
+        let idx_display = if json_progress {
+            InitDisplay::start_json()
+        } else if quiet {
             InitDisplay::start_quiet()
         } else {
             InitDisplay::start()
@@ -176,6 +179,9 @@ pub async fn run_init(
             files_deleted: stats.files_deleted,
         })
         .ok();
+        // Drop all sender clones so the display thread can exit
+        drop(tx);
+        drop(tx_idx);
         idx_display.finish();
         stats
     };
@@ -184,7 +190,9 @@ pub async fn run_init(
     let vault_guide = vault_guide.as_deref();
 
     // ── Start display for remaining pipeline ────────────────────────────
-    let display = if quiet {
+    let display = if json_progress {
+        InitDisplay::start_json()
+    } else if quiet {
         InitDisplay::start_quiet()
     } else {
         InitDisplay::start()
@@ -556,7 +564,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     drop(db);
 
     // Run init in quiet mode (suppresses all output)
-    let _ = run_init(vault_path, false, false, true, None, None).await?;
+    let _ = run_init(vault_path, false, false, true, false, None, None).await?;
 
     // Store bookkeeping for next staleness check
     let db = Database::open(&paths.vault_db)?;
@@ -1028,6 +1036,7 @@ async fn run_refresh_interactive(
         full,
         false,
         quiet,
+        false,
         vault_guide,
         min_top_catalysts,
     )
