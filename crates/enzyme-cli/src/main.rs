@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
             detached,
         } => {
             let source_path = source.as_deref().unwrap_or(&vault_path);
-            commands::apply::run_apply(source_path, &target, detached).await?;
+            commands::apply::run_apply(source_path, &target, false).await?;
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;

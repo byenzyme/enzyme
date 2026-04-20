@@ -16,7 +16,7 @@ use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
 use crate::display::{DisplayEvent, InitDisplay};
 
-pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) -> Result<()> {
+pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> Result<()> {
     let start = Instant::now();
     info!(?source_path, ?target_path, "enzyme apply");
 
@@ -43,17 +43,23 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
     // Target DB lives in source vault's .enzyme/targets/ directory
     let target_db_path = source_paths.target_db(target_path);
 
-    // Print header before starting display (not animated)
-    println!("enzyme apply");
-    println!(
-        "  source: {} ({} catalysts)",
-        source_path.display(),
-        catalysts.len()
-    );
-    println!("  target: {}", target_path.display());
+    if !quiet {
+        // Print header before starting display (not animated)
+        println!("enzyme apply");
+        println!(
+            "  source: {} ({} catalysts)",
+            source_path.display(),
+            catalysts.len()
+        );
+        println!("  target: {}", target_path.display());
+    }
 
     // Start animated display
-    let display = InitDisplay::start();
+    let display = if quiet {
+        InitDisplay::start_quiet()
+    } else {
+        InitDisplay::start()
+    };
     let tx = display.sender();
 
     // ── Phase 2: Index target ──────────────────────────────────────────────

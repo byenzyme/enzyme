@@ -176,7 +176,6 @@ pub async fn run_init(
             files_deleted: stats.files_deleted,
         })
         .ok();
-        tx.send(DisplayEvent::Done { duration_ms: 0 }).ok();
         idx_display.finish();
         stats
     };
@@ -894,7 +893,7 @@ async fn reapply_targets(vault_path: &Path) {
             continue;
         }
         info!(path = %target, "re-applying target after catalyst regeneration");
-        if let Err(e) = super::apply::run_apply(vault_path, &target_path, false).await {
+        if let Err(e) = super::apply::run_apply(vault_path, &target_path, true).await {
             info!(path = %target, err = %e, "re-apply failed for target");
         }
     }

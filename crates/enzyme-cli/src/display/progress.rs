@@ -387,11 +387,29 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 errors_count,
                 rate_limited,
             } => {
-                catalysts_generated.replace(count);
-                if errors_count > 0 {
-                    catalyst_errors.replace((errors_count, rate_limited));
-                }
-                // Stay in Discovery stage — entity tree keeps cycling
+                // Flush the cycling entity tree and print catalyst summary immediately
+                clear_lines(out, *lines_written);
+                *lines_written = 0;
+
+                let err_suffix = if errors_count > 0 && rate_limited > 0 {
+                    format!(" ({} failed, {} rate-limited)", errors_count, rate_limited)
+                } else if errors_count > 0 {
+                    format!(" ({} failed)", errors_count)
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(
+                    out,
+                    "  {}Catalysts:{} {} generated{}",
+                    crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
+                    crossterm::style::ResetColor,
+                    count,
+                    err_suffix,
+                );
+                // Mark catalysts as printed so EmbeddingComplete doesn't re-print
+                *catalysts_generated = None;
+                *catalyst_errors = None;
+                *stage = DisplayStage::Embedding;
             }
             DisplayEvent::EmbeddingStart => {
                 embedding_status.replace("Embedding...".to_string());
@@ -406,29 +424,10 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 pruned,
                 duration_ms,
             } => {
-                // Flush the cycling entity display and print final summary lines
                 clear_lines(out, *lines_written);
                 *lines_written = 0;
                 *stage = DisplayStage::Embedding;
                 embedding_status.take();
-
-                if let Some(count) = catalysts_generated.take() {
-                    let err_suffix = match catalyst_errors.take() {
-                        Some((errs, rl)) if rl > 0 => {
-                            format!(" ({} failed, {} rate-limited)", errs, rl)
-                        }
-                        Some((errs, _)) => format!(" ({} failed)", errs),
-                        None => String::new(),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "  {}Catalysts:{} {} generated{}",
-                        crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
-                        crossterm::style::ResetColor,
-                        count,
-                        err_suffix,
-                    );
-                }
 
                 let secs = duration_ms as f64 / 1000.0;
                 let docs_per_sec = if secs > 0.0 {
@@ -472,24 +471,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 *lines_written = 0;
                 *stage = DisplayStage::Embedding;
                 embedding_status.take();
-
-                if let Some(count) = catalysts_generated.take() {
-                    let err_suffix = match catalyst_errors.take() {
-                        Some((errs, rl)) if rl > 0 => {
-                            format!(" ({} failed, {} rate-limited)", errs, rl)
-                        }
-                        Some((errs, _)) => format!(" ({} failed)", errs),
-                        None => String::new(),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "  {}Catalysts:{} {} generated{}",
-                        crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
-                        crossterm::style::ResetColor,
-                        count,
-                        err_suffix,
-                    );
-                }
 
                 let _ = writeln!(
                     out,
