@@ -2,9 +2,10 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::info;
 
+use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -44,7 +45,11 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
 
     // Print header before starting display (not animated)
     println!("enzyme apply");
-    println!("  source: {} ({} catalysts)", source_path.display(), catalysts.len());
+    println!(
+        "  source: {} ({} catalysts)",
+        source_path.display(),
+        catalysts.len()
+    );
     println!("  target: {}", target_path.display());
 
     // Start animated display
@@ -53,8 +58,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
 
     // ── Phase 2: Index target ──────────────────────────────────────────────
     if let Some(parent) = target_db_path.parent() {
-        fs::create_dir_all(parent)
-            .context("failed to create targets directory")?;
+        fs::create_dir_all(parent).context("failed to create targets directory")?;
     }
 
     tx.send(DisplayEvent::IndexingStart).ok();
@@ -62,7 +66,9 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
     let indexing = IndexingPipeline::new(&target_db, target_path.to_path_buf());
     let tx_idx = tx.clone();
     let idx_stats = indexing.run(false, |msg| {
-        tx_idx.send(DisplayEvent::IndexingProgress(msg.to_string())).ok();
+        tx_idx
+            .send(DisplayEvent::IndexingProgress(msg.to_string()))
+            .ok();
     })?;
 
     tx.send(DisplayEvent::IndexingComplete {
@@ -70,7 +76,8 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         files_new: idx_stats.files_new,
         files_updated: idx_stats.files_updated,
         files_deleted: idx_stats.files_deleted,
-    }).ok();
+    })
+    .ok();
 
     // ── Phase 3: Embed target (spawn_blocking — CPU-bound ONNX) ────────────
     tx.send(DisplayEvent::EmbeddingStart).ok();
@@ -81,7 +88,9 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
             let db = Database::open(&target_db_path)?;
             let pipeline = EmbeddingPipeline::new(&db, service);
             pipeline.run_all(|done, total| {
-                tx_emb.send(DisplayEvent::EmbeddingProgress { done, total }).ok();
+                tx_emb
+                    .send(DisplayEvent::EmbeddingProgress { done, total })
+                    .ok();
             })
         }
     })
@@ -92,7 +101,8 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         documents: emb_stats.documents_embedded,
         pruned: emb_stats.documents_pruned,
         duration_ms: emb_stats.duration_ms,
-    }).ok();
+    })
+    .ok();
 
     // ── Phase 4: Similarity (spawn_blocking — CPU-bound vector math) ───────
     tx.send(DisplayEvent::SimilarityStart).ok();
@@ -103,7 +113,9 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
             let db = Database::open(&target_db_path)?;
             let pipeline = SimilarityPipeline::new(&db, service);
             pipeline.run_with_catalysts(&catalysts, true, |done, total| {
-                tx_sim.send(DisplayEvent::SimilarityProgress { done, total }).ok();
+                tx_sim
+                    .send(DisplayEvent::SimilarityProgress { done, total })
+                    .ok();
             })
         }
     })
@@ -113,7 +125,8 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
     tx.send(DisplayEvent::SimilarityComplete {
         catalysts: sim_stats.catalysts_processed,
         documents: sim_stats.documents_compared,
-    }).ok();
+    })
+    .ok();
 
     // ── Record applied target in source vault ─────────────────────────────
     let canonical_target = target_path
@@ -127,6 +140,13 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, _detached: bool) 
         catalyst_count: catalyst_count as i64,
         applied_at: chrono::Utc::now(),
     })?;
+
+    // Persist target to config.toml so it survives DB resets
+    if let Ok(Some(mut config)) = EnzymeConfig::load(source_path) {
+        if let Err(e) = config.add_target(source_path, target_path) {
+            tracing::warn!("failed to persist target to config: {}", e);
+        }
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     tx.send(DisplayEvent::Done { duration_ms }).ok();

@@ -856,6 +856,10 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
 
 /// Re-apply all previously applied targets using the vault's current catalysts.
 ///
+/// Merges targets from config.toml (declarative, survives DB resets) and the
+/// `applied_targets` DB table (runtime record). Config is the source of truth;
+/// DB targets that aren't in config are also re-applied for backward compat.
+///
 /// Called after catalyst regeneration so that target similarity mappings stay
 /// in sync. Errors are logged but don't fail the parent operation.
 async fn reapply_targets(vault_path: &Path) {
@@ -863,24 +867,35 @@ async fn reapply_targets(vault_path: &Path) {
         Ok(p) => p,
         Err(_) => return,
     };
-    let db = match Database::open(&paths.vault_db) {
-        Ok(db) => db,
-        Err(_) => return,
-    };
-    let targets = match db.get_all_applied_targets() {
-        Ok(t) => t,
-        Err(_) => return,
-    };
 
-    for target in &targets {
-        let target_path = std::path::PathBuf::from(&target.target_path);
+    // Collect target paths from both sources, deduplicated
+    let mut target_paths = std::collections::HashSet::new();
+
+    // Config targets (source of truth)
+    if let Ok(Some(config)) = EnzymeConfig::load(vault_path) {
+        for t in &config.targets {
+            target_paths.insert(t.clone());
+        }
+    }
+
+    // DB targets (backward compat — catches targets added before config persistence)
+    if let Ok(db) = Database::open(&paths.vault_db) {
+        if let Ok(db_targets) = db.get_all_applied_targets() {
+            for t in &db_targets {
+                target_paths.insert(t.target_path.clone());
+            }
+        }
+    }
+
+    for target in &target_paths {
+        let target_path = std::path::PathBuf::from(target);
         if !target_path.exists() {
-            info!(path = %target.target_path, "skipping re-apply: target path no longer exists");
+            info!(path = %target, "skipping re-apply: target path no longer exists");
             continue;
         }
-        info!(path = %target.target_path, "re-applying target after catalyst regeneration");
+        info!(path = %target, "re-applying target after catalyst regeneration");
         if let Err(e) = super::apply::run_apply(vault_path, &target_path, false).await {
-            info!(path = %target.target_path, err = %e, "re-apply failed for target");
+            info!(path = %target, err = %e, "re-apply failed for target");
         }
     }
 }

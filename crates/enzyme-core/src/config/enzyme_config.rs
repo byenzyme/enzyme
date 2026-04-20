@@ -9,6 +9,34 @@ use tracing::debug;
 use crate::config::paths::EnzymePaths;
 use crate::models::EntityType;
 
+/// Comment header prepended to config.toml on every save.
+const CONFIG_HEADER: &str = "\
+# Enzyme configuration
+# https://enzyme.garden/docs/config
+#
+# This file configures how Enzyme processes your Obsidian vault(s).
+# Edit it directly \u{2014} changes take effect on the next `enzyme refresh`.
+#
+# [defaults]
+# catalyst_profile = \"dialectical\"    # how catalysts read: dialectical, operational, relational
+# catalyst_format  = \"question\"       # catalyst shape: question, thesis, claim
+# minimum_tags     = 8                # minimum trending tag entities to select
+# minimum_links    = 6                # minimum trending link entities
+# minimum_folders  = 6                # minimum trending folder entities
+# total_limit      = 30               # cap on total entities selected
+#
+# Each vault gets its own section, keyed by absolute path:
+#
+# [vaults.\"/Users/you/notes\"]
+# entities = [\"folder:projects\", \"[[Design Principles]]\"]
+# pinned_entities = [\"folder:journal\"]         # always catalyzed, even if not trending
+# excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
+# targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
+# min_top_catalysts = 13                       # minimum catalysts for the largest entity
+#
+
+";
+
 /// Top-level config view for a specific vault.
 ///
 /// Data is loaded from the global `~/.enzyme/config.toml`, merged with the
@@ -33,6 +61,9 @@ pub struct EnzymeConfig {
     pub excluded_links: Vec<String>,
     #[serde(default)]
     pub excluded_folders: Vec<String>,
+    /// External directories to project this vault's catalysts onto.
+    #[serde(default)]
+    pub targets: Vec<String>,
 }
 
 /// A single entry in the config.
@@ -172,6 +203,8 @@ struct VaultTomlSection {
     entities: Vec<String>,
     #[serde(default)]
     pinned_entities: Vec<String>,
+    #[serde(default)]
+    targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -249,6 +282,7 @@ impl EnzymeConfig {
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
             excluded_links: vault.map(|v| v.excluded_links.clone()).unwrap_or_default(),
             excluded_folders: vault.map(|v| v.excluded_folders.clone()).unwrap_or_default(),
+            targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
         }
     }
 
@@ -280,6 +314,7 @@ impl EnzymeConfig {
             excluded_tags: legacy.excluded_tags,
             excluded_links: legacy.excluded_links,
             excluded_folders: legacy.excluded_folders,
+            targets: Vec::new(),
         }))
     }
 
@@ -332,6 +367,20 @@ impl EnzymeConfig {
         self.save(vault_path)
     }
 
+    /// Add a target path to the config if not already present. Canonicalizes the path.
+    pub fn add_target(&mut self, vault_path: &Path, target_path: &Path) -> Result<()> {
+        let canonical = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        if !self.targets.contains(&canonical) {
+            self.targets.push(canonical);
+            self.save(vault_path)?;
+        }
+        Ok(())
+    }
+
     pub fn set_auto_selected_entities(
         &mut self,
         vault_path: &Path,
@@ -376,14 +425,16 @@ impl EnzymeConfig {
             .iter()
             .filter_map(entity_ref_string)
             .collect();
+        entry.targets = self.targets.clone();
 
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let contents =
+        let body =
             toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
+        let contents = format!("{CONFIG_HEADER}{body}");
         fs::write(&config_path, contents)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
         debug!(?config_path, "saved enzyme config");
@@ -526,6 +577,7 @@ excludedTags:
             excluded_tags: config.excluded_tags,
             excluded_links: config.excluded_links,
             excluded_folders: config.excluded_folders,
+            targets: Vec::new(),
         };
         let prefs = merged.parse_preferences();
         assert_eq!(prefs.entities.len(), 4);
@@ -556,15 +608,21 @@ excludedTags:
             excluded_tags: vec!["todo".to_string()],
             excluded_links: vec!["Template".to_string()],
             excluded_folders: vec!["templates".to_string()],
+            targets: vec!["/Users/alice/code/my-app".to_string()],
         };
 
         config.save(&vault).unwrap();
+
+        // Verify the header comment is present in the written file
+        let raw = fs::read_to_string(EnzymeConfig::config_path().unwrap()).unwrap();
+        assert!(raw.starts_with("# Enzyme configuration"));
 
         let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_profile.as_deref(), Some("dialectical"));
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
         assert_eq!(loaded.catalyzed_entities.len(), 1);
         assert_eq!(loaded.pinned_entities.len(), 1);
+        assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
         assert_eq!(
             loaded.trending.as_ref().and_then(|t| t.min_top_catalysts),
             Some(13)
