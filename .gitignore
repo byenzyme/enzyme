@@ -19,6 +19,7 @@ Cargo.lock
 # Model binaries (too large for git — tokenizer.json is tracked)
 models/*.onnx
 models/*.rten
+models/*.gguf
 *.mlpackage/
 
 # Test vault
@@ -27,6 +28,9 @@ vault/
 # Enzyme runtime
 .enzyme/
 .enzyme-embeddings/
+
+# Working docs (not part of releases)
+docs/agent-plugin-test-plan.md
 
 # Plugin — CI-injected binaries and model files
 plugin/bin/enzyme-darwin-arm64
