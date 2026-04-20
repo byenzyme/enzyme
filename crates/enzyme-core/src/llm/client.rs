@@ -15,7 +15,6 @@ const FREE_CONFIG_URL: &str =
 #[derive(Debug, Clone)]
 pub enum ConfigProvider {
     OpenAiEnv,
-    AuthFile,
     ServerFallback,
 }
 
@@ -312,9 +311,11 @@ struct StreamingDelta {
     content: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct AuthConfig {
+#[derive(Deserialize, Serialize)]
+struct CachedFreeConfig {
     api_key: String,
+    base_url: String,
+    model: String,
 }
 
 impl LlmClient {
@@ -577,7 +578,7 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 ///
 /// Checks (in order):
 /// 1. `OPENAI_API_KEY` + `OPENAI_BASE_URL` env vars (both required) + optional `OPENAI_MODEL`
-/// 2. `~/.enzyme/auth.json` → `{"api_key": "..."}`
+/// 2. `/tmp/enzyme-api-cache`
 /// 3. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     // 1. OPENAI_API_KEY + OPENAI_BASE_URL (both must be set for env override)
@@ -611,40 +612,46 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         (None, None) => {}
     }
 
-    // 2. Fall back to ~/.enzyme/auth.json
-    let home_dir = dirs::home_dir().context("Could not determine home directory")?;
-    let auth_path = home_dir.join(".enzyme").join("auth.json");
+    // 2. Reuse cached free-tier config from /tmp if present
+    let cache_path = std::path::Path::new("/tmp/enzyme-api-cache");
+    if cache_path.exists() {
+        let contents = std::fs::read_to_string(cache_path)
+            .with_context(|| format!("Failed to read {}", cache_path.display()))?;
+        let cached: CachedFreeConfig = serde_json::from_str(&contents)
+            .with_context(|| format!("Failed to parse {}", cache_path.display()))?;
 
-    if auth_path.exists() {
-        let contents = std::fs::read_to_string(&auth_path)
-            .with_context(|| format!("Failed to read auth config at {}", auth_path.display()))?;
-
-        let config: AuthConfig = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse auth config at {}", auth_path.display()))?;
-
-        if !config.api_key.is_empty() {
-            let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-            debug!("Resolved API key from {}", auth_path.display());
+        if !cached.api_key.is_empty() {
+            debug!("Resolved API config from {}", cache_path.display());
             return Ok(ResolvedConfig {
-                api_key: config.api_key,
-                base_url: DEFAULT_BASE_URL.to_string(),
-                model,
-                provider: ConfigProvider::AuthFile,
+                api_key: cached.api_key,
+                base_url: cached.base_url,
+                model: cached.model,
+                provider: ConfigProvider::ServerFallback,
             });
         }
     }
 
     // 3. Fetch shared key from Enzyme server
     match fetch_free_config().await {
-        Ok(cfg) => return Ok(cfg),
+        Ok(cfg) => {
+            let cached = CachedFreeConfig {
+                api_key: cfg.api_key.clone(),
+                base_url: cfg.base_url.clone(),
+                model: cfg.model.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&cached) {
+                let _ = std::fs::write(cache_path, json);
+            }
+            return Ok(cfg);
+        }
         Err(e) => {
             debug!("Failed to fetch free config from server: {}", e);
         }
     }
 
     bail!(
-        "No API key found. Checked: OPENAI_API_KEY, \
-         ~/.enzyme/auth.json, and Enzyme server. Set one of the above or \
+        "No API key found. Checked: OPENAI_API_KEY, /tmp/enzyme-api-cache, \
+         and Enzyme server. Set OPENAI_API_KEY and OPENAI_BASE_URL or \
          ensure network access for the free tier."
     )
 }

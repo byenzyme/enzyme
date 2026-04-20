@@ -29,17 +29,13 @@ impl EnzymePaths {
     }
 
     /// Construct paths with explicit overrides (for testing without env var mutation).
-    pub fn with_overrides(
-        vault_path: impl AsRef<Path>,
-        enzyme_home: Option<&str>,
-    ) -> Result<Self> {
+    pub fn with_overrides(vault_path: impl AsRef<Path>, enzyme_home: Option<&str>) -> Result<Self> {
         let vault_path = vault_path.as_ref();
 
         let home = match enzyme_home {
             Some(h) => PathBuf::from(h),
             None => {
-                let home_dir =
-                    dirs::home_dir().context("could not determine home directory")?;
+                let home_dir = dirs::home_dir().context("could not determine home directory")?;
                 home_dir.join(".enzyme")
             }
         };
@@ -55,10 +51,7 @@ impl EnzymePaths {
             vault_path.join(".enzyme").join("enzyme.db")
         };
 
-        Ok(Self {
-            home,
-            vault_db,
-        })
+        Ok(Self { home, vault_db })
     }
 
     /// Resolve the Enzyme home directory.
@@ -71,8 +64,7 @@ impl EnzymePaths {
             }
         }
 
-        let home_dir =
-            dirs::home_dir().context("could not determine home directory")?;
+        let home_dir = dirs::home_dir().context("could not determine home directory")?;
         Ok(home_dir.join(".enzyme"))
     }
 
@@ -89,12 +81,7 @@ impl EnzymePaths {
 
     /// Path to the global config file.
     pub fn global_config(&self) -> PathBuf {
-        self.home.join("config.yaml")
-    }
-
-    /// Path to the auth token file.
-    pub fn auth_token(&self) -> PathBuf {
-        self.home.join("auth.json")
+        self.home.join("config.toml")
     }
 
     /// Path to the embedding daemon Unix socket.
@@ -156,9 +143,7 @@ mod tests {
     #[test]
     fn test_enzyme_home_override() {
         let vault = PathBuf::from("/Users/alice/vault");
-        let paths =
-            EnzymePaths::with_overrides(&vault, Some("/tmp/custom-enzyme"))
-                .unwrap();
+        let paths = EnzymePaths::with_overrides(&vault, Some("/tmp/custom-enzyme")).unwrap();
 
         assert_eq!(paths.home, PathBuf::from("/tmp/custom-enzyme"));
         assert_eq!(paths.vault_db, vault.join(".enzyme").join("enzyme.db"));
@@ -166,11 +151,9 @@ mod tests {
 
     #[test]
     fn test_convenience_paths() {
-        let paths =
-            EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();
+        let paths = EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();
 
-        assert_eq!(paths.global_config(), PathBuf::from("/tmp/eh/config.yaml"));
-        assert_eq!(paths.auth_token(), PathBuf::from("/tmp/eh/auth.json"));
+        assert_eq!(paths.global_config(), PathBuf::from("/tmp/eh/config.toml"));
     }
 
     #[test]
