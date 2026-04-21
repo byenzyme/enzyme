@@ -286,7 +286,7 @@ pub async fn run_init(
         let total = sel_result.entities.len();
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
 
-        let llm = LlmClient::with_base_url(&resolved.api_key, &resolved.base_url);
+        let llm = LlmClient::from_config(&resolved);
         let cat_pipeline = CatalystPipeline::new(&db, &llm, service);
         let tx_cat = tx.clone();
 
@@ -348,6 +348,7 @@ pub async fn run_init(
                         entity_name,
                         entity_type,
                         catalyst_texts,
+                        topic_names,
                         completed,
                         total,
                     } => {
@@ -356,6 +357,7 @@ pub async fn run_init(
                                 entity_name,
                                 entity_type: parse_entity_type(&entity_type),
                                 catalyst_texts,
+                                topic_names,
                                 completed,
                                 total,
                             })
@@ -777,7 +779,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
 
     // ── Step 4: Run catalyst pipeline ───────────────────────────────────
     let api_config = resolve_api_config().await?;
-    let llm = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
+    let llm = LlmClient::from_config(&api_config);
     let svc = get_embedding_service(&paths.home).ok();
     let cat_pipeline = CatalystPipeline::new(&db, &llm, svc);
 

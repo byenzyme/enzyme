@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -260,8 +261,11 @@ impl Default for GenerationParams {
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
-    api_key: String,
+    api_key: Arc<RwLock<String>>,
     base_url: String,
+    /// Whether this client was created from the free-tier server fallback.
+    /// When true, 401 errors trigger an automatic key refresh.
+    free_tier: bool,
 }
 
 #[derive(Serialize)]
@@ -311,27 +315,48 @@ struct StreamingDelta {
     content: Option<String>,
 }
 
+/// How long a cached free-tier config is considered fresh (5 minutes).
+/// OpenRouter free-tier keys rotate frequently; a short TTL ensures we
+/// re-fetch before the key expires rather than discovering it mid-run via 401.
+const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
+
 #[derive(Deserialize, Serialize)]
 struct CachedFreeConfig {
     api_key: String,
     base_url: String,
     model: String,
+    /// Unix timestamp (seconds) when the config was cached.
+    #[serde(default)]
+    cached_at: u64,
 }
 
 impl LlmClient {
     pub fn new(api_key: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: api_key.to_string(),
+            api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: DEFAULT_BASE_URL.to_string(),
+            free_tier: false,
         }
     }
 
     pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: api_key.to_string(),
+            api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: base_url.to_string(),
+            free_tier: false,
+        }
+    }
+
+    /// Create a client from a resolved config, preserving free-tier status
+    /// so that 401 errors can trigger automatic key refresh.
+    pub fn from_config(config: &ResolvedConfig) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: Arc::new(RwLock::new(config.api_key.clone())),
+            base_url: config.base_url.clone(),
+            free_tier: config.is_free_tier(),
         }
     }
 
@@ -340,8 +365,14 @@ impl LlmClient {
         self.base_url.contains("openrouter.ai")
     }
 
-    /// Whether this client targets a local model server (localhost/127.0.0.1).
+    /// Whether this client targets a local/fine-tuned model server.
+    ///
+    /// True for localhost URLs, or when `ENZYME_LOCAL_MODEL=1` is set
+    /// (e.g. a fine-tuned model hosted remotely that uses the compact prompt format).
     pub fn is_local(&self) -> bool {
+        if std::env::var("ENZYME_LOCAL_MODEL").ok().filter(|v| v == "1" || v == "true").is_some() {
+            return true;
+        }
         let url = self.base_url.to_lowercase();
         url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
     }
@@ -351,38 +382,47 @@ impl LlmClient {
         StructuredOutputSupport::detect(&self.base_url)
     }
 
-    pub async fn chat_completion(
+    /// Read the current API key.
+    fn current_api_key(&self) -> String {
+        self.api_key.read().unwrap().clone()
+    }
+
+    /// Attempt to refresh the API key by re-fetching from the free-config endpoint.
+    /// Returns true if the key was actually updated.
+    async fn try_refresh_key(&self) -> bool {
+        if !self.free_tier {
+            return false;
+        }
+        info!("free-tier key returned 401, refreshing from server");
+        invalidate_free_config_cache();
+        match fetch_free_config().await {
+            Ok(cfg) => {
+                *self.api_key.write().unwrap() = cfg.api_key.clone();
+                write_free_config_cache(std::path::Path::new("/tmp/enzyme-api-cache"), &cfg);
+                true
+            }
+            Err(e) => {
+                warn!("failed to refresh free-tier key: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Send a single chat completion request with the given API key.
+    async fn send_chat_completion(
         &self,
-        model: &str,
-        messages: Vec<Message>,
-        params: GenerationParams,
+        url: &str,
+        api_key: &str,
+        request_body: &ChatCompletionRequest,
     ) -> Result<String> {
-        let url = format!("{}/chat/completions", self.base_url);
-
-        let request_body = ChatCompletionRequest {
-            model: model.to_string(),
-            messages,
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            top_k: params.top_k,
-            response_format: params.response_format,
-            stream: None,
-        };
-
-        debug!(
-            "Sending chat completion request to {} with model {}",
-            url, model
-        );
-
         let response = self
             .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
             .header("X-Title", "Enzyme")
-            .json(&request_body)
+            .json(request_body)
             .send()
             .await
             .context("Failed to send request to LLM API")?;
@@ -423,6 +463,46 @@ impl LlmClient {
         Ok(content)
     }
 
+    pub async fn chat_completion(
+        &self,
+        model: &str,
+        messages: Vec<Message>,
+        params: GenerationParams,
+    ) -> Result<String> {
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let request_body = ChatCompletionRequest {
+            model: model.to_string(),
+            messages,
+            max_tokens: params.max_tokens,
+            temperature: params.temperature,
+            top_p: params.top_p,
+            top_k: params.top_k,
+            response_format: params.response_format,
+            stream: None,
+        };
+
+        debug!(
+            "Sending chat completion request to {} with model {}",
+            url, model
+        );
+
+        let api_key = self.current_api_key();
+        match self.send_chat_completion(&url, &api_key, &request_body).await {
+            Ok(content) => Ok(content),
+            Err(e) if self.free_tier && e.to_string().contains("401") => {
+                // Key likely rotated — refresh and retry once
+                if self.try_refresh_key().await {
+                    let new_key = self.current_api_key();
+                    self.send_chat_completion(&url, &new_key, &request_body).await
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Streaming chat completion that returns a stream of token strings.
     ///
     /// Uses the OpenAI-compatible SSE streaming protocol (`stream: true`).
@@ -451,10 +531,11 @@ impl LlmClient {
             url, model
         );
 
+        let api_key = self.current_api_key();
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
             .header("X-Title", "Enzyme")
@@ -541,6 +622,28 @@ impl LlmClient {
     }
 }
 
+/// Delete the cached free-tier config so the next resolve re-fetches.
+fn invalidate_free_config_cache() {
+    let _ = std::fs::remove_file("/tmp/enzyme-api-cache");
+}
+
+/// Write a resolved free-tier config to the cache with a timestamp.
+fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig) {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cached = CachedFreeConfig {
+        api_key: cfg.api_key.clone(),
+        base_url: cfg.base_url.clone(),
+        model: cfg.model.clone(),
+        cached_at: now_secs,
+    };
+    if let Ok(json) = serde_json::to_string(&cached) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 /// Fetch a free shared API key from the Enzyme server.
 async fn fetch_free_config() -> Result<ResolvedConfig> {
     let client = reqwest::Client::builder()
@@ -612,7 +715,7 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         (None, None) => {}
     }
 
-    // 2. Reuse cached free-tier config from /tmp if present
+    // 2. Reuse cached free-tier config from /tmp if present and not expired
     let cache_path = std::path::Path::new("/tmp/enzyme-api-cache");
     if cache_path.exists() {
         let contents = std::fs::read_to_string(cache_path)
@@ -620,8 +723,19 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         let cached: CachedFreeConfig = serde_json::from_str(&contents)
             .with_context(|| format!("Failed to parse {}", cache_path.display()))?;
 
-        if !cached.api_key.is_empty() {
-            debug!("Resolved API config from {}", cache_path.display());
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let age_secs = now_secs.saturating_sub(cached.cached_at);
+        let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
+
+        if !cached.api_key.is_empty() && !expired {
+            debug!(
+                "Resolved API config from {} (age={}s)",
+                cache_path.display(),
+                age_secs
+            );
             return Ok(ResolvedConfig {
                 api_key: cached.api_key,
                 base_url: cached.base_url,
@@ -629,19 +743,19 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
                 provider: ConfigProvider::ServerFallback,
             });
         }
+
+        if expired {
+            debug!(
+                "Cached free-tier config expired (age={}s, ttl={}s), re-fetching",
+                age_secs, FREE_CONFIG_CACHE_TTL_SECS
+            );
+        }
     }
 
     // 3. Fetch shared key from Enzyme server
     match fetch_free_config().await {
         Ok(cfg) => {
-            let cached = CachedFreeConfig {
-                api_key: cfg.api_key.clone(),
-                base_url: cfg.base_url.clone(),
-                model: cfg.model.clone(),
-            };
-            if let Ok(json) = serde_json::to_string(&cached) {
-                let _ = std::fs::write(cache_path, json);
-            }
+            write_free_config_cache(cache_path, &cfg);
             return Ok(cfg);
         }
         Err(e) => {
