@@ -57,6 +57,7 @@ pub enum DisplayEvent {
         entity_name: String,
         entity_type: EntityType,
         catalyst_texts: Vec<String>,
+        topic_names: Vec<String>,
         completed: usize,
         total: usize,
     },
@@ -351,6 +352,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 entity_name,
                 entity_type,
                 catalyst_texts,
+                topic_names: _,
                 completed,
                 total,
             } => {
@@ -897,8 +899,8 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::EntityStarted { entity_name, entity_type } => {
                         json!({"stage": "catalysts", "status": "entity_started", "entity": entity_name, "type": entity_type.as_str()})
                     }
-                    DisplayEvent::EntityDiscovered { entity_name, entity_type, catalyst_texts, completed, total } => {
-                        json!({"stage": "catalysts", "status": "entity_done", "entity": entity_name, "type": entity_type.as_str(), "catalysts": catalyst_texts, "completed": completed, "total": total})
+                    DisplayEvent::EntityDiscovered { entity_name, entity_type, catalyst_texts, topic_names, completed, total } => {
+                        json!({"stage": "catalysts", "status": "entity_done", "entity": entity_name, "type": entity_type.as_str(), "catalysts": catalyst_texts, "topics": topic_names, "completed": completed, "total": total})
                     }
                     DisplayEvent::EntitySkipped { entity_name, completed, total } => {
                         json!({"stage": "catalysts", "status": "entity_skipped", "entity": entity_name, "completed": completed, "total": total})

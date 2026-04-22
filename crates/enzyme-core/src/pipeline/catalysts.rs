@@ -542,11 +542,12 @@ pub enum CatalystEvent {
         entity_name: String,
         entity_type: String,
     },
-    /// An entity finished with generated catalyst texts.
+    /// An entity finished with generated catalyst texts and topic names.
     EntityCompleted {
         entity_name: String,
         entity_type: String,
         catalyst_texts: Vec<String>,
+        topic_names: Vec<String>,
         completed: usize,
         total: usize,
     },
@@ -1037,6 +1038,7 @@ impl<'a> CatalystPipeline<'a> {
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
 
         let model = config.model.to_string();
+        let local_model = self.llm.is_local();
         for job in jobs {
             on_event(CatalystEvent::EntityStarted {
                 entity_name: job.entity_name.clone(),
@@ -1047,6 +1049,7 @@ impl<'a> CatalystPipeline<'a> {
             let model = model.clone();
             let sem = Arc::clone(&semaphore);
             let response_format = response_format.clone();
+            let local_model = local_model;
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
@@ -1056,6 +1059,9 @@ impl<'a> CatalystPipeline<'a> {
                 let result = tokio::time::timeout(entity_timeout, async {
                     let params = GenerationParams {
                         response_format,
+                        // Local fine-tunes have small context windows; cap output
+                        // tokens so input + output fits within the model's limit.
+                        max_tokens: if local_model { 512 } else { 8192 },
                         ..GenerationParams::default()
                     };
 
@@ -1206,6 +1212,8 @@ impl<'a> CatalystPipeline<'a> {
 
                         let catalyst_texts: Vec<String> =
                             parsed_catalysts.iter().map(|c| c.text.clone()).collect();
+                        let topic_names: Vec<String> =
+                            parsed_catalysts.iter().map(|c| c.topic.clone()).collect();
 
                         let catalysts: Vec<Catalyst> = parsed_catalysts
                             .into_iter()
@@ -1233,6 +1241,7 @@ impl<'a> CatalystPipeline<'a> {
                             entity_name: entity_result.entity_name.clone(),
                             entity_type: entity_result.entity_type,
                             catalyst_texts,
+                            topic_names,
                             completed,
                             total,
                         });
