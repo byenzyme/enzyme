@@ -100,7 +100,7 @@ impl<'a> EmbeddingPipeline<'a> {
 
         // Step 2: Find documents needing embedding
         let total_needing = if max_docs.is_some() {
-            self.db.count_documents_needing_embedding()?
+            self.db.count_documents_needing_embedding(indexed_since)?
         } else {
             0 // no cap, so no skipping
         };

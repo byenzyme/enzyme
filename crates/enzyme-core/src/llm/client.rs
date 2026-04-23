@@ -470,6 +470,24 @@ impl LlmClient {
         Ok(content)
     }
 
+    async fn send_streaming_request(
+        &self,
+        url: &str,
+        api_key: &str,
+        request_body: &ChatCompletionRequest,
+    ) -> Result<reqwest::Response> {
+        self.client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
+            .header("X-Title", "Enzyme")
+            .json(request_body)
+            .send()
+            .await
+            .context("Failed to send streaming request to LLM API")
+    }
+
     pub async fn chat_completion(
         &self,
         model: &str,
@@ -539,17 +557,18 @@ impl LlmClient {
         );
 
         let api_key = self.current_api_key();
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://github.com/jshph/enzyme-rust")
-            .header("X-Title", "Enzyme")
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to send streaming request to LLM API")?;
+        let mut response = self
+            .send_streaming_request(&url, &api_key, &request_body)
+            .await?;
+
+        if self.free_tier && response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if self.try_refresh_key().await {
+                let new_key = self.current_api_key();
+                response = self
+                    .send_streaming_request(&url, &new_key, &request_body)
+                    .await?;
+            }
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -775,6 +794,14 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
          and Enzyme server. Set OPENAI_API_KEY and OPENAI_BASE_URL or \
          ensure network access for the free tier."
     )
+}
+
+/// Resolve API configuration and construct an LLM client that preserves
+/// provider metadata such as free-tier refresh behavior.
+pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
+    let config = resolve_api_config().await?;
+    let client = LlmClient::from_config(&config);
+    Ok((config, client))
 }
 
 /// Backward-compatible: resolve just the API key.

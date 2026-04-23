@@ -967,11 +967,11 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     }
                     DisplayEvent::Done { duration_ms } => {
                         let obj = json!({"stage": "done", "duration_ms": duration_ms});
-                        println!("{}", serde_json::to_string(&obj).unwrap());
+                        eprintln!("{}", serde_json::to_string(&obj).unwrap());
                         return;
                     }
                 };
-                println!("{}", serde_json::to_string(&obj).unwrap());
+                eprintln!("{}", serde_json::to_string(&obj).unwrap());
             }
             Err(_) => return,
         }

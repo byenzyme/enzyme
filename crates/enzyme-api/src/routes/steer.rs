@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
 
-use enzyme_core::llm::{GenerationParams, LlmClient, Message, ResponseFormat, resolve_api_config};
+use enzyme_core::llm::{GenerationParams, Message, ResponseFormat, resolve_llm_client};
 // Note: steer doesn't have a strict schema — response is parsed as generic JSON Value.
 // We use JsonObject here since we just need valid JSON, not a specific shape.
 
@@ -28,11 +28,9 @@ async fn steer(
     let petri_context = enzyme_core::query::format_steering_petri_context(&state.vault_path, 15)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let api_config = resolve_api_config()
+    let (api_config, client) = resolve_llm_client()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let client = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
 
     let user_prompt = format!(
         "## Petri — Catalyst Vocabulary\n{petri_context}\n\n\

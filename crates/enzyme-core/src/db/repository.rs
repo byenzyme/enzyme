@@ -343,12 +343,18 @@ impl Database {
     }
 
     /// Count documents whose embeddings are stale or missing.
-    pub fn count_documents_needing_embedding(&self) -> Result<usize> {
+    pub fn count_documents_needing_embedding(&self, indexed_since: Option<i64>) -> Result<usize> {
         let sql = "SELECT COUNT(*) FROM docs
              WHERE (embedded_content_hash IS NULL
                 OR embedded_content_hash != content_hash
                 OR embedded_at IS NULL)";
-        let rows = self.query_read(sql, vec![], |row| row.get::<i64>(0))?;
+        let mut sql = sql.to_string();
+        let mut params = Vec::new();
+        if let Some(ts) = indexed_since {
+            params.push(Value::Integer(ts));
+            sql.push_str(&format!(" AND indexed_at >= ?{}", params.len()));
+        }
+        let rows = self.query_read(&sql, params, |row| row.get::<i64>(0))?;
         Ok(rows.first().copied().unwrap_or(0) as usize)
     }
 

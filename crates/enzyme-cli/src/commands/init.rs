@@ -10,7 +10,7 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient, resolve_api_config};
+use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
 };
@@ -132,8 +132,8 @@ pub async fn run_init(
     let db = Database::open(&paths.vault_db)?;
 
     // Resolve API config early (needed for both LLM selection and catalyst generation)
-    let api_config = match resolve_api_config().await {
-        Ok(cfg) => Some(cfg),
+    let api_config = match resolve_llm_client().await {
+        Ok(resolved) => Some(resolved),
         Err(e) => {
             tracing::warn!("API config resolution failed: {}", e);
             None
@@ -152,7 +152,7 @@ pub async fn run_init(
         };
         let tx = idx_display.sender();
 
-        if let Some(ref cfg) = api_config {
+        if let Some((ref cfg, _)) = api_config {
             if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::OpenAiEnv) {
                 tx.send(DisplayEvent::ApiConfig {
                     base_url: cfg.base_url.clone(),
@@ -289,11 +289,10 @@ pub async fn run_init(
         }
     }
 
-    let cat_stats = if let Some(resolved) = api_config {
+    let cat_stats = if let Some((resolved, llm)) = api_config {
         let total = sel_result.entities.len();
         tx.send(DisplayEvent::DiscoveryStart { total }).ok();
 
-        let llm = LlmClient::from_config(&resolved);
         let cat_pipeline = CatalystPipeline::new(&db, &llm, service);
         let tx_cat = tx.clone();
 
@@ -505,7 +504,7 @@ pub async fn run_init(
     display.finish();
 
     // Show starter prompt on interactive init
-    if !quiet {
+    if !quiet && !json_progress {
         if let Ok(config_path) = EnzymeConfig::config_path() {
             eprintln!("  Config saved to {}", config_path.display());
             eprintln!();
@@ -521,7 +520,7 @@ pub async fn run_init(
         eprintln!();
     }
 
-    if quiet {
+    if quiet || json_progress {
         Ok(Some(InitResult {
             files_discovered: idx_stats.files_discovered,
             files_new: idx_stats.files_new,
@@ -771,8 +770,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     }
 
     // ── Step 4: Run catalyst pipeline ───────────────────────────────────
-    let api_config = resolve_api_config().await?;
-    let llm = LlmClient::from_config(&api_config);
+    let (api_config, llm) = resolve_llm_client().await?;
     let svc = get_embedding_service(&paths.home).ok();
     let cat_pipeline = CatalystPipeline::new(&db, &llm, svc);
 

@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_api_config};
+use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_llm_client};
 use enzyme_core::search::context::ContextSearch;
 
 use crate::explore_pool::ExplorePool;
@@ -265,9 +265,9 @@ pub async fn run_standard_pipeline(
         }
     };
 
-    // 2. Resolve API config (async, no DB)
-    let api_config = match resolve_api_config().await {
-        Ok(cfg) => cfg,
+    // 2. Resolve API config and client (async, no DB)
+    let (api_config, client) = match resolve_llm_client().await {
+        Ok(resolved) => resolved,
         Err(e) => {
             events.push(ExploreEvent::Error {
                 message: format!("Failed to resolve API config: {e}"),
@@ -275,7 +275,6 @@ pub async fn run_standard_pipeline(
             return events;
         }
     };
-    let client = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
     let model = api_config.model.clone();
 
     // 3. LLM decomposition (async, no DB)
@@ -600,8 +599,8 @@ pub async fn run_fast_pipeline(
         .collect();
 
     // Resolve API config and run synthesis (async, no DB)
-    let api_config = match resolve_api_config().await {
-        Ok(cfg) => cfg,
+    let (api_config, client) = match resolve_llm_client().await {
+        Ok(resolved) => resolved,
         Err(e) => {
             events.push(ExploreEvent::Error {
                 message: format!("Failed to resolve API config: {e}"),
@@ -609,7 +608,6 @@ pub async fn run_fast_pipeline(
             return events;
         }
     };
-    let client = LlmClient::with_base_url(&api_config.api_key, &api_config.base_url);
 
     let synthesis_events = run_synthesis(
         &client,
