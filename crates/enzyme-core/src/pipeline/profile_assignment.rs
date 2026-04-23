@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn rule_assign_link_gets_relational_nudge() {
-        let e = make_entity("maren holt", EntityType::Link);
+        let e = make_entity("alice jones", EntityType::Link);
         assert_eq!(rule_assign(&e), Some("relational".to_string()));
     }
 

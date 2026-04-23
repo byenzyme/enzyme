@@ -813,8 +813,8 @@ mod tests {
     #[test]
     fn full_scenario_dedup_fold_and_children() {
         let db = test_db();
-        insert_doc(&db, "people/Alice.md");
-        insert_doc(&db, "people/Ari.md");
+        insert_doc(&db, "people/Alice Jones.md");
+        insert_doc(&db, "people/Bob Chen.md");
         insert_entity(&db, "enzyme", "tag", 200);
         insert_entity(&db, "enzyme/gtm", "tag", 70);
 
@@ -823,8 +823,8 @@ mod tests {
             make_entity("enzyme/gtm", EntityType::Tag, 70),
             make_entity("storytelling", EntityType::Tag, 100),
             make_entity("storytelling", EntityType::Link, 80), // should be deduped
-            make_entity("maren holt", EntityType::Link, 50),   // should fold into people/
-            make_entity("ari", EntityType::Link, 40),           // should fold into people/
+            make_entity("alice jones", EntityType::Link, 50),   // should fold into people/
+            make_entity("bob chen", EntityType::Link, 40),           // should fold into people/
             make_entity("inbox", EntityType::Folder, 500),
         ];
 
@@ -836,17 +836,17 @@ mod tests {
         assert_eq!(enzyme.significant_children.len(), 1);
         assert_eq!(enzyme.significant_children[0].name, "enzyme/gtm");
 
-        // Folders: inbox (no page entities) + people/ (synthetic, with maren holt + ari)
+        // Folders: inbox (no page entities) + people/ (synthetic, with alice jones + bob chen)
         assert_eq!(map.folders.len(), 2);
         let people = map
             .folders
             .iter()
             .find(|f| f.entity.name == "people")
             .unwrap();
-        assert!(people.page_entities.contains(&"maren holt".to_string()));
-        assert!(people.page_entities.contains(&"ari".to_string()));
+        assert!(people.page_entities.contains(&"alice jones".to_string()));
+        assert!(people.page_entities.contains(&"bob chen".to_string()));
 
-        // Links: storytelling link deduped, maren holt + ari subsumed
+        // Links: storytelling link deduped, alice jones + bob chen subsumed
         assert!(map.links.is_empty());
     }
 }

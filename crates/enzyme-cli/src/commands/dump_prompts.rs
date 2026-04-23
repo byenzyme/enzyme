@@ -61,10 +61,7 @@ pub async fn run_dump_prompts(
     let cat_config = CatalystConfig {
         entity_profiles: &empty_profiles,
         catalysts_per_entity: 7,
-        default_profile: enzyme_config
-            .catalyst_profile
-            .as_deref()
-            .unwrap_or(DEFAULT_PROFILE_KEY),
+        default_profile: DEFAULT_PROFILE_KEY,
         format_key: enzyme_config
             .catalyst_format
             .as_deref()

@@ -322,10 +322,7 @@ pub async fn run_init(
         let cat_config = CatalystConfig {
             entity_profiles: &sel_result.entity_profiles,
             catalysts_per_entity: 7,
-            default_profile: enzyme_config
-                .catalyst_profile
-                .as_deref()
-                .unwrap_or(DEFAULT_PROFILE_KEY),
+            default_profile: DEFAULT_PROFILE_KEY,
             format_key: enzyme_config
                 .catalyst_format
                 .as_deref()
@@ -795,10 +792,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     let cat_config = CatalystConfig {
         entity_profiles: &sel_result.entity_profiles,
         catalysts_per_entity: 7,
-        default_profile: enzyme_config
-            .catalyst_profile
-            .as_deref()
-            .unwrap_or(DEFAULT_PROFILE_KEY),
+        default_profile: DEFAULT_PROFILE_KEY,
         format_key: enzyme_config
             .catalyst_format
             .as_deref()

@@ -198,7 +198,7 @@ pub fn store_staleness_bookkeeping_partial(db: &Database, entity_names: &[String
 
 /// Compute a SHA256 hash of the config fields that affect catalyst generation.
 ///
-/// Hashes the sorted list of parsed entity names/types and the catalyst profile.
+/// Hashes the sorted list of parsed entity names/types.
 /// This is deterministic regardless of YAML formatting or ordering.
 fn compute_config_hash(vault_path: &Path) -> Result<String> {
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
@@ -216,12 +216,6 @@ fn compute_config_hash(vault_path: &Path) -> Result<String> {
     for key in &entity_keys {
         hasher.update(key.as_bytes());
         hasher.update(b"\n");
-    }
-
-    // Hash catalystProfile
-    if let Some(ref profile) = config.catalyst_profile {
-        hasher.update(b"profile:");
-        hasher.update(profile.as_bytes());
     }
 
     let hash = format!("{:x}", hasher.finalize());

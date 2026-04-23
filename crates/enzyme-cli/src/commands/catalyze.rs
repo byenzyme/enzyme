@@ -4,7 +4,6 @@ use std::time::Instant;
 use anyhow::Result;
 use serde_json::json;
 
-use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -63,11 +62,10 @@ pub async fn run_catalyze(
     let processing_time = start.elapsed().as_secs_f64();
 
     // Enrich with register-appropriate presentation guidance
-    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let response = response.with_presentation_guidance(
         register,
         &std::collections::HashMap::new(),
-        enzyme_config.catalyst_profile.as_deref(),
+        None,
     );
 
     // Merge response fields with metadata into a single JSON object

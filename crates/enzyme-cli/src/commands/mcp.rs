@@ -13,7 +13,6 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use rmcp::{prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router};
 
-use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -213,14 +212,10 @@ impl EnzymeMcp {
             .as_deref()
             .and_then(ContentRegister::from_str_opt)
             .unwrap_or_default();
-        let enzyme_config = EnzymeConfig::load(&vault_path)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
         let response = response.with_presentation_guidance(
             register,
             &std::collections::HashMap::new(),
-            enzyme_config.catalyst_profile.as_deref(),
+            None,
         );
 
         let text = serde_json::to_string_pretty(&response).map_err(|e| {

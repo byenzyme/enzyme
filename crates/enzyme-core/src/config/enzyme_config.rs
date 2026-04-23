@@ -18,7 +18,6 @@ const CONFIG_HEADER: &str = "\
 # Edit it directly \u{2014} changes take effect on the next `enzyme refresh`.
 #
 # [defaults]
-# catalyst_profile = \"dialectical\"    # how catalysts read: dialectical, operational, relational
 # catalyst_format  = \"question\"       # catalyst shape: question, thesis, claim
 # minimum_tags     = 8                # minimum trending tag entities to select
 # minimum_links    = 6                # minimum trending link entities
@@ -48,8 +47,6 @@ const CONFIG_HEADER: &str = "\
 pub struct EnzymeConfig {
     #[serde(default)]
     pub catalyzed_entities: Vec<CatalyzedEntity>,
-    #[serde(default)]
-    pub catalyst_profile: Option<String>,
     #[serde(default)]
     pub trending: Option<SelectionConfig>,
     #[serde(default)]
@@ -166,8 +163,6 @@ struct GlobalTomlConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DefaultsTomlSection {
     #[serde(default)]
-    catalyst_profile: Option<String>,
-    #[serde(default)]
     catalyst_format: Option<String>,
     #[serde(default = "default_min_tags")]
     minimum_tags: usize,
@@ -185,7 +180,6 @@ struct DefaultsTomlSection {
 impl Default for DefaultsTomlSection {
     fn default() -> Self {
         Self {
-            catalyst_profile: None,
             catalyst_format: None,
             minimum_tags: default_min_tags(),
             minimum_links: default_min_links(),
@@ -220,8 +214,6 @@ struct VaultTomlSection {
 struct LegacyYamlConfig {
     #[serde(default)]
     catalyzed_entities: Vec<CatalyzedEntity>,
-    #[serde(default)]
-    catalyst_profile: Option<String>,
     #[serde(default)]
     trending: Option<SelectionConfig>,
     #[serde(default)]
@@ -275,7 +267,6 @@ impl EnzymeConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            catalyst_profile: global.defaults.catalyst_profile.clone(),
             trending: Some(trending),
             catalyst_format: global.defaults.catalyst_format.clone(),
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
@@ -309,7 +300,6 @@ impl EnzymeConfig {
 
         Ok(Some(Self {
             catalyzed_entities: legacy.catalyzed_entities,
-            catalyst_profile: legacy.catalyst_profile,
             trending: legacy.trending,
             catalyst_format: legacy.catalyst_format,
             excluded_tags: legacy.excluded_tags,
@@ -414,7 +404,6 @@ impl EnzymeConfig {
             GlobalTomlConfig::default()
         };
 
-        global.defaults.catalyst_profile = self.catalyst_profile.clone();
         global.defaults.catalyst_format = self.catalyst_format.clone();
         if let Some(ref trending) = self.trending {
             global.defaults.minimum_tags = trending.minimum_tags;
@@ -536,7 +525,7 @@ mod tests {
     #[test]
     fn test_parse_entity_ref_link() {
         let p = parse_entity_ref("[[Test Note]]").unwrap();
-        assert_eq!(p.name, "maren holt");
+        assert_eq!(p.name, "test note");
         assert_eq!(p.entity_type, EntityType::Link);
     }
 
@@ -568,8 +557,8 @@ catalyzedEntities:
       expandable: true
       profile: relational
       children:
-        - "[[ari]]"
-        - "[[milo strand]]"
+        - "[[Alice]]"
+        - "[[Bob Chen]]"
 catalystProfile: dialectical
 excludedTags:
   - note
@@ -578,11 +567,8 @@ excludedTags:
 
         let config: LegacyYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.catalyzed_entities.len(), 4);
-        assert_eq!(config.catalyst_profile, Some("dialectical".to_string()));
-
         let merged = EnzymeConfig {
             catalyzed_entities: config.catalyzed_entities,
-            catalyst_profile: config.catalyst_profile,
             trending: config.trending,
             catalyst_format: config.catalyst_format,
             excluded_tags: config.excluded_tags,
@@ -607,7 +593,6 @@ excludedTags:
 
         let config = EnzymeConfig {
             catalyzed_entities: vec![CatalyzedEntity::Simple("#enzyme".to_string()), CatalyzedEntity::Simple("[[Test Note]]".to_string())],
-            catalyst_profile: Some("dialectical".to_string()),
             trending: Some(SelectionConfig {
                 minimum_tags: 9,
                 minimum_links: 7,
@@ -630,7 +615,6 @@ excludedTags:
         assert!(raw.starts_with("# Enzyme configuration"));
 
         let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
-        assert_eq!(loaded.catalyst_profile.as_deref(), Some("dialectical"));
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
         assert_eq!(loaded.catalyzed_entities.len(), 2);
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
