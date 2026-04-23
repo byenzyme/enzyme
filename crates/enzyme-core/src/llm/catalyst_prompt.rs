@@ -51,7 +51,7 @@ pub fn catalyst_json_schema() -> serde_json::Value {
                 "items": { "type": "string" }
             }
         },
-        "required": ["catalysts", "topicNames"],
+        "required": ["catalysts", "topicNames", "eraLabels"],
         "additionalProperties": false
     })
 }

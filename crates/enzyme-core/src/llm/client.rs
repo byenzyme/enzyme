@@ -163,7 +163,13 @@ pub struct GenerationParams {
     pub max_tokens: u32,
     pub temperature: f32,
     pub top_p: f32,
-    pub top_k: u32,
+    /// Optional `top_k` sampling parameter.
+    ///
+    /// Only a handful of providers accept this (OpenRouter, Together AI, vLLM,
+    /// LM Studio, Anthropic).  OpenAI, Azure OpenAI, Groq, and Ollama reject
+    /// unknown parameters with a 400 error, so we skip serialization when this
+    /// is `None`.
+    pub top_k: Option<u32>,
     pub response_format: Option<ResponseFormat>,
 }
 
@@ -252,7 +258,7 @@ impl Default for GenerationParams {
             max_tokens: 8192,
             temperature: 0.7,
             top_p: 0.8,
-            top_k: 20,
+            top_k: None,
             response_format: None,
         }
     }
@@ -275,7 +281,8 @@ struct ChatCompletionRequest {
     max_tokens: u32,
     temperature: f32,
     top_p: f32,
-    top_k: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
