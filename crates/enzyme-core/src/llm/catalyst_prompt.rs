@@ -34,8 +34,8 @@ struct CatalystPayload {
 /// JSON Schema for the `CatalystPayload` response type.
 ///
 /// Used with `response_format: json_schema` for strict schema enforcement.
-pub fn catalyst_json_schema() -> serde_json::Value {
-    serde_json::json!({
+pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
+    let mut schema = serde_json::json!({
         "type": "object",
         "properties": {
             "catalysts": {
@@ -45,15 +45,24 @@ pub fn catalyst_json_schema() -> serde_json::Value {
             "topicNames": {
                 "type": "array",
                 "items": { "type": "string" }
-            },
-            "eraLabels": {
-                "type": "array",
-                "items": { "type": "string" }
             }
         },
-        "required": ["catalysts", "topicNames", "eraLabels"],
+        "required": ["catalysts", "topicNames"],
         "additionalProperties": false
-    })
+    });
+
+    if include_era_labels {
+        schema["properties"]["eraLabels"] = serde_json::json!({
+            "type": "array",
+            "items": { "type": "string" }
+        });
+        schema["required"]
+            .as_array_mut()
+            .expect("schema required is an array")
+            .push(serde_json::json!("eraLabels"));
+    }
+
+    schema
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +119,7 @@ Specifically banned: \"reveal,\" \"suggest about,\" \"underlying,\" \"foreclose,
 \"illuminate,\" \"inherent,\" \"navigate,\" \"in what ways,\" \"intersection of,\" \"the notion of,\" \
 \"the pursuit of,\" \"implicitly,\" \"the architecture of.\" Use words that appeared in the \
 excerpts or that a person would use in conversation.\n\n\
-Always respond with valid JSON that includes the catalysts and topic names.",
+Always respond with valid JSON that includes catalysts, topic names, and era labels.",
         fmt.format_prompt, surface_items, examples_section,
     );
 
@@ -360,13 +369,18 @@ embed well against vault passages and surface relevant content when used as a se
         .map(|i| format!("    \"[specific concept relationship {}]\"", i + 1))
         .collect::<Vec<_>>()
         .join(",\n");
+    let era_placeholders: String = (0..num_catalysts)
+        .map(|i| format!("    \"[era label {}]\"", i + 1))
+        .collect::<Vec<_>>()
+        .join(",\n");
 
     prompt.push_str(&format!(
         "\n\n\
 Now attend to the excerpts and:\n\
 1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
 2. {format_instruction}\n\
-3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\n\
+3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\
+4. For eraLabels: copy the era label that most shaped each catalyst. Use an empty string only if no era label is available.\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -374,6 +388,9 @@ Return a JSON object with:\n\
   ],\n\
   \"topicNames\": [\n\
 {topic_placeholders}\n\
+  ],\n\
+  \"eraLabels\": [\n\
+{era_placeholders}\n\
   ]\n\
 }}"
     ));

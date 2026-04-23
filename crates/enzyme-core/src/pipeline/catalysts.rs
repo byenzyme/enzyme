@@ -1028,17 +1028,20 @@ impl<'a> CatalystPipeline<'a> {
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let entity_timeout_secs: u64 = if is_remote { 30 } else { 300 };
 
-        // Build the response_format once based on provider capabilities
+        let local_model = self.llm.is_local();
+
+        // Build the response_format once based on provider capabilities. Local
+        // SmolLM2 checkpoints were trained before eraLabels were stable, so do
+        // not require that field for local inference yet.
         let structured_output = self.llm.structured_output_support();
-        let response_format =
-            structured_output.build_response_format("catalyst_response", catalyst_json_schema());
+        let response_format = structured_output
+            .build_response_format("catalyst_response", catalyst_json_schema(!local_model));
 
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
 
         let model = config.model.to_string();
-        let local_model = self.llm.is_local();
         for job in jobs {
             on_event(CatalystEvent::EntityStarted {
                 entity_name: job.entity_name.clone(),
