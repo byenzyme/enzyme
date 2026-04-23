@@ -32,6 +32,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # Embedding inference
 model2vec = "0.3"
+ese = { git = "https://github.com/flowercomputers/ese.git", rev = "e2931ab", features = ["dim-512", "rayon", "quant-8"], default-features = false }
 
 # HNSW
 instant-distance = "0.6"

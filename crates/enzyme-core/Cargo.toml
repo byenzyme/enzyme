@@ -4,12 +4,18 @@ version.workspace = true
 edition.workspace = true
 description = "Core library for Enzyme — local-first knowledge indexing and approximate search"
 
+[features]
+default = ["ese-backend"]
+ese-backend = ["dep:ese"]
+model2vec-backend = ["dep:model2vec"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 libsql = { workspace = true }
-model2vec = { workspace = true }
+model2vec = { workspace = true, optional = true }
+ese = { workspace = true, optional = true }
 instant-distance = { workspace = true }
 pulldown-cmark = { workspace = true }
 rayon = { workspace = true }

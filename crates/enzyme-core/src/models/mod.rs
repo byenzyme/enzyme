@@ -13,5 +13,8 @@ pub use entity::*;
 /// Enzyme stores all timestamps as milliseconds since Unix epoch.
 pub type Timestamp = i64;
 
-/// Embedding vector dimensionality (model2vec potion-base-8M).
+/// Embedding vector dimensionality.
+#[cfg(feature = "ese-backend")]
+pub const EMBEDDING_DIMENSION: usize = ese::DIMENSIONS;
+#[cfg(not(feature = "ese-backend"))]
 pub const EMBEDDING_DIMENSION: usize = 256;

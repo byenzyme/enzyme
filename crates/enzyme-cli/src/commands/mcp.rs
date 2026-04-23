@@ -23,9 +23,12 @@ use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
 use super::status::build_status_json;
 
-const SKILL_MD: &str = include_str!("../../../../plugin/skills/enzyme/SKILL.md");
-const PETRI_GUIDE: &str = include_str!("../../../../plugin/skills/enzyme/petri-guide.md");
-const SEARCH_GUIDE: &str = include_str!("../../../../plugin/skills/enzyme/search-guide.md");
+const SKILL_MD: &str =
+    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/SKILL.md");
+const PETRI_GUIDE: &str =
+    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/petri-guide.md");
+const SEARCH_GUIDE: &str =
+    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/search-guide.md");
 
 /// Strip YAML frontmatter (delimited by `---`) from a string.
 fn strip_frontmatter(s: &str) -> &str {

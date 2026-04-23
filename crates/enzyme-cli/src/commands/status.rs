@@ -18,10 +18,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     // Resolve async data first, before opening non-Send DB
     let api_key_configured = enzyme_core::llm::resolve_api_key().await.is_ok();
 
-    let model_path = match enzyme_core::embedding::resolve_distilled_model_files(&paths.home) {
-        Ok(mf) => Some(mf.model_dir.display().to_string()),
-        Err(_) => None,
-    };
+    let model_path = enzyme_core::embedding::model_description(&paths.home);
 
     let db = Database::open(&paths.vault_db)?;
 
