@@ -1,1 +1,19 @@
-../../.claude-plugin/marketplace.json
+{
+  "name": "enzyme",
+  "interface": {
+    "displayName": "Enzyme"
+  },
+  "plugins": [
+    {
+      "name": "enzyme",
+      "source": {
+        "source": "local",
+        "path": "../../"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
