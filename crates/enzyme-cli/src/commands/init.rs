@@ -505,7 +505,7 @@ pub async fn run_init(
     // Wait for display thread to finish rendering
     display.finish();
 
-    // Show starter prompt and bonsai CTA on interactive init
+    // Show starter prompt on interactive init
     if !quiet {
         if let Ok(config_path) = EnzymeConfig::config_path() {
             eprintln!("  Config saved to {}", config_path.display());
@@ -517,19 +517,6 @@ pub async fn run_init(
             crossterm::style::SetForegroundColor(crossterm::style::Color::White),
             crossterm::style::ResetColor,
             crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
-            crossterm::style::ResetColor,
-        );
-        eprintln!();
-        eprintln!(
-            "  {}A bonsai guide is shaped to your vault — sharper catalysts, better questions.{}",
-            crossterm::style::SetForegroundColor(crossterm::style::Color::Grey),
-            crossterm::style::ResetColor,
-        );
-        eprintln!(
-            "  {}enzyme.garden/bonsai{} {}— join the waitlist{}",
-            crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
-            crossterm::style::ResetColor,
-            crossterm::style::SetForegroundColor(crossterm::style::Color::Grey),
             crossterm::style::ResetColor,
         );
         eprintln!();
