@@ -28,8 +28,25 @@ pub struct EmbeddingStats {
     pub documents_embedded: usize,
     pub chunks_embedded: usize,
     pub documents_pruned: usize,
+    /// Number of documents that needed embedding but were skipped due to the cap.
+    pub documents_skipped: usize,
+    /// `created_at` (epoch ms) of the oldest document that was embedded.
+    /// `None` when no documents were embedded.
+    pub oldest_embedded_ms: Option<i64>,
     /// Wall-clock time for the entire pipeline run, in milliseconds.
     pub duration_ms: u64,
+}
+
+/// Progress update emitted during embedding.
+#[derive(Debug, Clone)]
+pub struct EmbeddingProgress {
+    /// Documents completed so far.
+    pub done: usize,
+    /// Total documents to embed.
+    pub total: usize,
+    /// `created_at` (epoch ms) of the document currently being embedded.
+    /// Dates rewind as we process from newest to oldest.
+    pub current_date_ms: Option<i64>,
 }
 
 impl<'a> EmbeddingPipeline<'a> {
@@ -38,13 +55,23 @@ impl<'a> EmbeddingPipeline<'a> {
     }
 
     /// Run embedding (capped to most recent N documents).
-    pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+    pub fn run(&self, on_progress: impl Fn(EmbeddingProgress)) -> Result<EmbeddingStats> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), None, on_progress)
+    }
+
+    /// Run embedding with a caller-specified cap.
+    /// `None` means unlimited; `Some(n)` caps at n documents.
+    pub fn run_with_limit(
+        &self,
+        max_docs: Option<usize>,
+        on_progress: impl Fn(EmbeddingProgress),
+    ) -> Result<EmbeddingStats> {
+        self.run_inner(max_docs, None, on_progress)
     }
 
     /// Run embedding with no document cap — embeds all documents in the DB.
     /// Used by `apply` where the target directory should be fully embedded.
-    pub fn run_all(&self, on_progress: impl Fn(usize, usize)) -> Result<EmbeddingStats> {
+    pub fn run_all(&self, on_progress: impl Fn(EmbeddingProgress)) -> Result<EmbeddingStats> {
         self.run_inner(None, None, on_progress)
     }
 
@@ -52,7 +79,7 @@ impl<'a> EmbeddingPipeline<'a> {
     pub fn run_since(
         &self,
         since_ms: i64,
-        on_progress: impl Fn(usize, usize),
+        on_progress: impl Fn(EmbeddingProgress),
     ) -> Result<EmbeddingStats> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
     }
@@ -61,7 +88,7 @@ impl<'a> EmbeddingPipeline<'a> {
         &self,
         max_docs: Option<usize>,
         indexed_since: Option<i64>,
-        on_progress: impl Fn(usize, usize),
+        on_progress: impl Fn(EmbeddingProgress),
     ) -> Result<EmbeddingStats> {
         let start = Instant::now();
 
@@ -72,15 +99,27 @@ impl<'a> EmbeddingPipeline<'a> {
         }
 
         // Step 2: Find documents needing embedding
+        let total_needing = if max_docs.is_some() {
+            self.db.count_documents_needing_embedding()?
+        } else {
+            0 // no cap, so no skipping
+        };
         let docs_needing = self
             .db
             .get_documents_needing_embedding(max_docs, indexed_since)?;
+        let documents_skipped = if max_docs.is_some() {
+            total_needing.saturating_sub(docs_needing.len())
+        } else {
+            0
+        };
         if docs_needing.is_empty() {
             info!("No documents need embedding");
             return Ok(EmbeddingStats {
                 documents_embedded: 0,
                 chunks_embedded: 0,
                 documents_pruned,
+                documents_skipped,
+                oldest_embedded_ms: None,
                 duration_ms: start.elapsed().as_millis() as u64,
             });
         }
@@ -93,7 +132,7 @@ impl<'a> EmbeddingPipeline<'a> {
         let mut doc_chunk_ranges: Vec<(usize, usize)> = Vec::new();
         let mut non_empty_docs: Vec<usize> = Vec::new();
 
-        for (i, (_doc_id, _source_ref, chunks)) in docs_needing.iter().enumerate() {
+        for (i, (_doc_id, _source_ref, _created_at, chunks)) in docs_needing.iter().enumerate() {
             if chunks.is_empty() {
                 continue;
             }
@@ -104,6 +143,12 @@ impl<'a> EmbeddingPipeline<'a> {
             doc_chunk_ranges.push((start_idx, chunks.len()));
             non_empty_docs.push(i);
         }
+
+        // Build a vec of created_at dates aligned with non_empty_docs for progress.
+        let doc_dates: Vec<i64> = non_empty_docs
+            .iter()
+            .map(|&i| docs_needing[i].2)
+            .collect();
 
         let total_chunks = flat_chunks.len();
         info!(
@@ -125,16 +170,25 @@ impl<'a> EmbeddingPipeline<'a> {
                         break;
                     }
                 }
-                on_progress(docs_done, total_non_empty);
+                // The current doc being worked on is docs_done (0-indexed into
+                // doc_dates). Since docs are sorted newest-first, this date
+                // rewinds as we progress.
+                let current_date_ms = doc_dates.get(docs_done).copied();
+                on_progress(EmbeddingProgress {
+                    done: docs_done,
+                    total: total_non_empty,
+                    current_date_ms,
+                });
             },
         )?;
 
         // Step 5: Scatter results back to documents and write to DB.
         let mut chunks_embedded = 0usize;
         let mut documents_embedded = 0usize;
+        let mut oldest_embedded_ms: Option<i64> = None;
 
         for (range_idx, &doc_idx) in non_empty_docs.iter().enumerate() {
-            let (doc_id, source_ref, _chunks) = &docs_needing[doc_idx];
+            let (doc_id, source_ref, created_at, _chunks) = &docs_needing[doc_idx];
             let (start_idx, count) = doc_chunk_ranges[range_idx];
             let vectors = &all_vectors[start_idx..start_idx + count];
 
@@ -169,6 +223,8 @@ impl<'a> EmbeddingPipeline<'a> {
 
             chunks_embedded += count;
             documents_embedded += 1;
+            // Docs are sorted newest-first, so the last one processed is oldest.
+            oldest_embedded_ms = Some(*created_at);
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -182,6 +238,8 @@ impl<'a> EmbeddingPipeline<'a> {
             documents_embedded,
             chunks_embedded,
             documents_pruned,
+            documents_skipped,
+            oldest_embedded_ms,
             duration_ms,
         })
     }

@@ -15,6 +15,17 @@ use super::spinner::HelixSpinner;
 use super::tree;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Format an epoch-millisecond timestamp as "Mon YYYY" (e.g. "Mar 2024").
+fn format_epoch_ms_short(ms: i64) -> String {
+    use chrono::{DateTime, Utc};
+    let dt = DateTime::from_timestamp_millis(ms).unwrap_or_else(|| Utc::now());
+    dt.format("%b %Y").to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Display events (sent from pipeline stages)
 // ---------------------------------------------------------------------------
 
@@ -85,10 +96,15 @@ pub enum DisplayEvent {
     EmbeddingProgress {
         done: usize,
         total: usize,
+        /// `created_at` (epoch ms) of the document currently being processed.
+        current_date_ms: Option<i64>,
     },
     EmbeddingComplete {
         documents: usize,
         pruned: usize,
+        skipped: usize,
+        /// `created_at` (epoch ms) of the oldest embedded document.
+        oldest_date_ms: Option<i64>,
         duration_ms: u64,
     },
     EmbeddingSkipped(String),
@@ -431,14 +447,17 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::EmbeddingStart => {
                 embedding_status.replace("Embedding...".to_string());
             }
-            DisplayEvent::EmbeddingProgress { done, total } => {
-                if total > 0 {
-                    embedding_status.replace(format!("Embedding [{}/{} docs]", done, total));
-                }
+            DisplayEvent::EmbeddingProgress { done: _, total: _, current_date_ms } => {
+                let label = current_date_ms
+                    .map(|ms| format!("Embedding [\u{2190} {}]", format_epoch_ms_short(ms)))
+                    .unwrap_or_else(|| "Embedding...".to_string());
+                embedding_status.replace(label);
             }
             DisplayEvent::EmbeddingComplete {
                 documents,
                 pruned,
+                skipped: _,
+                oldest_date_ms,
                 duration_ms,
             } => {
                 clear_lines(out, *lines_written);
@@ -452,6 +471,9 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 } else {
                     0.0
                 };
+                let date_label = oldest_date_ms
+                    .map(|ms| format!("back to {}", format_epoch_ms_short(ms)))
+                    .unwrap_or_else(|| "up to date".to_string());
                 let pruned_suffix = if pruned > 0 {
                     format!(", {} pruned", pruned)
                 } else {
@@ -459,10 +481,10 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 };
                 let _ = writeln!(
                     out,
-                    "  {}Embedded:{} {} recent documents{} ({:.0} docs/sec)",
+                    "  {}Embedded:{} {}{} ({:.0} docs/sec)",
                     crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                     crossterm::style::ResetColor,
-                    documents,
+                    date_label,
                     pruned_suffix,
                     docs_per_sec,
                 );
@@ -804,14 +826,16 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::EmbeddingStart => {
                     println!("Generating embeddings...");
                 }
-                DisplayEvent::EmbeddingProgress { done, total } => {
-                    if total > 0 {
-                        println!("  [embed] {}/{} documents", done, total);
+                DisplayEvent::EmbeddingProgress { done: _, total: _, current_date_ms } => {
+                    if let Some(ms) = current_date_ms {
+                        println!("  [embed] <- {}", format_epoch_ms_short(ms));
                     }
                 }
                 DisplayEvent::EmbeddingComplete {
                     documents,
                     pruned,
+                    skipped: _,
+                    oldest_date_ms,
                     duration_ms,
                 } => {
                     let secs = duration_ms as f64 / 1000.0;
@@ -820,14 +844,17 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                     } else {
                         0.0
                     };
+                    let date_label = oldest_date_ms
+                        .map(|ms| format!("back to {}", format_epoch_ms_short(ms)))
+                        .unwrap_or_else(|| "up to date".to_string());
                     let pruned_suffix = if pruned > 0 {
                         format!(", {} pruned", pruned)
                     } else {
                         String::new()
                     };
                     println!(
-                        "  Embedded: {} recent documents{} ({:.0} docs/sec)",
-                        documents, pruned_suffix, docs_per_sec
+                        "  Embedded: {}{} ({:.0} docs/sec)",
+                        date_label, pruned_suffix, docs_per_sec
                     );
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
@@ -914,11 +941,11 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::EmbeddingStart => {
                         json!({"stage": "embedding", "status": "start"})
                     }
-                    DisplayEvent::EmbeddingProgress { done, total } => {
-                        json!({"stage": "embedding", "status": "progress", "done": done, "total": total})
+                    DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
+                        json!({"stage": "embedding", "status": "progress", "done": done, "total": total, "current_date_ms": current_date_ms})
                     }
-                    DisplayEvent::EmbeddingComplete { documents, pruned, duration_ms } => {
-                        json!({"stage": "embedding", "status": "complete", "documents": documents, "pruned": pruned, "duration_ms": duration_ms})
+                    DisplayEvent::EmbeddingComplete { documents, pruned, skipped, oldest_date_ms, duration_ms } => {
+                        json!({"stage": "embedding", "status": "complete", "documents": documents, "pruned": pruned, "skipped": skipped, "oldest_date_ms": oldest_date_ms, "duration_ms": duration_ms})
                     }
                     DisplayEvent::EmbeddingSkipped(reason) => {
                         json!({"stage": "embedding", "status": "skipped", "reason": reason})

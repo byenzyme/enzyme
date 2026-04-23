@@ -260,13 +260,18 @@ pub async fn run_init(
     let embedding_handle = if let Some(svc) = service {
         let db_path = paths.vault_db.clone();
         let tx_emb = tx.clone();
+        let max_embed = enzyme_config.effective_max_embedding_files();
         tx.send(DisplayEvent::EmbeddingStart).ok();
         Some(tokio::task::spawn_blocking(move || {
             let bg_db = Database::open(&db_path)?;
             let pipeline = EmbeddingPipeline::new(&bg_db, svc);
-            pipeline.run(|done, total| {
+            pipeline.run_with_limit(max_embed, |p| {
                 tx_emb
-                    .send(DisplayEvent::EmbeddingProgress { done, total })
+                    .send(DisplayEvent::EmbeddingProgress {
+                        done: p.done,
+                        total: p.total,
+                        current_date_ms: p.current_date_ms,
+                    })
                     .ok();
             })
         }))
@@ -431,6 +436,8 @@ pub async fn run_init(
                 tx.send(DisplayEvent::EmbeddingComplete {
                     documents: stats.documents_embedded,
                     pruned: stats.documents_pruned,
+                    skipped: stats.documents_skipped,
+                    oldest_date_ms: stats.oldest_embedded_ms,
                     duration_ms: stats.duration_ms,
                 })
                 .ok();
@@ -640,7 +647,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         match svc {
             Some(svc) => {
                 let pipeline = EmbeddingPipeline::new(&db, svc);
-                match pipeline.run_since(index_start_ms, |_, _| {}) {
+                match pipeline.run_since(index_start_ms, |_| {}) {
                     Ok(stats) => {
                         debug!(
                             docs = stats.documents_embedded,

@@ -93,9 +93,13 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
         move || {
             let db = Database::open(&target_db_path)?;
             let pipeline = EmbeddingPipeline::new(&db, service);
-            pipeline.run_all(|done, total| {
+            pipeline.run_all(|p| {
                 tx_emb
-                    .send(DisplayEvent::EmbeddingProgress { done, total })
+                    .send(DisplayEvent::EmbeddingProgress {
+                        done: p.done,
+                        total: p.total,
+                        current_date_ms: p.current_date_ms,
+                    })
                     .ok();
             })
         }
@@ -106,6 +110,8 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
     tx.send(DisplayEvent::EmbeddingComplete {
         documents: emb_stats.documents_embedded,
         pruned: emb_stats.documents_pruned,
+        skipped: emb_stats.documents_skipped,
+        oldest_date_ms: emb_stats.oldest_embedded_ms,
         duration_ms: emb_stats.duration_ms,
     })
     .ok();

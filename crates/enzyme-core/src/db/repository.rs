@@ -297,14 +297,17 @@ impl Database {
     }
 
     /// Find documents whose embeddings are stale or missing.
+    ///
+    /// Returns `(doc_id, source_ref, created_at_ms, chunks)` sorted by
+    /// `created_at DESC` (newest first).
     pub fn get_documents_needing_embedding(
         &self,
         max_count: Option<usize>,
         indexed_since: Option<i64>,
-    ) -> Result<Vec<(i64, String, Vec<String>)>> {
+    ) -> Result<Vec<(i64, String, i64, Vec<String>)>> {
         let mut params: Vec<Value> = Vec::new();
         let mut sql = String::from(
-            "SELECT id, source_ref FROM docs
+            "SELECT id, source_ref, created_at FROM docs
              WHERE (embedded_content_hash IS NULL
                 OR embedded_content_hash != content_hash
                 OR embedded_at IS NULL)",
@@ -323,20 +326,30 @@ impl Database {
         }
 
         let docs = self.query_read(&sql, params, |row| {
-            Ok((row.get::<i64>(0)?, row.get::<String>(1)?))
+            Ok((row.get::<i64>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?))
         })?;
 
         let mut results = Vec::with_capacity(docs.len());
-        for (doc_id, source_ref) in docs {
+        for (doc_id, source_ref, created_at) in docs {
             let chunks = self.query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
                 vec![Value::Integer(doc_id)],
                 |row| row.get::<String>(0),
             )?;
-            results.push((doc_id, source_ref, chunks));
+            results.push((doc_id, source_ref, created_at, chunks));
         }
 
         Ok(results)
+    }
+
+    /// Count documents whose embeddings are stale or missing.
+    pub fn count_documents_needing_embedding(&self) -> Result<usize> {
+        let sql = "SELECT COUNT(*) FROM docs
+             WHERE (embedded_content_hash IS NULL
+                OR embedded_content_hash != content_hash
+                OR embedded_at IS NULL)";
+        let rows = self.query_read(sql, vec![], |row| row.get::<i64>(0))?;
+        Ok(rows.first().copied().unwrap_or(0) as usize)
     }
 
     /// Mark a document as having been embedded at `now` with the given `content_hash`.

@@ -24,6 +24,7 @@ const CONFIG_HEADER: &str = "\
 # minimum_links    = 6                # minimum trending link entities
 # minimum_folders  = 6                # minimum trending folder entities
 # total_limit      = 30               # cap on total entities selected
+# max_embedding_files = 1024          # max docs to embed per run (0 = unlimited)
 #
 # Each vault gets its own section, keyed by absolute path:
 #
@@ -33,6 +34,7 @@ const CONFIG_HEADER: &str = "\
 # excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
 # targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
 # min_top_catalysts = 13                       # minimum catalysts for the largest entity
+# max_embedding_files = 0                      # override: embed all docs in this vault
 #
 
 ";
@@ -64,6 +66,10 @@ pub struct EnzymeConfig {
     /// External directories to project this vault's catalysts onto.
     #[serde(default)]
     pub targets: Vec<String>,
+    /// Maximum number of documents to embed per run.
+    /// `None` uses the built-in default (1024). `Some(0)` means unlimited.
+    #[serde(default)]
+    pub max_embedding_files: Option<usize>,
 }
 
 /// A single entry in the config.
@@ -174,6 +180,9 @@ struct DefaultsTomlSection {
     minimum_folders: usize,
     #[serde(default = "default_total_limit")]
     total_limit: usize,
+    /// Maximum documents to embed per run. `0` = unlimited. Omitted = 1024.
+    #[serde(default)]
+    max_embedding_files: Option<usize>,
 }
 
 impl Default for DefaultsTomlSection {
@@ -185,6 +194,7 @@ impl Default for DefaultsTomlSection {
             minimum_links: default_min_links(),
             minimum_folders: default_min_folders(),
             total_limit: default_total_limit(),
+            max_embedding_files: None,
         }
     }
 }
@@ -205,6 +215,9 @@ struct VaultTomlSection {
     pinned_entities: Vec<String>,
     #[serde(default)]
     targets: Vec<String>,
+    /// Per-vault override for max embedding files. `0` = unlimited.
+    #[serde(default)]
+    max_embedding_files: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -283,6 +296,9 @@ impl EnzymeConfig {
             excluded_links: vault.map(|v| v.excluded_links.clone()).unwrap_or_default(),
             excluded_folders: vault.map(|v| v.excluded_folders.clone()).unwrap_or_default(),
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
+            max_embedding_files: vault
+                .and_then(|v| v.max_embedding_files)
+                .or(global.defaults.max_embedding_files),
         }
     }
 
@@ -315,6 +331,7 @@ impl EnzymeConfig {
             excluded_links: legacy.excluded_links,
             excluded_folders: legacy.excluded_folders,
             targets: Vec::new(),
+            max_embedding_files: None,
         }))
     }
 
@@ -355,6 +372,20 @@ impl EnzymeConfig {
         }
 
         prefs
+    }
+
+    /// Resolve the effective max-embedding-files limit.
+    ///
+    /// - `None` in config → `Some(DEFAULT)` (built-in 1024)
+    /// - `Some(0)` in config → `None` (unlimited)
+    /// - `Some(n)` in config → `Some(n)`
+    pub fn effective_max_embedding_files(&self) -> Option<usize> {
+        use crate::pipeline::embedding::MAX_EMBEDDING_FILES;
+        match self.max_embedding_files {
+            None => Some(MAX_EMBEDDING_FILES),
+            Some(0) => None,
+            Some(n) => Some(n),
+        }
     }
 
     pub fn has_curated_entities(&self) -> bool {
@@ -426,6 +457,7 @@ impl EnzymeConfig {
             .filter_map(entity_ref_string)
             .collect();
         entry.targets = self.targets.clone();
+        entry.max_embedding_files = self.max_embedding_files;
 
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
