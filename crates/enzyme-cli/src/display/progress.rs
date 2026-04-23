@@ -100,13 +100,10 @@ pub enum DisplayEvent {
         current_date_ms: Option<i64>,
     },
     EmbeddingComplete {
-        documents: usize,
         chunks: usize,
         pruned: usize,
-        skipped: usize,
         /// `created_at` (epoch ms) of the oldest embedded document.
         oldest_date_ms: Option<i64>,
-        duration_ms: u64,
         encode_ms: u64,
     },
     EmbeddingSkipped(String),
@@ -141,7 +138,6 @@ struct DiscoveryEntry {
     entity_name: String,
     entity_type: EntityType,
     catalysts: Vec<String>,
-    failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +378,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     entity_name,
                     entity_type,
                     catalysts: catalyst_texts,
-                    failed: false,
                 });
                 if rolling_window.len() > ROLLING_WINDOW_SIZE {
                     rolling_window.remove(0);
@@ -415,7 +410,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     entity_name,
                     entity_type,
                     catalysts: vec![short_err],
-                    failed: true,
                 });
             }
             DisplayEvent::DiscoveryComplete {
@@ -451,60 +445,49 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::EmbeddingStart => {
                 embedding_status.replace("Embedding...".to_string());
             }
-            DisplayEvent::EmbeddingProgress { done: _, total: _, current_date_ms } => {
+            DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
                 let label = current_date_ms
-                    .map(|ms| format!("Embedding [\u{2190} {}]", format_epoch_ms_short(ms)))
-                    .unwrap_or_else(|| "Embedding...".to_string());
+                    .map(|ms| {
+                        format!(
+                            "Embedding docs [{}/{}] [\u{2190} {}]",
+                            done,
+                            total,
+                            format_epoch_ms_short(ms)
+                        )
+                    })
+                    .unwrap_or_else(|| format!("Embedding docs [{}/{}]", done, total));
                 embedding_status.replace(label);
             }
             DisplayEvent::EmbeddingComplete {
-                documents: _,
                 chunks,
                 pruned,
-                skipped: _,
                 oldest_date_ms,
-                duration_ms: _,
                 encode_ms,
             } => {
                 embedding_status.take();
-
-                let date_label = oldest_date_ms
-                    .map(|ms| format!("back to {}", format_epoch_ms_short(ms)))
-                    .unwrap_or_else(|| "up to date".to_string());
-                let pruned_suffix = if pruned > 0 {
-                    format!(", {} pruned", pruned)
-                } else {
-                    String::new()
-                };
-                let encode_secs = encode_ms as f64 / 1000.0;
-                let rate = if encode_secs > 0.0 {
-                    chunks as f64 / encode_secs
-                } else {
-                    0.0
-                };
-                let rate_label = if rate >= 1_000_000.0 {
-                    format!("{:.1}M chunks/sec", rate / 1_000_000.0)
-                } else if rate >= 1_000.0 {
-                    format!("{:.0}K chunks/sec", rate / 1_000.0)
-                } else {
-                    format!("{:.0} chunks/sec", rate)
-                };
+                let summary = format_embedding_complete_summary(
+                    chunks,
+                    pruned,
+                    oldest_date_ms,
+                    encode_ms,
+                );
                 *embedding_done_line = Some(format!(
-                    "  {}Embedded:{} {}{} ({})",
+                    "  {}Embedded:{} {}",
                     crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                     crossterm::style::ResetColor,
-                    date_label,
-                    pruned_suffix,
-                    rate_label,
+                    summary,
                 ));
 
-                // If discovery isn't running, print immediately
-                if *stage != DisplayStage::Discovery || rolling_window.is_empty() {
+                // Print immediately only when discovery is not active.
+                // During discovery, cache the finished line so it renders once
+                // above the tree without double-printing.
+                if should_print_embedding_done_immediately(stage) {
                     clear_lines(out, *lines_written);
                     *lines_written = 0;
                     *stage = DisplayStage::Embedding;
                     if let Some(line) = embedding_done_line.as_ref() {
                         let _ = writeln!(out, "{}", line);
+                        *lines_written = 1;
                     }
                 }
             }
@@ -853,44 +836,28 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::EmbeddingStart => {
                     println!("Generating embeddings...");
                 }
-                DisplayEvent::EmbeddingProgress { done: _, total: _, current_date_ms } => {
+                DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
                     if let Some(ms) = current_date_ms {
-                        println!("  [embed] <- {}", format_epoch_ms_short(ms));
+                        println!("  Embedding docs [{}/{}] [← {}]", done, total, format_epoch_ms_short(ms));
+                    } else {
+                        println!("  Embedding docs [{}/{}]", done, total);
                     }
                 }
                 DisplayEvent::EmbeddingComplete {
-                    documents: _,
                     chunks,
                     pruned,
-                    skipped: _,
                     oldest_date_ms,
-                    duration_ms: _,
                     encode_ms,
                 } => {
-                    let date_label = oldest_date_ms
-                        .map(|ms| format!("back to {}", format_epoch_ms_short(ms)))
-                        .unwrap_or_else(|| "up to date".to_string());
-                    let pruned_suffix = if pruned > 0 {
-                        format!(", {} pruned", pruned)
-                    } else {
-                        String::new()
-                    };
-                    let encode_secs = encode_ms as f64 / 1000.0;
-                    let rate = if encode_secs > 0.0 {
-                        chunks as f64 / encode_secs
-                    } else {
-                        0.0
-                    };
-                    let rate_label = if rate >= 1_000_000.0 {
-                        format!("{:.1}M chunks/sec", rate / 1_000_000.0)
-                    } else if rate >= 1_000.0 {
-                        format!("{:.0}K chunks/sec", rate / 1_000.0)
-                    } else {
-                        format!("{:.0} chunks/sec", rate)
-                    };
+                    let summary = format_embedding_complete_summary(
+                        chunks,
+                        pruned,
+                        oldest_date_ms,
+                        encode_ms,
+                    );
                     println!(
-                        "  Embedded: {}{} ({})",
-                        date_label, pruned_suffix, rate_label
+                        "  Embedded: {}",
+                        summary,
                     );
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
@@ -978,10 +945,10 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                         json!({"stage": "embedding", "status": "start"})
                     }
                     DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
-                        json!({"stage": "embedding", "status": "progress", "done": done, "total": total, "current_date_ms": current_date_ms})
+                        json!({"stage": "embedding", "status": "progress", "documents_done": done, "documents_total": total, "current_date_ms": current_date_ms})
                     }
-                    DisplayEvent::EmbeddingComplete { documents, chunks, pruned, skipped, oldest_date_ms, duration_ms, encode_ms } => {
-                        json!({"stage": "embedding", "status": "complete", "documents": documents, "chunks": chunks, "pruned": pruned, "skipped": skipped, "oldest_date_ms": oldest_date_ms, "duration_ms": duration_ms, "encode_ms": encode_ms})
+                    DisplayEvent::EmbeddingComplete { chunks, pruned, oldest_date_ms, encode_ms } => {
+                        json!({"stage": "embedding", "status": "complete", "chunks": chunks, "pruned": pruned, "oldest_date_ms": oldest_date_ms, "encode_ms": encode_ms})
                     }
                     DisplayEvent::EmbeddingSkipped(reason) => {
                         json!({"stage": "embedding", "status": "skipped", "reason": reason})
@@ -1028,4 +995,85 @@ fn clear_lines(out: &mut io::Stdout, count: u16) {
         let _ = out.execute(cursor::MoveDown(1));
     }
     let _ = out.execute(cursor::MoveUp(count));
+}
+
+fn should_print_embedding_done_immediately(stage: &DisplayStage) -> bool {
+    *stage != DisplayStage::Discovery
+}
+
+fn format_chunk_rate(chunks: usize, encode_ms: u64) -> String {
+    let encode_secs = encode_ms as f64 / 1000.0;
+    let rate = if encode_secs > 0.0 {
+        chunks as f64 / encode_secs
+    } else {
+        0.0
+    };
+    if rate >= 1_000_000.0 {
+        format!("{:.1}M chunks/sec", rate / 1_000_000.0)
+    } else if rate >= 1_000.0 {
+        format!("{:.0}K chunks/sec", rate / 1_000.0)
+    } else {
+        format!("{:.0} chunks/sec", rate)
+    }
+}
+
+fn format_embedding_complete_summary(
+    chunks: usize,
+    pruned: usize,
+    oldest_date_ms: Option<i64>,
+    encode_ms: u64,
+) -> String {
+    let date_label = oldest_date_ms
+        .map(|ms| format!("back to {}", format_epoch_ms_short(ms)))
+        .unwrap_or_else(|| "up to date".to_string());
+
+    let mut summary = date_label;
+    if pruned > 0 {
+        summary.push_str(&format!(", {} pruned", pruned));
+    }
+    summary.push_str(&format!(" ({})", format_chunk_rate(chunks, encode_ms)));
+    summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_rate_formats_large_values() {
+        assert_eq!(format_chunk_rate(2_500, 1_000), "2K chunks/sec");
+        assert_eq!(format_chunk_rate(1_500_000, 1_000), "1.5M chunks/sec");
+    }
+
+    #[test]
+    fn embedding_summary_uses_full_payload() {
+        let summary = format_embedding_complete_summary(
+            12_345,
+            3,
+            Some(0),
+            500,
+        );
+
+        assert!(summary.contains("back to"));
+        assert!(summary.contains("3 pruned"));
+        assert!(summary.contains("25K chunks/sec"));
+    }
+
+    #[test]
+    fn embedding_progress_label_is_doc_oriented() {
+        let done = 4;
+        let total = 9;
+        let label = Some(0)
+            .map(|ms| format!("Embedding docs [{}/{}] [← {}]", done, total, format_epoch_ms_short(ms)))
+            .unwrap();
+
+        assert!(label.contains("Embedding docs [4/9]"));
+    }
+
+    #[test]
+    fn embedding_done_prints_immediately_only_outside_discovery() {
+        assert!(should_print_embedding_done_immediately(&DisplayStage::Embedding));
+        assert!(should_print_embedding_done_immediately(&DisplayStage::Similarity));
+        assert!(!should_print_embedding_done_immediately(&DisplayStage::Discovery));
+    }
 }

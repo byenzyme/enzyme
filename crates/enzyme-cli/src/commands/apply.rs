@@ -108,12 +108,9 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
     .context("embedding task panicked")??;
 
     tx.send(DisplayEvent::EmbeddingComplete {
-        documents: emb_stats.documents_embedded,
         chunks: emb_stats.chunks_embedded,
         pruned: emb_stats.documents_pruned,
-        skipped: emb_stats.documents_skipped,
         oldest_date_ms: emb_stats.oldest_embedded_ms,
-        duration_ms: emb_stats.duration_ms,
         encode_ms: emb_stats.encode_ms,
     })
     .ok();

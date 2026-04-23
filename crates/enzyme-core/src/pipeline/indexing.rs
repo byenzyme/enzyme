@@ -62,7 +62,7 @@ impl<'a> IndexingPipeline<'a> {
 
         // Step 4: Diff — determine which files are new, changed, or deleted
         let mut paths_to_process: Vec<PathBuf> = Vec::new();
-        let mut files_new = 0usize;
+        let files_new;
         let mut files_updated = 0usize;
 
         if full {

@@ -341,7 +341,7 @@ async fn main() -> Result<()> {
         Commands::Apply {
             target,
             source,
-            detached,
+            detached: _,
         } => {
             let source_path = source.as_deref().unwrap_or(&vault_path);
             commands::apply::run_apply(source_path, &target, false).await?;

@@ -280,12 +280,9 @@ pub async fn run_init(
             // above the entity tree while discovery is still running.
             tx_emb
                 .send(DisplayEvent::EmbeddingComplete {
-                    documents: stats.documents_embedded,
                     chunks: stats.chunks_embedded,
                     pruned: stats.documents_pruned,
-                    skipped: stats.documents_skipped,
                     oldest_date_ms: stats.oldest_embedded_ms,
-                    duration_ms: stats.duration_ms,
                     encode_ms: stats.encode_ms,
                 })
                 .ok();

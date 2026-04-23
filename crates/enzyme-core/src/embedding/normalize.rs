@@ -23,6 +23,7 @@ pub fn l2_normalize(v: &mut [f32]) {
 ///
 /// Panics if `token_embeddings` is empty or if `attention_mask` length differs
 /// from `token_embeddings` length.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn mean_pool(token_embeddings: &[Vec<f32>], attention_mask: &[f32]) -> Vec<f32> {
     assert!(
         !token_embeddings.is_empty(),
@@ -66,6 +67,7 @@ pub fn mean_pool(token_embeddings: &[Vec<f32>], attention_mask: &[f32]) -> Vec<f
 /// `attention_mask` has `seq_len` entries — 1.0 for real tokens, 0.0 for padding.
 ///
 /// Returns a single vector of length `hidden_dim`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn mean_pool_flat(
     hidden_states: &[f32],
     attention_mask: &[f32],
