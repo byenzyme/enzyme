@@ -303,46 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn pinned_entities_survive_auto_selection_update() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let old = std::env::var("ENZYME_HOME").ok();
-        let (vault, _home) = setup_test_env();
-        let db = open_db(vault.path());
-
-        insert_entity(&db, "enzyme", EntityType::Tag, 100);
-        insert_entity(&db, "ethics", EntityType::Tag, 80);
-        insert_entity(&db, "pinned-tag", EntityType::Tag, 10);
-
-        // Write TOML with pinned entity
-        let config_path = EnzymeConfig::config_path().unwrap();
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        let vault_key = vault.path().canonicalize().unwrap();
-        std::fs::write(&config_path, format!(
-            "[defaults]\nminimum_tags = 8\nminimum_links = 6\nminimum_folders = 6\ntotal_limit = 30\n\n\
-             [vaults.\"{}\"]\nentities = [\"#enzyme\"]\npinned_entities = [\"#pinned-tag\"]\n",
-            vault_key.display()
-        )).unwrap();
-
-        // Overwrite auto-selected entities
-        let mut config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
-        config.set_auto_selected_entities(
-            vault.path(),
-            vec!["#ethics".to_string()],
-        ).unwrap();
-
-        // Reload and verify pinned survived
-        let reloaded = EnzymeConfig::load(vault.path()).unwrap().unwrap();
-        let prefs = reloaded.parse_preferences();
-        let names: Vec<&str> = prefs.entities.iter().map(|e| e.name.as_str()).collect();
-
-        // pinned_entities are parsed first, then catalyzed_entities
-        assert!(names.contains(&"pinned-tag"), "pinned entity should survive");
-        assert!(names.contains(&"ethics"), "new auto-selected entity should be present");
-
-        restore_env(old);
-    }
-
-    #[test]
     fn toml_excluded_entities_are_filtered() {
         let _lock = ENV_LOCK.lock().unwrap();
         let old = std::env::var("ENZYME_HOME").ok();
@@ -359,7 +319,7 @@ mod tests {
         std::fs::write(&config_path, format!(
             "[defaults]\nminimum_tags = 8\nminimum_links = 6\nminimum_folders = 6\ntotal_limit = 30\n\n\
              [vaults.\"{}\"]\nentities = [\"#enzyme\", \"#todo\", \"folder:inbox\"]\n\
-             excluded_tags = [\"todo\"]\npinned_entities = []\n",
+             excluded_tags = [\"todo\"]\n",
             vault_key.display()
         )).unwrap();
 

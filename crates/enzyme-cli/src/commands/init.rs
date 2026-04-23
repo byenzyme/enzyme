@@ -204,25 +204,27 @@ pub async fn run_init(
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
-    // Write only base entities to TOML — exclude children that get auto-expanded
-    // from expandable folders at runtime.
-    let expanded_children: std::collections::HashSet<String> = sel_result
-        .expandable_folders
-        .values()
-        .flatten()
-        .cloned()
-        .collect();
-    let selected_entity_refs: Vec<String> = sel_result
-        .entities
-        .iter()
-        .filter(|entity| !expanded_children.contains(&entity.name))
-        .map(|entity| match entity.entity_type {
-            enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
-            enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),
-            enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
-        })
-        .collect();
-    enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
+    // Only write entities to TOML on first init (shortlist). If the config
+    // already has entities, those take precedence and are not overwritten.
+    if matches!(sel_result.source, enzyme_core::pipeline::selection::SelectionSource::Shortlist) {
+        let expanded_children: std::collections::HashSet<String> = sel_result
+            .expandable_folders
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let selected_entity_refs: Vec<String> = sel_result
+            .entities
+            .iter()
+            .filter(|entity| !expanded_children.contains(&entity.name))
+            .map(|entity| match entity.entity_type {
+                enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
+                enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),
+                enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
+            })
+            .collect();
+        enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
+    }
 
     tx.send(DisplayEvent::SelectionComplete {
         count: sel_result.entities.len(),

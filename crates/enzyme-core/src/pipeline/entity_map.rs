@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn full_scenario_dedup_fold_and_children() {
         let db = test_db();
-        insert_doc(&db, "people/Maren Holt.md");
+        insert_doc(&db, "people/Alice.md");
         insert_doc(&db, "people/Ari.md");
         insert_entity(&db, "enzyme", "tag", 200);
         insert_entity(&db, "enzyme/gtm", "tag", 70);

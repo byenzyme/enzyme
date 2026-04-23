@@ -30,7 +30,6 @@ const CONFIG_HEADER: &str = "\
 #
 # [vaults.\"/Users/you/notes\"]
 # entities = [\"folder:projects\", \"[[Design Principles]]\"]
-# pinned_entities = [\"folder:journal\"]         # always catalyzed, even if not trending
 # excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
 # targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
 # min_top_catalysts = 13                       # minimum catalysts for the largest entity
@@ -49,8 +48,6 @@ const CONFIG_HEADER: &str = "\
 pub struct EnzymeConfig {
     #[serde(default)]
     pub catalyzed_entities: Vec<CatalyzedEntity>,
-    #[serde(default)]
-    pub pinned_entities: Vec<CatalyzedEntity>,
     #[serde(default)]
     pub catalyst_profile: Option<String>,
     #[serde(default)]
@@ -212,8 +209,6 @@ struct VaultTomlSection {
     #[serde(default)]
     entities: Vec<String>,
     #[serde(default)]
-    pinned_entities: Vec<String>,
-    #[serde(default)]
     targets: Vec<String>,
     /// Per-vault override for max embedding files. `0` = unlimited.
     #[serde(default)]
@@ -280,15 +275,6 @@ impl EnzymeConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            pinned_entities: vault
-                .map(|v| {
-                    v.pinned_entities
-                        .iter()
-                        .cloned()
-                        .map(CatalyzedEntity::Simple)
-                        .collect()
-                })
-                .unwrap_or_default(),
             catalyst_profile: global.defaults.catalyst_profile.clone(),
             trending: Some(trending),
             catalyst_format: global.defaults.catalyst_format.clone(),
@@ -323,7 +309,6 @@ impl EnzymeConfig {
 
         Ok(Some(Self {
             catalyzed_entities: legacy.catalyzed_entities,
-            pinned_entities: Vec::new(),
             catalyst_profile: legacy.catalyst_profile,
             trending: legacy.trending,
             catalyst_format: legacy.catalyst_format,
@@ -338,7 +323,7 @@ impl EnzymeConfig {
     pub fn parse_preferences(&self) -> EntityPreferences {
         let mut prefs = EntityPreferences::default();
 
-        for entry in self.pinned_entities.iter().chain(self.catalyzed_entities.iter()) {
+        for entry in &self.catalyzed_entities {
             match entry {
                 CatalyzedEntity::Simple(raw) => {
                     if let Some(parsed) = parse_entity_ref(raw) {
@@ -389,7 +374,7 @@ impl EnzymeConfig {
     }
 
     pub fn has_curated_entities(&self) -> bool {
-        !self.catalyzed_entities.is_empty() || !self.pinned_entities.is_empty()
+        !self.catalyzed_entities.is_empty()
     }
 
     pub fn persist_min_top_catalysts(&mut self, vault_path: &Path, value: usize) -> Result<()> {
@@ -448,11 +433,6 @@ impl EnzymeConfig {
         entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
         entry.entities = self
             .catalyzed_entities
-            .iter()
-            .filter_map(entity_ref_string)
-            .collect();
-        entry.pinned_entities = self
-            .pinned_entities
             .iter()
             .filter_map(entity_ref_string)
             .collect();
@@ -555,7 +535,7 @@ mod tests {
 
     #[test]
     fn test_parse_entity_ref_link() {
-        let p = parse_entity_ref("[[Maren Holt]]").unwrap();
+        let p = parse_entity_ref("[[Test Note]]").unwrap();
         assert_eq!(p.name, "maren holt");
         assert_eq!(p.entity_type, EntityType::Link);
     }
@@ -583,7 +563,7 @@ catalyzedEntities:
   - "#enzyme":
       profile: operational
   - folder:inbox
-  - "[[Maren Holt]]"
+  - "[[Test Note]]"
   - folder:people:
       expandable: true
       profile: relational
@@ -602,7 +582,6 @@ excludedTags:
 
         let merged = EnzymeConfig {
             catalyzed_entities: config.catalyzed_entities,
-            pinned_entities: Vec::new(),
             catalyst_profile: config.catalyst_profile,
             trending: config.trending,
             catalyst_format: config.catalyst_format,
@@ -610,6 +589,7 @@ excludedTags:
             excluded_links: config.excluded_links,
             excluded_folders: config.excluded_folders,
             targets: Vec::new(),
+            max_embedding_files: None,
         };
         let prefs = merged.parse_preferences();
         assert_eq!(prefs.entities.len(), 4);
@@ -626,8 +606,7 @@ excludedTags:
         fs::create_dir_all(&vault).unwrap();
 
         let config = EnzymeConfig {
-            catalyzed_entities: vec![CatalyzedEntity::Simple("#enzyme".to_string())],
-            pinned_entities: vec![CatalyzedEntity::Simple("[[Maren Holt]]".to_string())],
+            catalyzed_entities: vec![CatalyzedEntity::Simple("#enzyme".to_string()), CatalyzedEntity::Simple("[[Test Note]]".to_string())],
             catalyst_profile: Some("dialectical".to_string()),
             trending: Some(SelectionConfig {
                 minimum_tags: 9,
@@ -641,6 +620,7 @@ excludedTags:
             excluded_links: vec!["Template".to_string()],
             excluded_folders: vec!["templates".to_string()],
             targets: vec!["/Users/alice/code/my-app".to_string()],
+            max_embedding_files: None,
         };
 
         config.save(&vault).unwrap();
@@ -652,8 +632,7 @@ excludedTags:
         let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_profile.as_deref(), Some("dialectical"));
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
-        assert_eq!(loaded.catalyzed_entities.len(), 1);
-        assert_eq!(loaded.pinned_entities.len(), 1);
+        assert_eq!(loaded.catalyzed_entities.len(), 2);
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
         assert_eq!(
             loaded.trending.as_ref().and_then(|t| t.min_top_catalysts),

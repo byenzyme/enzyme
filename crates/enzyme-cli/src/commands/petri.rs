@@ -669,22 +669,22 @@ mod tests {
         let vault = create_test_vault();
         let db = open_test_db(vault.path());
 
-        insert_doc(&db, "people/Maren Holt.md");
-        insert_doc(&db, "people/Odessa Lark.md");
-        insert_doc(&db, "people/Ivo.md");
-        insert_doc(&db, "people/Tamsin Vey.md");
+        insert_doc(&db, "people/Alice.md");
+        insert_doc(&db, "people/Bob.md");
+        insert_doc(&db, "people/Carol.md");
+        insert_doc(&db, "people/Dan.md");
 
-        insert_entity(&db, "maren holt", EntityType::Link, 53, 72.0);
-        insert_entity(&db, "odessa lark", EntityType::Link, 61, 39.0);
-        insert_entity(&db, "ivo", EntityType::Link, 52, 20.0);
-        insert_entity(&db, "tamsin vey", EntityType::Link, 8, 20.0);
+        insert_entity(&db, "alice", EntityType::Link, 53, 72.0);
+        insert_entity(&db, "bob", EntityType::Link, 61, 39.0);
+        insert_entity(&db, "carol", EntityType::Link, 52, 20.0);
+        insert_entity(&db, "dan", EntityType::Link, 8, 20.0);
 
         let now = Utc::now().timestamp_millis();
         for (target, count) in [
-            ("odessa lark", 61),
-            ("maren holt", 53),
-            ("ivo", 52),
-            ("tamsin vey", 8),
+            ("bob", 61),
+            ("alice", 53),
+            ("carol", 52),
+            ("dan", 8),
         ] {
             for i in 0..count {
                 let source = format!("notes/{}-{i}.md", target.replace(' ', "-"));
@@ -713,10 +713,10 @@ mod tests {
             }
         }
 
-        insert_catalyst(&db, "maren holt", "cat-maren", "maren catalyst");
-        insert_catalyst(&db, "odessa lark", "cat-odessa", "odessa catalyst");
-        insert_catalyst(&db, "ivo", "cat-ivo", "ivo catalyst");
-        insert_catalyst(&db, "tamsin vey", "cat-tamsin", "tamsin catalyst");
+        insert_catalyst(&db, "alice", "cat-alice", "alice catalyst");
+        insert_catalyst(&db, "bob", "cat-bob", "bob catalyst");
+        insert_catalyst(&db, "carol", "cat-carol", "carol catalyst");
+        insert_catalyst(&db, "dan", "cat-dan", "dan catalyst");
 
         let json = build_petri_json(vault.path(), 10, None, None).unwrap();
         let entities = json["entities"].as_array().unwrap();
@@ -733,7 +733,7 @@ mod tests {
 
         assert_eq!(
             child_names,
-            vec!["[[odessa lark]]", "[[maren holt]]", "[[ivo]]"]
+            vec!["[[bob]]", "[[alice]]", "[[carol]]"]
         );
     }
 }

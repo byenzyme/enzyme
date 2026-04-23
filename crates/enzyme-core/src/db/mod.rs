@@ -788,7 +788,7 @@ mod tests {
         .unwrap();
 
         let needing = db.get_documents_needing_embedding(None, None).unwrap();
-        let refs: Vec<&str> = needing.iter().map(|(_, r, _)| r.as_str()).collect();
+        let refs: Vec<&str> = needing.iter().map(|(_, r, _, _)| r.as_str()).collect();
         assert!(refs.contains(&"a.md"));
         assert!(refs.contains(&"c.md"));
         assert!(!refs.contains(&"b.md"));
