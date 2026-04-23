@@ -8,7 +8,7 @@
       "name": "enzyme",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./plugins/enzyme"
       },
       "policy": {
         "installation": "AVAILABLE"
