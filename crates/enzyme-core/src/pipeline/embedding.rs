@@ -35,6 +35,8 @@ pub struct EmbeddingStats {
     pub oldest_embedded_ms: Option<i64>,
     /// Wall-clock time for the entire pipeline run, in milliseconds.
     pub duration_ms: u64,
+    /// Time spent purely on embedding inference, in milliseconds.
+    pub encode_ms: u64,
 }
 
 /// Progress update emitted during embedding.
@@ -121,6 +123,7 @@ impl<'a> EmbeddingPipeline<'a> {
                 documents_skipped,
                 oldest_embedded_ms: None,
                 duration_ms: start.elapsed().as_millis() as u64,
+                encode_ms: 0,
             });
         }
 
@@ -150,16 +153,9 @@ impl<'a> EmbeddingPipeline<'a> {
             .map(|&i| docs_needing[i].2)
             .collect();
 
-        let total_chunks = flat_chunks.len();
-        info!(
-            total_chunks,
-            total_docs = non_empty_docs.len(),
-            "embedding all chunks in cross-document batches"
-        );
-
         // Step 4: Embed all chunks at once.
         let total_non_empty = non_empty_docs.len();
-        let all_vectors = self.service.embed_documents_with_progress(
+        let (all_vectors, encode_duration) = self.service.embed_documents_timed(
             &flat_chunks,
             |completed_chunks, _total_chunks| {
                 let mut docs_done = 0;
@@ -170,9 +166,6 @@ impl<'a> EmbeddingPipeline<'a> {
                         break;
                     }
                 }
-                // The current doc being worked on is docs_done (0-indexed into
-                // doc_dates). Since docs are sorted newest-first, this date
-                // rewinds as we progress.
                 let current_date_ms = doc_dates.get(docs_done).copied();
                 on_progress(EmbeddingProgress {
                     done: docs_done,
@@ -181,6 +174,7 @@ impl<'a> EmbeddingPipeline<'a> {
                 });
             },
         )?;
+        let encode_ms = encode_duration.as_millis() as u64;
 
         // Step 5: Scatter results back to documents and write to DB.
         let mut chunks_embedded = 0usize;
@@ -231,7 +225,7 @@ impl<'a> EmbeddingPipeline<'a> {
 
         info!(
             documents_embedded,
-            chunks_embedded, duration_ms, "embedding complete"
+            chunks_embedded, encode_ms, duration_ms, "embedding complete"
         );
 
         Ok(EmbeddingStats {
@@ -241,6 +235,7 @@ impl<'a> EmbeddingPipeline<'a> {
             documents_skipped,
             oldest_embedded_ms,
             duration_ms,
+            encode_ms,
         })
     }
 }

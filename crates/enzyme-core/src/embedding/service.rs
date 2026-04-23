@@ -1,5 +1,7 @@
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
-use tracing::{debug, info};
+use tracing::info;
 
 use super::backend::EmbeddingBackend;
 
@@ -58,17 +60,32 @@ impl EmbeddingService {
     pub fn embed_documents_with_progress<F>(
         &self,
         chunks: &[&str],
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<Vec<Vec<f32>>>
     where
         F: FnMut(usize, usize),
     {
+        let (embeddings, _) = self.embed_documents_timed(chunks, on_progress)?;
+        Ok(embeddings)
+    }
+
+    /// Like [`embed_documents_with_progress`] but also returns the time spent
+    /// purely on backend inference (excludes batching overhead and progress callbacks).
+    pub fn embed_documents_timed<F>(
+        &self,
+        chunks: &[&str],
+        mut on_progress: F,
+    ) -> Result<(Vec<Vec<f32>>, Duration)>
+    where
+        F: FnMut(usize, usize),
+    {
         if chunks.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], Duration::ZERO));
         }
 
         let total = chunks.len();
         let mut all_embeddings = Vec::with_capacity(total);
+        let mut encode_time = Duration::ZERO;
 
         info!(
             backend = self.backend.name(),
@@ -77,21 +94,18 @@ impl EmbeddingService {
             "embedding documents"
         );
 
-        for (batch_idx, batch) in chunks.chunks(self.batch_size).enumerate() {
-            debug!(
-                batch = batch_idx,
-                size = batch.len(),
-                "processing embedding batch"
-            );
-
+        for batch in chunks.chunks(self.batch_size) {
+            let t = Instant::now();
             let batch_embeddings = self.backend.embed_batch(batch)?;
+            encode_time += t.elapsed();
+
             all_embeddings.extend(batch_embeddings);
 
             on_progress(all_embeddings.len(), total);
         }
 
         debug_assert_eq!(all_embeddings.len(), total);
-        Ok(all_embeddings)
+        Ok((all_embeddings, encode_time))
     }
 
     /// Embed a single query string.

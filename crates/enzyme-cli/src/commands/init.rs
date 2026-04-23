@@ -15,7 +15,7 @@ use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
 };
 use enzyme_core::pipeline::context::ContextBuilder;
-use enzyme_core::pipeline::embedding::EmbeddingPipeline;
+use enzyme_core::pipeline::embedding::{EmbeddingPipeline, EmbeddingStats};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
@@ -264,10 +264,10 @@ pub async fn run_init(
         let tx_emb = tx.clone();
         let max_embed = enzyme_config.effective_max_embedding_files();
         tx.send(DisplayEvent::EmbeddingStart).ok();
-        Some(tokio::task::spawn_blocking(move || {
+        Some(tokio::task::spawn_blocking(move || -> anyhow::Result<EmbeddingStats> {
             let bg_db = Database::open(&db_path)?;
             let pipeline = EmbeddingPipeline::new(&bg_db, svc);
-            pipeline.run_with_limit(max_embed, |p| {
+            let stats = pipeline.run_with_limit(max_embed, |p| {
                 tx_emb
                     .send(DisplayEvent::EmbeddingProgress {
                         done: p.done,
@@ -275,7 +275,21 @@ pub async fn run_init(
                         current_date_ms: p.current_date_ms,
                     })
                     .ok();
-            })
+            })?;
+            // Notify display immediately so the finished state renders
+            // above the entity tree while discovery is still running.
+            tx_emb
+                .send(DisplayEvent::EmbeddingComplete {
+                    documents: stats.documents_embedded,
+                    chunks: stats.chunks_embedded,
+                    pruned: stats.documents_pruned,
+                    skipped: stats.documents_skipped,
+                    oldest_date_ms: stats.oldest_embedded_ms,
+                    duration_ms: stats.duration_ms,
+                    encode_ms: stats.encode_ms,
+                })
+                .ok();
+            Ok(stats)
         }))
     } else {
         None
@@ -428,19 +442,11 @@ pub async fn run_init(
     };
 
     // ── Step 6: Wait for background embedding ─────────────────────────────
+    // EmbeddingComplete was already sent from inside the spawn_blocking task,
+    // so we just collect the stats here.
     let emb_stats = if let Some(handle) = embedding_handle {
         match handle.await.context("embedding task panicked")? {
-            Ok(stats) => {
-                tx.send(DisplayEvent::EmbeddingComplete {
-                    documents: stats.documents_embedded,
-                    pruned: stats.documents_pruned,
-                    skipped: stats.documents_skipped,
-                    oldest_date_ms: stats.oldest_embedded_ms,
-                    duration_ms: stats.duration_ms,
-                })
-                .ok();
-                Some((stats.documents_embedded, stats.documents_pruned))
-            }
+            Ok(stats) => Some((stats.documents_embedded, stats.documents_pruned)),
             Err(e) => {
                 let msg = format!("Embedding failed: {}", e);
                 tx.send(DisplayEvent::EmbeddingFailed(msg.clone())).ok();
