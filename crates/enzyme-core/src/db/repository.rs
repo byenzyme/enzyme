@@ -1310,6 +1310,77 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get top similarities for multiple catalysts in a single query.
+    ///
+    /// Returns at most `per_catalyst_limit` rows per catalyst, ordered by
+    /// similarity descending.
+    pub fn get_similarities_for_catalysts(
+        &self,
+        catalyst_ids: &[&str],
+        per_catalyst_limit: usize,
+    ) -> Result<Vec<CatalystSimilarity>> {
+        if catalyst_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: Vec<String> = (1..=catalyst_ids.len())
+            .map(|i| format!("?{}", i))
+            .collect();
+        let in_clause = placeholders.join(", ");
+        let limit_param = catalyst_ids.len() + 1;
+
+        let sql = format!(
+            "SELECT id, catalyst_id, catalyst_text, file_path, chunk_index,
+                    similarity, chunk_metadata, timeline_data, created_at
+             FROM (
+                 SELECT *, ROW_NUMBER() OVER (
+                     PARTITION BY catalyst_id ORDER BY similarity DESC
+                 ) AS rn
+                 FROM catalyst_similarities
+                 WHERE catalyst_id IN ({in_clause})
+             )
+             WHERE rn <= ?{limit_param}"
+        );
+
+        let mut params: Vec<Value> = catalyst_ids
+            .iter()
+            .map(|id| Value::Text(id.to_string()))
+            .collect();
+        params.push(Value::Integer(per_catalyst_limit as i64));
+
+        let rows = self.query_read(&sql, params, map_catalyst_similarity_row)?;
+        Ok(rows)
+    }
+
+    /// Batch-fetch `modified_at` timestamps for multiple file paths.
+    pub fn get_modified_at_batch(
+        &self,
+        file_paths: &[&str],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        if file_paths.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let placeholders: Vec<String> = (1..=file_paths.len())
+            .map(|i| format!("?{}", i))
+            .collect();
+        let sql = format!(
+            "SELECT source_ref, modified_at FROM docs WHERE source_ref IN ({})",
+            placeholders.join(", ")
+        );
+
+        let params: Vec<Value> = file_paths
+            .iter()
+            .map(|p| Value::Text(p.to_string()))
+            .collect();
+
+        let rows = self.query_read(&sql, params, |row| {
+            Ok((row.get::<String>(0)?, row.get::<i64>(1)?))
+        })?;
+
+        Ok(rows.into_iter().collect())
+    }
+
     // -----------------------------------------------------------------------
     // Chunk operations
     // -----------------------------------------------------------------------

@@ -203,25 +203,42 @@ impl<'a> ContextSearch<'a> {
 
         let sim_repo = self.target_db.unwrap_or(self.db);
 
+        // Batch-load similarities for all top catalysts in one query
+        let top_catalyst_ids: Vec<&str> = cat_sims
+            .iter()
+            .map(|(idx, _)| catalysts[*idx].id.as_str())
+            .collect();
+        let all_sims =
+            sim_repo.get_similarities_for_catalysts(&top_catalyst_ids, context_per_catalyst)?;
+
+        let mut sims_by_catalyst: HashMap<&str, Vec<&crate::models::CatalystSimilarity>> =
+            HashMap::new();
+        for sim in &all_sims {
+            sims_by_catalyst
+                .entry(sim.catalyst_id.as_str())
+                .or_default()
+                .push(sim);
+        }
+
         for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
             let relevance = *cat_sim as f64;
-            let sims =
-                sim_repo.get_similarities_for_catalyst(&catalyst.id, context_per_catalyst)?;
 
-            for sim in &sims {
-                let key = format!("{}:{}", sim.file_path, sim.chunk_index);
-                let weighted_score = sim.similarity * relevance;
-                let entry = chunk_scores.entry(key).or_insert(ChunkScore {
-                    max_weighted_score: 0.0,
-                    catalyst_count: 0,
-                    best_catalyst_id: String::new(),
-                });
-                if weighted_score > entry.max_weighted_score {
-                    entry.max_weighted_score = weighted_score;
-                    entry.best_catalyst_id = catalyst.id.clone();
+            if let Some(sims) = sims_by_catalyst.get(catalyst.id.as_str()) {
+                for sim in sims {
+                    let key = format!("{}:{}", sim.file_path, sim.chunk_index);
+                    let weighted_score = sim.similarity * relevance;
+                    let entry = chunk_scores.entry(key).or_insert(ChunkScore {
+                        max_weighted_score: 0.0,
+                        catalyst_count: 0,
+                        best_catalyst_id: String::new(),
+                    });
+                    if weighted_score > entry.max_weighted_score {
+                        entry.max_weighted_score = weighted_score;
+                        entry.best_catalyst_id = catalyst.id.clone();
+                    }
+                    entry.catalyst_count += 1;
                 }
-                entry.catalyst_count += 1;
             }
         }
 
@@ -236,6 +253,16 @@ impl<'a> ContextSearch<'a> {
 
         let mut scored: Vec<ScoredChunk> = Vec::new();
 
+        // Batch-fetch modified_at for recency boost
+        let unique_paths: Vec<&str> = chunk_scores
+            .keys()
+            .filter_map(|key| key.rsplitn(2, ':').last())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let modified_at_map = sim_repo.get_modified_at_batch(&unique_paths).unwrap_or_default();
+        let now = chrono::Utc::now().timestamp_millis();
+
         for (key, cs) in &chunk_scores {
             let parts: Vec<&str> = key.rsplitn(2, ':').collect();
             if parts.len() != 2 {
@@ -248,12 +275,12 @@ impl<'a> ContextSearch<'a> {
             let multi_boost = 1.0 + (cs.catalyst_count as f64 - 1.0) * 0.2;
 
             // Recency boost (from document modified_at)
-            let mut recency_boost = 1.0;
-            if let Ok(Some(doc)) = sim_repo.get_document_by_path(&file_path) {
-                let now = chrono::Utc::now().timestamp_millis();
-                let age_days = ((now - doc.modified_at) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
-                recency_boost = 1.0 + (-0.693147 / 30.0 * age_days).exp();
-            }
+            let recency_boost = if let Some(&modified_at) = modified_at_map.get(&file_path) {
+                let age_days = ((now - modified_at) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+                1.0 + (-0.693147 / 30.0 * age_days).exp()
+            } else {
+                1.0
+            };
 
             scored.push(ScoredChunk {
                 file_path,
