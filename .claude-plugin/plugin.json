@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
   "description": "A compile step for knowledge bases — gives your agent a concept graph of your content",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": {
     "name": "Joshua Pham"
   },
