@@ -1,0 +1,19 @@
+{
+  "name": "enzyme",
+  "interface": {
+    "displayName": "Enzyme"
+  },
+  "plugins": [
+    {
+      "name": "enzyme",
+      "source": {
+        "source": "local",
+        "path": "./plugins/enzyme"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

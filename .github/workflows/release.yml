@@ -265,23 +265,23 @@ jobs:
 
       - name: Bundle binaries and model into plugin
         run: |
-          mkdir -p plugin/bin plugin/models/distilled tmp-bin
+          mkdir -p plugin/plugins/enzyme/bin plugin/plugins/enzyme/models/distilled tmp-bin
 
           # Extract platform binaries into a temp dir to avoid overwriting
-          # the committed wrapper script (plugin/bin/enzyme)
+          # the committed wrapper script (plugin/plugins/enzyme/bin/enzyme)
           tar xzf artifacts/enzyme-macos-arm64/enzyme-macos-arm64.tar.gz -C tmp-bin
-          mv tmp-bin/enzyme plugin/bin/enzyme-darwin-arm64
+          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64
 
           tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
-          mv tmp-bin/enzyme plugin/bin/enzyme-linux-arm64
+          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64
 
           # Copy distilled model files
-          cp model-files/distilled/model.safetensors plugin/models/distilled/
-          cp model-files/distilled/tokenizer.json plugin/models/distilled/
-          cp model-files/distilled/config.json plugin/models/distilled/
+          cp model-files/distilled/model.safetensors plugin/plugins/enzyme/models/distilled/
+          cp model-files/distilled/tokenizer.json plugin/plugins/enzyme/models/distilled/
+          cp model-files/distilled/config.json plugin/plugins/enzyme/models/distilled/
 
           # Ensure executability
-          chmod +x plugin/bin/enzyme plugin/bin/enzyme-darwin-arm64 plugin/bin/enzyme-linux-arm64
+          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64 plugin/plugins/enzyme/bin/enzyme-linux-arm64
 
       - name: Download server.json from release
         env:
@@ -304,7 +304,6 @@ jobs:
 
           rsync -av --delete \
             --exclude '.git' \
-            --exclude '.claude-plugin' \
             --exclude 'server.json' \
             --exclude 'agent' \
             ../plugin/ ./
@@ -313,8 +312,8 @@ jobs:
           [ -f ../server.json ] && cp ../server.json ./server.json
 
           version="${tag#v}"
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" .claude-plugin/plugin.json
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" .claude-plugin/marketplace.json
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.claude-plugin/plugin.json
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.codex-plugin/plugin.json
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
