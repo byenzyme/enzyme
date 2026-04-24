@@ -303,6 +303,41 @@ mod tests {
     }
 
     #[test]
+    fn shortlist_expands_folder_children_for_catalyst_generation() {
+        // End-to-end: no config → shortlist path → folder children appear in
+        // sel_result.entities (which is what CatalystPipeline receives).
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        // A tag and a folder with page entities above density threshold
+        insert_entity(&db, "enzyme", EntityType::Tag, 100);
+        insert_entity(&db, "people", EntityType::Folder, 10);
+        insert_entity(&db, "alice", EntityType::Link, 15);
+        insert_entity(&db, "bob", EntityType::Link, 12);
+        insert_doc(&db, "people/Alice.md");
+        insert_doc(&db, "people/Bob.md");
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Shortlist));
+
+        // The entity list that would be passed to CatalystPipeline
+        // should contain the folder AND its children
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"people"), "folder should be in entities");
+        assert!(
+            names.contains(&"alice") || names.contains(&"bob"),
+            "at least one folder child should be expanded into entities for catalyst generation, got: {:?}",
+            names
+        );
+
+        restore_env(old);
+    }
+
+    #[test]
     fn toml_excluded_entities_are_filtered() {
         let _lock = ENV_LOCK.lock().unwrap();
         let old = std::env::var("ENZYME_HOME").ok();
