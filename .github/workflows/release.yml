@@ -151,18 +151,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Download model files from latest release
-        env:
-          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
-        run: |
-          mkdir -p model-files/distilled
-          gh release download --repo "$RELEASE_REPO" \
-            --pattern 'model.safetensors' \
-            --pattern 'tokenizer.json' \
-            --pattern 'config.json' \
-            --dir model-files/distilled \
-            || echo "Warning: could not download model files from previous release (expected on first release)"
-
       - name: Generate server.json for MCP Registry
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -226,12 +214,6 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           files=$(find artifacts -name '*.tar.gz' -o -name '*.sha256' -o -name '*.mcpb' -o -name 'server.json')
 
-          # Include distilled model files if available
-          model_files=""
-          [ -f model-files/distilled/model.safetensors ] && model_files="$model_files model-files/distilled/model.safetensors"
-          [ -f model-files/distilled/tokenizer.json ] && model_files="$model_files model-files/distilled/tokenizer.json"
-          [ -f model-files/distilled/config.json ] && model_files="$model_files model-files/distilled/config.json"
-
           # Delete existing release if re-publishing the same tag
           gh release delete "$tag" --repo "$RELEASE_REPO" --yes 2>/dev/null || true
 
@@ -239,8 +221,7 @@ jobs:
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
             --generate-notes \
-            $files \
-            $model_files
+            $files
 
   sync-plugin:
     needs: publish
@@ -254,21 +235,9 @@ jobs:
         with:
           path: artifacts
 
-      - name: Download model files from release
-        env:
-          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+      - name: Bundle binaries into plugin
         run: |
-          tag="${GITHUB_REF_NAME}"
-          mkdir -p model-files/distilled
-          gh release download "$tag" --repo "$RELEASE_REPO" \
-            --pattern 'model.safetensors' \
-            --pattern 'tokenizer.json' \
-            --pattern 'config.json' \
-            --dir model-files/distilled
-
-      - name: Bundle binaries and model into plugin
-        run: |
-          mkdir -p plugin/plugins/enzyme/bin plugin/plugins/enzyme/models/distilled tmp-bin
+          mkdir -p plugin/plugins/enzyme/bin tmp-bin
 
           # Extract platform binaries into a temp dir to avoid overwriting
           # the committed wrapper script (plugin/plugins/enzyme/bin/enzyme)
@@ -277,11 +246,6 @@ jobs:
 
           tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
           mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64
-
-          # Copy distilled model files
-          cp model-files/distilled/model.safetensors plugin/plugins/enzyme/models/distilled/
-          cp model-files/distilled/tokenizer.json plugin/plugins/enzyme/models/distilled/
-          cp model-files/distilled/config.json plugin/plugins/enzyme/models/distilled/
 
           # Ensure executability
           chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64 plugin/plugins/enzyme/bin/enzyme-linux-arm64
@@ -340,18 +304,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Download model files from release
-        env:
-          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          mkdir -p model-files/distilled
-          gh release download "$tag" --repo "$RELEASE_REPO" \
-            --pattern 'model.safetensors' \
-            --pattern 'tokenizer.json' \
-            --pattern 'config.json' \
-            --dir model-files/distilled
-
       - name: Update enzyme-skill repo
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
@@ -363,10 +315,13 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
           cd skill-repo
 
-          mkdir -p bin models/distilled references scripts tmp-bin
+          mkdir -p bin references scripts tmp-bin
 
           # Remove legacy enzyme/ subdirectory if present (flatten to repo root)
           rm -rf enzyme
+
+          # Remove legacy model files
+          rm -rf models
 
           # Extract platform binaries
           for platform in macos-arm64 linux-arm64 linux-x86_64; do
@@ -375,11 +330,6 @@ jobs:
             chmod +x "bin/enzyme-${platform}"
           done
           rm -rf tmp-bin
-
-          # Copy distilled model files
-          cp ../model-files/distilled/model.safetensors models/distilled/
-          cp ../model-files/distilled/tokenizer.json models/distilled/
-          cp ../model-files/distilled/config.json models/distilled/
 
           # Sync agent plugin files (SKILL.md, Hermes adapter, guides, install script)
           cp ../plugin/agent/SKILL.md ./SKILL.md
@@ -398,7 +348,7 @@ jobs:
           cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
 
           # Update .gitattributes for flattened layout
-          printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\nmodels/distilled/model.safetensors filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
+          printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
 
           # Update versions
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" ./SKILL.md
@@ -461,10 +411,7 @@ jobs:
               <<~EOS
                 Enzyme installed successfully!
 
-                Download the embedding model (~23 MB):
-                  enzyme setup
-
-                Then initialize your vault:
+                Initialize your vault:
                   cd /path/to/your/vault
                   enzyme init
 

@@ -14,7 +14,4 @@ pub use entity::*;
 pub type Timestamp = i64;
 
 /// Embedding vector dimensionality.
-#[cfg(feature = "ese-backend")]
 pub const EMBEDDING_DIMENSION: usize = ese::DIMENSIONS;
-#[cfg(not(feature = "ese-backend"))]
-pub const EMBEDDING_DIMENSION: usize = 256;

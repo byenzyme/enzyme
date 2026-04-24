@@ -133,13 +133,6 @@ enum Commands {
     /// Show vault status and configuration
     Status,
 
-    /// Download the embedding model to ~/.enzyme/models/
-    Setup {
-        /// Check if model is present (exit 0) or missing (exit 1)
-        #[arg(long)]
-        check: bool,
-    },
-
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
@@ -245,10 +238,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // These commands don't need a vault path — log to stderr.
-    if let Commands::Setup { check } = cli.command {
-        init_tracing(cli.verbose, None);
-        return commands::setup::run_setup(check).await;
-    }
     if matches!(cli.command, Commands::Mcp) {
         init_tracing(cli.verbose, None);
         return commands::mcp::run_mcp(cli.vault).await;
@@ -368,7 +357,7 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Setup { .. } | Commands::Mcp => unreachable!(),
+        Commands::Mcp => unreachable!(),
     }
 
     Ok(())

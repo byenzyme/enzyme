@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bootstrap enzyme from the bundled skill — copies the platform binary
-# and model files into ~/.cache/enzyme, creates a wrapper in ~/.local/bin.
+# into ~/.cache/enzyme, creates a symlink in ~/.local/bin.
 #
 # Usage: sh setup.sh [SKILL_ROOT]
 #   SKILL_ROOT defaults to the parent of scripts/ (i.e. the enzyme/ skill dir).
@@ -47,22 +47,8 @@ if [ ! -x "$CACHE_BIN" ] || [ "$SRC" -nt "$CACHE_BIN" ]; then
     chmod +x "$CACHE_BIN"
 fi
 
-# Copy model files into the cache dir.
-MODEL_DIR="${CACHE_DIR}/models"
-if [ ! -f "${MODEL_DIR}/distilled/model.safetensors" ]; then
-    mkdir -p "$MODEL_DIR/distilled"
-    cp "${SKILL_ROOT}/models/distilled/model.safetensors" "$MODEL_DIR/distilled/"
-    cp "${SKILL_ROOT}/models/distilled/tokenizer.json" "$MODEL_DIR/distilled/"
-    cp "${SKILL_ROOT}/models/distilled/config.json" "$MODEL_DIR/distilled/"
-fi
-
-# Create a wrapper in PATH.
+# Symlink into PATH.
 mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/enzyme" << 'WRAPPER'
-#!/bin/sh
-export ENZYME_MODEL_DIR="$HOME/.cache/enzyme/models/distilled"
-exec "$HOME/.cache/enzyme/enzyme" "$@"
-WRAPPER
-chmod +x "$HOME/.local/bin/enzyme"
+ln -sf "$CACHE_BIN" "$HOME/.local/bin/enzyme"
 
 echo "enzyme: installed to ~/.local/bin/enzyme"

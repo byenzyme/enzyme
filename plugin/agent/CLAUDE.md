@@ -18,5 +18,4 @@ Most files in this repo are synced from [enzyme-rust](https://github.com/jshph/e
 
 **Files managed by CI only (not from plugin/agent/):**
 - `bin/*` — platform binaries, extracted from build artifacts
-- `models/*` — embedding model files, downloaded from release assets
 - `.gitattributes` — Git LFS tracking rules, repo-level

@@ -20,8 +20,6 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 crossterm = { workspace = true }
 atty = { workspace = true }
-reqwest = { workspace = true }
-dirs = { workspace = true }
 serde = { workspace = true }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"

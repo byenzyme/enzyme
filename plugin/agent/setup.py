@@ -1,6 +1,6 @@
 """Binary bootstrap for the enzyme agent plugin.
 
-Downloads the enzyme CLI binary and embedding model if not already installed.
+Downloads the enzyme CLI binary if not already installed.
 Uses the same install.sh script as the main distribution.
 """
 
@@ -48,7 +48,7 @@ def get_platform() -> str | None:
 
 
 def ensure_enzyme_installed() -> bool:
-    """Install enzyme binary + model if not present or outdated.
+    """Install enzyme binary if not present or outdated.
 
     Returns True if enzyme is available after this call.
     """
