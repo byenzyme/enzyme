@@ -342,6 +342,129 @@ mod tests {
     }
 
     #[test]
+    fn expandable_folder_promotes_children_not_in_shortlist() {
+        // Scenario: people/ is a shortlisted folder. Its page entity children
+        // (alice, bob, carol) are low-frequency links that would never make
+        // the top-level shortlist on their own. But because people/ is expandable,
+        // they should appear in final_entities and get catalyzed.
+        let db = test_db();
+
+        // Create a high-frequency tag so it dominates the shortlist
+        insert_entity(&db, "enzyme", "tag", 500, 300);
+
+        // Create the people folder with moderate frequency
+        insert_entity(&db, "people", "folder", 50, 10);
+
+        // Create low-frequency person links — these would never rank as top entities
+        insert_entity(&db, "alice", "link", 8, 5);
+        insert_entity(&db, "bob", "link", 6, 3);
+        insert_entity(&db, "carol", "link", 4, 2);
+
+        // Create docs so the links are detected as page entities of people/
+        insert_doc(&db, "people/Alice.md");
+        insert_doc(&db, "people/Bob.md");
+        insert_doc(&db, "people/Carol.md");
+
+        // Build curated selection with just enzyme + people
+        let base = vec![
+            make_entity("enzyme", EntityType::Tag, 500),
+            make_entity("people", EntityType::Folder, 50),
+        ];
+        let result = build_curated_selection(&db, base).unwrap();
+
+        // people/ should be expandable
+        assert!(
+            result.expandable_folders.contains_key("people"),
+            "people/ should be expandable"
+        );
+
+        // All three person links should be in the expandable children
+        let children = result.expandable_folders.get("people").unwrap();
+        assert!(children.contains(&"alice".to_string()));
+        assert!(children.contains(&"bob".to_string()));
+        assert!(children.contains(&"carol".to_string()));
+
+        // All three should appear in final_entities even though they're low-frequency
+        let final_names: Vec<&str> = result
+            .final_entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(final_names.contains(&"alice"), "alice should be in final entities");
+        assert!(final_names.contains(&"bob"), "bob should be in final entities");
+        assert!(final_names.contains(&"carol"), "carol should be in final entities");
+
+        // The base entities should still be there
+        assert!(final_names.contains(&"enzyme"));
+        assert!(final_names.contains(&"people"));
+    }
+
+    #[test]
+    fn expandable_folder_caps_children_at_limit() {
+        // Scenario: people/ has 15 page entity links but the cap is 10.
+        // Only the top 10 by recency should be expanded.
+        let db = test_db();
+        insert_entity(&db, "people", "folder", 50, 10);
+
+        // Create 15 person links with varying recency
+        for i in 0..15 {
+            let name = format!("person-{:02}", i);
+            let recency = 15 - i; // person-00 is most recent
+            insert_entity(&db, &name, "link", 10, recency);
+            insert_doc(&db, &format!("people/{}.md", name));
+        }
+
+        let base = vec![make_entity("people", EntityType::Folder, 50)];
+        let result = build_curated_selection(&db, base).unwrap();
+
+        let children = result.expandable_folders.get("people").unwrap();
+        assert_eq!(
+            children.len(),
+            MAX_FOLDER_CHILDREN,
+            "should cap at MAX_FOLDER_CHILDREN"
+        );
+
+        // The most recent should be included, the least recent excluded
+        assert!(children.contains(&"person-00".to_string()), "most recent should be included");
+        assert!(
+            !children.contains(&"person-14".to_string()),
+            "least recent should be excluded"
+        );
+    }
+
+    #[test]
+    fn non_expandable_folder_skipped_by_density() {
+        // Scenario: inbox/ has 100 files but only 2 page entity links (2% density).
+        // Below the 5% threshold, so it should NOT be expandable.
+        let db = test_db();
+        insert_entity(&db, "inbox", "folder", 100, 80);
+        insert_entity(&db, "some-note", "link", 5, 3);
+        insert_entity(&db, "other-note", "link", 4, 2);
+        insert_doc(&db, "inbox/Some Note.md");
+        insert_doc(&db, "inbox/Other Note.md");
+        // Add many docs without matching links to dilute density
+        for i in 0..98 {
+            insert_doc(&db, &format!("inbox/note-{}.md", i));
+        }
+
+        let base = vec![make_entity("inbox", EntityType::Folder, 100)];
+        let result = build_curated_selection(&db, base).unwrap();
+
+        assert!(
+            !result.expandable_folders.contains_key("inbox"),
+            "inbox/ should NOT be expandable at 2% density"
+        );
+        // The link entities should NOT be in final entities
+        let final_names: Vec<&str> = result
+            .final_entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert!(!final_names.contains(&"some-note"));
+        assert!(!final_names.contains(&"other-note"));
+    }
+
+    #[test]
     fn folder_child_expansion_deduplicates_shared_links() {
         let db = test_db();
         insert_entity(&db, "alice smith", "link", 12, 4);
