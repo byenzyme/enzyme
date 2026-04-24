@@ -33,6 +33,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure private git deps
+        run: git config --global url."https://x-access-token:${{ secrets.FLOWER_COMPUTERS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
