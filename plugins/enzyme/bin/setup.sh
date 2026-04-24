@@ -5,8 +5,7 @@
 #
 # Creates:
 #   ~/.cache/enzyme/enzyme  — executable binary (copied from plugin)
-#   ~/.cache/enzyme/models  — symlink to plugin's bundled model files
-#   ~/.local/bin/enzyme     — wrapper that sets ENZYME_MODEL_DIR and execs binary
+#   ~/.local/bin/enzyme     — symlink to cached binary
 set -e
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,17 +47,9 @@ if [ ! -x "$CACHE_BIN" ] || [ "$SRC" -nt "$CACHE_BIN" ]; then
     chmod +x "$CACHE_BIN"
 fi
 
-# Symlink model files into the cache dir.
-ln -sfn "${PLUGIN_ROOT}/models" "${CACHE_DIR}/models"
-
-# Create a wrapper in PATH that uses ~/.cache-relative paths.
+# Symlink into PATH.
 mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/enzyme" << WRAPPER
-#!/bin/sh
-export ENZYME_MODEL_DIR="\$HOME/.cache/enzyme/models/distilled"
-exec "\$HOME/.cache/enzyme/enzyme" "\$@"
-WRAPPER
-chmod +x "$HOME/.local/bin/enzyme"
+ln -sf "$CACHE_BIN" "$HOME/.local/bin/enzyme"
 
 # Ensure ~/.local/bin is in PATH for all subsequent Bash tool calls.
 if [ -n "$CLAUDE_ENV_FILE" ]; then

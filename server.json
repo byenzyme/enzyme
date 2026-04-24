@@ -13,7 +13,7 @@
     {
       "registryType": "mcpb",
       "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.2/enzyme-mcp-0.5.2-macos-arm64.mcpb",
-      "fileSha256": "6defb54f9efa71ca53bd351719ff486f7c5584803dc00edd4b2068ace5980f80",
+      "fileSha256": "ad8cece7c73b8cfb43d4920644a93b1c4ad3aa326df3cca33f665a1564f2474e",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -27,7 +27,7 @@
     },{
       "registryType": "mcpb",
       "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.2/enzyme-mcp-0.5.2-linux-x86_64.mcpb",
-      "fileSha256": "8b865f89512800145f079c6d6b2a68caf3d8c9bfc5f4e509d7ad16ec1b4faa38",
+      "fileSha256": "46a8e16a02dd49c08811cfd7780a028c4707c5c269e3833a7ad208eb09259ab9",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -41,7 +41,7 @@
     },{
       "registryType": "mcpb",
       "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.2/enzyme-mcp-0.5.2-linux-arm64.mcpb",
-      "fileSha256": "4a4a54f3635f0bc649bf6e913ad1f6b7e6c045244831271920f71db10667084b",
+      "fileSha256": "18d0e749428e9572c074a3e6c85070d6ef365a2737e484931eb6780762a57f21",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Enzyme wrapper — resolves the bundled platform binary and model directory.
+# Enzyme wrapper — resolves the bundled platform binary.
 # Installed as a symlink from ~/.local/bin/enzyme → <plugin>/bin/enzyme by the
 # Claude Code SessionStart hook.
 set -e
@@ -37,8 +37,5 @@ if [ ! -x "$ENZYME_BIN" ]; then
     echo "Install a standalone binary from https://github.com/jshph/enzyme/releases" >&2
     exit 1
 fi
-
-# Point the model resolver at the bundled model files.
-export ENZYME_MODEL_DIR="${PLUGIN_ROOT}/models/distilled"
 
 exec "$ENZYME_BIN" "$@"

@@ -111,11 +111,6 @@ case ":$PATH:" in
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 
-# Download embedding model
-echo ""
-echo "Downloading embedding model (~52 MB)..."
-"$INSTALL_DIR/enzyme" setup
-
 # Install Claude Code plugin if claude is available
 if command -v claude &>/dev/null; then
     echo ""
