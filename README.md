@@ -8,6 +8,7 @@
 [![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
 [![License](https://img.shields.io/github/license/jshph/enzyme?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jshph/enzyme?style=flat-square)](https://github.com/jshph/enzyme/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/jshph/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/jshph/enzyme/releases)
 
 [Website](https://enzyme.garden) · [Docs](https://enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
 
