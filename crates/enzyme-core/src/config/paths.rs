@@ -28,6 +28,43 @@ impl EnzymePaths {
         Self::with_overrides(vault_path, enzyme_home.as_deref())
     }
 
+    /// Construct paths from a direct database path for SDK/collection use.
+    pub fn from_db_path(db_path: impl AsRef<Path>) -> Result<Self> {
+        let db_path = db_path.as_ref().to_path_buf();
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory for DB: {:?}", parent))?;
+        }
+
+        let home = match env::var("ENZYME_HOME").ok().filter(|s| !s.is_empty()) {
+            Some(h) => PathBuf::from(h),
+            None => {
+                let home_dir = dirs::home_dir().context("could not determine home directory")?;
+                home_dir.join(".enzyme")
+            }
+        };
+
+        Ok(Self {
+            home,
+            vault_db: db_path,
+        })
+    }
+
+    /// Resolve a collection ID to its database path.
+    ///
+    /// Collections live at `~/.enzyme-sdk/collections/<id>/.enzyme/enzyme.db` by default,
+    /// overridable via `ENZYME_COLLECTIONS_DIR`.
+    pub fn collection_db_path(collection_id: &str) -> Result<PathBuf> {
+        let base = match env::var("ENZYME_COLLECTIONS_DIR").ok().filter(|s| !s.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let home_dir = dirs::home_dir().context("could not determine home directory")?;
+                home_dir.join(".enzyme-sdk").join("collections")
+            }
+        };
+        Ok(base.join(collection_id).join(".enzyme").join("enzyme.db"))
+    }
+
     /// Construct paths with explicit overrides (for testing without env var mutation).
     pub fn with_overrides(vault_path: impl AsRef<Path>, enzyme_home: Option<&str>) -> Result<Self> {
         let vault_path = vault_path.as_ref();

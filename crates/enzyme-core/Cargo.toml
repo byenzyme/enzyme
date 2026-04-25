@@ -28,6 +28,23 @@ futures = "0.3"
 async-stream = "0.3"
 toml = "0.8"
 
+[features]
+rten = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
+
+[dependencies.rten]
+version = "0.24"
+optional = true
+
+[dependencies.rten-tensor]
+version = "0.24"
+optional = true
+
+[dependencies.tokenizers]
+version = "0.21"
+optional = true
+default-features = false
+features = ["onig"]
+
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -304,6 +304,8 @@ pub fn build_user_prompt(
     entity: Option<&Entity>,
 ) -> String {
     let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
+    let synthetic_body_cluster =
+        entity_name.starts_with("auto-cluster-") || entity_name.starts_with("auto/body/");
 
     // Profile selection header
     let mut prompt = format!(
@@ -319,9 +321,18 @@ Apply the guidance and approach from the {} profile defined in the system prompt
     ));
 
     // Entity focus
-    prompt.push_str(&format!(
-        "\n\n<entity>\nFocus entity: {entity_name}\n</entity>"
-    ));
+    if synthetic_body_cluster {
+        prompt.push_str(&format!(
+            "\n\n<entity>\nFocus entity: {entity_name}\n\
+This is an automatically generated body-similarity cluster ID. The words after auto-cluster \
+are a weak display hint, not evidence. Treat the excerpts as the source of meaning for this \
+cluster.\n</entity>"
+        ));
+    } else {
+        prompt.push_str(&format!(
+            "\n\n<entity>\nFocus entity: {entity_name}\n</entity>"
+        ));
+    }
 
     // Practice shape from entity trends
     if let Some(e) = entity {
@@ -377,7 +388,7 @@ embed well against vault passages and surface relevant content when used as a se
     prompt.push_str(&format!(
         "\n\n\
 Now attend to the excerpts and:\n\
-1. Ground each catalyst in a specific phrase from the excerpts — what does {entity_name} actually mean in THIS vault? Then {periphery_instruction}\n\
+1. Ground each catalyst in a specific phrase from the excerpts — what does this entity actually mean in THIS vault? If the entity is an auto-cluster ID, use the keyword slug only as a weak hint and infer the cluster's meaning from the excerpts. Then {periphery_instruction}\n\
 2. {format_instruction}\n\
 3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\
 4. For eraLabels: copy the era label that most shaped each catalyst. Use an empty string only if no era label is available.\n\n\

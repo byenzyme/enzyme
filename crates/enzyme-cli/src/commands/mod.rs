@@ -1,7 +1,10 @@
 pub mod apply;
+pub mod benchmark;
 pub mod catalyze;
 pub mod claude_md;
 pub mod dump_prompts;
+pub mod embed_entries;
+pub mod ingest;
 pub mod init;
 pub mod lock;
 pub mod mcp;

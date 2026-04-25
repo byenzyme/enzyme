@@ -48,6 +48,18 @@ impl<'a> IndexingPipeline<'a> {
         on_progress("Discovering files...");
         let discovery = FileDiscovery::new(self.vault_path.clone());
         let all_paths = discovery.discover()?;
+        let db_doc_count = self.db.get_document_count().unwrap_or(0);
+        if all_paths.is_empty() && db_doc_count > 0 {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(IndexingStats {
+                files_discovered: 0,
+                files_new: 0,
+                files_updated: 0,
+                files_deleted: 0,
+                entities_extracted: 0,
+                duration_ms,
+            });
+        }
         let files_discovered = all_paths.len();
         info!(files_discovered, "files discovered");
 
@@ -210,7 +222,7 @@ impl<'a> IndexingPipeline<'a> {
     /// - Link in any frontmatter field → full file body
     /// - Folder entity → full file body (the file belongs to that folder)
     /// - Inline-only tag/link → 250-word neighborhood around the mention
-    fn collect_entity_entries(
+    pub fn collect_entity_entries(
         docs: &[ProcessedDocument],
     ) -> Vec<(String, EntityType, EntityOccurrence)> {
         let now = chrono::Utc::now().timestamp_millis();

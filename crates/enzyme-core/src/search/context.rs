@@ -76,6 +76,15 @@ impl CatalyzeResponse {
     }
 }
 
+/// A single result from direct (non-catalyst) search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectSearchResult {
+    pub file_path: String,
+    pub chunk_index: i64,
+    pub content: String,
+    pub similarity: f64,
+}
+
 /// Catalyst-based search over pre-computed similarities.
 ///
 /// Supports an optional **target** database for split-DB mode (after `enzyme apply`):
@@ -384,5 +393,86 @@ impl<'a> ContextSearch<'a> {
             presentation_guidance: Vec::new(),
             register: None,
         })
+    }
+
+    /// Direct search: pure cosine similarity between query and all chunk embeddings.
+    ///
+    /// Skips catalyst indirection entirely — baseline for benchmarking.
+    pub fn direct_search(&self, query: &str, limit: usize) -> Result<Vec<DirectSearchResult>> {
+        let query_vec = self.service.embed_query(query)?;
+
+        let repo = self.target_db.unwrap_or(self.db);
+        let all_chunks = repo.get_all_chunk_embeddings()?;
+
+        if all_chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Score all chunks by cosine similarity
+        let mut scored: Vec<(usize, f32)> = all_chunks
+            .iter()
+            .enumerate()
+            .map(|(i, (_fp, _ci, vec))| (i, Embedding::cosine_similarity(&query_vec, vec)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        // Fetch content for top results
+        let mut results = Vec::with_capacity(scored.len());
+        for (idx, sim) in &scored {
+            let (ref file_path, chunk_index, _) = all_chunks[*idx];
+            let content = repo
+                .get_chunk_content(file_path, chunk_index as i64)?
+                .unwrap_or_default();
+            results.push(DirectSearchResult {
+                file_path: file_path.clone(),
+                chunk_index: chunk_index as i64,
+                content,
+                similarity: (*sim as f64 * 1000.0).round() / 1000.0,
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Direct search with externally-provided embeddings (for cross-model benchmarking).
+    ///
+    /// Takes pre-computed chunk embeddings and a query vector, bypassing the
+    /// service's backend entirely. Used when comparing ESE vs Arctic on the same corpus.
+    pub fn direct_search_with_embeddings(
+        query_vec: &[f32],
+        chunk_embeddings: &[(String, u32, Vec<f32>)],
+        db: &Database,
+        limit: usize,
+    ) -> Result<Vec<DirectSearchResult>> {
+        if chunk_embeddings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scored: Vec<(usize, f32)> = chunk_embeddings
+            .iter()
+            .enumerate()
+            .map(|(i, (_fp, _ci, vec))| (i, Embedding::cosine_similarity(query_vec, vec)))
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        let mut results = Vec::with_capacity(scored.len());
+        for (idx, sim) in &scored {
+            let (ref file_path, chunk_index, _) = chunk_embeddings[*idx];
+            let content = db
+                .get_chunk_content(file_path, chunk_index as i64)?
+                .unwrap_or_default();
+            results.push(DirectSearchResult {
+                file_path: file_path.clone(),
+                chunk_index: chunk_index as i64,
+                content,
+                similarity: (*sim as f64 * 1000.0).round() / 1000.0,
+            });
+        }
+
+        Ok(results)
     }
 }

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 enzyme-core = { path = "../enzyme-core" }
+reqwest = { workspace = true }
 enzyme-api = { path = "../enzyme-api" }
 clap = { workspace = true }
 tokio = { workspace = true }
@@ -21,10 +22,14 @@ chrono = { workspace = true }
 crossterm = { workspace = true }
 atty = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"
 fs2 = "0.4"
 tempfile = "3.26.0"
+
+[features]
+rten = ["enzyme-core/rten"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

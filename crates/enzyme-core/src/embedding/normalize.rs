@@ -67,7 +67,6 @@ pub fn mean_pool(token_embeddings: &[Vec<f32>], attention_mask: &[f32]) -> Vec<f
 /// `attention_mask` has `seq_len` entries — 1.0 for real tokens, 0.0 for padding.
 ///
 /// Returns a single vector of length `hidden_dim`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn mean_pool_flat(
     hidden_states: &[f32],
     attention_mask: &[f32],

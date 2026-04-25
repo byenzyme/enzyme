@@ -18,11 +18,15 @@ use tracing::info;
 mod backend;
 mod ese_backend;
 mod normalize;
+#[cfg(feature = "rten")]
+mod rten_backend;
 mod service;
 
 pub use backend::EmbeddingBackend;
 pub use ese_backend::EseBackend;
-pub use normalize::l2_normalize;
+pub use normalize::{l2_normalize, mean_pool_flat};
+#[cfg(feature = "rten")]
+pub use rten_backend::RtenBackend;
 pub use service::EmbeddingService;
 
 static EMBEDDING_SERVICE: OnceLock<EmbeddingService> = OnceLock::new();

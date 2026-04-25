@@ -20,6 +20,10 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
+    /// Collection ID (resolves to ~/.enzyme-sdk/collections/<id>/.enzyme/enzyme.db)
+    #[arg(long, global = true)]
+    collection: Option<String>,
+
     /// Verbosity level
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
@@ -150,6 +154,34 @@ enum Commands {
         port: u16,
     },
 
+    /// Ingest structured data directly into the enzyme DB
+    Ingest {
+        /// Suppress human output, emit JSON
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
+    /// Embed structured entries without creating an enzyme database
+    EmbedEntries {
+        /// JSON file containing an array, {"entries": [...]}, or {"entry": ...}; reads stdin if omitted
+        #[arg(short, long)]
+        input: Option<PathBuf>,
+    },
+
+    /// Benchmark retrieval quality across embedding backends and search modes
+    Benchmark {
+        /// Path to queries file (JSONL or plain text, one query per line)
+        queries: PathBuf,
+
+        /// Maximum results per query
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+
+        /// Conditions to run (default: all). Options: ese_direct, ese_catalysts, arctic_direct, arctic_catalysts
+        #[arg(long, value_delimiter = ',')]
+        conditions: Vec<String>,
+    },
+
     /// Dump catalyst prompts to JSONL for training data generation
     DumpPrompts {
         /// Output file path (JSONL)
@@ -243,7 +275,21 @@ async fn main() -> Result<()> {
         return commands::mcp::run_mcp(cli.vault).await;
     }
 
-    let vault_path = resolve_vault_path(cli.vault)?;
+    let vault_path = if let Some(ref collection_id) = cli.collection {
+        let db_path = enzyme_core::config::paths::EnzymePaths::collection_db_path(collection_id)?;
+        let vault = db_path
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow::anyhow!("invalid collection DB path"))?
+            .to_path_buf();
+        std::fs::create_dir_all(&vault)?;
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        vault
+    } else {
+        resolve_vault_path(cli.vault)?
+    };
     init_tracing(cli.verbose, Some(&vault_path));
     info!(?vault_path, "resolved vault path");
 
@@ -343,6 +389,19 @@ async fn main() -> Result<()> {
         }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
+        }
+        Commands::Ingest { quiet } => {
+            commands::ingest::run_ingest(&vault_path, quiet).await?;
+        }
+        Commands::EmbedEntries { input } => {
+            commands::embed_entries::run_embed_entries(input.as_deref())?;
+        }
+        Commands::Benchmark {
+            queries,
+            limit,
+            conditions,
+        } => {
+            commands::benchmark::run_benchmark(&vault_path, &queries, limit, &conditions).await?;
         }
         Commands::DumpPrompts {
             output,
