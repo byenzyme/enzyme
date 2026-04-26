@@ -1,0 +1,19 @@
+[project]
+name = "py"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bm25s[core]",
+    "datasets>=4.8.4",
+    "einops>=0.8.2",
+    "numpy>=2.4.4",
+    "peft>=0.18.1",
+    "sentence-transformers>=5.3.0",
+]
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.uv.sources]

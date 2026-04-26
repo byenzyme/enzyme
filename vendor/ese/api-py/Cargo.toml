@@ -1,0 +1,13 @@
+[package]
+name = "ese-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ese"
+crate-type = ["cdylib"]
+
+[dependencies]
+ese_core = { package = "ese", path = "..", features = ["rayon", "dim-512", "quant-8"] }
+numpy = "0.28.0"
+pyo3 = { version = "0", features = ["extension-module"] }

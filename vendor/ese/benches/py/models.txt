@@ -1,0 +1,14 @@
+ours
+all-MiniLM-L6-v2
+all-mpnet-base-v2
+intfloat/multilingual-e5-base
+BAAI/bge-base-en-v1.5
+google/embeddinggemma-300m
+MongoDB/mdbr-leaf-ir
+google/embeddinggemma-300m
+average_word_embeddings_glove.6B.300d
+minishlab/M2V_base_output
+static-retrieval-mrl-en-v1
+minishlab/potion-base-32M
+minishlab/potion-base-2M
+minishlab/potion-multilingual-128M

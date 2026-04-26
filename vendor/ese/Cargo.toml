@@ -1,0 +1,46 @@
+[package]
+name = "ese"
+version = "0.1.0"
+edition = "2024"
+description = "Extremely Static Embeddings"
+readme = "readme.md"
+license-file = "license"
+authors = ["W. Turner Abney <wta@ieee.org>"]
+homepage = "https://github.com/flowercomputers/ese"
+repository = "https://github.com/flowercomputers/ese"
+keywords = ["embeddings", "model2vec", "nlp", "search"]
+categories = ["text-processing", "artificial-intelligence", "compression", "encoding", "science"]
+
+[features]
+default = ["dim-512"]
+dim-1024 = []
+dim-768 = []
+dim-512 = []
+dim-256 = []
+dim-128 = []
+dim-64 = []
+dim-32 = []
+quant-16 = []
+quant-8 = []
+rayon = ["dep:rayon"]
+tests = ["dep:tokenizers"]
+
+[dependencies]
+rayon = { version = "1", optional = true }
+unicode-normalization = "0"
+unicode-general-category = "1"
+
+[build-dependencies]
+serde_json = "1"
+tokenizers = { version = "0", optional = true }
+minreq = { version = "2", features = ["https-native"] }
+
+[dev-dependencies]
+criterion = { version = "0", features = ["html_reports"] }
+model2vec-rs = "0"
+parquet = { version = "58" }
+minreq = { version = "2", features = ["https-native"] }
+
+[[bench]]
+name = "gooaq"
+harness = false
