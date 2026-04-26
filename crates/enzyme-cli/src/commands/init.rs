@@ -9,14 +9,14 @@ use tracing::{debug, info};
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::embedding::get_embedding_service;
+use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
 };
 use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::embedding::{EmbeddingPipeline, EmbeddingStats};
-use enzyme_core::pipeline::indexing::IndexingPipeline;
+use enzyme_core::pipeline::indexing::{IndexingPipeline, IndexingStats};
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::pipeline::staleness::{
@@ -27,6 +27,21 @@ use enzyme_core::pipeline::staleness::{
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
 use crate::display::{DisplayEvent, InitDisplay};
+
+fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
+    if paths.vault_db.exists() {
+        fs::remove_file(&paths.vault_db)
+            .with_context(|| format!("failed to reset {}", paths.vault_db.display()))?;
+        debug!(path = %paths.vault_db.display(), "reset vault database for init");
+    }
+    Ok(())
+}
+
+struct LocalRefreshResult {
+    indexing: IndexingStats,
+    embedding_changed: bool,
+    similarities_recomputed: bool,
+}
 
 /// Stats collected during an init run, used for JSON output in quiet mode.
 pub struct InitResult {
@@ -79,7 +94,7 @@ impl InitResult {
 /// Used by `enzyme init --stage index` to populate the DB and show
 /// the user what enzyme found before committing to LLM + catalyst work.
 /// Desktop app uses quiet mode (JSON output) to populate its guide text box.
-pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> Result<()> {
+pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // Ensure .enzyme directory exists
@@ -87,11 +102,12 @@ pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> 
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
+    reset_vault_database(&paths)?;
     let db = Database::open(&paths.vault_db)?;
 
     // Run indexing
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
-    let idx_stats = indexing.run(full, |_| {})?;
+    let idx_stats = indexing.run(true, |_| {})?;
 
     debug!(
         new = idx_stats.files_new,
@@ -114,7 +130,6 @@ pub async fn run_init_index_only(vault_path: &Path, full: bool, quiet: bool) -> 
 
 pub async fn run_init(
     vault_path: &Path,
-    full: bool,
     _detached: bool,
     quiet: bool,
     json_progress: bool,
@@ -128,6 +143,8 @@ pub async fn run_init(
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
+    reset_vault_database(&paths)?;
+
     // Open database
     let db = Database::open(&paths.vault_db)?;
 
@@ -139,6 +156,39 @@ pub async fn run_init(
             None
         }
     };
+
+    // Deduct 2 credits if using free-tier LLM (BYOK users pay their own inference)
+    let is_free_tier = api_config.as_ref().map_or(false, |(cfg, _)| {
+        matches!(cfg.provider, enzyme_core::llm::ConfigProvider::ServerFallback)
+    });
+    if is_free_tier {
+        let auth_path = paths.auth_token();
+        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+            {
+                match enzyme_core::config::credits::deduct_credits(
+                    &token.api_key,
+                    2.0,
+                    "init",
+                )
+                .await
+                {
+                    Ok(remaining) => {
+                        if remaining <= 2.0 && !quiet {
+                            eprintln!(
+                                "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
+                                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                                remaining,
+                                crossterm::style::ResetColor,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("credit deduction failed: {}", e);
+                    }
+                }
+            }
+        }
+    }
 
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     // Run with animated display, then finish it before the interactive prompt.
@@ -166,7 +216,7 @@ pub async fn run_init(
         tx.send(DisplayEvent::IndexingStart).ok();
         let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
         let tx_idx = tx.clone();
-        let stats = indexing.run(full, |msg| {
+        let stats = indexing.run(true, |msg| {
             tx_idx
                 .send(DisplayEvent::IndexingProgress(msg.to_string()))
                 .ok();
@@ -206,7 +256,10 @@ pub async fn run_init(
     let sel_result = selection.run()?;
     // Only write entities to TOML on first init (shortlist). If the config
     // already has entities, those take precedence and are not overwritten.
-    if matches!(sel_result.source, enzyme_core::pipeline::selection::SelectionSource::Shortlist) {
+    if matches!(
+        sel_result.source,
+        enzyme_core::pipeline::selection::SelectionSource::Shortlist
+    ) {
         let expanded_children: std::collections::HashSet<String> = sel_result
             .expandable_folders
             .values()
@@ -264,30 +317,32 @@ pub async fn run_init(
         let tx_emb = tx.clone();
         let max_embed = enzyme_config.effective_max_embedding_files();
         tx.send(DisplayEvent::EmbeddingStart).ok();
-        Some(tokio::task::spawn_blocking(move || -> anyhow::Result<EmbeddingStats> {
-            let bg_db = Database::open(&db_path)?;
-            let pipeline = EmbeddingPipeline::new(&bg_db, svc);
-            let stats = pipeline.run_with_limit(max_embed, |p| {
+        Some(tokio::task::spawn_blocking(
+            move || -> anyhow::Result<EmbeddingStats> {
+                let bg_db = Database::open(&db_path)?;
+                let pipeline = EmbeddingPipeline::new(&bg_db, svc);
+                let stats = pipeline.run_with_limit(max_embed, |p| {
+                    tx_emb
+                        .send(DisplayEvent::EmbeddingProgress {
+                            done: p.done,
+                            total: p.total,
+                            current_date_ms: p.current_date_ms,
+                        })
+                        .ok();
+                })?;
+                // Notify display immediately so the finished state renders
+                // above the entity tree while discovery is still running.
                 tx_emb
-                    .send(DisplayEvent::EmbeddingProgress {
-                        done: p.done,
-                        total: p.total,
-                        current_date_ms: p.current_date_ms,
+                    .send(DisplayEvent::EmbeddingComplete {
+                        chunks: stats.chunks_embedded,
+                        pruned: stats.documents_pruned,
+                        oldest_date_ms: stats.oldest_embedded_ms,
+                        encode_ms: stats.encode_ms,
                     })
                     .ok();
-            })?;
-            // Notify display immediately so the finished state renders
-            // above the entity tree while discovery is still running.
-            tx_emb
-                .send(DisplayEvent::EmbeddingComplete {
-                    chunks: stats.chunks_embedded,
-                    pruned: stats.documents_pruned,
-                    oldest_date_ms: stats.oldest_embedded_ms,
-                    encode_ms: stats.encode_ms,
-                })
-                .ok();
-            Ok(stats)
-        }))
+                Ok(stats)
+            },
+        ))
     } else {
         None
     };
@@ -464,7 +519,10 @@ pub async fn run_init(
     {
         tx.send(DisplayEvent::SimilarityStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
-        let sim_pipeline = SimilarityPipeline::new(&db, svc);
+        // Reopen after the background embedding connection commits so similarity
+        // reads the complete current embedding set.
+        let sim_db = Database::open(&paths.vault_db)?;
+        let sim_pipeline = SimilarityPipeline::new(&sim_db, svc);
         let tx_sim = tx.clone();
         let sim_stats = sim_pipeline.run(|done, total| {
             tx_sim
@@ -477,6 +535,14 @@ pub async fn run_init(
             documents: sim_stats.documents_compared,
         })
         .ok();
+    }
+
+    if cat_stats.is_some() {
+        let entity_names: Vec<String> =
+            sel_result.entities.iter().map(|e| e.name.clone()).collect();
+        if let Err(e) = store_staleness_bookkeeping(&db, vault_path, &entity_names) {
+            tracing::warn!("failed to store catalyst staleness bookkeeping: {}", e);
+        }
     }
 
     // ── Step 8: Re-apply targets ──────────────────────────────────────────
@@ -521,6 +587,15 @@ pub async fn run_init(
             crossterm::style::ResetColor,
         );
         eprintln!();
+        eprintln!(
+            "  {}Publish this vault to access it from Claude anywhere:{}",
+            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
+            crossterm::style::ResetColor,
+        );
+        eprintln!(
+            "    enzyme login && enzyme publish",
+        );
+        eprintln!();
     }
 
     if quiet || json_progress {
@@ -552,35 +627,20 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     }
 
     let db = Database::open(&paths.vault_db)?;
-    let staleness = check_catalyst_staleness(&db, vault_path)?;
-
-    if matches!(staleness, StalenessResult::Fresh) {
-        return Ok(());
-    }
-
+    let _local = run_local_refresh_work(&db, vault_path, &paths)?;
     drop(db);
 
-    // Run init in quiet mode (suppresses all output)
-    let _ = run_init(vault_path, false, false, true, false, None, None).await?;
-
-    // Store bookkeeping for next staleness check
-    let db = Database::open(&paths.vault_db)?;
-    let selection = SelectionPipeline::new(&db, vault_path);
-    let sel_result = selection.run()?;
-    let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
-    store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
-
+    run_stale_catalyst_refresh(vault_path, None, None).await?;
     Ok(())
 }
 
 /// Lightweight refresh: dispatches to the appropriate path based on flags.
 ///
 /// - `--detached` → `run_refresh_detached` (background lockfile-guarded catalyst run)
-/// - `--quiet` without `--full` → `run_refresh_fast` (sync hot path for hooks)
-/// - Otherwise → interactive full pipeline
+/// - `--quiet` → `run_refresh_fast` (sync hot path for hooks)
+/// - Otherwise → interactive incremental refresh
 pub async fn run_refresh(
     vault_path: &Path,
-    full: bool,
     detached: bool,
     quiet: bool,
     vault_guide: Option<&str>,
@@ -589,10 +649,10 @@ pub async fn run_refresh(
     if detached {
         return run_refresh_detached(vault_path).await;
     }
-    if quiet && !full {
+    if quiet {
         return run_refresh_fast(vault_path).await;
     }
-    run_refresh_interactive(vault_path, full, quiet, vault_guide, min_top_catalysts).await
+    run_refresh_interactive(vault_path, vault_guide, min_top_catalysts).await
 }
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
@@ -610,71 +670,9 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     }
 
     let db = Database::open(&paths.vault_db)?;
+    let local = run_local_refresh_work(&db, vault_path, &paths)?;
 
-    // ── Step 1: Index (filesystem scan, fast) ────────────────────────────
-    // Capture timestamp before indexing so we can scope embedding to only
-    // the docs processed in this run.
-    let index_start_ms = chrono::Utc::now().timestamp_millis();
-    let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
-    let idx_stats = indexing.run(false, |_msg| {})?;
-    debug!(
-        new = idx_stats.files_new,
-        updated = idx_stats.files_updated,
-        deleted = idx_stats.files_deleted,
-        "fast refresh: indexing complete"
-    );
-
-    // ── Step 2: Warm the embedding daemon & embed changed docs ──────────
-    // Always call get_embedding_service so the daemon stays warm across
-    // invocations (avoids ~650ms cold-start on the first `catalyze` call).
-    let svc = get_embedding_service(&paths.home).ok();
-
-    let has_changes =
-        idx_stats.files_new > 0 || idx_stats.files_updated > 0 || idx_stats.files_deleted > 0;
-    let emb_produced = if has_changes {
-        match svc {
-            Some(svc) => {
-                let pipeline = EmbeddingPipeline::new(&db, svc);
-                match pipeline.run_since(index_start_ms, |_| {}) {
-                    Ok(stats) => {
-                        debug!(
-                            docs = stats.documents_embedded,
-                            "fast refresh: embedding complete"
-                        );
-                        stats.documents_embedded > 0
-                    }
-                    Err(e) => {
-                        debug!("fast refresh: embedding failed: {}", e);
-                        false
-                    }
-                }
-            }
-            None => false,
-        }
-    } else {
-        false
-    };
-
-    // ── Step 3: Similarity (only if new embeddings and catalysts exist) ──
-    if emb_produced {
-        let has_catalysts = db
-            .query_read("SELECT COUNT(*) FROM catalysts", vec![], |row| {
-                row.get::<i64>(0)
-            })
-            .map(|rows| rows.first().copied().unwrap_or(0) > 0)
-            .unwrap_or(false);
-
-        if has_catalysts {
-            if let Ok(svc) = get_embedding_service(&paths.home) {
-                let sim_pipeline = SimilarityPipeline::new(&db, svc);
-                if let Err(e) = sim_pipeline.run(|_, _| {}) {
-                    debug!("fast refresh: similarity failed: {}", e);
-                }
-            }
-        }
-    }
-
-    // ── Step 4: Check staleness → spawn background if needed ────────────
+    // Catalyst staleness controls only catalyst regeneration, not doc embedding.
     let staleness = check_catalyst_staleness(&db, vault_path)?;
     let background_spawned = match &staleness {
         StalenessResult::Fresh => false,
@@ -691,11 +689,13 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         "status": "completed",
         "fresh": staleness.is_fresh(),
         "background_spawned": background_spawned,
+        "embedding_changed": local.embedding_changed,
+        "similarities_recomputed": local.similarities_recomputed,
         "indexing": {
-            "files_discovered": idx_stats.files_discovered,
-            "files_new": idx_stats.files_new,
-            "files_updated": idx_stats.files_updated,
-            "files_deleted": idx_stats.files_deleted,
+            "files_discovered": local.indexing.files_discovered,
+            "files_new": local.indexing.files_new,
+            "files_updated": local.indexing.files_updated,
+            "files_deleted": local.indexing.files_deleted,
         },
         "duration_ms": duration_ms,
         "petri": petri,
@@ -703,6 +703,113 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
+}
+
+fn run_local_refresh_work(
+    db: &Database,
+    vault_path: &Path,
+    paths: &EnzymePaths,
+) -> Result<LocalRefreshResult> {
+    let index_start_ms = chrono::Utc::now().timestamp_millis();
+    let indexing = IndexingPipeline::new(db, vault_path.to_path_buf());
+    let idx_stats = indexing.run(false, |_msg| {})?;
+    debug!(
+        new = idx_stats.files_new,
+        updated = idx_stats.files_updated,
+        deleted = idx_stats.files_deleted,
+        "fast refresh: indexing complete"
+    );
+
+    let service = get_embedding_service(&paths.home).ok();
+    let max_embed = EnzymeConfig::load(vault_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .effective_max_embedding_files();
+    let embedding_changed = refresh_changed_doc_embeddings(
+        db,
+        service,
+        index_start_ms,
+        max_embed,
+        has_index_changes(&idx_stats),
+    );
+
+    let similarities_recomputed = if embedding_changed {
+        recompute_current_similarities(db, service)
+    } else {
+        false
+    };
+
+    Ok(LocalRefreshResult {
+        indexing: idx_stats,
+        embedding_changed,
+        similarities_recomputed,
+    })
+}
+
+fn has_index_changes(stats: &IndexingStats) -> bool {
+    stats.files_new > 0 || stats.files_updated > 0 || stats.files_deleted > 0
+}
+
+fn refresh_changed_doc_embeddings(
+    db: &Database,
+    service: Option<&EmbeddingService>,
+    index_start_ms: i64,
+    max_embed: Option<usize>,
+    has_index_changes: bool,
+) -> bool {
+    if !has_index_changes {
+        return false;
+    }
+
+    let Some(service) = service else {
+        debug!("fast refresh: embedding unavailable");
+        return false;
+    };
+
+    let pipeline = EmbeddingPipeline::new(db, service);
+    match pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {}) {
+        Ok(stats) => {
+            let changed = stats.documents_embedded > 0 || stats.documents_pruned > 0;
+            debug!(
+                docs = stats.documents_embedded,
+                pruned = stats.documents_pruned,
+                changed,
+                "fast refresh: embedding complete"
+            );
+            changed
+        }
+        Err(e) => {
+            debug!("fast refresh: embedding failed: {}", e);
+            false
+        }
+    }
+}
+
+fn recompute_current_similarities(db: &Database, service: Option<&EmbeddingService>) -> bool {
+    let Some(service) = service else {
+        return false;
+    };
+    if !database_has_catalysts(db) {
+        return false;
+    }
+
+    let sim_pipeline = SimilarityPipeline::new(db, service);
+    match sim_pipeline.run(|_, _| {}) {
+        Ok(_) => true,
+        Err(e) => {
+            debug!("fast refresh: similarity failed: {}", e);
+            false
+        }
+    }
+}
+
+fn database_has_catalysts(db: &Database) -> bool {
+    db.query_read("SELECT COUNT(*) FROM catalysts", vec![], |row| {
+        row.get::<i64>(0)
+    })
+    .map(|rows| rows.first().copied().unwrap_or(0) > 0)
+    .unwrap_or(false)
 }
 
 /// Detached background path — runs the expensive LLM catalyst pipeline.
@@ -726,29 +833,43 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         }
     };
 
+    run_stale_catalyst_refresh(vault_path, None, None).await?;
+    // Lock released on drop
+    Ok(())
+}
+
+async fn run_stale_catalyst_refresh(
+    vault_path: &Path,
+    vault_guide: Option<&str>,
+    min_top_catalysts: Option<usize>,
+) -> Result<bool> {
+    let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
 
-    // ── Step 2: Re-check staleness (may have been resolved since spawn) ─
+    if let Some(mtc) = min_top_catalysts {
+        let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+        if let Err(e) = config.persist_min_top_catalysts(vault_path, mtc) {
+            tracing::warn!("failed to persist min_top_catalysts: {}", e);
+        }
+    }
+
     let staleness = check_catalyst_staleness(&db, vault_path)?;
     let reason = match staleness {
         StalenessResult::Fresh => {
-            info!("detached refresh: already fresh, exiting");
-            return Ok(());
+            info!("catalyst refresh: already fresh, exiting");
+            return Ok(false);
         }
         StalenessResult::Stale(reason) => reason,
     };
 
-    // ── Step 3: Select entities ─────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
 
-    // Determine which entities to process based on staleness reason
     let entities_to_process = match reason.stale_entity_names() {
         Some(stale_names) => {
-            // Partial refresh: only regenerate stale entities
             info!(
                 count = stale_names.len(),
-                "detached refresh: partial regeneration"
+                "catalyst refresh: partial regeneration"
             );
             sel_result
                 .entities
@@ -758,22 +879,41 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
                 .collect::<Vec<_>>()
         }
         None => {
-            // Full refresh
             info!(
                 count = sel_result.entities.len(),
-                "detached refresh: full regeneration"
+                "catalyst refresh: full regeneration"
             );
             sel_result.entities.clone()
         }
     };
 
     if entities_to_process.is_empty() {
-        info!("detached refresh: no entities to process");
-        return Ok(());
+        info!("catalyst refresh: no entities to process");
+        return Ok(false);
     }
 
-    // ── Step 4: Run catalyst pipeline ───────────────────────────────────
     let (api_config, llm) = resolve_llm_client().await?;
+
+    // Deduct 0.5 credits for non-noop refresh (free-tier only)
+    if matches!(api_config.provider, enzyme_core::llm::ConfigProvider::ServerFallback) {
+        if let Ok(auth_home) = EnzymePaths::enzyme_home() {
+            let auth_path = auth_home.join("auth.json");
+            if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+                if let Ok(remaining) = enzyme_core::config::credits::deduct_credits(
+                    &token.api_key, 0.5, "refresh",
+                ).await {
+                    if remaining <= 2.0 {
+                        eprintln!(
+                            "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
+                            crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                            remaining, crossterm::style::ResetColor,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let svc = get_embedding_service(&paths.home).ok();
     let cat_pipeline = CatalystPipeline::new(&db, &llm, svc);
 
@@ -783,12 +923,23 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         let ctx_builder = ContextBuilder::new(&db);
         ctx_builder.build(&entities_to_process, 5, 300).ok()
     };
+    let effective_vault_guide = match (vault_guide, vault_context.as_deref()) {
+        (Some(guide), Some(context)) => Some(format!(
+            "{guide}\n\n<vault_context>\n{context}\n</vault_context>"
+        )),
+        (Some(guide), None) => Some(guide.to_string()),
+        (None, Some(context)) => Some(context.to_string()),
+        (None, None) => None,
+    };
+    let effective_vault_guide = effective_vault_guide.as_deref();
 
-    let detached_min_top = enzyme_config
-        .trending
-        .as_ref()
-        .and_then(|t| t.min_top_catalysts);
-    let allocations = calculate_allocations(&entities_to_process, detached_min_top);
+    let effective_min_top = min_top_catalysts.or_else(|| {
+        enzyme_config
+            .trending
+            .as_ref()
+            .and_then(|t| t.min_top_catalysts)
+    });
+    let allocations = calculate_allocations(&entities_to_process, effective_min_top);
 
     let cat_config = CatalystConfig {
         entity_profiles: &sel_result.entity_profiles,
@@ -798,7 +949,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
             .catalyst_format
             .as_deref()
             .unwrap_or(DEFAULT_FORMAT_KEY),
-        vault_guide: vault_context.as_deref(),
+        vault_guide: effective_vault_guide,
         model: &api_config.model,
         per_entity_allocations: Some(&allocations),
         max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
@@ -821,10 +972,9 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     info!(
         entities = stats.entities_processed,
         catalysts = stats.catalysts_generated,
-        "detached refresh: catalyst generation complete"
+        "catalyst refresh: generation complete"
     );
 
-    // ── Step 5: Store bookkeeping ───────────────────────────────────────
     let is_partial = reason.stale_entity_names().is_some();
     if is_partial {
         let names: Vec<String> = entities_to_process.iter().map(|e| e.name.clone()).collect();
@@ -835,23 +985,17 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
     }
 
-    // ── Step 6: Recompute similarity ────────────────────────────────────
     if stats.catalysts_generated > 0 {
         if let Ok(svc) = get_embedding_service(&paths.home) {
             let sim_pipeline = SimilarityPipeline::new(&db, svc);
             if let Err(e) = sim_pipeline.run(|_, _| {}) {
-                info!("detached refresh: similarity failed: {}", e);
+                info!("catalyst refresh: similarity failed: {}", e);
             }
         }
-    }
-
-    // ── Step 7: Re-apply targets ───────────────────────────────────────
-    if stats.catalysts_generated > 0 {
         reapply_targets(vault_path).await;
     }
 
-    // Lock released on drop
-    Ok(())
+    Ok(stats.catalysts_generated > 0)
 }
 
 /// Re-apply all previously applied targets using the vault's current catalysts.
@@ -982,65 +1126,50 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
     }
 }
 
-/// Interactive refresh path — the original full pipeline with display output.
+/// Interactive refresh path.
 ///
-/// Used for `enzyme refresh` (no --quiet) and `enzyme refresh --full --quiet`.
+/// Runs the same local incremental work as quiet refresh, then runs the
+/// catalyst pipeline only when catalyst staleness says it is needed.
 async fn run_refresh_interactive(
     vault_path: &Path,
-    full: bool,
-    quiet: bool,
     vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
-    // Capture old entity names before init for diffing.
-    let old_entity_names = if paths.vault_db.exists() {
-        let db = Database::open(&paths.vault_db)?;
-        let staleness = check_catalyst_staleness(&db, vault_path)?;
+    if !paths.vault_db.exists() {
+        let _ = run_init(
+            vault_path,
+            false,
+            false,
+            false,
+            vault_guide,
+            min_top_catalysts,
+        )
+        .await?;
+        return Ok(());
+    }
 
-        match staleness {
-            StalenessResult::Fresh => {
-                debug!("catalysts are fresh — nothing to do");
-                if quiet {
-                    let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
-                    let output = json!({
-                        "status": "completed",
-                        "fresh": true,
-                        "petri": petri,
-                    });
-                    println!("{}", serde_json::to_string(&output)?);
-                }
-                return Ok(());
-            }
-            StalenessResult::Stale(reason) => {
-                debug!(?reason, "catalysts are stale — running full init");
-            }
-        }
-
-        load_stored_entity_names(&db).ok()
-    } else {
-        None
-    };
-
-    // Run the full pipeline.
-    let init_result = run_init(
-        vault_path,
-        full,
-        false,
-        quiet,
-        false,
-        vault_guide,
-        min_top_catalysts,
-    )
-    .await?;
-
-    // Store bookkeeping for next staleness check.
     let db = Database::open(&paths.vault_db)?;
-    let selection = SelectionPipeline::new(&db, vault_path);
-    let sel_result = selection.run()?;
-    let entity_names: Vec<String> = sel_result.entities.iter().map(|e| e.name.clone()).collect();
-    store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
+    let old_entity_names = load_stored_entity_names(&db).ok();
+    let _local = run_local_refresh_work(&db, vault_path, &paths)?;
+
+    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    match staleness {
+        StalenessResult::Fresh => {
+            debug!("catalysts are fresh after local refresh");
+            return Ok(());
+        }
+        StalenessResult::Stale(reason) => {
+            debug!(?reason, "catalysts are stale — running catalyst pipeline");
+        }
+    }
+    drop(db);
+
+    run_stale_catalyst_refresh(vault_path, vault_guide, min_top_catalysts).await?;
+
+    let db = Database::open(&paths.vault_db)?;
+    let entity_names = load_stored_entity_names(&db)?;
 
     // Compute entity set diff if we had a previous snapshot.
     let new_names: std::collections::HashSet<String> = entity_names.iter().cloned().collect();
@@ -1066,32 +1195,20 @@ async fn run_refresh_interactive(
         None
     };
 
-    if quiet {
-        if let Some(result) = init_result {
-            let mut output = result.to_json(vault_path)?;
-
-            if let Some((added, removed)) = entity_changes {
-                output["entity_changes"] = json!({ "added": added, "removed": removed });
-            }
-
-            println!("{}", serde_json::to_string(&output)?);
+    // Surface entity set diff to stderr for interactive use.
+    if let Some((added, removed)) = entity_changes {
+        eprintln!("\n  Entity changes:");
+        for name in &added {
+            eprintln!("    + {}", name);
         }
-    } else {
-        // Surface entity set diff to stderr for interactive use.
-        if let Some((added, removed)) = entity_changes {
-            eprintln!("\n  Entity changes:");
-            for name in &added {
-                eprintln!("    + {}", name);
-            }
-            for name in &removed {
-                eprintln!("    - {}", name);
-            }
-            if let Some(ref old_names) = old_entity_names {
-                eprintln!(
-                    "    {} unchanged",
-                    old_names.intersection(&new_names).count()
-                );
-            }
+        for name in &removed {
+            eprintln!("    - {}", name);
+        }
+        if let Some(ref old_names) = old_entity_names {
+            eprintln!(
+                "    {} unchanged",
+                old_names.intersection(&new_names).count()
+            );
         }
     }
 

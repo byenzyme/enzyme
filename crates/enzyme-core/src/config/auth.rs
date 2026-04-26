@@ -6,15 +6,12 @@ use serde::{Deserialize, Serialize};
 
 /// Authentication token stored at `~/.enzyme/auth.json`.
 ///
-/// Contains a Supabase JWT obtained via the device flow during `enzyme login`.
-/// Both `access_token` and `refresh_token` are Supabase-issued.
+/// Contains an API key obtained via the device flow during `enzyme login`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthToken {
-    pub access_token: String,
-    pub refresh_token: String,
-    /// Unix timestamp (seconds) when the access token expires.
-    pub expires_at: i64,
-    /// Supabase user ID (from the JWT `sub` claim).
+    /// The API key (prefixed `enz_`).
+    pub api_key: String,
+    /// User ID from the server.
     pub user_id: String,
     /// User's email address.
     pub email: String,
@@ -50,12 +47,6 @@ impl AuthToken {
                 .with_context(|| format!("failed to delete auth token at {}", path.display()))?;
         }
         Ok(())
-    }
-
-    /// Check whether the access token has expired.
-    pub fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp();
-        now >= self.expires_at
     }
 }
 
