@@ -136,6 +136,11 @@ impl EnzymePaths {
         self.home.join("embedding_daemon.log")
     }
 
+    /// Path to the authentication token file.
+    pub fn auth_token(&self) -> PathBuf {
+        self.home.join("auth.json")
+    }
+
     /// Path to a target-specific database for `enzyme apply`.
     ///
     /// Target data lives in `<vault>/.enzyme/targets/<hash>.db` where
@@ -222,6 +227,12 @@ mod tests {
         // Different target should produce a different hash
         let db_path3 = paths.target_db(Path::new("/Users/alice/yet-another"));
         assert_ne!(db_path, db_path3);
+    }
+
+    #[test]
+    fn test_auth_token_path() {
+        let paths = EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();
+        assert_eq!(paths.auth_token(), PathBuf::from("/tmp/eh/auth.json"));
     }
 
     #[test]
