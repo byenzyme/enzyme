@@ -71,6 +71,23 @@ impl Database {
         })
     }
 
+    /// Open a **remote** Turso database — for hosted search endpoints.
+    ///
+    /// Connects to a Turso database via HTTP. No local file is created.
+    /// Pragmas and migrations are skipped (the DB was uploaded pre-migrated).
+    pub fn open_remote(url: &str, auth_token: &str) -> Result<Self, DbError> {
+        info!(url, "opening remote database");
+        block_in_place_sync(async move {
+            let db = Builder::new_remote(url.to_string(), auth_token.to_string())
+                .build()
+                .await
+                .map_err(DbError::Libsql)?;
+            let conn = db.connect().map_err(DbError::Libsql)?;
+            // No pragmas or migrations for remote — the uploaded DB is already set up
+            Ok(Self { _db: db, conn })
+        })
+    }
+
     // -- Convenience wrappers -------------------------------------------------
 
     /// Execute a write statement and return the number of rows changed.
