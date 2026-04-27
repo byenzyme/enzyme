@@ -55,7 +55,10 @@ impl EnzymePaths {
     /// Collections live at `~/.enzyme-sdk/collections/<id>/.enzyme/enzyme.db` by default,
     /// overridable via `ENZYME_COLLECTIONS_DIR`.
     pub fn collection_db_path(collection_id: &str) -> Result<PathBuf> {
-        let base = match env::var("ENZYME_COLLECTIONS_DIR").ok().filter(|s| !s.is_empty()) {
+        let base = match env::var("ENZYME_COLLECTIONS_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             Some(d) => PathBuf::from(d),
             None => {
                 let home_dir = dirs::home_dir().context("could not determine home directory")?;

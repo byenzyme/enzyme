@@ -23,8 +23,7 @@ use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
 use super::status::build_status_json;
 
-const SKILL_MD: &str =
-    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/SKILL.md");
+const SKILL_MD: &str = include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/SKILL.md");
 const PETRI_GUIDE: &str =
     include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/petri-guide.md");
 const SEARCH_GUIDE: &str =
@@ -153,7 +152,7 @@ impl EnzymeMcp {
 
         let handle = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
-            handle.block_on(run_init(&vault_path, false, false, true, false, None, None))
+            handle.block_on(run_init(&vault_path, false, true, false, None, None))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?
@@ -217,11 +216,8 @@ impl EnzymeMcp {
             .as_deref()
             .and_then(ContentRegister::from_str_opt)
             .unwrap_or_default();
-        let response = response.with_presentation_guidance(
-            register,
-            &std::collections::HashMap::new(),
-            None,
-        );
+        let response =
+            response.with_presentation_guidance(register, &std::collections::HashMap::new(), None);
 
         let text = serde_json::to_string_pretty(&response).map_err(|e| {
             McpError::internal_error(format!("json serialization failed: {e}"), None)

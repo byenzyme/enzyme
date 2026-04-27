@@ -390,9 +390,18 @@ mod tests {
             .iter()
             .map(|e| e.name.as_str())
             .collect();
-        assert!(final_names.contains(&"alice"), "alice should be in final entities");
-        assert!(final_names.contains(&"bob"), "bob should be in final entities");
-        assert!(final_names.contains(&"carol"), "carol should be in final entities");
+        assert!(
+            final_names.contains(&"alice"),
+            "alice should be in final entities"
+        );
+        assert!(
+            final_names.contains(&"bob"),
+            "bob should be in final entities"
+        );
+        assert!(
+            final_names.contains(&"carol"),
+            "carol should be in final entities"
+        );
 
         // The base entities should still be there
         assert!(final_names.contains(&"enzyme"));
@@ -425,7 +434,10 @@ mod tests {
         );
 
         // The most recent should be included, the least recent excluded
-        assert!(children.contains(&"person-00".to_string()), "most recent should be included");
+        assert!(
+            children.contains(&"person-00".to_string()),
+            "most recent should be included"
+        );
         assert!(
             !children.contains(&"person-14".to_string()),
             "least recent should be excluded"
@@ -487,5 +499,4 @@ mod tests {
 
         assert_eq!(alice_count, 1);
     }
-
 }

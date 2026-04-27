@@ -34,7 +34,11 @@ fn main() -> anyhow::Result<()> {
         vec![],
         |row| row.get::<i64>(0),
     )?;
-    eprintln!("stored vector bytes: {:?} (= {} f32s)", check, check.first().unwrap_or(&0) / 4);
+    eprintln!(
+        "stored vector bytes: {:?} (= {} f32s)",
+        check,
+        check.first().unwrap_or(&0) / 4
+    );
 
     // Recompute similarities
     let sim_pipeline = SimilarityPipeline::new(&db, svc);

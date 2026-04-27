@@ -10,7 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 enzyme-core = { path = "../enzyme-core" }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart", "stream"] }
+flate2 = "1"
 enzyme-api = { path = "../enzyme-api" }
 clap = { workspace = true }
 tokio = { workspace = true }

@@ -75,10 +75,7 @@ pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
 /// - Base catalyst generation instructions (format-aware)
 /// - All catalyst profiles (for prompt caching — actual profile selected per-entity)
 /// - Enzyme guide content for vault context (if available)
-pub fn build_system_prompt(
-    format_key: Option<&str>,
-    vault_guide: Option<&str>,
-) -> String {
+pub fn build_system_prompt(format_key: Option<&str>, vault_guide: Option<&str>) -> String {
     let fmt = format_key
         .and_then(get_format)
         .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());

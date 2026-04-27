@@ -13,7 +13,7 @@ pub mod schema;
 
 pub use connection::Database;
 pub use errors::DbError;
-pub use repository::{FileChunk, FolderChild, FolderStats, SubfolderStats};
+pub use repository::{EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats};
 
 #[cfg(test)]
 mod tests {

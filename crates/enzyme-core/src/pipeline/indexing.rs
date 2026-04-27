@@ -50,7 +50,13 @@ impl<'a> IndexingPipeline<'a> {
         let all_paths = discovery.discover()?;
         let db_doc_count = self.db.get_document_count().unwrap_or(0);
         if all_paths.is_empty() && db_doc_count > 0 {
+            on_progress("Using DB-ingested documents...");
+            self.compute_trending_scores()?;
             let duration_ms = start.elapsed().as_millis() as u64;
+            info!(
+                db_doc_count,
+                duration_ms, "no files discovered; preserving DB-ingested corpus"
+            );
             return Ok(IndexingStats {
                 files_discovered: 0,
                 files_new: 0,

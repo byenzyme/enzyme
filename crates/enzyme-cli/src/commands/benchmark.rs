@@ -7,7 +7,7 @@ use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::embedding::{EmbeddingBackend, EmbeddingService, get_embedding_service};
+use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::search::context::{ContextSearch, DirectSearchResult};
 
 /// A single benchmark query with optional metadata.
@@ -69,7 +69,11 @@ pub async fn run_benchmark(
 
     // Load queries
     let queries = load_queries(queries_path)?;
-    eprintln!("Loaded {} queries from {}", queries.len(), queries_path.display());
+    eprintln!(
+        "Loaded {} queries from {}",
+        queries.len(),
+        queries_path.display()
+    );
 
     let db = Database::open(&paths.vault_db)?;
     let ese_service = get_embedding_service(&paths.home)?;
@@ -91,7 +95,9 @@ pub async fn run_benchmark(
     };
     #[cfg(not(feature = "rten"))]
     let arctic_service: Option<EmbeddingService> = if run_arctic_direct || run_arctic_catalysts {
-        anyhow::bail!("Arctic backend requires the 'rten' feature. Rebuild with: cargo build --features rten");
+        anyhow::bail!(
+            "Arctic backend requires the 'rten' feature. Rebuild with: cargo build --features rten"
+        );
     } else {
         None
     };
@@ -120,13 +126,17 @@ pub async fn run_benchmark(
     eprintln!("Loading ESE chunk embeddings for cross-model scoring...");
     let ese_chunk_map: HashMap<(String, u32), Vec<f32>> = {
         let all = db.get_all_chunk_embeddings()?;
-        all.into_iter().map(|(fp, ci, vec)| ((fp, ci), vec)).collect()
+        all.into_iter()
+            .map(|(fp, ci, vec)| ((fp, ci), vec))
+            .collect()
     };
     eprintln!("  {} chunks indexed", ese_chunk_map.len());
 
     let arctic_chunk_map: Option<HashMap<(String, u32), &Vec<f32>>> =
         arctic_chunk_embeddings.as_ref().map(|embs| {
-            embs.iter().map(|(fp, ci, vec)| ((fp.clone(), *ci), vec)).collect()
+            embs.iter()
+                .map(|(fp, ci, vec)| ((fp.clone(), *ci), vec))
+                .collect()
         });
 
     // Run benchmark
@@ -151,7 +161,11 @@ pub async fn run_benchmark(
             let results = search.direct_search(&bq.query, limit)?;
             let latency = start.elapsed().as_secs_f64() * 1000.0;
             conditions_results.push(build_condition_result(
-                "ese_direct", "ese", "direct", latency, &results,
+                "ese_direct",
+                "ese",
+                "direct",
+                latency,
+                &results,
             ));
         }
 
@@ -216,9 +230,8 @@ pub async fn run_benchmark(
                 (&arctic_service, &arctic_chunk_embeddings)
             {
                 let start = Instant::now();
-                let results = catalyze_search_with_backend(
-                    &db, arctic_svc, arctic_chunks, &bq.query, limit,
-                )?;
+                let results =
+                    catalyze_search_with_backend(&db, arctic_svc, arctic_chunks, &bq.query, limit)?;
                 let latency = start.elapsed().as_secs_f64() * 1000.0;
                 conditions_results.push(build_condition_result(
                     "arctic_catalysts",
@@ -371,7 +384,10 @@ fn compute_chunk_embeddings_with_backend(
         return Ok(Vec::new());
     }
 
-    let texts: Vec<&str> = chunks.iter().map(|(_, _, content)| content.as_str()).collect();
+    let texts: Vec<&str> = chunks
+        .iter()
+        .map(|(_, _, content)| content.as_str())
+        .collect();
     let embeddings = service.embed_documents(&texts)?;
 
     Ok(chunks
@@ -501,7 +517,10 @@ fn print_summary(results: &[QueryBenchmarkResult]) {
     }
 
     eprintln!("\n--- Benchmark Summary ---");
-    eprintln!("{:<20} {:>8} {:>8} {:>8}", "Condition", "P50 ms", "P95 ms", "Mean ms");
+    eprintln!(
+        "{:<20} {:>8} {:>8} {:>8}",
+        "Condition", "P50 ms", "P95 ms", "Mean ms"
+    );
     eprintln!("{}", "-".repeat(50));
 
     let mut conditions: Vec<_> = stats.keys().collect();
@@ -548,7 +567,10 @@ fn print_summary(results: &[QueryBenchmarkResult]) {
         let ese_mean = if ese_sims.is_empty() {
             "n/a".to_string()
         } else {
-            format!("{:.4}", ese_sims.iter().sum::<f64>() / ese_sims.len() as f64)
+            format!(
+                "{:.4}",
+                ese_sims.iter().sum::<f64>() / ese_sims.len() as f64
+            )
         };
         let arctic_mean = if arctic_sims.is_empty() {
             "n/a".to_string()
@@ -563,10 +585,8 @@ fn print_summary(results: &[QueryBenchmarkResult]) {
     }
 
     // Per-category relevance quality
-    let categories: std::collections::HashSet<String> = results
-        .iter()
-        .filter_map(|r| r.category.clone())
-        .collect();
+    let categories: std::collections::HashSet<String> =
+        results.iter().filter_map(|r| r.category.clone()).collect();
     if !categories.is_empty() {
         eprintln!("\n--- Per-Category Mean Query-Result Similarity ---");
         let mut cats: Vec<_> = categories.iter().collect();
@@ -605,7 +625,10 @@ fn print_summary(results: &[QueryBenchmarkResult]) {
                 let ese_mean = if ese_sims.is_empty() {
                     "n/a".to_string()
                 } else {
-                    format!("{:.4}", ese_sims.iter().sum::<f64>() / ese_sims.len() as f64)
+                    format!(
+                        "{:.4}",
+                        ese_sims.iter().sum::<f64>() / ese_sims.len() as f64
+                    )
                 };
                 let arctic_mean = if arctic_sims.is_empty() {
                     "n/a".to_string()
@@ -679,10 +702,8 @@ async fn load_arctic_backend(enzyme_home: &Path) -> Result<EmbeddingService> {
         eprintln!("Arctic Embed XS model not found. Downloading...");
         tokio::fs::create_dir_all(&models_dir).await?;
 
-        let model_url =
-            "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve/main/onnx/model_quantized.onnx";
-        let tokenizer_url =
-            "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve/main/tokenizer.json";
+        let model_url = "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve/main/onnx/model_quantized.onnx";
+        let tokenizer_url = "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve/main/tokenizer.json";
 
         let client = reqwest::Client::new();
 
@@ -702,9 +723,6 @@ async fn load_arctic_backend(enzyme_home: &Path) -> Result<EmbeddingService> {
     }
 
     let backend = RtenBackend::load(&model_path, &tokenizer_path)?;
-    eprintln!(
-        "Loaded Arctic Embed XS (dim={})",
-        backend.dimension()
-    );
+    eprintln!("Loaded Arctic Embed XS (dim={})", backend.dimension());
     Ok(EmbeddingService::new(Box::new(backend)))
 }

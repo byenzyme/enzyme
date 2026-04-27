@@ -155,7 +155,10 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
     };
 
     if let Some(metadata) = entry.metadata {
-        tracing::debug!(?metadata, "ingest metadata is accepted but not persisted yet");
+        tracing::debug!(
+            ?metadata,
+            "ingest metadata is accepted but not persisted yet"
+        );
     }
 
     Ok(ProcessedDocument {

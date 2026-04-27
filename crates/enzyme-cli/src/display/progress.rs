@@ -445,7 +445,11 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::EmbeddingStart => {
                 embedding_status.replace("Embedding...".to_string());
             }
-            DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
+            DisplayEvent::EmbeddingProgress {
+                done,
+                total,
+                current_date_ms,
+            } => {
                 let label = current_date_ms
                     .map(|ms| {
                         format!(
@@ -465,12 +469,8 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 encode_ms,
             } => {
                 embedding_status.take();
-                let summary = format_embedding_complete_summary(
-                    chunks,
-                    pruned,
-                    oldest_date_ms,
-                    encode_ms,
-                );
+                let summary =
+                    format_embedding_complete_summary(chunks, pruned, oldest_date_ms, encode_ms);
                 *embedding_done_line = Some(format!(
                     "  {}Embedded:{} {}",
                     crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
@@ -836,9 +836,18 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::EmbeddingStart => {
                     println!("Generating embeddings...");
                 }
-                DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
+                DisplayEvent::EmbeddingProgress {
+                    done,
+                    total,
+                    current_date_ms,
+                } => {
                     if let Some(ms) = current_date_ms {
-                        println!("  Embedding docs [{}/{}] [← {}]", done, total, format_epoch_ms_short(ms));
+                        println!(
+                            "  Embedding docs [{}/{}] [← {}]",
+                            done,
+                            total,
+                            format_epoch_ms_short(ms)
+                        );
                     } else {
                         println!("  Embedding docs [{}/{}]", done, total);
                     }
@@ -855,10 +864,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         oldest_date_ms,
                         encode_ms,
                     );
-                    println!(
-                        "  Embedded: {}",
-                        summary,
-                    );
+                    println!("  Embedded: {}", summary,);
                 }
                 DisplayEvent::EmbeddingSkipped(reason) => {
                     println!("  Embedding skipped: {}", reason);
@@ -908,7 +914,11 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
         match rx.recv() {
             Ok(event) => {
                 let obj = match event {
-                    DisplayEvent::ApiConfig { base_url, model, masked_key } => {
+                    DisplayEvent::ApiConfig {
+                        base_url,
+                        model,
+                        masked_key,
+                    } => {
                         json!({"stage": "api_config", "base_url": base_url, "model": model, "key": masked_key})
                     }
                     DisplayEvent::IndexingStart => {
@@ -917,7 +927,12 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::IndexingProgress(msg) => {
                         json!({"stage": "indexing", "status": "progress", "message": msg})
                     }
-                    DisplayEvent::IndexingComplete { files_discovered, files_new, files_updated, files_deleted } => {
+                    DisplayEvent::IndexingComplete {
+                        files_discovered,
+                        files_new,
+                        files_updated,
+                        files_deleted,
+                    } => {
                         json!({"stage": "indexing", "status": "complete", "files": files_discovered, "new": files_new, "updated": files_updated, "deleted": files_deleted})
                     }
                     DisplayEvent::SelectionComplete { count, .. } => {
@@ -926,28 +941,62 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::DiscoveryStart { total } => {
                         json!({"stage": "catalysts", "status": "start", "total": total})
                     }
-                    DisplayEvent::EntityStarted { entity_name, entity_type } => {
+                    DisplayEvent::EntityStarted {
+                        entity_name,
+                        entity_type,
+                    } => {
                         json!({"stage": "catalysts", "status": "entity_started", "entity": entity_name, "type": entity_type.as_str()})
                     }
-                    DisplayEvent::EntityDiscovered { entity_name, entity_type, catalyst_texts, topic_names, completed, total } => {
+                    DisplayEvent::EntityDiscovered {
+                        entity_name,
+                        entity_type,
+                        catalyst_texts,
+                        topic_names,
+                        completed,
+                        total,
+                    } => {
                         json!({"stage": "catalysts", "status": "entity_done", "entity": entity_name, "type": entity_type.as_str(), "catalysts": catalyst_texts, "topics": topic_names, "completed": completed, "total": total})
                     }
-                    DisplayEvent::EntitySkipped { entity_name, completed, total } => {
+                    DisplayEvent::EntitySkipped {
+                        entity_name,
+                        completed,
+                        total,
+                    } => {
                         json!({"stage": "catalysts", "status": "entity_skipped", "entity": entity_name, "completed": completed, "total": total})
                     }
-                    DisplayEvent::EntityFailed { entity_name, entity_type, error, completed, total } => {
+                    DisplayEvent::EntityFailed {
+                        entity_name,
+                        entity_type,
+                        error,
+                        completed,
+                        total,
+                    } => {
                         json!({"stage": "catalysts", "status": "entity_failed", "entity": entity_name, "type": entity_type.as_str(), "error": error, "completed": completed, "total": total})
                     }
-                    DisplayEvent::DiscoveryComplete { entities_processed, catalysts_generated, errors_count, rate_limited } => {
+                    DisplayEvent::DiscoveryComplete {
+                        entities_processed,
+                        catalysts_generated,
+                        errors_count,
+                        rate_limited,
+                    } => {
                         json!({"stage": "catalysts", "status": "complete", "entities": entities_processed, "catalysts": catalysts_generated, "errors": errors_count, "rate_limited": rate_limited})
                     }
                     DisplayEvent::EmbeddingStart => {
                         json!({"stage": "embedding", "status": "start"})
                     }
-                    DisplayEvent::EmbeddingProgress { done, total, current_date_ms } => {
+                    DisplayEvent::EmbeddingProgress {
+                        done,
+                        total,
+                        current_date_ms,
+                    } => {
                         json!({"stage": "embedding", "status": "progress", "documents_done": done, "documents_total": total, "current_date_ms": current_date_ms})
                     }
-                    DisplayEvent::EmbeddingComplete { chunks, pruned, oldest_date_ms, encode_ms } => {
+                    DisplayEvent::EmbeddingComplete {
+                        chunks,
+                        pruned,
+                        oldest_date_ms,
+                        encode_ms,
+                    } => {
                         json!({"stage": "embedding", "status": "complete", "chunks": chunks, "pruned": pruned, "oldest_date_ms": oldest_date_ms, "encode_ms": encode_ms})
                     }
                     DisplayEvent::EmbeddingSkipped(reason) => {
@@ -965,7 +1014,10 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::SimilarityProgress { done, total } => {
                         json!({"stage": "similarity", "status": "progress", "done": done, "total": total})
                     }
-                    DisplayEvent::SimilarityComplete { catalysts, documents } => {
+                    DisplayEvent::SimilarityComplete {
+                        catalysts,
+                        documents,
+                    } => {
                         json!({"stage": "similarity", "status": "complete", "catalysts": catalysts, "documents": documents})
                     }
                     DisplayEvent::Done { duration_ms } => {
@@ -1047,12 +1099,7 @@ mod tests {
 
     #[test]
     fn embedding_summary_uses_full_payload() {
-        let summary = format_embedding_complete_summary(
-            12_345,
-            3,
-            Some(0),
-            500,
-        );
+        let summary = format_embedding_complete_summary(12_345, 3, Some(0), 500);
 
         assert!(summary.contains("back to"));
         assert!(summary.contains("3 pruned"));
@@ -1064,7 +1111,14 @@ mod tests {
         let done = 4;
         let total = 9;
         let label = Some(0)
-            .map(|ms| format!("Embedding docs [{}/{}] [← {}]", done, total, format_epoch_ms_short(ms)))
+            .map(|ms| {
+                format!(
+                    "Embedding docs [{}/{}] [← {}]",
+                    done,
+                    total,
+                    format_epoch_ms_short(ms)
+                )
+            })
             .unwrap();
 
         assert!(label.contains("Embedding docs [4/9]"));
@@ -1072,8 +1126,14 @@ mod tests {
 
     #[test]
     fn embedding_done_prints_immediately_only_outside_discovery() {
-        assert!(should_print_embedding_done_immediately(&DisplayStage::Embedding));
-        assert!(should_print_embedding_done_immediately(&DisplayStage::Similarity));
-        assert!(!should_print_embedding_done_immediately(&DisplayStage::Discovery));
+        assert!(should_print_embedding_done_immediately(
+            &DisplayStage::Embedding
+        ));
+        assert!(should_print_embedding_done_immediately(
+            &DisplayStage::Similarity
+        ));
+        assert!(!should_print_embedding_done_immediately(
+            &DisplayStage::Discovery
+        ));
     }
 }

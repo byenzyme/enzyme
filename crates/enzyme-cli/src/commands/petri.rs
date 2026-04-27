@@ -680,12 +680,7 @@ mod tests {
         insert_entity(&db, "dan", EntityType::Link, 8, 20.0);
 
         let now = Utc::now().timestamp_millis();
-        for (target, count) in [
-            ("bob", 61),
-            ("alice", 53),
-            ("carol", 52),
-            ("dan", 8),
-        ] {
+        for (target, count) in [("bob", 61), ("alice", 53), ("carol", 52), ("dan", 8)] {
             for i in 0..count {
                 let source = format!("notes/{}-{i}.md", target.replace(' ', "-"));
                 db.execute_write(
@@ -731,9 +726,6 @@ mod tests {
             .filter_map(|child| child.as_str())
             .collect();
 
-        assert_eq!(
-            child_names,
-            vec!["[[bob]]", "[[alice]]", "[[carol]]"]
-        );
+        assert_eq!(child_names, vec!["[[bob]]", "[[alice]]", "[[carol]]"]);
     }
 }

@@ -271,7 +271,9 @@ impl EnzymeConfig {
             catalyst_format: global.defaults.catalyst_format.clone(),
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
             excluded_links: vault.map(|v| v.excluded_links.clone()).unwrap_or_default(),
-            excluded_folders: vault.map(|v| v.excluded_folders.clone()).unwrap_or_default(),
+            excluded_folders: vault
+                .map(|v| v.excluded_folders.clone())
+                .unwrap_or_default(),
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
             max_embedding_files: vault
                 .and_then(|v| v.max_embedding_files)
@@ -392,7 +394,10 @@ impl EnzymeConfig {
         vault_path: &Path,
         entity_refs: Vec<String>,
     ) -> Result<()> {
-        self.catalyzed_entities = entity_refs.into_iter().map(CatalyzedEntity::Simple).collect();
+        self.catalyzed_entities = entity_refs
+            .into_iter()
+            .map(CatalyzedEntity::Simple)
+            .collect();
         self.save(vault_path)
     }
 
@@ -433,8 +438,7 @@ impl EnzymeConfig {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let body =
-            toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
+        let body = toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
         let contents = format!("{CONFIG_HEADER}{body}");
         fs::write(&config_path, contents)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
@@ -592,7 +596,10 @@ excludedTags:
         fs::create_dir_all(&vault).unwrap();
 
         let config = EnzymeConfig {
-            catalyzed_entities: vec![CatalyzedEntity::Simple("#enzyme".to_string()), CatalyzedEntity::Simple("[[Test Note]]".to_string())],
+            catalyzed_entities: vec![
+                CatalyzedEntity::Simple("#enzyme".to_string()),
+                CatalyzedEntity::Simple("[[Test Note]]".to_string()),
+            ],
             trending: Some(SelectionConfig {
                 minimum_tags: 9,
                 minimum_links: 7,

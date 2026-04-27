@@ -6,8 +6,8 @@ use tracing::info;
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::llm::{LlmClient, DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY};
-use enzyme_core::pipeline::catalysts::{calculate_allocations, CatalystConfig, CatalystPipeline};
+use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
+use enzyme_core::pipeline::catalysts::{CatalystConfig, CatalystPipeline, calculate_allocations};
 use enzyme_core::pipeline::context::ContextBuilder;
 
 /// Dump catalyst prompts to JSONL for training data generation.
@@ -79,11 +79,7 @@ pub async fn run_dump_prompts(
 
     let count = cat_pipeline.dump_prompts(&entities, &cat_config, output)?;
 
-    eprintln!(
-        "Wrote {} entity prompts to {}",
-        count,
-        output.display()
-    );
+    eprintln!("Wrote {} entity prompts to {}", count, output.display());
 
     Ok(())
 }

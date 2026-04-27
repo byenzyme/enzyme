@@ -62,11 +62,8 @@ pub async fn run_catalyze(
     let processing_time = start.elapsed().as_secs_f64();
 
     // Enrich with register-appropriate presentation guidance
-    let response = response.with_presentation_guidance(
-        register,
-        &std::collections::HashMap::new(),
-        None,
-    );
+    let response =
+        response.with_presentation_guidance(register, &std::collections::HashMap::new(), None);
 
     // Merge response fields with metadata into a single JSON object
     let mut output = serde_json::to_value(&response)?;

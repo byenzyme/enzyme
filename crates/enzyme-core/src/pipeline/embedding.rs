@@ -86,6 +86,17 @@ impl<'a> EmbeddingPipeline<'a> {
         self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
     }
 
+    /// Run embedding only for documents indexed since `since_ms`, using the
+    /// same caller-specified cap semantics as `run_with_limit`.
+    pub fn run_since_with_limit(
+        &self,
+        since_ms: i64,
+        max_docs: Option<usize>,
+        on_progress: impl Fn(EmbeddingProgress),
+    ) -> Result<EmbeddingStats> {
+        self.run_inner(max_docs, Some(since_ms), on_progress)
+    }
+
     fn run_inner(
         &self,
         max_docs: Option<usize>,
@@ -148,10 +159,7 @@ impl<'a> EmbeddingPipeline<'a> {
         }
 
         // Build a vec of created_at dates aligned with non_empty_docs for progress.
-        let doc_dates: Vec<i64> = non_empty_docs
-            .iter()
-            .map(|&i| docs_needing[i].2)
-            .collect();
+        let doc_dates: Vec<i64> = non_empty_docs.iter().map(|&i| docs_needing[i].2).collect();
 
         // Step 4: Embed all chunks at once.
         let total_non_empty = non_empty_docs.len();

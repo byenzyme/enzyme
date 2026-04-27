@@ -2,11 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
-use crate::db::Database;
+use crate::db::{Database, EntityRefreshStats};
 
 /// Number of new document mentions for an entity before it's considered stale.
 const NEW_MENTIONS_THRESHOLD: usize = 3;
@@ -20,11 +21,22 @@ const CONFIG_HASH_KEY: &str = "catalyst_config_hash";
 /// Config DB key for the entity doc count snapshot (JSON).
 const ENTITY_DOC_COUNTS_KEY: &str = "catalyst_entity_doc_counts";
 
+/// Minimum meaningful movement in effective document date before refresh treats
+/// the entity's catalysts as stale. This avoids tiny timestamp noise while still
+/// catching backfilled daily notes, imported highlights, and fresh SDK entries.
+const EFFECTIVE_DATE_STALENESS_MS: i64 = 60 * 60 * 1000;
+
 /// An entity that has new content since last catalyst generation.
 #[derive(Debug, Clone)]
 pub struct StaleEntity {
     pub name: String,
     pub delta: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct EntityStalenessSnapshot {
+    doc_count: usize,
+    latest_effective_date: Option<i64>,
 }
 
 /// Why the catalysts are stale.
@@ -117,20 +129,34 @@ pub fn check_catalyst_staleness(db: &Database, vault_path: &Path) -> Result<Stal
     }
 
     // --- Check 2: New content (collect ALL stale entities) ---
-    let stored_counts = load_stored_doc_counts(db)?;
+    let stored_snapshots = load_stored_entity_snapshots(db)?;
+    let catalyzed_entities = db.get_catalyzed_entity_names()?;
     let mut stale_entities = Vec::new();
-    if !stored_counts.is_empty() {
-        for (entity_name, old_count) in &stored_counts {
-            let current_count = db.get_entity_doc_count(entity_name)?;
-            if current_count >= *old_count + NEW_MENTIONS_THRESHOLD {
-                let delta = current_count - old_count;
+    if !stored_snapshots.is_empty() {
+        for (entity_name, snapshot) in &stored_snapshots {
+            let current = db.get_entity_refresh_stats(entity_name)?;
+            let delta = current.doc_count.saturating_sub(snapshot.doc_count);
+            let count_stale = delta >= NEW_MENTIONS_THRESHOLD;
+            let effective_date_stale = is_newer(
+                current.latest_effective_date,
+                snapshot.latest_effective_date,
+                EFFECTIVE_DATE_STALENESS_MS,
+            );
+            let missing_catalysts = !catalyzed_entities.contains(entity_name);
+
+            if count_stale || effective_date_stale || missing_catalysts {
                 info!(
                     entity = entity_name.as_str(),
-                    old_count, current_count, "entity has new content — stale"
+                    old_count = snapshot.doc_count,
+                    current_count = current.doc_count,
+                    delta,
+                    effective_date_stale,
+                    missing_catalysts,
+                    "entity has stale catalyst evidence"
                 );
                 stale_entities.push(StaleEntity {
                     name: entity_name.clone(),
-                    delta,
+                    delta: delta.max(usize::from(effective_date_stale || missing_catalysts)),
                 });
             }
         }
@@ -160,10 +186,12 @@ pub fn store_staleness_bookkeeping(
     db.set_config(CONFIG_HASH_KEY, &hash)?;
 
     // Store entity doc counts
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<String, EntityStalenessSnapshot> = HashMap::new();
     for name in entity_names {
-        let count = db.get_entity_doc_count(name)?;
-        counts.insert(name.clone(), count);
+        counts.insert(
+            name.clone(),
+            snapshot_from_stats(db.get_entity_refresh_stats(name)?),
+        );
     }
     let json = serde_json::to_string(&counts)?;
     db.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
@@ -180,10 +208,12 @@ pub fn store_staleness_bookkeeping(
 /// specified entities, preserving counts for all others.
 pub fn store_staleness_bookkeeping_partial(db: &Database, entity_names: &[String]) -> Result<()> {
     // Load existing counts and merge in the refreshed entities
-    let mut counts = load_stored_doc_counts(db)?;
+    let mut counts = load_stored_entity_snapshots(db)?;
     for name in entity_names {
-        let count = db.get_entity_doc_count(name)?;
-        counts.insert(name.clone(), count);
+        counts.insert(
+            name.clone(),
+            snapshot_from_stats(db.get_entity_refresh_stats(name)?),
+        );
     }
     let json = serde_json::to_string(&counts)?;
     db.set_config(ENTITY_DOC_COUNTS_KEY, &json)?;
@@ -224,24 +254,60 @@ fn compute_config_hash(vault_path: &Path) -> Result<String> {
 
 /// Load entity names from the last staleness snapshot.
 pub fn load_stored_entity_names(db: &Database) -> Result<HashSet<String>> {
-    let counts = load_stored_doc_counts(db)?;
+    let counts = load_stored_entity_snapshots(db)?;
     Ok(counts.into_keys().collect())
 }
 
-/// Load stored entity doc counts from the config table.
-fn load_stored_doc_counts(db: &Database) -> Result<HashMap<String, usize>> {
+/// Load stored entity snapshots from the config table.
+///
+/// Older databases stored this key as `{ "entity": count }`; keep accepting that
+/// shape so existing vaults get upgraded naturally on the next successful
+/// catalyst generation.
+fn load_stored_entity_snapshots(db: &Database) -> Result<HashMap<String, EntityStalenessSnapshot>> {
     match db.get_config(ENTITY_DOC_COUNTS_KEY)? {
         Some(json) => {
-            let counts: HashMap<String, usize> = serde_json::from_str(&json)?;
-            Ok(counts)
+            let raw: serde_json::Value = serde_json::from_str(&json)?;
+            let mut snapshots = HashMap::new();
+            if let Some(map) = raw.as_object() {
+                for (name, value) in map {
+                    let snapshot = if let Some(count) = value.as_u64() {
+                        EntityStalenessSnapshot {
+                            doc_count: count as usize,
+                            ..Default::default()
+                        }
+                    } else {
+                        serde_json::from_value(value.clone())?
+                    };
+                    snapshots.insert(name.clone(), snapshot);
+                }
+            }
+            Ok(snapshots)
         }
         None => Ok(HashMap::new()),
+    }
+}
+
+fn snapshot_from_stats(stats: EntityRefreshStats) -> EntityStalenessSnapshot {
+    EntityStalenessSnapshot {
+        doc_count: stats.doc_count,
+        latest_effective_date: stats.latest_effective_date,
+    }
+}
+
+fn is_newer(current: Option<i64>, stored: Option<i64>, tolerance_ms: i64) -> bool {
+    match (current, stored) {
+        (Some(current), Some(stored)) => current > stored.saturating_add(tolerance_ms),
+        (Some(_), None) => false,
+        _ => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Catalyst;
+    use chrono::Utc;
+    use libsql::Value;
 
     #[test]
     fn test_config_hash_deterministic() {
@@ -264,5 +330,46 @@ mod tests {
             result,
             StalenessResult::Stale(StaleReason::NoCatalysts)
         ));
+    }
+
+    #[test]
+    fn test_staleness_respects_new_doc_threshold() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        db.execute_write(
+            "INSERT INTO entities (id, name, type, frequency, first_seen, last_seen)
+             VALUES (1, 'alpha', 'tag', 1, 1000, 1000)",
+            vec![],
+        )
+        .unwrap();
+        db.execute_write(
+            "INSERT INTO entity_occurrences
+             (entity_id, file_path, context, created_at, effective_date, date_source)
+             VALUES (1, 'note.md', 'old', 1000, 1000, 'filesystem')",
+            vec![],
+        )
+        .unwrap();
+        db.insert_catalysts(&[Catalyst {
+            id: "cat-alpha".to_string(),
+            text: "alpha catalyst".to_string(),
+            entity: "alpha".to_string(),
+            context: "default".to_string(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        store_staleness_bookkeeping(&db, dir.path(), &["alpha".to_string()]).unwrap();
+
+        db.execute_write(
+            "INSERT INTO entity_occurrences
+             (entity_id, file_path, context, created_at, effective_date, date_source)
+             VALUES (1, 'second.md', 'new doc', ?1, 1000, 'filesystem')",
+            vec![Value::Integer(2000)],
+        )
+        .unwrap();
+
+        let result = check_catalyst_staleness(&db, dir.path()).unwrap();
+        assert!(matches!(result, StalenessResult::Fresh));
     }
 }

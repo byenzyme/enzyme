@@ -75,19 +75,10 @@ ENZYME_CATALYZE = {
 
 ENZYME_REFRESH = {
     "name": "enzyme_refresh",
-    "description": (
-        "Re-index vault content. Fast: skips if nothing changed. "
-        "Use --full to force complete re-index if results seem off."
-    ),
+    "description": "Incrementally refresh vault content and catalyst-derived similarities.",
     "parameters": {
         "type": "object",
-        "properties": {
-            "full": {
-                "type": "boolean",
-                "description": "Force full re-index. Default: false.",
-                "default": False,
-            },
-        },
+        "properties": {},
         "required": [],
     },
 }

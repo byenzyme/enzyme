@@ -34,14 +34,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize or refresh the vault index
+    /// Reset and rebuild the vault index
     Init {
-        /// Force full re-index
-        #[arg(long)]
-        full: bool,
-
-        /// Run in background
-        #[arg(long)]
+        /// Internal background worker mode
+        #[arg(long, hide = true)]
         detached: bool,
 
         /// Vault guide content (or pass via stdin)
@@ -66,12 +62,10 @@ enum Commands {
         stage: Option<String>,
     },
 
-    /// Refresh the vault index (alias for init)
+    /// Incrementally refresh the vault index
     Refresh {
-        #[arg(long)]
-        full: bool,
-
-        #[arg(long)]
+        /// Internal background worker mode
+        #[arg(long, hide = true)]
         detached: bool,
 
         /// Vault guide content (or pass via stdin)
@@ -137,6 +131,19 @@ enum Commands {
     /// Show vault status and configuration
     Status,
 
+    /// Sign in to enzyme.garden
+    Login,
+
+    /// Sign out of enzyme.garden
+    Logout,
+
+    /// Publish vault index to enzyme.garden for hosted access
+    Publish {
+        /// Emit publish result as JSON on stdout
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
@@ -196,7 +203,6 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
     },
-
 }
 
 fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
@@ -270,9 +276,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // These commands don't need a vault path — log to stderr.
-    if matches!(cli.command, Commands::Mcp) {
-        init_tracing(cli.verbose, None);
-        return commands::mcp::run_mcp(cli.vault).await;
+    match &cli.command {
+        Commands::Mcp => {
+            init_tracing(cli.verbose, None);
+            return commands::mcp::run_mcp(cli.vault).await;
+        }
+        Commands::Login => {
+            init_tracing(cli.verbose, None);
+            return commands::login::run_login().await;
+        }
+        Commands::Logout => {
+            init_tracing(cli.verbose, None);
+            return commands::login::run_logout().await;
+        }
+        _ => {}
     }
 
     let vault_path = if let Some(ref collection_id) = cli.collection {
@@ -295,7 +312,6 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init {
-            full,
             detached,
             guide,
             quiet,
@@ -304,12 +320,11 @@ async fn main() -> Result<()> {
             stage,
         } => {
             if stage.as_deref() == Some("index") {
-                commands::init::run_init_index_only(&vault_path, full, quiet).await?;
+                commands::init::run_init_index_only(&vault_path, quiet).await?;
             } else {
                 let vault_guide = resolve_vault_guide(guide);
                 let init_result = commands::init::run_init(
                     &vault_path,
-                    full,
                     detached,
                     quiet,
                     json_progress,
@@ -327,7 +342,6 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Refresh {
-            full,
             detached,
             guide,
             quiet,
@@ -336,7 +350,6 @@ async fn main() -> Result<()> {
             let vault_guide = resolve_vault_guide(guide);
             commands::init::run_refresh(
                 &vault_path,
-                full,
                 detached,
                 quiet,
                 vault_guide.as_deref(),
@@ -416,6 +429,10 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Publish { json } => {
+            commands::publish::run_publish(&vault_path, json).await?;
+        }
+        Commands::Login | Commands::Logout => unreachable!(),
         Commands::Mcp => unreachable!(),
     }
 

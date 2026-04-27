@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 const DEFAULT_API_BASE: &str = "https://api.enzyme.garden";
 
@@ -33,6 +33,9 @@ pub async fn deduct_credits(api_key: &str, amount: f64, reason: &str) -> Result<
         bail!("Credits API error: {}", body);
     }
 
-    let body: serde_json::Value = resp.json().await.context("failed to parse credits response")?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse credits response")?;
     Ok(body["credits"].as_f64().unwrap_or(0.0))
 }

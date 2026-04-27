@@ -72,10 +72,10 @@ enzyme init --guide "vault guide content"
 
 ### `enzyme refresh` — Update the index
 
-Runs automatically before each prompt via hook — manual use is rarely needed. Use `--full` to force a complete re-index if results seem off.
+Runs automatically before each prompt via hook — manual use is rarely needed.
 
 ```bash
-enzyme refresh --full                 # Force full re-index
+enzyme refresh                        # Incrementally update the index
 ```
 
 ### `--quiet` mode (agent/headless use)
@@ -209,4 +209,3 @@ If the output is large and gets persisted to a file (you'll see a `persisted-out
 enzyme petri -n 10          # -n sets number of top entities (default: 10)
 enzyme catalyze "query" -n 20  # -n sets number of results (default: 10)
 ```
-

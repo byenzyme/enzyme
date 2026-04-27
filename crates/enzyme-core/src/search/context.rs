@@ -269,7 +269,9 @@ impl<'a> ContextSearch<'a> {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let modified_at_map = sim_repo.get_modified_at_batch(&unique_paths).unwrap_or_default();
+        let modified_at_map = sim_repo
+            .get_modified_at_batch(&unique_paths)
+            .unwrap_or_default();
         let now = chrono::Utc::now().timestamp_millis();
 
         for (key, cs) in &chunk_scores {

@@ -823,8 +823,8 @@ mod tests {
             make_entity("enzyme/gtm", EntityType::Tag, 70),
             make_entity("storytelling", EntityType::Tag, 100),
             make_entity("storytelling", EntityType::Link, 80), // should be deduped
-            make_entity("alice jones", EntityType::Link, 50),   // should fold into people/
-            make_entity("bob chen", EntityType::Link, 40),           // should fold into people/
+            make_entity("alice jones", EntityType::Link, 50),  // should fold into people/
+            make_entity("bob chen", EntityType::Link, 40),     // should fold into people/
             make_entity("inbox", EntityType::Folder, 500),
         ];
 

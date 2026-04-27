@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use rten::Model;
-use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
+use rten_tensor::prelude::*;
 use tokenizers::Tokenizer;
 use tracing::debug;
 
@@ -205,11 +205,7 @@ impl EmbeddingBackend for RtenBackend {
         let hs_data = hs.into_data();
 
         Ok(Self::pool_and_normalize(
-            &hs_data,
-            &mask_f32,
-            batch_size,
-            seq_len,
-            hidden_dim,
+            &hs_data, &mask_f32, batch_size, seq_len, hidden_dim,
         ))
     }
 

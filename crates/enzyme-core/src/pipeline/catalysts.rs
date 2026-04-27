@@ -629,9 +629,7 @@ impl<'a> CatalystPipeline<'a> {
             let names: Vec<&str> = name_positions.iter().map(|(_, n)| *n).collect();
             match service.embed_documents(&names) {
                 Ok(vectors) => {
-                    for ((idx, _), vector) in
-                        name_positions.into_iter().zip(vectors.into_iter())
-                    {
+                    for ((idx, _), vector) in name_positions.into_iter().zip(vectors.into_iter()) {
                         entity_vectors[idx] = Some(vector);
                     }
                 }

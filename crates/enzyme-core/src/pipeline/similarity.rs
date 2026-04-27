@@ -52,6 +52,13 @@ impl<'a> SimilarityPipeline<'a> {
             });
         }
 
+        let catalyst_ids: Vec<String> = catalysts.iter().map(|c| c.id.clone()).collect();
+        self.db
+            .delete_catalyst_similarities_for_catalysts(&catalyst_ids)?;
+        if cache_catalyst_embeddings {
+            self.db.prune_catalyst_similarities_except(&catalyst_ids)?;
+        }
+
         // Embed all catalyst texts
         let catalyst_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
         let catalyst_vecs = self.service.embed_documents(&catalyst_texts)?;

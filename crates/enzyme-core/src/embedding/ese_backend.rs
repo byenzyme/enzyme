@@ -46,7 +46,9 @@ mod tests {
     #[test]
     fn identical_texts_produce_identical_vectors() {
         let backend = EseBackend::new();
-        let vecs = backend.embed_batch(&["hello world", "hello world"]).unwrap();
+        let vecs = backend
+            .embed_batch(&["hello world", "hello world"])
+            .unwrap();
         let sim = Embedding::cosine_similarity(&vecs[0], &vecs[1]);
         assert!((sim - 1.0).abs() < 1e-5);
     }
@@ -58,7 +60,10 @@ mod tests {
             .embed_batch(&["quantum physics", "chocolate cake recipe"])
             .unwrap();
         let sim = Embedding::cosine_similarity(&vecs[0], &vecs[1]);
-        assert!(sim < 0.9, "unrelated texts should have low similarity, got {sim}");
+        assert!(
+            sim < 0.9,
+            "unrelated texts should have low similarity, got {sim}"
+        );
     }
 
     #[test]

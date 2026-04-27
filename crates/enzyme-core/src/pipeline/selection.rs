@@ -94,10 +94,7 @@ impl<'a> SelectionPipeline<'a> {
             }
         }
 
-        let materialized = selection_steps::build_curated_selection(
-            self.db,
-            found,
-        )?;
+        let materialized = selection_steps::build_curated_selection(self.db, found)?;
 
         info!(
             count = materialized.final_entities.len(),
@@ -240,22 +237,29 @@ mod tests {
 
         // Write TOML with only 2 entities
         let mut config = EnzymeConfig::default();
-        config.set_auto_selected_entities(
-            vault.path(),
-            vec!["#enzyme".to_string(), "#ethics".to_string()],
-        ).unwrap();
+        config
+            .set_auto_selected_entities(
+                vault.path(),
+                vec!["#enzyme".to_string(), "#ethics".to_string()],
+            )
+            .unwrap();
 
         // Verify TOML was written and loads back
         let loaded = EnzymeConfig::load(vault.path()).unwrap();
         assert!(loaded.is_some(), "config should load from TOML");
-        assert!(loaded.as_ref().unwrap().has_curated_entities(),
-            "config should have curated entities");
+        assert!(
+            loaded.as_ref().unwrap().has_curated_entities(),
+            "config should have curated entities"
+        );
 
         let pipeline = SelectionPipeline::new(&db, vault.path());
         let result = pipeline.run().unwrap();
 
-        assert!(matches!(result.source, SelectionSource::Config),
-            "expected Config source, got {:?}", result.source);
+        assert!(
+            matches!(result.source, SelectionSource::Config),
+            "expected Config source, got {:?}",
+            result.source
+        );
         assert_eq!(result.entities.len(), 2);
         let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"enzyme"));
@@ -281,10 +285,9 @@ mod tests {
 
         // Write TOML with just the folder — no children listed
         let mut config = EnzymeConfig::default();
-        config.set_auto_selected_entities(
-            vault.path(),
-            vec!["folder:people".to_string()],
-        ).unwrap();
+        config
+            .set_auto_selected_entities(vault.path(), vec!["folder:people".to_string()])
+            .unwrap();
 
         let pipeline = SelectionPipeline::new(&db, vault.path());
         let result = pipeline.run().unwrap();
@@ -294,8 +297,11 @@ mod tests {
         assert!(result.entities.len() > 1);
         let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"people"));
-        assert!(names.contains(&"alice") || names.contains(&"bob"),
-            "expected at least one child to be expanded, got: {:?}", names);
+        assert!(
+            names.contains(&"alice") || names.contains(&"bob"),
+            "expected at least one child to be expanded, got: {:?}",
+            names
+        );
         // Expandable folders map should contain people
         assert!(result.expandable_folders.contains_key("people"));
 
@@ -380,10 +386,12 @@ mod tests {
         insert_entity(&db, "enzyme", EntityType::Tag, 100);
 
         let mut config = EnzymeConfig::default();
-        config.set_auto_selected_entities(
-            vault.path(),
-            vec!["#enzyme".to_string(), "#ethics".to_string()],
-        ).unwrap();
+        config
+            .set_auto_selected_entities(
+                vault.path(),
+                vec!["#enzyme".to_string(), "#ethics".to_string()],
+            )
+            .unwrap();
 
         let pipeline = SelectionPipeline::new(&db, vault.path());
         let result = pipeline.run().unwrap();
@@ -409,10 +417,12 @@ mod tests {
 
         // User wrote TOML with specific entities
         let mut config = EnzymeConfig::default();
-        config.set_auto_selected_entities(
-            vault.path(),
-            vec!["#enzyme".to_string(), "#ethics".to_string()],
-        ).unwrap();
+        config
+            .set_auto_selected_entities(
+                vault.path(),
+                vec!["#enzyme".to_string(), "#ethics".to_string()],
+            )
+            .unwrap();
 
         // Selection uses the config path
         let pipeline = SelectionPipeline::new(&db, vault.path());
@@ -420,9 +430,15 @@ mod tests {
         assert!(matches!(result.source, SelectionSource::Config));
 
         // Simulate what init does: write back the selected entities
-        let entity_refs: Vec<String> = result.entities.iter().map(|e| format!("#{}", e.name)).collect();
+        let entity_refs: Vec<String> = result
+            .entities
+            .iter()
+            .map(|e| format!("#{}", e.name))
+            .collect();
         let mut config2 = EnzymeConfig::load(vault.path()).unwrap().unwrap();
-        config2.set_auto_selected_entities(vault.path(), entity_refs).unwrap();
+        config2
+            .set_auto_selected_entities(vault.path(), entity_refs)
+            .unwrap();
 
         // Reload — should still be the same two, not shortlist's three
         let reloaded = EnzymeConfig::load(vault.path()).unwrap().unwrap();

@@ -61,8 +61,6 @@ def handle_catalyze(args: dict, **kwargs) -> str:
 
 def handle_refresh(args: dict, **kwargs) -> str:
     cmd = ["refresh", "--quiet"]
-    if args.get("full", False):
-        cmd.append("--full")
     return _run_enzyme(cmd, timeout=120)
 
 

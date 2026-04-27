@@ -50,6 +50,13 @@ pub struct FileChunk {
     pub content: String,
 }
 
+/// Per-entity evidence used by catalyst refresh staleness checks.
+#[derive(Debug, Clone)]
+pub struct EntityRefreshStats {
+    pub doc_count: usize,
+    pub latest_effective_date: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -326,7 +333,11 @@ impl Database {
         }
 
         let docs = self.query_read(&sql, params, |row| {
-            Ok((row.get::<i64>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?))
+            Ok((
+                row.get::<i64>(0)?,
+                row.get::<String>(1)?,
+                row.get::<i64>(2)?,
+            ))
         })?;
 
         let mut results = Vec::with_capacity(docs.len());
@@ -1237,6 +1248,28 @@ impl Database {
         Ok(rows.into_iter().next().unwrap_or(0) as usize)
     }
 
+    /// Summarize the current document evidence for one entity.
+    pub fn get_entity_refresh_stats(&self, entity_name: &str) -> Result<EntityRefreshStats> {
+        let rows = self.query_read(
+            "SELECT COUNT(DISTINCT eo.file_path),
+                    MAX(COALESCE(eo.effective_date, eo.created_at))
+             FROM entity_occurrences eo
+             JOIN entities e ON e.id = eo.entity_id
+             WHERE e.name = ?1",
+            vec![Value::Text(entity_name.to_string())],
+            |row| {
+                Ok(EntityRefreshStats {
+                    doc_count: row.get::<i64>(0)? as usize,
+                    latest_effective_date: row.get::<Option<i64>>(1)?,
+                })
+            },
+        )?;
+        Ok(rows.into_iter().next().unwrap_or(EntityRefreshStats {
+            doc_count: 0,
+            latest_effective_date: None,
+        }))
+    }
+
     /// Delete all catalysts for a given entity name.
     pub fn delete_catalysts_for_entity(&self, entity: &str) -> Result<()> {
         self.execute_write(
@@ -1286,6 +1319,42 @@ impl Database {
                 .context("failed to commit upsert_catalyst_similarities")?;
             Ok(())
         })
+    }
+
+    /// Delete similarity rows for specific catalysts before recomputing them.
+    pub fn delete_catalyst_similarities_for_catalysts(
+        &self,
+        catalyst_ids: &[String],
+    ) -> Result<()> {
+        if catalyst_ids.is_empty() {
+            return Ok(());
+        }
+
+        let placeholders: Vec<String> = (1..=catalyst_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "DELETE FROM catalyst_similarities WHERE catalyst_id IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<Value> = catalyst_ids.iter().cloned().map(Value::Text).collect();
+        self.execute_write(&sql, params)?;
+        Ok(())
+    }
+
+    /// Delete similarity rows for catalyst IDs that are no longer active.
+    pub fn prune_catalyst_similarities_except(&self, catalyst_ids: &[String]) -> Result<()> {
+        if catalyst_ids.is_empty() {
+            self.execute_write("DELETE FROM catalyst_similarities", vec![])?;
+            return Ok(());
+        }
+
+        let placeholders: Vec<String> = (1..=catalyst_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "DELETE FROM catalyst_similarities WHERE catalyst_id NOT IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<Value> = catalyst_ids.iter().cloned().map(Value::Text).collect();
+        self.execute_write(&sql, params)?;
+        Ok(())
     }
 
     /// Get the top similarities for a given catalyst, ordered by similarity descending.
@@ -1361,9 +1430,7 @@ impl Database {
             return Ok(std::collections::HashMap::new());
         }
 
-        let placeholders: Vec<String> = (1..=file_paths.len())
-            .map(|i| format!("?{}", i))
-            .collect();
+        let placeholders: Vec<String> = (1..=file_paths.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
             "SELECT source_ref, modified_at FROM docs WHERE source_ref IN ({})",
             placeholders.join(", ")

@@ -377,7 +377,11 @@ impl LlmClient {
     /// True for localhost URLs, or when `ENZYME_LOCAL_MODEL=1` is set
     /// (e.g. a fine-tuned model hosted remotely that uses the compact prompt format).
     pub fn is_local(&self) -> bool {
-        if std::env::var("ENZYME_LOCAL_MODEL").ok().filter(|v| v == "1" || v == "true").is_some() {
+        if std::env::var("ENZYME_LOCAL_MODEL")
+            .ok()
+            .filter(|v| v == "1" || v == "true")
+            .is_some()
+        {
             return true;
         }
         let url = self.base_url.to_lowercase();
@@ -513,13 +517,17 @@ impl LlmClient {
         );
 
         let api_key = self.current_api_key();
-        match self.send_chat_completion(&url, &api_key, &request_body).await {
+        match self
+            .send_chat_completion(&url, &api_key, &request_body)
+            .await
+        {
             Ok(content) => Ok(content),
             Err(e) if self.free_tier && e.to_string().contains("401") => {
                 // Key likely rotated — refresh and retry once
                 if self.try_refresh_key().await {
                     let new_key = self.current_api_key();
-                    self.send_chat_completion(&url, &new_key, &request_body).await
+                    self.send_chat_completion(&url, &new_key, &request_body)
+                        .await
                 } else {
                     Err(e)
                 }

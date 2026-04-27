@@ -210,7 +210,7 @@ memorySearch: {
 - [ ] Run `enzyme refresh --quiet` to catch vault changes
 ```
 
-**Schedule a daily full re-index** for vaults with external content sources (Readwise syncs, channel captures):
+**Schedule a daily refresh** for vaults with external content sources (Readwise syncs, channel captures):
 
 ```json5
 cron: {
@@ -218,7 +218,7 @@ cron: {
 }
 ```
 
-Then tell your agent: *"Create a daily cron job that runs `enzyme refresh --full` at 9 AM."*
+Then tell your agent: *"Create a daily cron job that runs `enzyme refresh --quiet` at 9 AM."*
 
 **Set your API key** for catalyst generation (optional — enzyme works without it, but catalysts won't regenerate):
 
