@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
-use enzyme_core::config::auth::AuthToken;
+use enzyme_core::config::auth::require_login;
 use enzyme_core::config::paths::EnzymePaths;
 
 const DEFAULT_API_BASE: &str = "https://api.enzyme.garden";
@@ -12,7 +12,7 @@ fn api_base_url() -> String {
     std::env::var("ENZYME_API_URL").unwrap_or_else(|_| DEFAULT_API_BASE.to_string())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[allow(dead_code)]
 struct PublishResponse {
     slug: String,
@@ -22,17 +22,11 @@ struct PublishResponse {
     catalyst_count: usize,
 }
 
-pub async fn run_publish(vault_path: &Path) -> Result<()> {
+pub async fn run_publish(vault_path: &Path, json: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     // Check auth
-    let auth_path = paths.auth_token();
-    let auth_token = match AuthToken::load(&auth_path) {
-        Ok(token) => token,
-        Err(_) => {
-            bail!("Not logged in. Run `enzyme login` first.");
-        }
-    };
+    let auth_token = require_login(&paths.auth_token())?;
 
     // Check vault DB exists
     if !paths.vault_db.exists() {
@@ -88,10 +82,7 @@ pub async fn run_publish(vault_path: &Path) -> Result<()> {
     let publish_url = format!("{}/v1/publish", api_base_url());
     let resp = client
         .post(&publish_url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", auth_token.api_key),
-        )
+        .header("Authorization", format!("Bearer {}", auth_token.api_key))
         .multipart(form)
         .send()
         .await
@@ -108,25 +99,23 @@ pub async fn run_publish(vault_path: &Path) -> Result<()> {
         .await
         .context("failed to parse publish response")?;
 
-    eprintln!();
-    eprintln!(
-        "  {}Published!{} Your vault is live at:",
-        SetForegroundColor(Color::Green),
-        ResetColor,
-    );
-    eprintln!(
-        "    MCP:    {}{}{}",
-        SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
-        publish_resp.mcp_url,
-        ResetColor,
-    );
-    eprintln!(
-        "    Search: {}{}{}",
-        SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
-        publish_resp.search_url,
-        ResetColor,
-    );
-    eprintln!();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&publish_resp)?);
+    } else {
+        eprintln!();
+        eprintln!(
+            "  {}Published!{} Your vault is live at:",
+            SetForegroundColor(Color::Green),
+            ResetColor,
+        );
+        eprintln!(
+            "    MCP:    {}{}{}",
+            SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
+            publish_resp.mcp_url,
+            ResetColor,
+        );
+        eprintln!();
+    }
 
     Ok(())
 }

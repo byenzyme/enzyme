@@ -9,6 +9,7 @@ use tracing::{debug, info};
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
+use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
 use enzyme_core::pipeline::catalysts::{
@@ -27,6 +28,7 @@ use enzyme_core::pipeline::staleness::{
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
 use crate::display::{DisplayEvent, InitDisplay};
+use enzyme_core::config::auth::require_login;
 
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
     if paths.vault_db.exists() {
@@ -35,6 +37,20 @@ fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
         debug!(path = %paths.vault_db.display(), "reset vault database for init");
     }
     Ok(())
+}
+
+fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Result<bool> {
+    if !paths.vault_db.exists() {
+        return Ok(false);
+    }
+
+    let discovered_files = FileDiscovery::new(vault_path.to_path_buf()).discover()?;
+    if !discovered_files.is_empty() {
+        return Ok(false);
+    }
+
+    let db = Database::open(&paths.vault_db)?;
+    Ok(db.get_document_count().unwrap_or(0) > 0)
 }
 
 struct LocalRefreshResult {
@@ -96,13 +112,16 @@ impl InitResult {
 /// Desktop app uses quiet mode (JSON output) to populate its guide text box.
 pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
+    require_login(&paths.auth_token())?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
-    reset_vault_database(&paths)?;
+    if !should_preserve_db_only_corpus(&paths, vault_path)? {
+        reset_vault_database(&paths)?;
+    }
     let db = Database::open(&paths.vault_db)?;
 
     // Run indexing
@@ -138,12 +157,16 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
+    require_login(&paths.auth_token())?;
+
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
-    reset_vault_database(&paths)?;
+    if !should_preserve_db_only_corpus(&paths, vault_path)? {
+        reset_vault_database(&paths)?;
+    }
 
     // Open database
     let db = Database::open(&paths.vault_db)?;
@@ -159,24 +182,25 @@ pub async fn run_init(
 
     // Deduct 2 credits if using free-tier LLM (BYOK users pay their own inference)
     let is_free_tier = api_config.as_ref().map_or(false, |(cfg, _)| {
-        matches!(cfg.provider, enzyme_core::llm::ConfigProvider::ServerFallback)
+        matches!(
+            cfg.provider,
+            enzyme_core::llm::ConfigProvider::ServerFallback
+        )
     });
     if is_free_tier {
         let auth_path = paths.auth_token();
         if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
             {
-                match enzyme_core::config::credits::deduct_credits(
-                    &token.api_key,
-                    2.0,
-                    "init",
-                )
-                .await
+                match enzyme_core::config::credits::deduct_credits(&token.api_key, 2.0, "init")
+                    .await
                 {
                     Ok(remaining) => {
                         if remaining <= 2.0 && !quiet {
                             eprintln!(
                                 "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
-                                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                                crossterm::style::SetForegroundColor(
+                                    crossterm::style::Color::Yellow
+                                ),
                                 remaining,
                                 crossterm::style::ResetColor,
                             );
@@ -592,9 +616,7 @@ pub async fn run_init(
             crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
             crossterm::style::ResetColor,
         );
-        eprintln!(
-            "    enzyme login && enzyme publish",
-        );
+        eprintln!("    enzyme publish",);
         eprintln!();
     }
 
@@ -646,6 +668,9 @@ pub async fn run_refresh(
     vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<()> {
+    let paths = EnzymePaths::new(vault_path)?;
+    require_login(&paths.auth_token())?;
+
     if detached {
         return run_refresh_detached(vault_path).await;
     }
@@ -758,17 +783,18 @@ fn refresh_changed_doc_embeddings(
     max_embed: Option<usize>,
     has_index_changes: bool,
 ) -> bool {
-    if !has_index_changes {
-        return false;
-    }
-
     let Some(service) = service else {
         debug!("fast refresh: embedding unavailable");
         return false;
     };
 
     let pipeline = EmbeddingPipeline::new(db, service);
-    match pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {}) {
+    let result = if has_index_changes {
+        pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {})
+    } else {
+        pipeline.run_with_limit(max_embed, |_| {})
+    };
+    match result {
         Ok(stats) => {
             let changed = stats.documents_embedded > 0 || stats.documents_pruned > 0;
             debug!(
@@ -895,18 +921,23 @@ async fn run_stale_catalyst_refresh(
     let (api_config, llm) = resolve_llm_client().await?;
 
     // Deduct 0.5 credits for non-noop refresh (free-tier only)
-    if matches!(api_config.provider, enzyme_core::llm::ConfigProvider::ServerFallback) {
+    if matches!(
+        api_config.provider,
+        enzyme_core::llm::ConfigProvider::ServerFallback
+    ) {
         if let Ok(auth_home) = EnzymePaths::enzyme_home() {
             let auth_path = auth_home.join("auth.json");
             if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-                if let Ok(remaining) = enzyme_core::config::credits::deduct_credits(
-                    &token.api_key, 0.5, "refresh",
-                ).await {
+                if let Ok(remaining) =
+                    enzyme_core::config::credits::deduct_credits(&token.api_key, 0.5, "refresh")
+                        .await
+                {
                     if remaining <= 2.0 {
                         eprintln!(
                             "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
                             crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                            remaining, crossterm::style::ResetColor,
+                            remaining,
+                            crossterm::style::ResetColor,
                         );
                     }
                 }

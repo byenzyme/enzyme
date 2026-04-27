@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use enzyme_core::config::auth::AuthToken;
 use enzyme_core::config::paths::EnzymePaths;
@@ -15,7 +15,6 @@ fn api_base_url() -> String {
 #[derive(serde::Deserialize)]
 struct DeviceCodeResponse {
     device_code: String,
-    user_code: String,
     verification_uri: String,
     #[serde(default = "default_interval")]
     interval: u64,
@@ -74,8 +73,10 @@ pub async fn run_login() -> Result<()> {
         bail!("device code request failed ({}): {}", status, body);
     }
 
-    let device_resp: DeviceCodeResponse =
-        resp.json().await.context("failed to parse device code response")?;
+    let device_resp: DeviceCodeResponse = resp
+        .json()
+        .await
+        .context("failed to parse device code response")?;
 
     // Step 2: Show instructions and open browser
     eprintln!(
@@ -88,12 +89,6 @@ pub async fn run_login() -> Result<()> {
         "  Visit: {}{}{}",
         SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
         device_resp.verification_uri,
-        ResetColor,
-    );
-    eprintln!(
-        "  Code:  {}{}{}",
-        SetForegroundColor(Color::White),
-        device_resp.user_code,
         ResetColor,
     );
     eprintln!();
@@ -114,11 +109,7 @@ pub async fn run_login() -> Result<()> {
 
     loop {
         if start.elapsed() > timeout {
-            eprintln!(
-                " {}timed out{}",
-                SetForegroundColor(Color::Red),
-                ResetColor,
-            );
+            eprintln!(" {}timed out{}", SetForegroundColor(Color::Red), ResetColor,);
             bail!("Device code expired. Run `enzyme login` again.");
         }
 
@@ -150,11 +141,7 @@ pub async fn run_login() -> Result<()> {
             };
             auth_token.save(&auth_path)?;
 
-            eprintln!(
-                " {}done{}",
-                SetForegroundColor(Color::Green),
-                ResetColor,
-            );
+            eprintln!(" {}done{}", SetForegroundColor(Color::Green), ResetColor,);
             eprintln!();
             eprintln!(
                 "  {}Logged in as {}{}{}",
@@ -176,19 +163,11 @@ pub async fn run_login() -> Result<()> {
                     continue;
                 }
                 "expired_token" => {
-                    eprintln!(
-                        " {}expired{}",
-                        SetForegroundColor(Color::Red),
-                        ResetColor,
-                    );
+                    eprintln!(" {}expired{}", SetForegroundColor(Color::Red), ResetColor,);
                     bail!("Device code expired. Run `enzyme login` again.");
                 }
                 _ => {
-                    eprintln!(
-                        " {}failed{}",
-                        SetForegroundColor(Color::Red),
-                        ResetColor,
-                    );
+                    eprintln!(" {}failed{}", SetForegroundColor(Color::Red), ResetColor,);
                     bail!("Authentication failed: {}", err.error);
                 }
             }
@@ -201,6 +180,17 @@ pub async fn run_logout() -> Result<()> {
     let auth_path = paths_home.join("auth.json");
 
     if auth_path.exists() {
+        // Revoke the API key server-side before deleting locally
+        if let Ok(token) = AuthToken::load(&auth_path) {
+            let base = api_base_url();
+            let client = reqwest::Client::new();
+            // Best-effort revoke — don't fail logout if server is unreachable
+            let _ = client
+                .delete(format!("{}/v1/api-keys/current", base))
+                .header("Authorization", format!("Bearer {}", token.api_key))
+                .send()
+                .await;
+        }
         AuthToken::delete(&auth_path)?;
         eprintln!(
             "  {}Logged out.{}",

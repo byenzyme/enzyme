@@ -54,3 +54,9 @@ impl AuthToken {
 pub fn is_logged_in(auth_path: &Path) -> bool {
     AuthToken::load(auth_path).is_ok()
 }
+
+/// Load the current login token, returning the standard CLI login prompt on failure.
+pub fn require_login(auth_path: &Path) -> Result<AuthToken> {
+    AuthToken::load(auth_path)
+        .map_err(|_| anyhow::anyhow!("Not logged in. Run `enzyme login` first."))
+}
