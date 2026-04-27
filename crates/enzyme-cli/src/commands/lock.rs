@@ -50,7 +50,7 @@ pub fn is_refresh_locked(enzyme_dir: &Path) -> bool {
     };
     // If we can lock it, it's NOT held — unlock immediately.
     if file.try_lock_exclusive().is_ok() {
-        let _ = file.unlock();
+        let _ = fs2::FileExt::unlock(&file);
         false
     } else {
         true

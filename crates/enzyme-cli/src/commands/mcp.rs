@@ -47,7 +47,9 @@ fn strip_frontmatter(s: &str) -> &str {
 struct EnzymeMcp {
     vault_path: Arc<RwLock<PathBuf>>,
     refreshed: Arc<AtomicBool>,
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    #[allow(dead_code)]
     prompt_router: PromptRouter<Self>,
 }
 

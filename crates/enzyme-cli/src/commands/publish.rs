@@ -74,7 +74,6 @@ pub async fn run_publish(vault_path: &Path) -> Result<()> {
         .to_string();
 
     // Upload via multipart with progress
-    let total_size = compressed.len();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
