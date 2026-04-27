@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install enzyme — local-first knowledge indexing for Obsidian vaults
-# Usage: curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
+# Usage: curl -fsSL enzyme.garden/install.sh | bash
 
 set -euo pipefail
 
@@ -42,8 +42,15 @@ if [ -d "$tmpdir/lib" ]; then
     cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
 fi
 
-# Clear previous data (models, indices) for clean slate
+# Clear previous data (models, indices) but preserve auth
+if [ -f "$HOME/.enzyme/auth.json" ]; then
+    cp "$HOME/.enzyme/auth.json" "$tmpdir/auth.json.bak"
+fi
 rm -rf "$HOME/.enzyme"
+if [ -f "$tmpdir/auth.json.bak" ]; then
+    mkdir -p "$HOME/.enzyme"
+    mv "$tmpdir/auth.json.bak" "$HOME/.enzyme/auth.json"
+fi
 
 # Clean up legacy enzyme-python installation
 legacy=""
@@ -117,6 +124,13 @@ if command -v claude &>/dev/null; then
     echo "Installing Claude Code plugin..."
     claude plugin marketplace add jshph/enzyme 2>/dev/null || true
     claude plugin install enzyme 2>/dev/null || true
+fi
+
+# Prompt login if not already authenticated
+if [ ! -f "$HOME/.enzyme/auth.json" ]; then
+    echo ""
+    echo "Creating your Enzyme account..."
+    "${INSTALL_DIR}/enzyme" login || true
 fi
 
 echo ""
