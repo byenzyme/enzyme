@@ -180,7 +180,10 @@ pub async fn run_init(
         }
     };
 
-    // Deduct 2 credits if using free-tier LLM (BYOK users pay their own inference)
+    // Free-tier preflight: deduct 2 credits up front so we fail fast on
+    // insufficient balance instead of running embedding + N catalyst calls
+    // that all 402. BYOK users (env vars set → OpenAiEnv) pay their own
+    // inference and skip this gate.
     let is_free_tier = api_config.as_ref().map_or(false, |(cfg, _)| {
         matches!(
             cfg.provider,
@@ -189,28 +192,17 @@ pub async fn run_init(
     });
     if is_free_tier {
         let auth_path = paths.auth_token();
-        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-            {
-                match enzyme_core::config::credits::deduct_credits(&token.api_key, 2.0, "init")
-                    .await
-                {
-                    Ok(remaining) => {
-                        if remaining <= 2.0 && !quiet {
-                            eprintln!(
-                                "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
-                                crossterm::style::SetForegroundColor(
-                                    crossterm::style::Color::Yellow
-                                ),
-                                remaining,
-                                crossterm::style::ResetColor,
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("credit deduction failed: {}", e);
-                    }
-                }
-            }
+        let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
+            .context("Not logged in. Run `enzyme login` first.")?;
+        let remaining =
+            enzyme_core::config::credits::deduct_credits(&token.api_key, 2.0, "init").await?;
+        if remaining <= 2.0 && !quiet {
+            eprintln!(
+                "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
+                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                remaining,
+                crossterm::style::ResetColor,
+            );
         }
     }
 
@@ -920,28 +912,25 @@ async fn run_stale_catalyst_refresh(
 
     let (api_config, llm) = resolve_llm_client().await?;
 
-    // Deduct 0.5 credits for non-noop refresh (free-tier only)
+    // Free-tier preflight: deduct 0.5 credits up front. Bail before LLM work
+    // if balance is insufficient. BYOK users skip this gate.
     if matches!(
         api_config.provider,
         enzyme_core::llm::ConfigProvider::ServerFallback
     ) {
-        if let Ok(auth_home) = EnzymePaths::enzyme_home() {
-            let auth_path = auth_home.join("auth.json");
-            if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-                if let Ok(remaining) =
-                    enzyme_core::config::credits::deduct_credits(&token.api_key, 0.5, "refresh")
-                        .await
-                {
-                    if remaining <= 2.0 {
-                        eprintln!(
-                            "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
-                            crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                            remaining,
-                            crossterm::style::ResetColor,
-                        );
-                    }
-                }
-            }
+        let auth_home = EnzymePaths::enzyme_home()?;
+        let auth_path = auth_home.join("auth.json");
+        let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
+            .context("Not logged in. Run `enzyme login` first.")?;
+        let remaining =
+            enzyme_core::config::credits::deduct_credits(&token.api_key, 0.5, "refresh").await?;
+        if remaining <= 2.0 {
+            eprintln!(
+                "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
+                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                remaining,
+                crossterm::style::ResetColor,
+            );
         }
     }
 

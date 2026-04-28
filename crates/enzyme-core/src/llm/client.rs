@@ -687,11 +687,30 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 
     debug!("Fetching free config from {}", FREE_CONFIG_URL);
 
-    let resp: FreeConfigResponse = client
+    // Free-config now requires login: the server gates on user_credits.
+    let auth_path = crate::config::paths::EnzymePaths::enzyme_home()
+        .context("failed to resolve enzyme home for auth lookup")?
+        .join("auth.json");
+    let token = crate::config::auth::AuthToken::load(&auth_path)
+        .context("Not logged in. Run `enzyme login` first.")?;
+
+    let resp = client
         .get(FREE_CONFIG_URL)
+        .header("Authorization", format!("Bearer {}", token.api_key))
         .send()
         .await
-        .context("failed to reach Enzyme server for free config")?
+        .context("failed to reach Enzyme server for free config")?;
+
+    if resp.status().as_u16() == 402 {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let credits = body["credits"].as_f64().unwrap_or(0.0);
+        bail!(
+            "Insufficient credits ({:.1} remaining). Visit enzyme.garden/dashboard to top up.",
+            credits
+        );
+    }
+
+    let resp: FreeConfigResponse = resp
         .error_for_status()
         .context("Enzyme server returned an error for free config")?
         .json()

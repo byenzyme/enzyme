@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::{Datelike, Utc};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -1038,6 +1039,9 @@ impl<'a> CatalystPipeline<'a> {
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
+        // Tripped by any task that sees a 402 / insufficient-credits error.
+        // Other in-flight tasks short-circuit, and the main loop aborts the rest.
+        let credits_exhausted = Arc::new(AtomicBool::new(false));
 
         let model = config.model.to_string();
         for job in jobs {
@@ -1051,10 +1055,20 @@ impl<'a> CatalystPipeline<'a> {
             let sem = Arc::clone(&semaphore);
             let response_format = response_format.clone();
             let local_model = local_model;
+            let credits_exhausted = Arc::clone(&credits_exhausted);
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
+
+                if credits_exhausted.load(Ordering::SeqCst) {
+                    return EntityResult {
+                        entity_name,
+                        entity_type,
+                        catalysts: None,
+                        error: Some("skipped: credits exhausted".to_string()),
+                    };
+                }
 
                 let entity_timeout = std::time::Duration::from_secs(entity_timeout_secs);
                 let result = tokio::time::timeout(entity_timeout, async {
@@ -1087,6 +1101,12 @@ impl<'a> CatalystPipeline<'a> {
                                     entity_name = entity_name.as_str(),
                                     attempt, "LLM call failed: {}", e
                                 );
+                                // Don't retry on credit exhaustion — backoff
+                                // would just delay the inevitable failure.
+                                if is_credits_exhausted_error(&last_error) {
+                                    credits_exhausted.store(true, Ordering::SeqCst);
+                                    break;
+                                }
                                 if attempt < max_attempts - 1 {
                                     // Exponential backoff: 2s, 4s + jitter (0-500ms)
                                     let base_ms = 2000u64 * 2u64.pow(attempt);
@@ -1178,6 +1198,18 @@ impl<'a> CatalystPipeline<'a> {
         // Phase 3: Collect results as tasks complete
         let mut completed = skipped.len();
         while let Some(result) = join_set.join_next().await {
+            // Short-circuit the rest of the run on credit exhaustion. Whatever
+            // tripped the flag has already been collected as an EntityResult
+            // error; aborting here prevents N more entities from each retrying
+            // and accumulating identical 402s.
+            if credits_exhausted.load(Ordering::SeqCst) {
+                join_set.abort_all();
+                stats.duration_ms = start.elapsed().as_millis() as u64;
+                bail!(
+                    "Insufficient credits — catalyst generation aborted. \
+                     Visit enzyme.garden/dashboard to top up."
+                );
+            }
             match result {
                 Ok(entity_result) => {
                     completed += 1;
@@ -1281,6 +1313,13 @@ impl<'a> CatalystPipeline<'a> {
 /// When `min_top_catalysts` is set, the largest entity (by volume) is guaranteed
 /// at least that many catalysts. The base and max are derived accordingly,
 /// matching enzyme-python's `min_top_catalysts` parameter.
+/// Detect 402 / insufficient-credit errors from the LLM client error string.
+/// Used to short-circuit the catalyst pipeline when the free-tier credit gate
+/// or upstream OpenRouter ephemeral key has been exhausted mid-run.
+fn is_credits_exhausted_error(err: &str) -> bool {
+    err.contains("402") || err.contains("Insufficient credits")
+}
+
 pub fn calculate_allocations(
     entities: &[Entity],
     min_top_catalysts: Option<usize>,
