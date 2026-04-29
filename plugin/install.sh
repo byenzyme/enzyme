@@ -106,7 +106,7 @@ fi
 [ -n "$legacy" ] && echo "Cleaned up legacy enzyme-python installation."
 
 # Track install (non-blocking, best-effort)
-curl -sfSo /dev/null -X POST https://enzyme-server-production.up.railway.app/telemetry/plugin-install \
+curl -sfSo /dev/null -X POST https://api.enzyme.garden/telemetry/plugin-install \
   -H "Content-Type: application/json" \
   -d "{\"platform\":\"${TARGET}\",\"version\":\"${VERSION}\"}" 2>/dev/null &
 

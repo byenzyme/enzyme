@@ -705,7 +705,7 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let credits = body["credits"].as_f64().unwrap_or(0.0);
         bail!(
-            "Insufficient credits ({:.1} remaining). Visit app.enzyme.garden/dashboard to top up.",
+            "Insufficient credits ({:.1} remaining). Visit app.enzyme.garden/plans to top up.",
             credits
         );
     }

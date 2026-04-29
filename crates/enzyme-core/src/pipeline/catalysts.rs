@@ -1207,7 +1207,7 @@ impl<'a> CatalystPipeline<'a> {
                 stats.duration_ms = start.elapsed().as_millis() as u64;
                 bail!(
                     "Insufficient credits — catalyst generation aborted. \
-                     Visit app.enzyme.garden/dashboard to top up."
+                     Visit app.enzyme.garden/plans to top up."
                 );
             }
             match result {

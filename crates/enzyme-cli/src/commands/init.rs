@@ -198,7 +198,7 @@ pub async fn run_init(
             enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init").await?;
         if remaining <= 3.0 && !quiet {
             eprintln!(
-                "  {}{:.1} credits remaining — visit app.enzyme.garden/dashboard{}",
+                "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
                 crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
                 remaining,
                 crossterm::style::ResetColor,
@@ -926,7 +926,7 @@ async fn run_stale_catalyst_refresh(
             enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh").await?;
         if remaining <= 3.0 {
             eprintln!(
-                "  {}{:.1} credits remaining — visit app.enzyme.garden/dashboard{}",
+                "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
                 crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
                 remaining,
                 crossterm::style::ResetColor,
