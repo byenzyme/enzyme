@@ -79,26 +79,29 @@ impl LocalRefreshResult {
     }
 }
 
-const COLLECTION_INDEX_GENERATION_CONFIG_KEY: &str = "collection.index_generation";
+// Persisted under the historical key so existing databases remain readable.
+// Semantically this is a cache epoch: it bumps when collection-derived caches
+// should be invalidated, not when user-visible collection content is versioned.
+const COLLECTION_CACHE_EPOCH_CONFIG_KEY: &str = "collection.index_generation";
 
-fn read_collection_index_generation(db: &Database) -> Result<u64> {
+fn read_collection_cache_epoch(db: &Database) -> Result<u64> {
     Ok(db
-        .get_config(COLLECTION_INDEX_GENERATION_CONFIG_KEY)?
+        .get_config(COLLECTION_CACHE_EPOCH_CONFIG_KEY)?
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0))
 }
 
-fn bump_collection_index_generation(db: &Database) -> Result<u64> {
-    let next = read_collection_index_generation(db)?.saturating_add(1);
-    db.set_config(COLLECTION_INDEX_GENERATION_CONFIG_KEY, &next.to_string())?;
+fn bump_collection_cache_epoch(db: &Database) -> Result<u64> {
+    let next = read_collection_cache_epoch(db)?.saturating_add(1);
+    db.set_config(COLLECTION_CACHE_EPOCH_CONFIG_KEY, &next.to_string())?;
     Ok(next)
 }
 
-fn maybe_bump_collection_index_generation(db: &Database, changed: bool) -> Result<u64> {
+fn maybe_bump_collection_cache_epoch(db: &Database, changed: bool) -> Result<u64> {
     if changed {
-        bump_collection_index_generation(db)
+        bump_collection_cache_epoch(db)
     } else {
-        read_collection_index_generation(db)
+        read_collection_cache_epoch(db)
     }
 }
 
@@ -113,7 +116,7 @@ pub struct InitResult {
     pub embeddings_pruned: Option<usize>,
     pub semantic_search: bool,
     pub catalysts_available: bool,
-    pub collection_index_generation: u64,
+    pub cache_epoch: u64,
     pub warnings: Vec<String>,
     pub duration_ms: u64,
 }
@@ -132,7 +135,7 @@ impl InitResult {
                 "files_deleted": self.files_deleted,
             },
             "catalysts_generated": self.catalysts_generated,
-            "collection_index_generation": self.collection_index_generation,
+            "cache_epoch": self.cache_epoch,
             "capabilities": {
                 "semantic_search": self.semantic_search,
                 "catalysts": self.catalysts_available,
@@ -614,7 +617,7 @@ pub async fn run_init(
         reapply_targets(vault_path).await;
     }
 
-    let collection_index_generation = bump_collection_index_generation(&db)?;
+    let cache_epoch = bump_collection_cache_epoch(&db)?;
 
     // ── Step 9: Generate CLAUDE.md and hook (interactive mode only) ──────
     if !quiet {
@@ -670,7 +673,7 @@ pub async fn run_init(
             embeddings_pruned: emb_stats.map(|(_, pruned)| pruned),
             semantic_search: emb_completed,
             catalysts_available: cat_stats.is_some(),
-            collection_index_generation,
+            cache_epoch,
             warnings,
             duration_ms,
         }))
@@ -690,7 +693,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
 
     let db = Database::open(&paths.vault_db)?;
     let _local = run_local_refresh_work(&db, vault_path, &paths)?;
-    let _ = maybe_bump_collection_index_generation(&db, _local.collection_changed())?;
+    let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
     drop(db);
 
     run_stale_catalyst_refresh(vault_path, None, None).await?;
@@ -749,8 +752,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
             spawn_background_refresh(vault_path, &paths)
         }
     };
-    let collection_index_generation =
-        maybe_bump_collection_index_generation(&db, collection_changed)?;
+    let cache_epoch = maybe_bump_collection_cache_epoch(&db, collection_changed)?;
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -761,7 +763,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         "background_spawned": background_spawned,
         "embedding_changed": local.embedding_changed,
         "similarities_recomputed": local.similarities_recomputed,
-        "collection_index_generation": collection_index_generation,
+        "cache_epoch": cache_epoch,
         "collection_changed": collection_changed,
         "collection_change_reasons": collection_change_reasons,
         "indexing": {
@@ -1069,7 +1071,7 @@ async fn run_stale_catalyst_refresh(
             }
         }
         reapply_targets(vault_path).await;
-        let _ = bump_collection_index_generation(&db)?;
+        let _ = bump_collection_cache_epoch(&db)?;
     }
 
     Ok(stats.catalysts_generated > 0)
@@ -1235,7 +1237,7 @@ async fn run_refresh_interactive(
     match staleness {
         StalenessResult::Fresh => {
             debug!("catalysts are fresh after local refresh");
-            let _ = maybe_bump_collection_index_generation(&db, _local.collection_changed())?;
+            let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
             return Ok(());
         }
         StalenessResult::Stale(reason) => {
