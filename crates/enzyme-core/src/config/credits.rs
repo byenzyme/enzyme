@@ -22,7 +22,7 @@ pub async fn deduct_credits(api_key: &str, amount: f64, reason: &str) -> Result<
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let current = body["credits"].as_f64().unwrap_or(0.0);
         bail!(
-            "Insufficient credits ({:.1} remaining, {:.1} required). Visit enzyme.garden/dashboard for details.",
+            "Insufficient credits ({:.1} remaining, {:.1} required). Visit app.enzyme.garden/dashboard for details.",
             current,
             amount
         );

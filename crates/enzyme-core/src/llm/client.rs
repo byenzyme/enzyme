@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
 const FREE_CONFIG_URL: &str =
-    "https://enzyme-server-production.up.railway.app/enzyme-python/free-config";
+    "https://api.enzyme.garden/enzyme-python/free-config";
 
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]
@@ -705,7 +705,7 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let credits = body["credits"].as_f64().unwrap_or(0.0);
         bail!(
-            "Insufficient credits ({:.1} remaining). Visit enzyme.garden/dashboard to top up.",
+            "Insufficient credits ({:.1} remaining). Visit app.enzyme.garden/dashboard to top up.",
             credits
         );
     }
