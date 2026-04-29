@@ -1,0 +1,42 @@
+{
+  "name": "@jshph/enzyme-openclaw",
+  "version": "0.1.0",
+  "description": "Enzyme semantic search plugin for OpenClaw — petri working memory + catalyze concept search over Obsidian vaults.",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "plugin": "./openclaw.plugin.json",
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24"
+    },
+    "build": {
+      "openclawVersion": ">=2026.3.24"
+    }
+  },
+  "dependencies": {
+    "@jshph/enzyme-openclaw-bridge": "file:../openclaw-bridge"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.24"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jshph/enzyme-rust.git",
+    "directory": "plugin/openclaw"
+  },
+  "homepage": "https://enzyme.garden",
+  "license": "MIT"
+}

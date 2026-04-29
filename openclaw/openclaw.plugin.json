@@ -1,0 +1,53 @@
+{
+  "id": "enzyme",
+  "name": "Enzyme",
+  "description": "Semantic search and pattern discovery for Obsidian vaults — petri (working memory) and catalyze (concept search) over your notes.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "vaultPath": {
+        "type": "string",
+        "description": "Absolute path to the Obsidian/markdown vault. If unset, falls back to ENZYME_VAULT_ROOT env var, then the agent's working directory."
+      },
+      "binaryPath": {
+        "type": "string",
+        "description": "Path to the enzyme binary. If unset, resolves via PATH."
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true,
+        "description": "Inject `enzyme petri` context into the prompt before each agent turn."
+      },
+      "autoRefresh": {
+        "type": "boolean",
+        "default": false,
+        "description": "Run `enzyme refresh --quiet` after each agent turn (requires hooks.allowConversationAccess)."
+      }
+    }
+  },
+  "uiHints": {
+    "vaultPath": {
+      "label": "Vault path",
+      "placeholder": "/Users/you/obsidian",
+      "help": "Absolute path to your Obsidian vault."
+    },
+    "binaryPath": {
+      "label": "Enzyme binary path",
+      "advanced": true,
+      "placeholder": "enzyme"
+    },
+    "autoRecall": {
+      "label": "Auto-recall",
+      "help": "Inject vault context into every prompt."
+    },
+    "autoRefresh": {
+      "label": "Auto-refresh",
+      "advanced": true,
+      "help": "Re-index after each turn. Requires conversation access."
+    }
+  }
+}
