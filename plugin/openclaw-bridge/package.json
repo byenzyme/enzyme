@@ -1,0 +1,19 @@
+{
+  "name": "@jshph/enzyme-openclaw-bridge",
+  "version": "0.1.0",
+  "description": "Process bridge for the Enzyme OpenClaw plugin — spawns the enzyme CLI binary.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jshph/enzyme-rust.git",
+    "directory": "plugin/openclaw-bridge"
+  }
+}
