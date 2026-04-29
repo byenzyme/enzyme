@@ -733,11 +733,13 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 /// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
-/// 1. `OPENAI_API_KEY` + `OPENAI_BASE_URL` env vars (both required) + optional `OPENAI_MODEL`
+/// 1. `OPENAI_API_KEY` env var + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
 /// 2. `/tmp/enzyme-api-cache`
 /// 3. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    // 1. OPENAI_API_KEY + OPENAI_BASE_URL (both must be set for env override)
+    // 1. OPENAI_API_KEY short-circuits free-tier resolution. OPENAI_BASE_URL is
+    // optional and defaults to the OpenRouter-compatible endpoint for legacy
+    // Enzyme/OpenRouter BYOK setups.
     let has_key = std::env::var("OPENAI_API_KEY")
         .ok()
         .filter(|v| !v.is_empty());
@@ -746,7 +748,10 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         .filter(|v| !v.is_empty());
 
     match (&has_key, &has_url) {
-        (Some(key), Some(base_url)) => {
+        (Some(key), base_url) => {
+            let base_url = base_url
+                .clone()
+                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
             let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
             debug!(
                 "Resolved API key from OPENAI_API_KEY (base_url={}, model={})",
@@ -758,9 +763,6 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
                 model,
                 provider: ConfigProvider::OpenAiEnv,
             });
-        }
-        (Some(_), None) => {
-            warn!("OPENAI_API_KEY is set but OPENAI_BASE_URL is not — ignoring partial env config");
         }
         (None, Some(_)) => {
             warn!("OPENAI_BASE_URL is set but OPENAI_API_KEY is not — ignoring partial env config");
