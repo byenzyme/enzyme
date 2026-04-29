@@ -122,8 +122,9 @@ esac
 if command -v claude &>/dev/null; then
     echo ""
     echo "Installing Claude Code plugin..."
-    claude plugin marketplace add jshph/enzyme 2>/dev/null || true
-    claude plugin install enzyme 2>/dev/null || true
+    NO_COLOR=1 claude plugin marketplace add jshph/enzyme </dev/null >/dev/null 2>&1 || true
+    NO_COLOR=1 claude plugin install enzyme </dev/null >/dev/null 2>&1 || true
+    echo "Installed Claude Code plugin: enzyme"
 fi
 
 # Prompt login if not already authenticated

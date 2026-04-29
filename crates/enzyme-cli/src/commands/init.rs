@@ -59,6 +59,49 @@ struct LocalRefreshResult {
     similarities_recomputed: bool,
 }
 
+impl LocalRefreshResult {
+    fn collection_changed(&self) -> bool {
+        has_index_changes(&self.indexing) || self.embedding_changed || self.similarities_recomputed
+    }
+
+    fn change_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if has_index_changes(&self.indexing) {
+            reasons.push("documents_changed");
+        }
+        if self.embedding_changed {
+            reasons.push("embeddings_changed");
+        }
+        if self.similarities_recomputed {
+            reasons.push("similarities_recomputed");
+        }
+        reasons
+    }
+}
+
+const COLLECTION_INDEX_GENERATION_CONFIG_KEY: &str = "collection.index_generation";
+
+fn read_collection_index_generation(db: &Database) -> Result<u64> {
+    Ok(db
+        .get_config(COLLECTION_INDEX_GENERATION_CONFIG_KEY)?
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
+fn bump_collection_index_generation(db: &Database) -> Result<u64> {
+    let next = read_collection_index_generation(db)?.saturating_add(1);
+    db.set_config(COLLECTION_INDEX_GENERATION_CONFIG_KEY, &next.to_string())?;
+    Ok(next)
+}
+
+fn maybe_bump_collection_index_generation(db: &Database, changed: bool) -> Result<u64> {
+    if changed {
+        bump_collection_index_generation(db)
+    } else {
+        read_collection_index_generation(db)
+    }
+}
+
 /// Stats collected during an init run, used for JSON output in quiet mode.
 pub struct InitResult {
     pub files_discovered: usize,
@@ -70,6 +113,7 @@ pub struct InitResult {
     pub embeddings_pruned: Option<usize>,
     pub semantic_search: bool,
     pub catalysts_available: bool,
+    pub collection_index_generation: u64,
     pub warnings: Vec<String>,
     pub duration_ms: u64,
 }
@@ -88,6 +132,7 @@ impl InitResult {
                 "files_deleted": self.files_deleted,
             },
             "catalysts_generated": self.catalysts_generated,
+            "collection_index_generation": self.collection_index_generation,
             "capabilities": {
                 "semantic_search": self.semantic_search,
                 "catalysts": self.catalysts_available,
@@ -569,6 +614,8 @@ pub async fn run_init(
         reapply_targets(vault_path).await;
     }
 
+    let collection_index_generation = bump_collection_index_generation(&db)?;
+
     // ── Step 9: Generate CLAUDE.md and hook (interactive mode only) ──────
     if !quiet {
         if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
@@ -623,6 +670,7 @@ pub async fn run_init(
             embeddings_pruned: emb_stats.map(|(_, pruned)| pruned),
             semantic_search: emb_completed,
             catalysts_available: cat_stats.is_some(),
+            collection_index_generation,
             warnings,
             duration_ms,
         }))
@@ -642,6 +690,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
 
     let db = Database::open(&paths.vault_db)?;
     let _local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let _ = maybe_bump_collection_index_generation(&db, _local.collection_changed())?;
     drop(db);
 
     run_stale_catalyst_refresh(vault_path, None, None).await?;
@@ -688,6 +737,8 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
 
     let db = Database::open(&paths.vault_db)?;
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let collection_changed = local.collection_changed();
+    let collection_change_reasons = local.change_reasons();
 
     // Catalyst staleness controls only catalyst regeneration, not doc embedding.
     let staleness = check_catalyst_staleness(&db, vault_path)?;
@@ -698,6 +749,8 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
             spawn_background_refresh(vault_path, &paths)
         }
     };
+    let collection_index_generation =
+        maybe_bump_collection_index_generation(&db, collection_changed)?;
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -708,6 +761,9 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         "background_spawned": background_spawned,
         "embedding_changed": local.embedding_changed,
         "similarities_recomputed": local.similarities_recomputed,
+        "collection_index_generation": collection_index_generation,
+        "collection_changed": collection_changed,
+        "collection_change_reasons": collection_change_reasons,
         "indexing": {
             "files_discovered": local.indexing.files_discovered,
             "files_new": local.indexing.files_new,
@@ -1013,6 +1069,7 @@ async fn run_stale_catalyst_refresh(
             }
         }
         reapply_targets(vault_path).await;
+        let _ = bump_collection_index_generation(&db)?;
     }
 
     Ok(stats.catalysts_generated > 0)
@@ -1178,6 +1235,7 @@ async fn run_refresh_interactive(
     match staleness {
         StalenessResult::Fresh => {
             debug!("catalysts are fresh after local refresh");
+            let _ = maybe_bump_collection_index_generation(&db, _local.collection_changed())?;
             return Ok(());
         }
         StalenessResult::Stale(reason) => {
