@@ -42,8 +42,15 @@ if [ -d "$tmpdir/lib" ]; then
     cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
 fi
 
-# Clear previous data (models, indices) for clean slate
+# Clear previous index data but preserve auth.
+if [ -f "$HOME/.enzyme/auth.json" ]; then
+    cp "$HOME/.enzyme/auth.json" "$tmpdir/auth.json.bak"
+fi
 rm -rf "$HOME/.enzyme"
+if [ -f "$tmpdir/auth.json.bak" ]; then
+    mkdir -p "$HOME/.enzyme"
+    mv "$tmpdir/auth.json.bak" "$HOME/.enzyme/auth.json"
+fi
 
 # Clean up legacy enzyme-python installation
 legacy=""
@@ -99,7 +106,7 @@ fi
 [ -n "$legacy" ] && echo "Cleaned up legacy enzyme-python installation."
 
 # Track install (non-blocking, best-effort)
-curl -sfSo /dev/null -X POST https://enzyme-server-production.up.railway.app/telemetry/plugin-install \
+curl -sfSo /dev/null -X POST https://api.enzyme.garden/telemetry/plugin-install \
   -H "Content-Type: application/json" \
   -d "{\"platform\":\"${TARGET}\",\"version\":\"${VERSION}\"}" 2>/dev/null &
 
@@ -110,11 +117,6 @@ case ":$PATH:" in
     *":${INSTALL_DIR}:"*) ;;
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
-
-# Download embedding model
-echo ""
-echo "Downloading embedding model (~52 MB)..."
-"$INSTALL_DIR/enzyme" setup
 
 echo ""
 echo "Next steps:"

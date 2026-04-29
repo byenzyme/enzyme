@@ -131,7 +131,7 @@ OPENAI_API_KEY=your-key
 ```bash
 cd /tmp && git clone --depth 1 https://github.com/jshph/enzyme-skill.git enzyme-update \
   && rm -rf ~/.hermes/plugins/enzyme \
-  && mv enzyme-update/enzyme ~/.hermes/plugins/enzyme \
+  && mv enzyme-update ~/.hermes/plugins/enzyme \
   && rm -rf enzyme-update
 ```
 
@@ -139,7 +139,7 @@ Or if you want to track upstream for easier updates:
 
 ```bash
 git clone https://github.com/jshph/enzyme-skill.git ~/.hermes/enzyme-skill-repo
-ln -sfn ~/.hermes/enzyme-skill-repo/enzyme ~/.hermes/plugins/enzyme
+ln -sfn ~/.hermes/enzyme-skill-repo ~/.hermes/plugins/enzyme
 ```
 
 Then update with `cd ~/.hermes/enzyme-skill-repo && git pull`.
@@ -301,10 +301,8 @@ __init__.py                 # Hermes entry point
 schemas.py                  # Tool schemas (LLM-facing)
 tools.py                    # Tool handlers (shell out to enzyme CLI)
 hooks.py                    # Lifecycle hooks (session start, pre-LLM, session end)
-setup.py                    # Binary bootstrap logic
 install.sh                  # CLI installer (curl-pipe-bash)
 bin/                        # Platform binaries (macOS arm64, Linux x86_64/arm64)
-models/                     # Embedding model (~23 MB, bundled via Git LFS)
 references/
 ├── petri-guide.md          # How to present vault overview results
 └── search-guide.md         # How to present search results
@@ -313,7 +311,7 @@ scripts/
 ```
 
 Two install paths:
-- **Bundled** (`scripts/setup.sh`) — copies platform binary from `bin/`, no network needed
+- **Bundled** (`scripts/setup.sh`) — copies the platform binary from `bin/`, no network needed; used by hooks and refreshed when the bundled binary is newer
 - **Download** (`install.sh`) — fetches latest release from GitHub
 
 ## Requirements
@@ -321,6 +319,25 @@ Two install paths:
 - macOS Apple Silicon or Linux (x86_64, aarch64)
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
 - Catalyst generation uses [OpenRouter](https://openrouter.ai) free tier by default, or set `OPENAI_API_KEY`
+
+## Testing
+
+From `enzyme-rust`, run the deterministic plugin smoke test:
+
+```bash
+python3 scripts/test-hermes-plugin-smoke.py
+```
+
+That verifies the Hermes plugin layout, imports, registered hooks, and registered tools without invoking Hermes or installing binaries.
+
+For a live Hermes integration run, use an initialized vault with Hermes configured:
+
+```bash
+cd /path/to/vault
+python /path/to/enzyme-rust/scripts/test-hermes-e2e.py
+```
+
+The live test exercises real `hermes chat` turns, plugin hooks, and enzyme tool calls, so it requires `hermes`, an `.enzyme/enzyme.db`, and a working model provider.
 
 ## Links
 

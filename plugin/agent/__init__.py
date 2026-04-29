@@ -4,7 +4,7 @@ Registers enzyme tools and lifecycle hooks with the Hermes runtime.
 Tools shell out to the enzyme CLI; no core logic is reimplemented here.
 """
 
-from . import hooks, schemas, setup, tools
+from . import hooks, schemas, tools
 
 
 def register(ctx):
@@ -14,7 +14,7 @@ def register(ctx):
     ctx.register_hook("pre_llm_call", hooks.pre_llm_call)
     ctx.register_hook("on_session_end", hooks.on_session_end)
 
-    check = lambda: setup.is_enzyme_available()
+    check = lambda: hooks.is_enzyme_available()
 
     ctx.register_tool(
         name="enzyme_petri",

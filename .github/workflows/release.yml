@@ -322,6 +322,7 @@ jobs:
 
           # Remove legacy model files
           rm -rf models
+          rm -f setup.py
 
           # Extract platform binaries
           for platform in macos-arm64 linux-arm64 linux-x86_64; do
@@ -338,7 +339,6 @@ jobs:
           cp ../plugin/agent/schemas.py ./schemas.py
           cp ../plugin/agent/tools.py ./tools.py
           cp ../plugin/agent/hooks.py ./hooks.py
-          cp ../plugin/agent/setup.py ./setup.py
           cp ../plugin/agent/install.sh ./install.sh
           cp ../plugin/agent/setup-guide.md ./setup-guide.md
           cp ../plugin/agent/petri-guide.md ./references/petri-guide.md
@@ -353,7 +353,6 @@ jobs:
           # Update versions
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" ./SKILL.md
           sed -i "s/version: \"[^\"]*\"/version: \"${version}\"/" ./plugin.yaml
-          sed -i "s/EXPECTED_VERSION = \"[^\"]*\"/EXPECTED_VERSION = \"${version}\"/" ./setup.py
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

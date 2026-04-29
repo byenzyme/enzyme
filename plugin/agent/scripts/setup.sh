@@ -1,6 +1,6 @@
 #!/bin/sh
-# Bootstrap enzyme from the bundled skill — copies the platform binary
-# into ~/.cache/enzyme, creates a symlink in ~/.local/bin.
+# Bootstrap enzyme from the bundled skill — copies the platform binary into
+# ~/.cache/enzyme, creates a symlink in ~/.local/bin.
 #
 # Usage: sh setup.sh [SKILL_ROOT]
 #   SKILL_ROOT defaults to the parent of scripts/ (i.e. the enzyme/ skill dir).
@@ -12,9 +12,12 @@ else
     SKILL_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fi
 
-# Skip if enzyme is already installed and working.
+# Homebrew owns its own upgrades. For every other install path, keep going so a
+# newer bundled plugin binary can replace a stale cached copy.
 if command -v enzyme >/dev/null 2>&1; then
-    enzyme --version >/dev/null 2>&1 && exit 0
+    case "$(command -v enzyme)" in
+        /opt/homebrew/*|/usr/local/*) exit 0 ;;
+    esac
 fi
 
 # Detect platform.
@@ -26,15 +29,14 @@ case "${OS}-${ARCH}" in
     Linux-aarch64)  BIN="enzyme-linux-arm64"   ;;
     *)
         echo "enzyme: unsupported platform ${OS}-${ARCH}" >&2
-        echo "Install via Cargo: cargo install --git https://github.com/jshph/enzyme-rust --bin enzyme" >&2
-        exit 1
+        exit 0
         ;;
 esac
 
 SRC="${SKILL_ROOT}/bin/${BIN}"
 if [ ! -f "$SRC" ]; then
     echo "enzyme: platform binary not found: ${SRC}" >&2
-    exit 1
+    exit 0
 fi
 
 CACHE_DIR="$HOME/.cache/enzyme"

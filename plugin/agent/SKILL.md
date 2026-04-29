@@ -5,7 +5,7 @@ description: >
   find latent patterns across notes. Use when the user wants to explore their
   thinking, draw connections, or search their vault by concept rather than keyword.
 license: MIT
-compatibility: Requires shell access (macOS arm64, Linux x86_64/arm64). Binary and model are bundled — run scripts/setup.sh if enzyme is not on PATH.
+compatibility: Requires shell access (macOS arm64, Linux x86_64/arm64). Binary is bundled — run scripts/setup.sh if enzyme is not on PATH.
 allowed-tools: Bash Read Glob Grep
 metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/jshph/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.4.5", "homepage": "https://enzyme.garden" }
 ---

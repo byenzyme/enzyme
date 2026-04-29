@@ -4,15 +4,42 @@ Maps Hermes session events to enzyme CLI operations.
 """
 
 import os
+import shutil
 import subprocess
-
-from . import setup
+from pathlib import Path
 
 
 _ENZYME_MARKER = "<!-- enzyme:start -->"
+_PLUGIN_ROOT = Path(__file__).resolve().parent
 
 # Context files Hermes loads into the system prompt, in priority order.
 _CONTEXT_FILES = [".hermes.md", "HERMES.md", "AGENTS.md", "agents.md", "CLAUDE.md", "claude.md"]
+
+
+def _ensure_local_bin_on_path() -> None:
+    local_bin = str(Path.home() / ".local" / "bin")
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    if local_bin not in paths:
+        os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
+
+
+def is_enzyme_available() -> bool:
+    """Check if enzyme binary is on PATH and executable."""
+    _ensure_local_bin_on_path()
+    return shutil.which("enzyme") is not None
+
+
+def ensure_enzyme_installed() -> None:
+    """Install or refresh the bundled enzyme binary when the setup script exists."""
+    _ensure_local_bin_on_path()
+    setup_script = _PLUGIN_ROOT / "scripts" / "setup.sh"
+    if not setup_script.exists():
+        return
+    subprocess.run(
+        ["sh", str(setup_script), str(_PLUGIN_ROOT)],
+        capture_output=True,
+        timeout=30,
+    )
 
 
 def _vault_is_initialized() -> bool:
@@ -37,14 +64,10 @@ def on_session_start(**kwargs) -> None:
 
     Hermes blocks on this hook before the LLM loop starts.
     """
-    if not setup.is_enzyme_available():
-        setup.ensure_enzyme_installed()
+    ensure_enzyme_installed()
 
-    if not setup.is_enzyme_available():
+    if not is_enzyme_available():
         return
-
-    if not setup.is_enzyme_current():
-        setup.ensure_enzyme_installed()
 
     if not _vault_is_initialized():
         subprocess.run(["enzyme", "init"], capture_output=True, timeout=120)
@@ -59,7 +82,7 @@ def on_session_end(**kwargs) -> None:
     Only fires on completed sessions — interrupted ones may lack context.
     Returns context string that nudges the agent to review and capture.
     """
-    if not setup.is_enzyme_available():
+    if not is_enzyme_available():
         return
 
     if not kwargs.get("completed", False):
@@ -106,7 +129,7 @@ def pre_llm_call(**kwargs) -> dict:
     if _skip_injection:
         return {}
 
-    if not setup.is_enzyme_available():
+    if not is_enzyme_available():
         return {}
 
     if _context_file_has_enzyme():
