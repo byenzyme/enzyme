@@ -180,7 +180,7 @@ pub async fn run_init(
         }
     };
 
-    // Free-tier preflight: deduct 2 credits up front so we fail fast on
+    // Free-tier preflight: deduct 3 credits up front so we fail fast on
     // insufficient balance instead of running embedding + N catalyst calls
     // that all 402. BYOK users (env vars set → OpenAiEnv) pay their own
     // inference and skip this gate.
@@ -195,8 +195,8 @@ pub async fn run_init(
         let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
             .context("Not logged in. Run `enzyme login` first.")?;
         let remaining =
-            enzyme_core::config::credits::deduct_credits(&token.api_key, 2.0, "init").await?;
-        if remaining <= 2.0 && !quiet {
+            enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init").await?;
+        if remaining <= 3.0 && !quiet {
             eprintln!(
                 "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
                 crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
@@ -912,7 +912,7 @@ async fn run_stale_catalyst_refresh(
 
     let (api_config, llm) = resolve_llm_client().await?;
 
-    // Free-tier preflight: deduct 0.5 credits up front. Bail before LLM work
+    // Free-tier preflight: deduct 1 credit up front. Bail before LLM work
     // if balance is insufficient. BYOK users skip this gate.
     if matches!(
         api_config.provider,
@@ -923,8 +923,8 @@ async fn run_stale_catalyst_refresh(
         let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
             .context("Not logged in. Run `enzyme login` first.")?;
         let remaining =
-            enzyme_core::config::credits::deduct_credits(&token.api_key, 0.5, "refresh").await?;
-        if remaining <= 2.0 {
+            enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh").await?;
+        if remaining <= 3.0 {
             eprintln!(
                 "  {}{:.1} credits remaining — visit enzyme.garden/dashboard{}",
                 crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
