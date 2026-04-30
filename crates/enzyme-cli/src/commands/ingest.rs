@@ -22,6 +22,9 @@ pub struct IngestEntry {
     pub tags: Vec<String>,
     #[serde(default)]
     pub links: Vec<String>,
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub collections: Vec<String>,
     pub folder: Option<String>,
     pub created_at: Option<serde_json::Value>,
     pub metadata: Option<serde_json::Value>,
@@ -149,10 +152,16 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
     let word_count = full_content.split_whitespace().count() as i64;
     let char_count = full_content.chars().count() as i64;
     let created_at = parse_timestamp(&entry.created_at, now_ms);
-    let folders = match entry.folder {
-        Some(ref folder) if !folder.is_empty() => vec![folder.clone()],
-        _ => Vec::new(),
-    };
+    let mut folders = Vec::new();
+    if let Some(ref folder) = entry.folder {
+        push_unique_nonempty(&mut folders, folder);
+    }
+    if let Some(ref collection) = entry.collection {
+        push_unique_nonempty(&mut folders, collection);
+    }
+    for collection in &entry.collections {
+        push_unique_nonempty(&mut folders, collection);
+    }
 
     if let Some(metadata) = entry.metadata {
         tracing::debug!(
@@ -218,4 +227,64 @@ fn slugify(s: &str) -> String {
         }
     }
     result.trim_end_matches('-').to_string()
+}
+
+fn push_unique_nonempty(values: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || values.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    values.push(trimmed.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(title: &str) -> IngestEntry {
+        IngestEntry {
+            id: Some("doc-1".to_string()),
+            title: title.to_string(),
+            content: Some("body".to_string()),
+            notes: None,
+            source: None,
+            tags: Vec::new(),
+            links: Vec::new(),
+            collection: None,
+            collections: Vec::new(),
+            folder: None,
+            created_at: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn collection_label_becomes_folder_entity_without_changing_source_ref() {
+        let mut input = entry("Tagged Recipe");
+        input.collection = Some("recipe/main-dishes".to_string());
+
+        let doc = entry_to_processed_document(input, 1_700_000_000_000).unwrap();
+
+        assert_eq!(doc.source_ref, "doc-1");
+        assert_eq!(doc.folders, vec!["recipe/main-dishes"]);
+    }
+
+    #[test]
+    fn multiple_collection_labels_become_deduped_folder_entities() {
+        let mut input = entry("Tagged Recipe");
+        input.folder = Some("recipes".to_string());
+        input.collection = Some("recipe/main-dishes".to_string());
+        input.collections = vec![
+            "recipe/weeknight".to_string(),
+            "recipe/main-dishes".to_string(),
+            " ".to_string(),
+        ];
+
+        let doc = entry_to_processed_document(input, 1_700_000_000_000).unwrap();
+
+        assert_eq!(
+            doc.folders,
+            vec!["recipes", "recipe/main-dishes", "recipe/weeknight"]
+        );
+    }
 }
