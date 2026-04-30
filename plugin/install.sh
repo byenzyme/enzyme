@@ -126,15 +126,6 @@ case ":$PATH:" in
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 
-# Install Claude Code plugin if claude is available
-if command -v claude &>/dev/null; then
-    echo ""
-    echo "Installing Claude Code plugin..."
-    NO_COLOR=1 claude plugin marketplace add jshph/enzyme </dev/null >/dev/null 2>&1 || true
-    NO_COLOR=1 claude plugin install enzyme </dev/null >/dev/null 2>&1 || true
-    echo "Installed Claude Code plugin: enzyme"
-fi
-
 # Prompt login if not already authenticated
 if [ ! -f "$HOME/.enzyme/auth.json" ]; then
     echo ""
@@ -149,9 +140,3 @@ echo "  cd /path/to/your/vault"
 echo "  enzyme init"
 echo ""
 echo "Enzyme will scan your vault and show you what it finds before proceeding."
-if ! command -v claude &>/dev/null; then
-    echo ""
-    echo "Add the Claude Code plugin:"
-    echo "  claude plugin marketplace add jshph/enzyme"
-    echo "  claude plugin install enzyme"
-fi

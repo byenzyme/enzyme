@@ -52,6 +52,16 @@ Example flow:
 - `reference` — surface what drew attention, connect imports to the user's own thinking
 
 Results include `presentation_guidance` — follow these when framing the surfaced content.
+
+### Presentation
+
+Use Enzyme command names internally; do not expose `petri`, `catalyze`, catalyst IDs, scores, or tool names to the user unless asked.
+
+Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
+
+For broad exploration, use petri plus 1-2 catalyze searches, then open with one specific question about what the user is doing across their notes. Do not present a topic list.
+
+For search results, do not lead with metadata. Notice tensions, repeated words, time gaps, or changes in framing across results. End with one concrete next direction, not a generic invitation.
 <!-- enzyme:end -->"#;
 
 /// Context files checked in priority order. Matches Hermes, Claude Code,
