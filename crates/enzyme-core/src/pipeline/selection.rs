@@ -94,7 +94,8 @@ impl<'a> SelectionPipeline<'a> {
             }
         }
 
-        let materialized = selection_steps::build_curated_selection(self.db, found)?;
+        let materialized =
+            selection_steps::build_curated_selection(self.db, found, &prefs.entity_profiles)?;
 
         info!(
             count = materialized.final_entities.len(),

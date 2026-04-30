@@ -3,13 +3,13 @@
 //! Assigns catalyst profiles without an LLM call using two strategies:
 //!
 //! 1. **Rules**: keyword matching on entity name/type → profile.
-//!    Covers common Obsidian patterns (people → relational, readwise → synthesis).
+//!    Covers common Obsidian patterns (people → relational, readwise → resonance_trace).
 //!
 //! 2. **Embedding fallback**: when no keyword matches, embeds the entity's
 //!    occurrence context and compares to pre-computed profile exemplar centroids.
 //!    Requires an `EmbeddingService`.
 //!
-//! The default fallback (no embedding service, no keyword match) is `dialectical`.
+//! The default fallback (no embedding service, no keyword match) is `tension_trace`.
 
 use std::collections::HashMap;
 
@@ -37,6 +37,24 @@ const RULE_GROUPS: &[(&[&str], &str, f64)] = &[
     ),
     (
         &[
+            "preference",
+            "preferences",
+            "taste",
+            "tastes",
+            "recipe",
+            "recipes",
+            "cooking",
+            "feedback",
+            "activity",
+            "activities",
+            "trace",
+            "traces",
+        ],
+        "preference_evidence",
+        2.5,
+    ),
+    (
+        &[
             "readwise",
             "reading",
             "highlights",
@@ -46,7 +64,7 @@ const RULE_GROUPS: &[(&[&str], &str, f64)] = &[
             "pkm",
             "library",
         ],
-        "synthesis",
+        "resonance_trace",
         2.5,
     ),
     (
@@ -75,9 +93,11 @@ const RULE_GROUPS: &[(&[&str], &str, f64)] = &[
             "product",
             "market",
             "decision",
+            "decisions",
+            "architecture",
             "ai",
         ],
-        "strategic",
+        "decision_trace",
         2.0,
     ),
     (
@@ -97,18 +117,30 @@ const RULE_GROUPS: &[(&[&str], &str, f64)] = &[
     ),
     (
         &["ethics", "philosophy", "thinking", "concepts", "ideas"],
-        "dialectical",
+        "tension_trace",
         1.5,
     ),
 ];
 
 /// Synthetic exemplars per profile. Each reads like a real vault artifact
-/// belonging to that profile — CRM entries (relational), readwise highlights
-/// (synthesis), sprint reviews (operational), decision memos (strategic),
-/// journal entries (reflective), conceptual explorations (dialectical).
+/// belonging to that profile — preference logs, CRM entries, readwise highlights,
+/// sprint reviews, decision memos, journal entries, and conceptual explorations.
 const PROFILE_EXEMPLARS: &[(&str, &[&str])] = &[
     (
-        "dialectical",
+        "preference_evidence",
+        &[
+            "Recipe note: reduced the sugar by half and liked the balance much better.",
+            "Design trace: user keeps choosing denser canvases with smaller labels and fewer decorative effects.",
+            "Feedback log: prefers keyboard shortcuts over modal flows for repeated work.",
+            "Agent observation: the user repeatedly rejects verbose summaries and asks for concrete diffs.",
+            "Activity log: worked well for a dinner party because it could be made ahead and served at room temperature.",
+            "Canvas JSON decision: kept muted color swatches but removed gradients after preview.",
+            "Preference note: strong texture contrast matters more than visual polish in this context.",
+            "Usage trace: abandoned the flow whenever it required copying data between panes.",
+        ],
+    ),
+    (
+        "tension_trace",
         &[
             "I keep going back and forth. The argument for structure makes sense but emergence says the opposite.",
             "The tension between wanting to be known and wanting to stay hidden shows up constantly.",
@@ -121,7 +153,7 @@ const PROFILE_EXEMPLARS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "synthesis",
+        "resonance_trace",
         &[
             "Highlights from a book on cognitive science and hemispheric lateralization.",
             "Saved from podcast: personal knowledge management as building a second brain.",
@@ -160,7 +192,7 @@ const PROFILE_EXEMPLARS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "strategic",
+        "decision_trace",
         &[
             "Decision matrix for a launch. Columns: trust, cost, competitive position.",
             "Pricing analysis. Option A targets individuals, option B targets teams. Chose B with documented reasoning.",
@@ -195,7 +227,7 @@ const PROFILE_EXEMPLARS: &[(&str, &[&str])] = &[
 /// 1. Try keyword rules on entity name/type.
 /// 2. If no keyword match and `embedding_service` is provided, embed the
 ///    entity's occurrence context and compare to exemplar centroids.
-/// 3. Otherwise, fall back to `dialectical`.
+/// 3. Otherwise, fall back to `tension_trace`.
 pub fn assign_profiles(
     entities: &[Entity],
     contexts: &HashMap<String, String>,
@@ -340,9 +372,15 @@ mod tests {
     }
 
     #[test]
-    fn rule_assign_readwise_is_synthesis() {
+    fn rule_assign_readwise_is_resonance_trace() {
         let e = make_entity("readwise", EntityType::Folder);
-        assert_eq!(rule_assign(&e), Some("synthesis".to_string()));
+        assert_eq!(rule_assign(&e), Some("resonance_trace".to_string()));
+    }
+
+    #[test]
+    fn rule_assign_recipes_are_preference_evidence() {
+        let e = make_entity("recipes", EntityType::Folder);
+        assert_eq!(rule_assign(&e), Some("preference_evidence".to_string()));
     }
 
     #[test]
@@ -352,9 +390,9 @@ mod tests {
     }
 
     #[test]
-    fn rule_assign_enzyme_is_strategic() {
+    fn rule_assign_enzyme_is_decision_trace() {
         let e = make_entity("enzyme", EntityType::Tag);
-        assert_eq!(rule_assign(&e), Some("strategic".to_string()));
+        assert_eq!(rule_assign(&e), Some("decision_trace".to_string()));
     }
 
     #[test]
@@ -364,9 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn rule_assign_faith_is_dialectical() {
+    fn rule_assign_faith_is_tension_trace() {
         let e = make_entity("ethics", EntityType::Tag);
-        assert_eq!(rule_assign(&e), Some("dialectical".to_string()));
+        assert_eq!(rule_assign(&e), Some("tension_trace".to_string()));
     }
 
     #[test]
@@ -382,10 +420,10 @@ mod tests {
     }
 
     #[test]
-    fn assign_profiles_falls_back_to_dialectical() {
+    fn assign_profiles_falls_back_to_tension_trace() {
         let entities = vec![make_entity("bestill", EntityType::Tag)];
         let profiles = assign_profiles(&entities, &HashMap::new(), None);
-        assert_eq!(profiles.get("bestill").unwrap(), "dialectical");
+        assert_eq!(profiles.get("bestill").unwrap(), "tension_trace");
     }
 
     #[test]
@@ -397,7 +435,7 @@ mod tests {
         ];
         let profiles = assign_profiles(&entities, &HashMap::new(), None);
         assert_eq!(profiles.get("people").unwrap(), "relational");
-        assert_eq!(profiles.get("enzyme").unwrap(), "strategic");
-        assert_eq!(profiles.get("unknown").unwrap(), "dialectical");
+        assert_eq!(profiles.get("enzyme").unwrap(), "decision_trace");
+        assert_eq!(profiles.get("unknown").unwrap(), "tension_trace");
     }
 }

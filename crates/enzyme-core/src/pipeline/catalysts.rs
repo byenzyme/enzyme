@@ -917,6 +917,7 @@ impl<'a> CatalystPipeline<'a> {
                     entity_name,
                     context_samples,
                     num_catalysts,
+                    Some(profile),
                     era_context.as_ref(),
                 )
             } else {

@@ -54,12 +54,18 @@ pub fn build_shortlist_selection(db: &Database, limit: usize) -> Result<Material
 pub fn build_curated_selection(
     db: &Database,
     base_entities: Vec<Entity>,
+    profile_overrides: &HashMap<String, String>,
 ) -> Result<MaterializedSelection> {
     let expandable_folders = auto_expandable_folders(db, &base_entities)?;
     let final_entities = expand_with_folder_children(db, &base_entities, &expandable_folders)?;
     let entity_map = EntityMap::from_entities(db, &final_entities)?;
-    let entity_profiles =
+    let mut entity_profiles =
         profile_assignment::assign_profiles(&final_entities, &HashMap::new(), None);
+    for entity in &final_entities {
+        if let Some(profile) = profile_overrides.get(&entity.name) {
+            entity_profiles.insert(entity.name.clone(), profile.clone());
+        }
+    }
 
     Ok(MaterializedSelection {
         base_entities,
@@ -328,7 +334,7 @@ mod tests {
 
         let selected = vec![make_entity("people", EntityType::Folder, 20)];
 
-        let result = build_curated_selection(&db, selected).unwrap();
+        let result = build_curated_selection(&db, selected, &HashMap::new()).unwrap();
 
         assert_eq!(
             result.expandable_folders.get("people"),
@@ -338,6 +344,23 @@ mod tests {
             result.final_entities.iter().any(
                 |entity| entity.name == "alice smith" && entity.entity_type == EntityType::Link
             )
+        );
+    }
+
+    #[test]
+    fn curated_selection_preserves_explicit_profile_overrides() {
+        let db = test_db();
+        let selected = vec![make_entity("user-recipe-comment", EntityType::Folder, 20)];
+        let overrides = HashMap::from([(
+            "user-recipe-comment".to_string(),
+            "preference_evidence".to_string(),
+        )]);
+
+        let result = build_curated_selection(&db, selected, &overrides).unwrap();
+
+        assert_eq!(
+            result.entity_profiles.get("user-recipe-comment").unwrap(),
+            "preference_evidence"
         );
     }
 
@@ -370,7 +393,7 @@ mod tests {
             make_entity("enzyme", EntityType::Tag, 500),
             make_entity("people", EntityType::Folder, 50),
         ];
-        let result = build_curated_selection(&db, base).unwrap();
+        let result = build_curated_selection(&db, base, &HashMap::new()).unwrap();
 
         // people/ should be expandable
         assert!(
@@ -424,7 +447,7 @@ mod tests {
         }
 
         let base = vec![make_entity("people", EntityType::Folder, 50)];
-        let result = build_curated_selection(&db, base).unwrap();
+        let result = build_curated_selection(&db, base, &HashMap::new()).unwrap();
 
         let children = result.expandable_folders.get("people").unwrap();
         assert_eq!(
@@ -460,7 +483,7 @@ mod tests {
         }
 
         let base = vec![make_entity("inbox", EntityType::Folder, 100)];
-        let result = build_curated_selection(&db, base).unwrap();
+        let result = build_curated_selection(&db, base, &HashMap::new()).unwrap();
 
         assert!(
             !result.expandable_folders.contains_key("inbox"),

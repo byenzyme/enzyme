@@ -1,4 +1,4 @@
-/// Catalyst profile definitions — 6 core use cases ported from Python.
+/// Catalyst profile definitions — reusable retrieval lenses.
 ///
 /// Core Theory: Catalysts probe tensions obliquely — not asking about them directly,
 /// but creating conditions for insight. A tension might be:
@@ -117,6 +117,8 @@ pub struct CatalystFormat {
 // ---------------------------------------------------------------------------
 
 pub const CORE_CATALYST_GUIDANCE: &[&str] = &[
+    "Treat catalysts as semantic retrieval handles: each question should name a latent axis that can retrieve evidence the user may not know to search for.",
+    "Obliqueness is useful only when it improves retrieval coverage. Prefer concrete latent axes over repeated generic templates.",
     "Probe tensions obliquely—create conditions for insight rather than asking directly about the tension.",
     "Tensions manifest as: edges (knowing/not-knowing), held contradictions, aspirations (current/desired), resistances (engage/avoid).",
     "Quote or reference concrete language from the source material whenever possible.",
@@ -128,7 +130,7 @@ pub const CORE_CATALYST_GUIDANCE: &[&str] = &[
 // Defaults
 // ---------------------------------------------------------------------------
 
-pub const DEFAULT_PROFILE_KEY: &str = "dialectical";
+pub const DEFAULT_PROFILE_KEY: &str = "tension_trace";
 pub const DEFAULT_FORMAT_KEY: &str = "question";
 
 // ---------------------------------------------------------------------------
@@ -203,21 +205,58 @@ drawn from the excerpts.",
 pub const CATALYST_FORMATS: &[&CatalystFormat] = &[&FORMAT_QUESTION, &FORMAT_THESIS, &FORMAT_CLAIM];
 
 // ---------------------------------------------------------------------------
-// The 6 catalyst profiles
+// The catalyst retrieval lenses
 // ---------------------------------------------------------------------------
 
-pub const PROFILE_DIALECTICAL: CatalystProfile = CatalystProfile {
-    key: "dialectical",
-    display_name: "Dialectical",
-    description: "You surface intellectual tensions—ideas that conflict, frameworks that don't fit together, \
-conclusions that contradict evidence. Your catalysts make both poles vivid before touching \
-the middle, creating conditions for synthesis without forcing it. You help users figure out \
-what they actually think.",
+pub const PROFILE_PREFERENCE_EVIDENCE: CatalystProfile = CatalystProfile {
+    key: "preference_evidence",
+    display_name: "Preference Evidence",
+    description: "You create retrieval handles for stable preference signals across activity logs: what worked, \
+what failed, what the user repeated, adapted, avoided, reduced, intensified, or chose under constraint. \
+The domain can be cooking, design, product behavior, agent traces, or any log where taste and preference \
+are inferred from concrete actions.",
     guidance_lines: &[
+        "Surface likes, dislikes, thresholds, constraints, repeated choices, and worked/didn't-work signals.",
+        "Name retrieval axes a future assistant would need: occasions, constraints, substitutions, outcomes, tradeoffs, materials, styles, and repeated adjustments.",
+        "Prefer questions that retrieve non-obvious evidence across many small entries over questions that restate one entry.",
+        "Use metadata only as grounding; the catalyst should point to a latent preference pattern in the body and surrounding entries.",
+    ],
+    sample_prompts: &[
+        "Which {{domain_items}} became repeat-worthy after {{adjustment_or_constraint}} changed?",
+        "Where did {{preference_signal}} make something work despite {{constraint}}?",
+        "What pattern connects the moments where {{user_or_system}} reduced, omitted, or substituted {{attribute}}?",
+        "Which examples show {{style_or_choice}} as a stable preference rather than a one-off outcome?",
+    ],
+    footer: Some(
+        "The goal is preference recall: generate handles that help an agent retrieve evidence of taste, constraints, and repeated behavior.",
+    ),
+    detection_patterns: &[
+        "Activity logs with comments, outcomes, or preference signals",
+        "JSON traces describing user choices, edits, rankings, or approvals",
+        "Recipe notes, design decisions, product usage logs, saved preferences",
+        "Agent observations about what the user tends to prefer or reject",
+        "Folder patterns: preferences/, activity/, recipes/, design-decisions/, traces/, feedback/",
+    ],
+    presentation_guidance: &[
+        "Open with a concrete repeated signal: something they keep choosing, changing, or avoiding.",
+        "Distinguish stable preference from a one-off note.",
+        "Use the source domain's vocabulary instead of generic psychology.",
+        "Connect preference to context: occasion, constraint, material, tool, audience, or outcome.",
+        "End with the retrieval axis that would help find more evidence.",
+    ],
+};
+
+pub const PROFILE_TENSION_TRACE: CatalystProfile = CatalystProfile {
+    key: "tension_trace",
+    display_name: "Tension Trace",
+    description: "You create retrieval handles for costs, assumptions, contradictions, avoided tradeoffs, and live \
+frictions. This lens is useful for personal reflection, technical uncertainty, design disagreement, strategy, \
+and any material where the important retrieval target is the unresolved pressure rather than the surface topic.",
+    guidance_lines: &[
+        "Use cost, assumption, contradiction, and friction when those axes are present in the excerpts.",
         "Make both poles vivid and concrete before probing the middle ground.",
-        "Notice when the user needs to stay with what surfaced rather than resolve it.",
-        "Signal when exploration has looped—synthesis, action, or closure may be needed.",
-        "Honor the full lifecycle: some tensions need dwelling, some need integration, some need release.",
+        "Avoid applying the same 'what does X cost' grammar to every entity; vary the retrieval axis.",
+        "Notice when the user has been circling a tension and may need synthesis, action, or closure.",
     ],
     sample_prompts: &[
         "What does the commitment to {{position_a}} cost when {{position_b}} keeps surfacing?",
@@ -245,16 +284,15 @@ what they actually think.",
     ],
 };
 
-pub const PROFILE_SYNTHESIS: CatalystProfile = CatalystProfile {
-    key: "synthesis",
-    display_name: "Synthesis",
-    description: "You bridge imported content to personal thinking. When someone highlights a passage or \
-saves an article, the magic isn't in the capture—it's in the resonance. Your catalysts \
-surface where read material connects to what they've written and reflected on, turning \
-collected information into personal implication.",
+pub const PROFILE_RESONANCE_TRACE: CatalystProfile = CatalystProfile {
+    key: "resonance_trace",
+    display_name: "Resonance Trace",
+    description: "You create retrieval handles for reference material that keeps connecting to the user's own \
+thinking. Imported highlights, saved articles, research notes, design references, and inspiration boards are \
+valuable because they reveal what repeatedly draws attention and where it resonates with active work.",
     guidance_lines: &[
         "Connect imported content to the user's own writing and reflections—surface the resonance.",
-        "Probe for implication: not just 'this is interesting' but 'what does this mean for me?'",
+        "Probe for retrieval implication: not just 'this is interesting' but 'where else does this keep mattering?'",
         "Notice when a highlight challenges something the user has written elsewhere.",
         "Surface patterns across sources—what themes keep appearing in what they choose to save?",
     ],
@@ -359,18 +397,17 @@ might be avoiding.",
     ],
 };
 
-pub const PROFILE_STRATEGIC: CatalystProfile = CatalystProfile {
-    key: "strategic",
-    display_name: "Strategic",
-    description: "You surface the trade-offs being avoided and the bets being made (or not made). \
-Decisions accumulate context but resist closure. Your catalysts make the either/or \
-visible, probe what evidence would tip the balance, and notice when someone is \
-gathering information to avoid deciding.",
+pub const PROFILE_DECISION_TRACE: CatalystProfile = CatalystProfile {
+    key: "decision_trace",
+    display_name: "Decision Trace",
+    description: "You create retrieval handles for bets, options, reversals, rejected alternatives, assumptions, \
+constraints, and evidence thresholds. This lens works across technical decisions, product strategy, canvas \
+design choices, agent traces, architecture logs, and any domain where the artifact records why one path won.",
     guidance_lines: &[
         "Make trade-offs explicit—what does choosing A foreclose about B?",
         "Probe for what evidence would actually tip the decision.",
         "Notice when information-gathering has become decision-avoidance.",
-        "Rotate perspectives: customer, operator, investor, competitor—each sees different constraints.",
+        "Retrieve rejected alternatives, constraints, reversals, and decision criteria, not just the final choice.",
     ],
     sample_prompts: &[
         "What trade-off between {{option_a}} and {{option_b}} remains unnamed in {{decision}}?",
@@ -378,15 +415,14 @@ gathering information to avoid deciding.",
         "Where does the analysis of {{decision}} gather information that delays rather than clarifies?",
         "What constraint from {{stakeholder}} forecloses options not yet acknowledged?",
     ],
-    footer: Some(
-        "Strategic clarity often comes from naming the trade-off, not from more analysis.",
-    ),
+    footer: Some("Decision clarity often comes from naming the trade-off, not from more analysis."),
     detection_patterns: &[
         "Decision logs with options and criteria",
-        "Strategic planning with trade-off analysis",
+        "Technical, product, design, or strategic planning with trade-off analysis",
         "Notes weighing alternatives or scenarios",
         "Content about bets, risks, or resource allocation",
-        "Folder patterns: decisions/, strategy/, planning/, bets/",
+        "Agent traces explaining why a tool, architecture, canvas shape, or design choice was selected",
+        "Folder patterns: decisions/, strategy/, planning/, bets/, architecture/, design-decisions/",
     ],
     presentation_guidance: &[
         "Open with the trade-off that seems most alive—not the whole decision tree.",
@@ -437,21 +473,23 @@ something else—a piece of writing, a decision, a conversation.",
 
 /// All profiles in display order.
 pub const CATALYST_PROFILES: &[&CatalystProfile] = &[
-    &PROFILE_DIALECTICAL,
-    &PROFILE_SYNTHESIS,
+    &PROFILE_PREFERENCE_EVIDENCE,
+    &PROFILE_TENSION_TRACE,
+    &PROFILE_RESONANCE_TRACE,
     &PROFILE_RELATIONAL,
     &PROFILE_OPERATIONAL,
-    &PROFILE_STRATEGIC,
+    &PROFILE_DECISION_TRACE,
     &PROFILE_REFLECTIVE,
 ];
 
 /// Enabled profile keys in order.
 pub const ENABLED_PROFILE_KEYS: &[&str] = &[
-    "dialectical",
-    "synthesis",
+    "preference_evidence",
+    "tension_trace",
+    "resonance_trace",
     "relational",
     "operational",
-    "strategic",
+    "decision_trace",
     "reflective",
 ];
 
@@ -461,7 +499,12 @@ pub const ENABLED_PROFILE_KEYS: &[&str] = &[
 
 /// Look up a profile by key (case-insensitive).
 pub fn get_profile(key: &str) -> Option<&'static CatalystProfile> {
-    let lower = key.to_lowercase();
+    let lower = match key.to_lowercase().as_str() {
+        "dialectical" => "tension_trace".to_string(),
+        "synthesis" => "resonance_trace".to_string(),
+        "strategic" => "decision_trace".to_string(),
+        other => other.to_string(),
+    };
     CATALYST_PROFILES.iter().find(|p| p.key == lower).copied()
 }
 
@@ -480,7 +523,7 @@ pub fn full_guidance_lines(profile: &CatalystProfile) -> Vec<&'static str> {
 
 /// Look up presentation guidance for an entity based on its profile (explore register).
 ///
-/// Resolution order: entity-specific profile override → vault-wide default → dialectical.
+/// Resolution order: entity-specific profile override → vault-wide default → tension_trace.
 /// Only used in explore mode — continuity and reference have register-level guidance.
 pub fn presentation_guidance_for_entity(
     entity_name: &str,
@@ -519,9 +562,15 @@ mod tests {
 
     #[test]
     fn test_get_profile_found() {
+        let p = get_profile("tension_trace").unwrap();
+        assert_eq!(p.key, "tension_trace");
+        assert_eq!(p.display_name, "Tension Trace");
+    }
+
+    #[test]
+    fn test_get_profile_legacy_alias() {
         let p = get_profile("dialectical").unwrap();
-        assert_eq!(p.key, "dialectical");
-        assert_eq!(p.display_name, "Dialectical");
+        assert_eq!(p.key, "tension_trace");
     }
 
     #[test]
@@ -550,26 +599,26 @@ mod tests {
 
     #[test]
     fn test_full_guidance_lines() {
-        let lines = full_guidance_lines(&PROFILE_DIALECTICAL);
+        let lines = full_guidance_lines(&PROFILE_TENSION_TRACE);
         assert_eq!(
             lines.len(),
-            CORE_CATALYST_GUIDANCE.len() + PROFILE_DIALECTICAL.guidance_lines.len()
+            CORE_CATALYST_GUIDANCE.len() + PROFILE_TENSION_TRACE.guidance_lines.len()
         );
         // First lines should be core guidance
-        assert!(lines[0].starts_with("Probe tensions"));
+        assert!(lines[0].starts_with("Treat catalysts as semantic retrieval handles"));
         // Last lines should be profile-specific
         assert!(
             lines
                 .last()
                 .unwrap()
-                .starts_with("Honor the full lifecycle")
+                .starts_with("Notice when the user has been circling")
         );
     }
 
     #[test]
     fn test_all_profiles_present() {
-        assert_eq!(CATALYST_PROFILES.len(), 6);
-        assert_eq!(ENABLED_PROFILE_KEYS.len(), 6);
+        assert_eq!(CATALYST_PROFILES.len(), 7);
+        assert_eq!(ENABLED_PROFILE_KEYS.len(), 7);
         for key in ENABLED_PROFILE_KEYS {
             assert!(get_profile(key).is_some(), "profile '{}' not found", key);
         }

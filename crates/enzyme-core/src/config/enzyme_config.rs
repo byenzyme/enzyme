@@ -70,7 +70,7 @@ pub struct EnzymeConfig {
 ///
 /// Supports:
 /// - Simple string: `"#tag"` or `"folder:inbox"` or `"[[Note]]"`
-/// - Legacy YAML map with options: `"#tag": { profile: "strategic" }`
+/// - Legacy YAML map with options: `"#tag": { profile: "decision_trace" }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CatalyzedEntity {
@@ -150,6 +150,7 @@ pub struct ParsedEntity {
 pub struct EntityPreferences {
     pub entities: Vec<ParsedEntity>,
     pub excluded_names: Vec<ParsedEntity>,
+    pub entity_profiles: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -201,7 +202,7 @@ struct VaultTomlSection {
     #[serde(default)]
     min_top_catalysts: Option<usize>,
     #[serde(default)]
-    entities: Vec<String>,
+    entities: Vec<CatalyzedEntity>,
     #[serde(default)]
     targets: Vec<String>,
     /// Per-vault override for max embedding files. `0` = unlimited.
@@ -258,15 +259,7 @@ impl EnzymeConfig {
         };
 
         Self {
-            catalyzed_entities: vault
-                .map(|v| {
-                    v.entities
-                        .iter()
-                        .cloned()
-                        .map(CatalyzedEntity::Simple)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            catalyzed_entities: vault.map(|v| v.entities.clone()).unwrap_or_default(),
             trending: Some(trending),
             catalyst_format: global.defaults.catalyst_format.clone(),
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
@@ -323,8 +316,13 @@ impl EnzymeConfig {
                     }
                 }
                 CatalyzedEntity::WithOptions(map) => {
-                    for (raw, _options) in map {
+                    for (raw, options) in map {
                         if let Some(parsed) = parse_entity_ref(raw) {
+                            if let Some(profile) = &options.profile {
+                                prefs
+                                    .entity_profiles
+                                    .insert(parsed.name.clone(), profile.clone());
+                            }
                             prefs.entities.push(parsed);
                         }
                     }
@@ -425,11 +423,7 @@ impl EnzymeConfig {
         entry.excluded_links = self.excluded_links.clone();
         entry.excluded_folders = self.excluded_folders.clone();
         entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
-        entry.entities = self
-            .catalyzed_entities
-            .iter()
-            .filter_map(entity_ref_string)
-            .collect();
+        entry.entities = self.catalyzed_entities.clone();
         entry.targets = self.targets.clone();
         entry.max_embedding_files = self.max_embedding_files;
 
@@ -462,13 +456,6 @@ fn canonical_vault_key(vault_path: &Path) -> String {
         .unwrap_or_else(|_| vault_path.to_path_buf())
         .to_string_lossy()
         .to_string()
-}
-
-fn entity_ref_string(entity: &CatalyzedEntity) -> Option<String> {
-    match entity {
-        CatalyzedEntity::Simple(raw) => Some(raw.clone()),
-        CatalyzedEntity::WithOptions(map) => map.keys().next().cloned(),
-    }
 }
 
 fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
@@ -563,7 +550,7 @@ catalyzedEntities:
       children:
         - "[[Alice]]"
         - "[[Bob Chen]]"
-catalystProfile: dialectical
+catalystProfile: tension_trace
 excludedTags:
   - note
   - todo
@@ -583,6 +570,42 @@ excludedTags:
         };
         let prefs = merged.parse_preferences();
         assert_eq!(prefs.entities.len(), 4);
+        assert_eq!(prefs.entity_profiles.get("enzyme").unwrap(), "operational");
+        assert_eq!(prefs.entity_profiles.get("people").unwrap(), "relational");
+    }
+
+    #[test]
+    fn test_parse_global_toml_entity_profile_options() {
+        let toml = r##"
+[vaults."/tmp/recipe-vault"]
+entities = [
+  { "folder:user-recipe-comment" = { profile = "preference_evidence" } },
+  "folder:agent-observed-preference",
+  { "folder:preference-substitution" = { profile = "operational" } },
+]
+"##;
+
+        let global: GlobalTomlConfig = toml::from_str(toml).unwrap();
+        let config = EnzymeConfig::from_global_config(Path::new("/tmp/recipe-vault"), &global);
+        let prefs = config.parse_preferences();
+
+        assert_eq!(prefs.entities.len(), 3);
+        assert_eq!(
+            prefs.entity_profiles.get("user-recipe-comment").unwrap(),
+            "preference_evidence"
+        );
+        assert_eq!(
+            prefs
+                .entity_profiles
+                .get("preference-substitution")
+                .unwrap(),
+            "operational"
+        );
+        assert!(
+            !prefs
+                .entity_profiles
+                .contains_key("agent-observed-preference")
+        );
     }
 
     #[test]

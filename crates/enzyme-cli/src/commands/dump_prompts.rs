@@ -9,6 +9,7 @@ use enzyme_core::db::Database;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
 use enzyme_core::pipeline::catalysts::{CatalystConfig, CatalystPipeline, calculate_allocations};
 use enzyme_core::pipeline::context::ContextBuilder;
+use enzyme_core::pipeline::selection::SelectionPipeline;
 
 /// Dump catalyst prompts to JSONL for training data generation.
 pub async fn run_dump_prompts(
@@ -22,18 +23,11 @@ pub async fn run_dump_prompts(
 
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
 
-    // Get trending entities
-    let trending = enzyme_config.trending.clone().unwrap_or_default();
-    let entities = db.get_trending_entities(
-        trending.minimum_tags,
-        trending.minimum_links,
-        trending.minimum_folders,
-        trending.total_limit,
-    )?;
+    let selection = SelectionPipeline::new(&db, vault_path).run()?;
+    let entities = selection.entities;
 
     info!(
         entities = entities.len(),
-        limit = trending.total_limit,
         "selected entities for prompt dump"
     );
 
@@ -56,10 +50,8 @@ pub async fn run_dump_prompts(
     });
     let allocations = calculate_allocations(&entities, effective_min_top);
 
-    let empty_profiles = std::collections::HashMap::new();
-
     let cat_config = CatalystConfig {
-        entity_profiles: &empty_profiles,
+        entity_profiles: &selection.entity_profiles,
         catalysts_per_entity: 7,
         default_profile: DEFAULT_PROFILE_KEY,
         format_key: enzyme_config

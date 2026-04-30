@@ -140,7 +140,7 @@ entity relates to the broader landscape of inquiry.\n\n\
     prompt
 }
 
-/// Build the `<catalyst_profiles>` section listing all 6 profiles.
+/// Build the `<catalyst_profiles>` section listing all enabled profiles.
 fn build_profiles_section() -> String {
     let mut lines: Vec<String> = vec!["<catalyst_profiles>".into(), String::new()];
 
@@ -414,9 +414,21 @@ pub fn build_local_user_prompt(
     entity_name: &str,
     context_samples: &[String],
     num_catalysts: usize,
+    profile: Option<&CatalystProfile>,
     era_context: Option<&EraContext>,
 ) -> String {
     let mut prompt = String::new();
+
+    if let Some(profile) = profile {
+        let guidance = full_guidance_lines(profile).join("\n- ");
+        prompt.push_str(&format!(
+            "SELECTED PROFILE: {} (`{}`)\n\
+             Apply this optional profile as the generation lens.\n\
+             {}\n\
+             Guidance:\n- {}\n\n",
+            profile.display_name, profile.key, profile.description, guidance
+        ));
+    }
 
     // Context section
     if let Some(ec) = era_context {
@@ -801,7 +813,7 @@ fn generate_fallback_topic(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::catalyst_profiles::{PROFILE_DIALECTICAL, PROFILE_OPERATIONAL};
+    use crate::llm::catalyst_profiles::{PROFILE_OPERATIONAL, PROFILE_TENSION_TRACE};
 
     #[test]
     fn test_parse_object_format() {
@@ -845,7 +857,8 @@ mod tests {
         let prompt = build_system_prompt(None, None);
         assert!(prompt.contains("single sentence questions"));
         assert!(prompt.contains("<catalyst_profiles>"));
-        assert!(prompt.contains("Dialectical"));
+        assert!(prompt.contains("Tension Trace"));
+        assert!(prompt.contains("Preference Evidence"));
         assert!(prompt.contains("Reflective"));
         assert!(prompt.contains("</catalyst_profiles>"));
     }
@@ -872,15 +885,26 @@ mod tests {
             "enzyme",
             &samples,
             3,
-            &PROFILE_DIALECTICAL,
+            &PROFILE_TENSION_TRACE,
             "question",
             None,
         );
-        assert!(prompt.contains("SELECTED PROFILE: Dialectical"));
+        assert!(prompt.contains("SELECTED PROFILE: Tension Trace"));
         assert!(prompt.contains("<vault_context>"));
         assert!(prompt.contains("Focus entity: enzyme"));
         assert!(prompt.contains("probe AROUND the grounded meaning"));
         assert!(prompt.contains("\"catalysts\""));
+    }
+
+    #[test]
+    fn test_build_local_user_prompt_includes_optional_profile() {
+        let samples = vec!["excerpt one".into()];
+        let prompt =
+            build_local_user_prompt("recipes", &samples, 3, Some(&PROFILE_OPERATIONAL), None);
+
+        assert!(prompt.contains("SELECTED PROFILE: Operational"));
+        assert!(prompt.contains("`operational`"));
+        assert!(prompt.contains("Focus entity: recipes"));
     }
 
     #[test]
