@@ -64,8 +64,7 @@ For broad exploration, use petri plus 1-2 catalyze searches, then open with one 
 For search results, do not lead with metadata. Notice tensions, repeated words, time gaps, or changes in framing across results. End with one concrete next direction, not a generic invitation.
 <!-- enzyme:end -->"#;
 
-/// Context files checked in priority order. Matches Hermes, Claude Code,
-/// and Cursor discovery — first existing file wins.
+/// Context files checked for existing Enzyme sections.
 const CONTEXT_FILES: &[&str] = &[
     ".hermes.md",
     "HERMES.md",
@@ -78,8 +77,7 @@ const CONTEXT_FILES: &[&str] = &[
 
 /// Find the best context file to write to:
 /// 1. If any file already contains the enzyme marker, return it (update in place).
-/// 2. Otherwise return the first file that exists (append to it).
-/// 3. If none exist, default to CLAUDE.md.
+/// 2. Otherwise use AGENTS.md so Codex sees the instructions by default.
 fn find_context_file(vault_path: &Path) -> std::path::PathBuf {
     // First pass: file that already has our marker
     for name in CONTEXT_FILES {
@@ -92,15 +90,42 @@ fn find_context_file(vault_path: &Path) -> std::path::PathBuf {
             }
         }
     }
-    // Second pass: first existing file
-    for name in CONTEXT_FILES {
-        let path = vault_path.join(name);
-        if path.exists() {
-            return path;
-        }
-    }
     // Default
-    vault_path.join("CLAUDE.md")
+    vault_path.join("AGENTS.md")
+}
+
+/// Claude Code reads CLAUDE.md, not AGENTS.md. When AGENTS.md is the canonical
+/// instruction file, keep Claude wired to the same content through an import.
+fn ensure_claude_import(vault_path: &Path, target_path: &Path) -> Result<()> {
+    let Some(file_name) = target_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    if file_name != "AGENTS.md" && file_name != "agents.md" {
+        return Ok(());
+    }
+
+    let claude_path = vault_path.join("CLAUDE.md");
+    let import_line = format!("@{file_name}");
+
+    if claude_path.exists() {
+        let content = fs::read_to_string(&claude_path)
+            .with_context(|| format!("failed to read {}", claude_path.display()))?;
+        if content.lines().any(|line| line.trim() == import_line) {
+            return Ok(());
+        }
+        let new_content = if content.trim().is_empty() {
+            format!("{import_line}\n")
+        } else {
+            format!("{import_line}\n\n{}", content.trim_start())
+        };
+        fs::write(&claude_path, new_content)
+            .with_context(|| format!("failed to write {}", claude_path.display()))?;
+    } else {
+        fs::write(&claude_path, format!("{import_line}\n"))
+            .with_context(|| format!("failed to write {}", claude_path.display()))?;
+    }
+
+    Ok(())
 }
 
 pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
@@ -128,6 +153,8 @@ pub fn generate_claude_md(vault_path: &Path) -> Result<()> {
     fs::write(&target_path, new_content)
         .with_context(|| format!("failed to write {}", target_path.display()))?;
 
+    ensure_claude_import(vault_path, &target_path)?;
+
     Ok(())
 }
 
@@ -137,28 +164,34 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn creates_claude_md_when_none_exists() {
+    fn creates_agents_md_when_none_exists() {
         let dir = TempDir::new().unwrap();
         generate_claude_md(dir.path()).unwrap();
 
-        let content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        let content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
         assert!(content.starts_with(MARKER_START));
         assert!(content.ends_with(MARKER_END));
         assert!(content.contains("enzyme petri"));
+
+        let claude_content = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(claude_content, "@AGENTS.md\n");
     }
 
     #[test]
-    fn appends_to_existing_claude_md() {
+    fn writes_agents_and_imports_from_existing_claude_md() {
         let dir = TempDir::new().unwrap();
         let claude_md = dir.path().join("CLAUDE.md");
         fs::write(&claude_md, "# My Vault\n\nExisting instructions here.\n").unwrap();
 
         generate_claude_md(dir.path()).unwrap();
 
-        let content = fs::read_to_string(&claude_md).unwrap();
-        assert!(content.starts_with("# My Vault"));
-        assert!(content.contains(MARKER_START));
-        assert!(content.contains("enzyme petri"));
+        let agents_content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(agents_content.starts_with(MARKER_START));
+        assert!(agents_content.contains("enzyme petri"));
+
+        let claude_content = fs::read_to_string(&claude_md).unwrap();
+        assert!(claude_content.starts_with("@AGENTS.md"));
+        assert!(claude_content.contains("# My Vault"));
     }
 
     #[test]
@@ -196,9 +229,10 @@ mod tests {
         let agents_content = fs::read_to_string(&agents_md).unwrap();
         assert!(agents_content.contains(MARKER_START));
         assert!(agents_content.contains("enzyme petri"));
-        // CLAUDE.md should be untouched
+        // CLAUDE.md should import AGENTS.md but keep its existing content.
         let claude_content = fs::read_to_string(&claude_md).unwrap();
-        assert!(!claude_content.contains(MARKER_START));
+        assert!(claude_content.starts_with("@AGENTS.md"));
+        assert!(claude_content.contains("# Claude"));
     }
 
     #[test]
@@ -206,11 +240,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         generate_claude_md(dir.path()).unwrap();
-        let first = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        let first = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        let first_claude = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
 
         generate_claude_md(dir.path()).unwrap();
-        let second = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        let second = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        let second_claude = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
 
         assert_eq!(first, second);
+        assert_eq!(first_claude, second_claude);
     }
 }
