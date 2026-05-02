@@ -108,6 +108,18 @@ impl StalenessResult {
 /// All stale entities are collected (not short-circuited) so callers can decide
 /// between a partial refresh (few entities) and a full refresh (many entities).
 pub fn check_catalyst_staleness(db: &Database, vault_path: &Path) -> Result<StalenessResult> {
+    check_catalyst_staleness_for_entities(db, vault_path, None)
+}
+
+/// Check catalyst staleness against an optional current entity set.
+///
+/// Supplying current entity names lets refresh catch newly selected entities
+/// that are not present in the previous bookkeeping snapshot yet.
+pub fn check_catalyst_staleness_for_entities(
+    db: &Database,
+    vault_path: &Path,
+    current_entity_names: Option<&HashSet<String>>,
+) -> Result<StalenessResult> {
     // --- Check 0: Do catalysts exist at all? ---
     let latest_ts = db.get_latest_catalyst_timestamp()?;
     if latest_ts.is_none() {
@@ -157,6 +169,25 @@ pub fn check_catalyst_staleness(db: &Database, vault_path: &Path) -> Result<Stal
                 stale_entities.push(StaleEntity {
                     name: entity_name.clone(),
                     delta: delta.max(usize::from(effective_date_stale || missing_catalysts)),
+                });
+            }
+        }
+    }
+
+    if let Some(current_names) = current_entity_names {
+        for entity_name in current_names {
+            if stored_snapshots.contains_key(entity_name) {
+                continue;
+            }
+            let missing_catalysts = !catalyzed_entities.contains(entity_name);
+            if missing_catalysts {
+                info!(
+                    entity = entity_name.as_str(),
+                    "selected entity is missing from catalyst staleness snapshot"
+                );
+                stale_entities.push(StaleEntity {
+                    name: entity_name.clone(),
+                    delta: 1,
                 });
             }
         }
@@ -371,5 +402,82 @@ mod tests {
 
         let result = check_catalyst_staleness(&db, dir.path()).unwrap();
         assert!(matches!(result, StalenessResult::Fresh));
+    }
+
+    #[test]
+    fn stale_entity_names_switches_to_full_refresh_at_threshold() {
+        let one = StaleReason::EntitiesStale {
+            stale_entities: vec![StaleEntity {
+                name: "alpha".to_string(),
+                delta: 3,
+            }],
+        };
+        assert_eq!(one.stale_entity_names(), Some(vec!["alpha".to_string()]));
+
+        let threshold = StaleReason::EntitiesStale {
+            stale_entities: vec![
+                StaleEntity {
+                    name: "alpha".to_string(),
+                    delta: 3,
+                },
+                StaleEntity {
+                    name: "beta".to_string(),
+                    delta: 3,
+                },
+                StaleEntity {
+                    name: "gamma".to_string(),
+                    delta: 3,
+                },
+            ],
+        };
+        assert!(threshold.stale_entity_names().is_none());
+        assert!(threshold.needs_full_refresh());
+    }
+
+    #[test]
+    fn selected_entity_missing_from_snapshot_is_stale() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        db.execute_write(
+            "INSERT INTO entities (id, name, type, frequency, first_seen, last_seen)
+             VALUES (1, 'alpha', 'tag', 1, 1000, 1000),
+                    (2, 'beta', 'tag', 1, 1000, 1000)",
+            vec![],
+        )
+        .unwrap();
+        db.execute_write(
+            "INSERT INTO entity_occurrences
+             (entity_id, file_path, context, created_at, effective_date, date_source)
+             VALUES (1, 'alpha.md', 'old', 1000, 1000, 'filesystem'),
+                    (2, 'beta.md', 'new selected entity', 1000, 1000, 'filesystem')",
+            vec![],
+        )
+        .unwrap();
+        db.insert_catalysts(&[Catalyst {
+            id: "cat-alpha".to_string(),
+            text: "alpha catalyst".to_string(),
+            entity: "alpha".to_string(),
+            context: "default".to_string(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        store_staleness_bookkeeping(&db, dir.path(), &["alpha".to_string()]).unwrap();
+
+        let current = HashSet::from(["alpha".to_string(), "beta".to_string()]);
+        let result =
+            check_catalyst_staleness_for_entities(&db, dir.path(), Some(&current)).unwrap();
+
+        match result {
+            StalenessResult::Stale(StaleReason::EntitiesStale { stale_entities }) => {
+                assert!(
+                    stale_entities.iter().any(|entity| entity.name == "beta"),
+                    "new selected entity should be stale: {:?}",
+                    stale_entities
+                );
+            }
+            other => panic!("expected beta to be stale, got {:?}", other),
+        }
     }
 }

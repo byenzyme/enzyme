@@ -537,6 +537,21 @@ mod tests {
     }
 
     #[test]
+    fn effective_max_embedding_files_defaults_caps_and_unlimited() {
+        let mut config = EnzymeConfig::default();
+        assert_eq!(
+            config.effective_max_embedding_files(),
+            Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES)
+        );
+
+        config.max_embedding_files = Some(32);
+        assert_eq!(config.effective_max_embedding_files(), Some(32));
+
+        config.max_embedding_files = Some(0);
+        assert_eq!(config.effective_max_embedding_files(), None);
+    }
+
+    #[test]
     fn test_parse_legacy_yaml_config() {
         let yaml = r##"
 catalyzedEntities:

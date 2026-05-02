@@ -12,6 +12,7 @@ use enzyme_core::db::Database;
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
+use enzyme_core::models::Entity;
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
 };
@@ -21,7 +22,7 @@ use enzyme_core::pipeline::indexing::{IndexingPipeline, IndexingStats};
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::pipeline::staleness::{
-    StalenessResult, check_catalyst_staleness, load_stored_entity_names,
+    StaleReason, StalenessResult, check_catalyst_staleness_for_entities, load_stored_entity_names,
     store_staleness_bookkeeping, store_staleness_bookkeeping_partial,
 };
 
@@ -742,9 +743,12 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
     let collection_changed = local.collection_changed();
     let collection_change_reasons = local.change_reasons();
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+    let entity_names = selected_entity_names(&sel_result.entities);
 
     // Catalyst staleness controls only catalyst regeneration, not doc embedding.
-    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    let staleness = check_catalyst_staleness_for_entities(&db, vault_path, Some(&entity_names))?;
     let background_spawned = match &staleness {
         StalenessResult::Fresh => false,
         StalenessResult::Stale(reason) => {
@@ -826,6 +830,20 @@ fn has_index_changes(stats: &IndexingStats) -> bool {
     stats.files_new > 0 || stats.files_updated > 0 || stats.files_deleted > 0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingRefreshPlan {
+    Skip,
+    SinceIndexStart,
+}
+
+fn embedding_refresh_plan(has_index_changes: bool) -> EmbeddingRefreshPlan {
+    if has_index_changes {
+        EmbeddingRefreshPlan::SinceIndexStart
+    } else {
+        EmbeddingRefreshPlan::Skip
+    }
+}
+
 fn refresh_changed_doc_embeddings(
     db: &Database,
     service: Option<&EmbeddingService>,
@@ -839,10 +857,11 @@ fn refresh_changed_doc_embeddings(
     };
 
     let pipeline = EmbeddingPipeline::new(db, service);
-    let result = if has_index_changes {
-        pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {})
-    } else {
-        pipeline.run_with_limit(max_embed, |_| {})
+    let result = match embedding_refresh_plan(has_index_changes) {
+        EmbeddingRefreshPlan::Skip => return false,
+        EmbeddingRefreshPlan::SinceIndexStart => {
+            pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {})
+        }
     };
     match result {
         Ok(stats) => {
@@ -859,6 +878,21 @@ fn refresh_changed_doc_embeddings(
             debug!("fast refresh: embedding failed: {}", e);
             false
         }
+    }
+}
+
+fn selected_entity_names(entities: &[Entity]) -> std::collections::HashSet<String> {
+    entities.iter().map(|entity| entity.name.clone()).collect()
+}
+
+fn entities_for_catalyst_refresh(selected: &[Entity], reason: &StaleReason) -> Vec<Entity> {
+    match reason.stale_entity_names() {
+        Some(stale_names) => selected
+            .iter()
+            .filter(|entity| stale_names.contains(&entity.name))
+            .cloned()
+            .collect(),
+        None => selected.to_vec(),
     }
 }
 
@@ -929,7 +963,10 @@ async fn run_stale_catalyst_refresh(
         }
     }
 
-    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+    let entity_names = selected_entity_names(&sel_result.entities);
+    let staleness = check_catalyst_staleness_for_entities(&db, vault_path, Some(&entity_names))?;
     let reason = match staleness {
         StalenessResult::Fresh => {
             info!("catalyst refresh: already fresh, exiting");
@@ -938,28 +975,20 @@ async fn run_stale_catalyst_refresh(
         StalenessResult::Stale(reason) => reason,
     };
 
-    let selection = SelectionPipeline::new(&db, vault_path);
-    let sel_result = selection.run()?;
-
     let entities_to_process = match reason.stale_entity_names() {
         Some(stale_names) => {
             info!(
                 count = stale_names.len(),
                 "catalyst refresh: partial regeneration"
             );
-            sel_result
-                .entities
-                .iter()
-                .filter(|e| stale_names.contains(&e.name))
-                .cloned()
-                .collect::<Vec<_>>()
+            entities_for_catalyst_refresh(&sel_result.entities, &reason)
         }
         None => {
             info!(
                 count = sel_result.entities.len(),
                 "catalyst refresh: full regeneration"
             );
-            sel_result.entities.clone()
+            entities_for_catalyst_refresh(&sel_result.entities, &reason)
         }
     };
 
@@ -1232,8 +1261,11 @@ async fn run_refresh_interactive(
     let db = Database::open(&paths.vault_db)?;
     let old_entity_names = load_stored_entity_names(&db).ok();
     let _local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let selection = SelectionPipeline::new(&db, vault_path);
+    let sel_result = selection.run()?;
+    let entity_names = selected_entity_names(&sel_result.entities);
 
-    let staleness = check_catalyst_staleness(&db, vault_path)?;
+    let staleness = check_catalyst_staleness_for_entities(&db, vault_path, Some(&entity_names))?;
     match staleness {
         StalenessResult::Fresh => {
             debug!("catalysts are fresh after local refresh");
@@ -1387,5 +1419,98 @@ fn parse_entity_type(s: &str) -> enzyme_core::models::EntityType {
         "link" => enzyme_core::models::EntityType::Link,
         "folder" => enzyme_core::models::EntityType::Folder,
         _ => enzyme_core::models::EntityType::Tag,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use enzyme_core::models::{EntityTrends, EntityType};
+
+    fn entity(name: &str) -> Entity {
+        Entity {
+            id: None,
+            name: name.to_string(),
+            entity_type: EntityType::Tag,
+            frequency: 1,
+            first_seen: None,
+            last_seen: None,
+            trends: EntityTrends::default(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn embedding_refresh_skips_when_indexing_has_no_changes() {
+        assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Skip);
+        assert_eq!(
+            embedding_refresh_plan(true),
+            EmbeddingRefreshPlan::SinceIndexStart
+        );
+    }
+
+    #[test]
+    fn catalyst_refresh_processes_only_stale_entities_below_threshold() {
+        let selected = vec![entity("alpha"), entity("beta"), entity("gamma")];
+        let reason = StaleReason::EntitiesStale {
+            stale_entities: vec![enzyme_core::pipeline::staleness::StaleEntity {
+                name: "beta".to_string(),
+                delta: 3,
+            }],
+        };
+
+        let names: Vec<String> = entities_for_catalyst_refresh(&selected, &reason)
+            .into_iter()
+            .map(|entity| entity.name)
+            .collect();
+
+        assert_eq!(names, vec!["beta"]);
+    }
+
+    #[test]
+    fn catalyst_refresh_processes_all_entities_at_full_refresh_threshold() {
+        let selected = vec![entity("alpha"), entity("beta"), entity("gamma")];
+        let reason = StaleReason::EntitiesStale {
+            stale_entities: vec![
+                enzyme_core::pipeline::staleness::StaleEntity {
+                    name: "alpha".to_string(),
+                    delta: 3,
+                },
+                enzyme_core::pipeline::staleness::StaleEntity {
+                    name: "beta".to_string(),
+                    delta: 3,
+                },
+                enzyme_core::pipeline::staleness::StaleEntity {
+                    name: "gamma".to_string(),
+                    delta: 3,
+                },
+            ],
+        };
+
+        let names: Vec<String> = entities_for_catalyst_refresh(&selected, &reason)
+            .into_iter()
+            .map(|entity| entity.name)
+            .collect();
+
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn catalyst_refresh_processes_all_entities_for_config_or_empty_state() {
+        let selected = vec![entity("alpha"), entity("beta")];
+
+        let config_names: Vec<String> =
+            entities_for_catalyst_refresh(&selected, &StaleReason::ConfigChanged)
+                .into_iter()
+                .map(|entity| entity.name)
+                .collect();
+        assert_eq!(config_names, vec!["alpha", "beta"]);
+
+        let no_catalyst_names: Vec<String> =
+            entities_for_catalyst_refresh(&selected, &StaleReason::NoCatalysts)
+                .into_iter()
+                .map(|entity| entity.name)
+                .collect();
+        assert_eq!(no_catalyst_names, vec!["alpha", "beta"]);
     }
 }
