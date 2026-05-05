@@ -2,6 +2,8 @@
 
 Run this workflow when `enzyme.db` doesn't exist in the vault. After setup, this guide is no longer needed — the SKILL.md and persistent instructions handle everything.
 
+Resolve the vault root once and run this workflow from that directory. If the user passed a vault path, `cd` there first or export it as `ENZYME_VAULT_ROOT`; the persistent instruction writer uses that same root.
+
 ## 1. Install enzyme (if not on PATH)
 
 ```bash
@@ -62,7 +64,82 @@ enzyme init --quiet
 
 The `--quiet` output includes petri data under the `petri` key — don't run a separate petri call.
 
-## 5. Optional frontmatter backfill
+## 5. Write persistent instructions
+
+`enzyme init --quiet` does not write the persistent instructions block, so app-mediated setup must do it explicitly after init. Use `AGENTS.md` as the canonical instruction file, replacing only the marked Enzyme section if it already exists, and make `CLAUDE.md` import `@AGENTS.md` without duplicating the import:
+
+```bash
+VAULT_ROOT="${ENZYME_VAULT_ROOT:-$PWD}" python3 <<'PY'
+import os
+from pathlib import Path
+
+root = Path(os.environ["VAULT_ROOT"]).expanduser().resolve()
+agents = root / "AGENTS.md"
+claude = root / "CLAUDE.md"
+start = "<!-- enzyme:start -->"
+end = "<!-- enzyme:end -->"
+section = """<!-- enzyme:start -->
+## Enzyme CLI
+
+Use Enzyme for retrieving context from this vault. Run all `enzyme` commands from the vault root.
+
+### Working memory
+
+`enzyme petri` is working memory: it returns current entities and catalysts, which are thematic phrases from the vault.
+
+- For a specific user prompt, run `enzyme petri --query "user's question"`.
+- For a broad prompt or first orientation, run `enzyme petri`.
+- Treat nested children under a tag or folder as evidence inside that parent cluster by default.
+
+Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect to precomputed content that the user's raw words may not find.
+
+### Search
+
+- `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
+- `enzyme refresh --quiet` re-indexes changed content.
+- `enzyme apply ./target-dir` indexes external content using vault catalysts; then search it with `enzyme catalyze "query" --target ./target-dir`.
+- Use `grep` for exact names, `#tags`, `[[wikilinks]]`, and literal text.
+- Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
+
+### Presentation
+
+Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs, scores, or tool names to the user unless asked.
+
+Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
+
+For broad exploration, use petri plus 1-2 catalyze searches, then open with one specific question about what the user is doing across their notes. Do not present a topic list.
+
+For search results, do not lead with metadata. Notice tensions, repeated words, time gaps, or changes in framing across results. End with one concrete next direction, not a generic invitation.
+
+Presentation registers for `enzyme catalyze --register`:
+- `explore`: wonder, probe, notice patterns.
+- `continuity`: restore what the user knew, show trajectory, enable forward motion.
+- `reference`: surface what drew attention and connect imports to the user's own thinking.
+
+Follow any `presentation_guidance` returned by Enzyme when framing surfaced content.
+<!-- enzyme:end -->"""
+
+content = agents.read_text() if agents.exists() else ""
+if start in content and end in content:
+    before, rest = content.split(start, 1)
+    _, after = rest.split(end, 1)
+    agents.write_text(before + section + after)
+elif content.strip():
+    agents.write_text(content.rstrip() + "\n\n" + section + "\n")
+else:
+    agents.write_text(section + "\n")
+
+import_line = "@AGENTS.md"
+if claude.exists():
+    claude_content = claude.read_text()
+    if not any(line.strip() == import_line for line in claude_content.splitlines()):
+        claude.write_text(import_line + ("\n\n" + claude_content if claude_content else "\n"))
+else:
+    claude.write_text(import_line + "\n")
+PY
+```
+
+## 6. Optional frontmatter backfill
 
 If the audit found useful missing structure, propose a script and show exactly what it would change before running it. Good candidates:
 
@@ -72,21 +149,6 @@ If the audit found useful missing structure, propose a script and show exactly w
 
 Never backfill frontmatter during first init unless the user explicitly approves the script and scope.
 
-## 6. Write persistent instructions
-
-Add this to AGENTS.md (OpenClaw), CLAUDE.md (Claude Code), or equivalent — filling in the capture folder and conventions from step 3:
-
-```
-## Enzyme
-
-On session start, run `enzyme refresh --quiet`.
-On the user's first message, run `enzyme petri --query "their message"` for vault context.
-Use catalyst phrases from petri to compose `enzyme catalyze` queries.
-
-When a session produces a decision or insight worth preserving,
-write a note to [capture folder] using existing vault tags and wikilinks.
-```
-
 ## 7. Tell the user
 
-> Enzyme indexed N notes across M entities. [Top themes.] Session insights go to [folder].
+> Enzyme indexed N notes across M entities. Updated AGENTS.md and made CLAUDE.md import it. [Top themes.] Session insights go to [folder].
