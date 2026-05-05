@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
   "description": "Set up and keep Enzyme fresh for local knowledge vaults",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/jshph"
@@ -11,7 +11,6 @@
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Enzyme",
     "shortDescription": "Set up semantic memory for your vault",
