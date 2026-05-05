@@ -147,11 +147,11 @@ enum Commands {
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
-    /// Quick vault scan — extract entities without initializing
+    /// Scan vault structure and suggest config without initializing
     Scan {
-        /// Output a one-line guide string instead of JSON
+        /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
         #[arg(long)]
-        guide: bool,
+        write_config: bool,
     },
 
     /// Start the HTTP API server for the explore UI
@@ -397,8 +397,8 @@ async fn main() -> Result<()> {
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
         }
-        Commands::Scan { guide } => {
-            commands::scan::run_scan(&vault_path, guide)?;
+        Commands::Scan { write_config } => {
+            commands::scan::run_scan(&vault_path, write_config)?;
         }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;

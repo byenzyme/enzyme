@@ -9,14 +9,18 @@ import os
 import subprocess
 
 
-def _ensure_initialized(timeout: int = 120) -> None:
-    """Run enzyme init if the vault has no index yet."""
-    if not os.path.exists(os.path.join(".enzyme", "enzyme.db")):
-        subprocess.run(
-            ["enzyme", "init"],
-            capture_output=True,
-            timeout=timeout,
-        )
+def _vault_is_initialized() -> bool:
+    """Check if the current directory has an enzyme index."""
+    return os.path.exists(os.path.join(".enzyme", "enzyme.db"))
+
+
+def _not_initialized_error() -> str:
+    return json.dumps(
+        {
+            "error": "enzyme vault is not initialized",
+            "next": "Run `enzyme scan` to review suggested entities, `enzyme scan --write-config` if the config should be created, then explicitly run `enzyme init`.",
+        }
+    )
 
 
 def _run_enzyme(args: list[str], timeout: int = 30) -> str:
@@ -41,7 +45,8 @@ def _run_enzyme(args: list[str], timeout: int = 30) -> str:
 
 
 def handle_petri(args: dict, **kwargs) -> str:
-    _ensure_initialized()
+    if not _vault_is_initialized():
+        return _not_initialized_error()
     cmd = ["petri", "-n", str(args.get("top", 10))]
     query = args.get("query")
     if query:
@@ -50,7 +55,8 @@ def handle_petri(args: dict, **kwargs) -> str:
 
 
 def handle_catalyze(args: dict, **kwargs) -> str:
-    _ensure_initialized()
+    if not _vault_is_initialized():
+        return _not_initialized_error()
     query = args.get("query", "")
     cmd = ["catalyze", query, "-n", str(args.get("limit", 10))]
     register = args.get("register", "explore")
@@ -61,6 +67,13 @@ def handle_catalyze(args: dict, **kwargs) -> str:
 
 def handle_refresh(args: dict, **kwargs) -> str:
     cmd = ["refresh", "--quiet"]
+    return _run_enzyme(cmd, timeout=120)
+
+
+def handle_scan(args: dict, **kwargs) -> str:
+    cmd = ["scan"]
+    if args.get("write_config", False):
+        cmd.append("--write-config")
     return _run_enzyme(cmd, timeout=120)
 
 

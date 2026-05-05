@@ -60,18 +60,13 @@ def _context_file_has_enzyme() -> bool:
 
 
 def on_session_start(**kwargs) -> None:
-    """Bootstrap enzyme and ensure the vault is indexed.
-
-    Hermes blocks on this hook before the LLM loop starts.
-    """
+    """Bootstrap the bundled binary and refresh only already-initialized vaults."""
     ensure_enzyme_installed()
 
     if not is_enzyme_available():
         return
 
-    if not _vault_is_initialized():
-        subprocess.run(["enzyme", "init"], capture_output=True, timeout=120)
-    else:
+    if _vault_is_initialized():
         subprocess.run(["enzyme", "refresh", "--quiet"], capture_output=True, timeout=60)
 
 
@@ -87,6 +82,9 @@ def on_session_end(**kwargs) -> None:
 
     if not kwargs.get("completed", False):
         return  # interrupted or unknown — skip
+
+    if not _vault_is_initialized():
+        return
 
     # No-op for now: the SKILL.md instructions handle capture decisions.
     # This hook exists as a registration point for future session-end
@@ -121,7 +119,7 @@ content by concept, not keyword."""
 def pre_llm_call(**kwargs) -> dict:
     """First-session bridge: inject instructions until context file exists.
 
-    Once enzyme init writes instructions to CLAUDE.md / AGENTS.md / .hermes.md,
+    Once explicit setup writes instructions to CLAUDE.md / AGENTS.md / .hermes.md,
     the system prompt carries them natively and this hook becomes a no-op.
     """
     global _skip_injection
@@ -130,6 +128,9 @@ def pre_llm_call(**kwargs) -> dict:
         return {}
 
     if not is_enzyme_available():
+        return {}
+
+    if not _vault_is_initialized():
         return {}
 
     if _context_file_has_enzyme():

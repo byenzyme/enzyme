@@ -41,6 +41,14 @@ def register(ctx):
     )
 
     ctx.register_tool(
+        name="enzyme_scan",
+        toolset="enzyme",
+        schema=schemas.ENZYME_SCAN,
+        handler=tools.handle_scan,
+        check_fn=check,
+    )
+
+    ctx.register_tool(
         name="enzyme_status",
         toolset="enzyme",
         schema=schemas.ENZYME_STATUS,
