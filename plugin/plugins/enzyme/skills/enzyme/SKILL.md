@@ -30,7 +30,7 @@ If `enzyme.db` exists, the vault is initialized. Do not run the setup workflow.
 enzyme scan                 # Preview suggested entities and exclusions
 enzyme scan --write-config  # Persist scan suggestions after user confirmation
 enzyme init --quiet         # Initialize after confirmed config is persisted
-enzyme login --json --no-open # Agent-mediated login; show the URL to the user
+nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 & # Agent-mediated login; show the URL from the log
 enzyme status               # Check whether the vault is initialized
 ```
 
@@ -40,15 +40,22 @@ Read Enzyme JSON directly. Do not pipe through Python or jq unless the output is
 
 1. **Run scan preview.** Run `enzyme scan` before init. Treat it as a proposal, not truth. Do not run `enzyme scan --write-config` yet.
 
-2. **Handle login if needed.** If there is no API key in the environment and no `~/.enzyme/auth.json`, run `enzyme login --json --no-open`.
+2. **Handle login if needed.** If there is no API key in the environment and no `~/.enzyme/auth.json`, start login in the background:
+
+   ```bash
+   nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
+   echo "Started login PID $!"
+   sleep 3
+   cat /tmp/enzyme-login.log
+   ```
 
    Read JSONL events directly:
    - `already_logged_in`: continue setup.
-   - `device_authorization`: show the `verification_uri` to the user and keep the command running while they approve in the browser.
+   - `device_authorization`: show the `verification_uri` to the user, leave the background process running, and re-check `/tmp/enzyme-login.log` until it emits `success`, `expired`, or `error`.
    - `success`: continue setup.
    - `expired` or `error`: explain the failure and rerun login only if the user wants to try again.
 
-   Do not ask the user to paste API keys. Do not stop after showing the URL; keep the login process alive until it emits `success`, fails, or expires.
+   Do not ask the user to paste API keys. Do not stop after showing the URL; keep checking the background login log until it emits `success`, fails, or expires.
 
 3. **Audit independently.** Inspect the vault yourself:
    - Folders: count markdown files by top-level and second-level folder; note recent activity and obvious structural folders.

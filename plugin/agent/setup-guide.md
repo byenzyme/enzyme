@@ -14,7 +14,16 @@ Run `enzyme scan` first. This is a preview only; do not run `enzyme scan --write
 
 Then audit the vault independently: folder structure (by recency and file count), tag frequency (frontmatter and inline, last 90 days), wikilinks (hub pages, reference patterns), and any structural files (CLAUDE.md, AGENTS.md, README.md, MOC/Index files). Check file dates: frontmatter `created`/`date` field first, filename/path dates second, filesystem date as fallback.
 
-If there is no API key in the environment and no `~/.enzyme/auth.json`, run `enzyme login --json --no-open`. Read JSONL events directly: `already_logged_in` means continue; `device_authorization` means show the `verification_uri` to the user and keep the command running; `success` means continue; `expired` or `error` means explain the failure and retry only if the user asks. Do not ask the user to paste API keys.
+If there is no API key in the environment and no `~/.enzyme/auth.json`, start login in the background:
+
+```bash
+nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
+echo "Started login PID $!"
+sleep 3
+cat /tmp/enzyme-login.log
+```
+
+Read JSONL events from `/tmp/enzyme-login.log`: `already_logged_in` means continue; `device_authorization` means show the `verification_uri` to the user, leave the background process running, and re-check the log until it emits `success`, `expired`, or `error`; `success` means continue; `expired` or `error` means explain the failure and retry only if the user asks. Do not ask the user to paste API keys.
 
 ## 3. Detect existing conventions
 
