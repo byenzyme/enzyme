@@ -295,6 +295,13 @@ jobs:
             git push origin main
           fi
 
+          # The public release is created before this sync so assets are available.
+          # Move the public tag to the synced plugin commit so plugin installs pinned
+          # with `codex plugin marketplace add jshph/enzyme --ref "$tag"` see the
+          # same files as public main.
+          git tag -f "$tag" HEAD
+          git push --force origin "refs/tags/${tag}"
+
   sync-skill:
     needs: publish
     runs-on: ubuntu-latest
