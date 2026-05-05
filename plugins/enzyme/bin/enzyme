@@ -20,12 +20,12 @@ OS=$(uname -s)
 ARCH=$(uname -m)
 
 case "${OS}-${ARCH}" in
-    Darwin-arm64)   BINARY="enzyme-darwin-arm64" ;;
     Linux-x86_64)   BINARY="enzyme-linux-x86_64" ;;
     Linux-aarch64)  BINARY="enzyme-linux-arm64"  ;;
     *)
-        echo "enzyme: unsupported platform ${OS}-${ARCH}" >&2
-        echo "Install a standalone binary from https://github.com/jshph/enzyme/releases" >&2
+        echo "enzyme: this plugin bundles Linux binaries for the Claude desktop VM only." >&2
+        echo "For host CLI use, install via Homebrew or https://enzyme.garden/install.sh" >&2
+        echo "Standalone binaries: https://github.com/jshph/enzyme/releases" >&2
         exit 1
         ;;
 esac
