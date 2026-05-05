@@ -172,6 +172,7 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
         reset_vault_database(&paths)?;
     }
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
 
     // Run indexing
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
@@ -218,6 +219,7 @@ pub async fn run_init(
 
     // Open database
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
 
     // Resolve API config early (needed for both LLM selection and catalyst generation)
     let api_config = match resolve_llm_client().await {
@@ -721,6 +723,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
     }
 
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
     let collection_changed = local.collection_changed();
     let collection_change_reasons = local.change_reasons();
@@ -935,6 +938,7 @@ async fn run_stale_catalyst_refresh(
 ) -> Result<bool> {
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
 
     if let Some(mtc) = min_top_catalysts {
         let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
@@ -1227,6 +1231,7 @@ async fn run_refresh_interactive(
     }
 
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
     let old_entity_names = load_stored_entity_names(&db).ok();
     let _local = run_local_refresh_work(&db, vault_path, &paths)?;
     let selection = SelectionPipeline::new(&db, vault_path);

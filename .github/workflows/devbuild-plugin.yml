@@ -1,0 +1,66 @@
+name: Devbuild plugin binaries
+
+# Build Linux binaries on demand and stash them as artifacts so we can
+# manually push an updated plugin to jshph/enzyme without cutting a release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref (branch/sha/tag) to build"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            release_name: linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            release_name: linux-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Configure private git deps
+        run: git config --global url."https://x-access-token:${{ secrets.FLOWER_COMPUTERS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build UI
+        run: cd ui && npm ci && npm run build
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }} --bin enzyme
+
+      - name: Stage binary
+        run: |
+          mkdir -p out
+          cp target/${{ matrix.target }}/release/enzyme out/enzyme-${{ matrix.release_name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: enzyme-${{ matrix.release_name }}
+          path: out/enzyme-${{ matrix.release_name }}
+          retention-days: 7

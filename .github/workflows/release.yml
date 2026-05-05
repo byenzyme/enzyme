@@ -239,11 +239,10 @@ jobs:
         run: |
           mkdir -p plugin/plugins/enzyme/bin tmp-bin
 
-          # Extract platform binaries into a temp dir to avoid overwriting
-          # the committed wrapper script (plugin/plugins/enzyme/bin/enzyme)
-          tar xzf artifacts/enzyme-macos-arm64/enzyme-macos-arm64.tar.gz -C tmp-bin
-          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64
-
+          # Extract Linux platform binaries into a temp dir to avoid overwriting
+          # the committed wrapper script (plugin/plugins/enzyme/bin/enzyme).
+          # The Claude desktop plugin runs inside a Linux VM, so only Linux
+          # binaries ship here. Host CLI users install via Homebrew / install.sh.
           tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
           mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64
 
@@ -251,7 +250,7 @@ jobs:
           mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-x86_64
 
           # Ensure executability
-          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64 plugin/plugins/enzyme/bin/enzyme-linux-arm64 plugin/plugins/enzyme/bin/enzyme-linux-x86_64
+          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64 plugin/plugins/enzyme/bin/enzyme-linux-x86_64
 
       - name: Download server.json from release
         env:

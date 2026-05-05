@@ -82,6 +82,7 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
 
     let count = processed.len();
     let db = Database::open(&paths.vault_db)?;
+    let _sync_guard = paths.sync_on_drop();
     db.upsert_documents_batch(&processed)?;
 
     let entity_entries = IndexingPipeline::collect_entity_entries(&processed);

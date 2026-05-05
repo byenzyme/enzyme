@@ -8,14 +8,20 @@ use sha2::{Digest, Sha256};
 ///
 /// Respects `ENZYME_HOME` to override `~/.enzyme` for global state (auth, config).
 /// Vault data (DB, embeddings) lives at `<vault>/.enzyme/` on normal filesystems.
-/// On FUSE mounts (Cowork VMs), data is redirected to `/tmp/enzyme/` because
-/// FUSE doesn't support SQLite's `xDelete` VFS operation.
+/// On FUSE mounts (Cowork VMs), data is redirected to a session-private cache
+/// because FUSE doesn't support SQLite's `xDelete` VFS operation, and concurrent
+/// sessions run as different users so a shared `/tmp/enzyme/` collides on perms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnzymePaths {
     /// Global Enzyme home directory (`~/.enzyme` or `$ENZYME_HOME`).
     pub home: PathBuf,
-    /// Path to the vault's SQLite database.
+    /// Path to the SQLite database the binary reads/writes.
+    /// On FUSE this is the session-private mirror; otherwise the vault DB itself.
     pub vault_db: PathBuf,
+    /// On FUSE, the durable host-side DB path inside the FUSE-mounted vault.
+    /// `sync_in` copies this → `vault_db` on construction; `sync_back`
+    /// copies `vault_db` → here after a successful mutating command.
+    pub vault_db_origin: Option<PathBuf>,
 }
 
 impl EnzymePaths {
@@ -47,6 +53,7 @@ impl EnzymePaths {
         Ok(Self {
             home,
             vault_db: db_path,
+            vault_db_origin: None,
         })
     }
 
@@ -80,18 +87,122 @@ impl EnzymePaths {
             }
         };
 
-        let vault_db = if Self::is_fuse_mount(vault_path) {
-            let local = PathBuf::from("/tmp/enzyme");
+        let (vault_db, vault_db_origin) = if Self::is_fuse_mount(vault_path) {
+            let origin = vault_path.join(".enzyme").join("enzyme.db");
+            let mirror = Self::session_db_path(vault_path)?;
             tracing::info!(
-                "FUSE mount detected — redirecting DB to {}",
-                local.display()
+                "FUSE mount detected — mirroring DB at {} (origin: {})",
+                mirror.display(),
+                origin.display()
             );
-            local.join("enzyme.db")
+            (mirror, Some(origin))
         } else {
-            vault_path.join(".enzyme").join("enzyme.db")
+            (vault_path.join(".enzyme").join("enzyme.db"), None)
         };
 
-        Ok(Self { home, vault_db })
+        let paths = Self {
+            home,
+            vault_db,
+            vault_db_origin,
+        };
+        paths.sync_in()?;
+        Ok(paths)
+    }
+
+    /// Derive the session-private mirror DB path for a FUSE-mounted vault.
+    ///
+    /// Uses the per-user cache dir (resolves under `$HOME`, which Cowork
+    /// scopes per-session-user) so two sessions on the same VM don't collide.
+    /// Includes a hash of the canonical vault path so multiple vaults stay
+    /// separate within one session.
+    fn session_db_path(vault_path: &Path) -> Result<PathBuf> {
+        let canonical = vault_path
+            .canonicalize()
+            .unwrap_or_else(|_| vault_path.to_path_buf());
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        let hash = hasher.finalize();
+        let short: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+
+        let base = dirs::cache_dir()
+            .or_else(dirs::home_dir)
+            .context("could not determine cache or home directory for FUSE mirror")?;
+        Ok(base.join("enzyme").join(short).join("enzyme.db"))
+    }
+
+    /// Copy the durable origin DB into the session mirror if needed.
+    /// No-op when there is no origin (non-FUSE paths) or when the mirror
+    /// is already up-to-date.
+    pub fn sync_in(&self) -> Result<()> {
+        let Some(origin) = self.vault_db_origin.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = self.vault_db.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create mirror dir: {:?}", parent))?;
+        }
+        if !origin.exists() {
+            return Ok(());
+        }
+        let needs_copy = match (
+            std::fs::metadata(origin).and_then(|m| m.modified()),
+            std::fs::metadata(&self.vault_db).and_then(|m| m.modified()),
+        ) {
+            (Ok(o), Ok(m)) => o > m,
+            (Ok(_), Err(_)) => true,
+            _ => false,
+        };
+        if needs_copy {
+            tracing::info!(
+                "syncing FUSE-origin DB into session mirror ({} → {})",
+                origin.display(),
+                self.vault_db.display()
+            );
+            std::fs::copy(origin, &self.vault_db).with_context(|| {
+                format!(
+                    "failed to copy origin DB {} → {}",
+                    origin.display(),
+                    self.vault_db.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Return a guard that syncs the mirror DB back to the FUSE origin
+    /// when dropped. Place after the `Database::open` call site so the DB
+    /// connection drops first (locals drop in reverse declaration order),
+    /// flushing the WAL before the file is copied.
+    pub fn sync_on_drop(&self) -> SyncOnDrop<'_> {
+        SyncOnDrop { paths: self }
+    }
+
+    /// Copy the session mirror DB back to the durable origin.
+    /// Caller must ensure all SQLite connections are closed first.
+    /// No-op when there is no origin (non-FUSE paths).
+    pub fn sync_back(&self) -> Result<()> {
+        let Some(origin) = self.vault_db_origin.as_ref() else {
+            return Ok(());
+        };
+        if !self.vault_db.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = origin.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create origin dir: {:?}", parent))?;
+        }
+        tracing::info!(
+            "syncing session mirror back to FUSE origin ({} → {})",
+            self.vault_db.display(),
+            origin.display()
+        );
+        std::fs::copy(&self.vault_db, origin).with_context(|| {
+            format!(
+                "failed to copy mirror DB back to origin {}",
+                origin.display()
+            )
+        })?;
+        Ok(())
     }
 
     /// Resolve the Enzyme home directory.
@@ -171,6 +282,24 @@ impl EnzymePaths {
     }
 }
 
+/// RAII guard returned by [`EnzymePaths::sync_on_drop`].
+///
+/// On drop, calls `sync_back` and logs (does not panic) on failure.
+/// Best-effort: a partially-written origin is preferable to losing the
+/// command's work entirely, and the next session will overwrite whatever's
+/// there from its own mirror.
+pub struct SyncOnDrop<'a> {
+    paths: &'a EnzymePaths,
+}
+
+impl<'a> Drop for SyncOnDrop<'a> {
+    fn drop(&mut self) {
+        if let Err(e) = self.paths.sync_back() {
+            tracing::warn!("FUSE DB sync_back failed: {:#}", e);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +372,29 @@ mod tests {
         assert!(!EnzymePaths::is_fuse_mount(Path::new("/Users/alice/vault")));
         assert!(!EnzymePaths::is_fuse_mount(Path::new("/home/bob/obsidian")));
         assert!(!EnzymePaths::is_fuse_mount(Path::new("/mnt/data"))); // no /sessions/
+    }
+
+    #[test]
+    fn test_default_paths_no_origin() {
+        let vault = PathBuf::from("/Users/alice/vault");
+        let paths = EnzymePaths::with_overrides(&vault, None).unwrap();
+        assert!(paths.vault_db_origin.is_none());
+    }
+
+    #[test]
+    fn test_session_db_path_differs_per_vault() {
+        let a = EnzymePaths::session_db_path(Path::new("/sessions/x/mnt/vault-one")).unwrap();
+        let b = EnzymePaths::session_db_path(Path::new("/sessions/x/mnt/vault-two")).unwrap();
+        assert_ne!(a, b);
+        assert!(a.ends_with("enzyme.db"));
+    }
+
+    #[test]
+    fn test_sync_back_noop_without_origin() {
+        let vault = PathBuf::from("/Users/alice/vault");
+        let paths = EnzymePaths::with_overrides(&vault, None).unwrap();
+        // Non-FUSE: sync_back is a no-op even though vault_db doesn't exist.
+        paths.sync_back().expect("non-FUSE sync_back must be a no-op");
+        paths.sync_in().expect("non-FUSE sync_in must be a no-op");
     }
 }
