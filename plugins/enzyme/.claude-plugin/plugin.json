@@ -11,14 +11,5 @@
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
   "skills": "./skills/",
-  "hooks": "./.claude-plugin/hooks/hooks.json",
-  "interface": {
-    "displayName": "Enzyme",
-    "shortDescription": "Set up semantic memory for your vault",
-    "longDescription": "Enzyme scans a local Markdown or Obsidian vault, confirms the entities and exclusions to persist, initializes the local index, and keeps it fresh while the app runs.",
-    "developerName": "Joshua Pham",
-    "category": "Productivity",
-    "capabilities": ["Local indexing", "Lifecycle refresh", "Vault setup"],
-    "websiteURL": "https://enzyme.garden"
-  }
+  "hooks": "./.claude-plugin/hooks/hooks.json"
 }
