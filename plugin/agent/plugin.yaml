@@ -1,5 +1,5 @@
 name: enzyme
-version: "0.5.7"
+version: "0.5.8"
 description: "Vault intelligence — concept graph and semantic search for markdown"
 author: Joshua Pham
 provides_tools:
