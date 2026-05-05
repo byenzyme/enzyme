@@ -1,5 +1,13 @@
 {
   "name": "enzyme",
+  "owner": {
+    "name": "Joshua Pham",
+    "url": "https://github.com/jshph"
+  },
+  "metadata": {
+    "description": "Enzyme plugins for local markdown vault setup and indexing.",
+    "version": "0.5.8"
+  },
   "plugins": [
     {
       "name": "enzyme",
