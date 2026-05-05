@@ -497,8 +497,8 @@ pub struct CatalystConfig<'a> {
     pub default_profile: &'a str,
     /// Catalyst output format key (question, thesis, claim).
     pub format_key: &'a str,
-    /// Optional ENZYME_GUIDE content for vault context.
-    pub vault_guide: Option<&'a str>,
+    /// Optional prompt-level context for the broader vault.
+    pub prompt_context: Option<&'a str>,
     /// LLM model to use for catalyst generation.
     pub model: &'a str,
     /// Per-entity catalyst count overrides from volume-based allocation.
@@ -525,7 +525,7 @@ impl<'a> Default for CatalystConfig<'a> {
             catalysts_per_entity: 7,
             default_profile: DEFAULT_PROFILE_KEY,
             format_key: DEFAULT_FORMAT_KEY,
-            vault_guide: None,
+            prompt_context: None,
             model: DEFAULT_MODEL,
             per_entity_allocations: None,
             max_context_chars: 0,
@@ -834,7 +834,7 @@ impl<'a> CatalystPipeline<'a> {
             info!("using simplified system prompt for local model");
             LOCAL_SYSTEM_PROMPT.to_string()
         } else {
-            build_system_prompt(Some(config.format_key), config.vault_guide)
+            build_system_prompt(Some(config.format_key), config.prompt_context)
         };
 
         // Auto-apply context budget for local models if not explicitly set.

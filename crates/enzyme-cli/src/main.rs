@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -40,10 +39,6 @@ enum Commands {
         #[arg(long, hide = true)]
         detached: bool,
 
-        /// Vault guide content (or pass via stdin)
-        #[arg(long)]
-        guide: Option<String>,
-
         /// Suppress all output (for agent/programmatic use)
         #[arg(short, long)]
         quiet: bool,
@@ -67,10 +62,6 @@ enum Commands {
         /// Internal background worker mode
         #[arg(long, hide = true)]
         detached: bool,
-
-        /// Vault guide content (or pass via stdin)
-        #[arg(long)]
-        guide: Option<String>,
 
         /// Suppress all output (for agent/programmatic use)
         #[arg(short, long)]
@@ -203,10 +194,6 @@ enum Commands {
         #[arg(short, long, default_value = "prompts.jsonl")]
         output: PathBuf,
 
-        /// Vault guide content
-        #[arg(long)]
-        guide: Option<String>,
-
         /// Minimum catalysts for the largest entity (by volume)
         #[arg(long)]
         min_top_catalysts: Option<usize>,
@@ -245,23 +232,6 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
 
     // Fallback: stderr (non-vault commands, or if file creation failed).
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
-}
-
-/// Read vault guide from --guide flag or stdin (if piped).
-fn resolve_vault_guide(flag: Option<String>) -> Option<String> {
-    if let Some(guide) = flag {
-        if guide.is_empty() { None } else { Some(guide) }
-    } else if !atty::is(atty::Stream::Stdin) {
-        // stdin is piped — read it
-        let mut buf = String::new();
-        if std::io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
-            Some(buf)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
 }
 
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
@@ -321,7 +291,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init {
             detached,
-            guide,
             quiet,
             json_progress,
             min_top_catalysts,
@@ -330,13 +299,11 @@ async fn main() -> Result<()> {
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
             } else {
-                let vault_guide = resolve_vault_guide(guide);
                 let init_result = commands::init::run_init(
                     &vault_path,
                     detached,
                     quiet,
                     json_progress,
-                    vault_guide.as_deref(),
                     min_top_catalysts,
                 )
                 .await?;
@@ -351,16 +318,13 @@ async fn main() -> Result<()> {
         }
         Commands::Refresh {
             detached,
-            guide,
             quiet,
             min_top_catalysts,
         } => {
-            let vault_guide = resolve_vault_guide(guide);
             commands::init::run_refresh(
                 &vault_path,
                 detached,
                 quiet,
-                vault_guide.as_deref(),
                 min_top_catalysts,
             )
             .await?;
@@ -426,13 +390,11 @@ async fn main() -> Result<()> {
         }
         Commands::DumpPrompts {
             output,
-            guide,
             min_top_catalysts,
         } => {
             commands::dump_prompts::run_dump_prompts(
                 &vault_path,
                 &output,
-                guide,
                 min_top_catalysts,
             )
             .await?;

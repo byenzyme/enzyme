@@ -120,18 +120,11 @@ ENZYME_INIT = {
     "name": "enzyme_init",
     "description": (
         "Initialize enzyme on a vault. Run after scanning vault structure and "
-        "composing a guide (entity list). Takes 10-30s depending on vault size."
+        "persisting the reviewed config. Takes 10-30s depending on vault size."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "guide": {
-                "type": "string",
-                "description": (
-                    "Freeform guide string: entity names, folder: prefixes, "
-                    "excludedTags: block. Tells enzyme which entities to focus on."
-                ),
-            },
             "quiet": {
                 "type": "boolean",
                 "description": "Return compact JSON with petri data. Default: true.",

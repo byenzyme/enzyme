@@ -59,7 +59,12 @@ def on_session_start(**kwargs) -> None:
         return
 
     if _vault_is_initialized():
-        subprocess.run(["enzyme", "refresh", "--quiet"], capture_output=True, timeout=60)
+        subprocess.run(
+            ["enzyme", "refresh", "--quiet"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
 
 
 def on_session_end(**kwargs) -> None:
@@ -84,6 +89,7 @@ def on_session_end(**kwargs) -> None:
     subprocess.run(
         ["enzyme", "refresh", "--quiet"],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         timeout=30,
     )
 

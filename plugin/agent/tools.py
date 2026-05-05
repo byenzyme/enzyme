@@ -30,6 +30,7 @@ def _run_enzyme(args: list[str], timeout: int = 30) -> str:
             ["enzyme"] + args,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             timeout=timeout,
         )
         if result.returncode != 0:
@@ -85,7 +86,4 @@ def handle_init(args: dict, **kwargs) -> str:
     cmd = ["init"]
     if args.get("quiet", True):
         cmd.append("--quiet")
-    guide = args.get("guide")
-    if guide:
-        cmd.extend(["--guide", guide])
     return _run_enzyme(cmd, timeout=120)

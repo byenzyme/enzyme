@@ -15,7 +15,6 @@ use enzyme_core::pipeline::selection::SelectionPipeline;
 pub async fn run_dump_prompts(
     vault_path: &Path,
     output: &PathBuf,
-    guide: Option<String>,
     min_top_catalysts: Option<usize>,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
@@ -31,10 +30,7 @@ pub async fn run_dump_prompts(
         "selected entities for prompt dump"
     );
 
-    // Vault context
-    let vault_guide = if let Some(g) = guide {
-        Some(g)
-    } else {
+    let vault_context = {
         let ctx_builder = ContextBuilder::new(&db);
         match ctx_builder.build(&entities, 5, 300) {
             Ok(ctx) => Some(ctx),
@@ -58,7 +54,7 @@ pub async fn run_dump_prompts(
             .catalyst_format
             .as_deref()
             .unwrap_or(DEFAULT_FORMAT_KEY),
-        vault_guide: vault_guide.as_deref(),
+        prompt_context: vault_context.as_deref(),
         model: "dump",
         per_entity_allocations: Some(&allocations),
         max_context_chars: 0,

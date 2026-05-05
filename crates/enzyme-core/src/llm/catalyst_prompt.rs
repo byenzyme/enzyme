@@ -74,8 +74,8 @@ pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
 /// Includes:
 /// - Base catalyst generation instructions (format-aware)
 /// - All catalyst profiles (for prompt caching — actual profile selected per-entity)
-/// - Enzyme guide content for vault context (if available)
-pub fn build_system_prompt(format_key: Option<&str>, vault_guide: Option<&str>) -> String {
+/// - Additional prompt context for the vault (if available)
+pub fn build_system_prompt(format_key: Option<&str>, prompt_context: Option<&str>) -> String {
     let fmt = format_key
         .and_then(get_format)
         .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
@@ -125,15 +125,14 @@ Always respond with valid JSON that includes catalysts, topic names, and era lab
 
     let mut prompt = format!("{base}\n\n{profiles_section}");
 
-    // Optional vault overview
-    if let Some(guide) = vault_guide {
+    // Optional vault context
+    if let Some(context) = prompt_context {
         prompt.push_str(&format!(
-            "\n\n<vault_overview>\n\
-The following is the ENZYME_GUIDE for this vault, providing an overview of all tracked \
-entities and the vault's intellectual terrain. Use this to understand how the current \
-entity relates to the broader landscape of inquiry.\n\n\
-{guide}\n\
-</vault_overview>"
+            "\n\n<vault_context>\n\
+The following context summarizes tracked entities and the vault's current terrain. \
+Use this to understand how the current entity relates to the broader landscape of inquiry.\n\n\
+{context}\n\
+</vault_context>"
         ));
     }
 
@@ -871,11 +870,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_system_prompt_with_vault_guide() {
-        let prompt = build_system_prompt(None, Some("My vault guide content"));
-        assert!(prompt.contains("<vault_overview>"));
-        assert!(prompt.contains("My vault guide content"));
-        assert!(prompt.contains("</vault_overview>"));
+    fn test_build_system_prompt_with_prompt_context() {
+        let prompt = build_system_prompt(None, Some("My vault context content"));
+        assert!(prompt.contains("<vault_context>"));
+        assert!(prompt.contains("My vault context content"));
+        assert!(prompt.contains("</vault_context>"));
     }
 
     #[test]

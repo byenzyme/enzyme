@@ -158,7 +158,7 @@ impl InitResult {
 ///
 /// Used by `enzyme init --stage index` to populate the DB and show
 /// the user what enzyme found before committing to LLM + catalyst work.
-/// Desktop app uses quiet mode (JSON output) to populate its guide text box.
+/// Desktop app uses quiet mode (JSON output) to populate its setup text box.
 pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
     require_login(&paths.auth_token())?;
@@ -201,7 +201,6 @@ pub async fn run_init(
     _detached: bool,
     quiet: bool,
     json_progress: bool,
-    vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
@@ -300,9 +299,6 @@ pub async fn run_init(
         idx_display.finish();
         stats
     };
-
-    let vault_guide = vault_guide.map(|s| s.to_string());
-    let vault_guide = vault_guide.as_deref();
 
     // ── Start display for remaining pipeline ────────────────────────────
     let display = if json_progress {
@@ -427,20 +423,6 @@ pub async fn run_init(
         let cat_pipeline = CatalystPipeline::new(&db, &llm, service);
         let tx_cat = tx.clone();
 
-        // Merge user-provided vault guide with DB-built context
-        let effective_vault_guide = match (vault_guide, vault_context.as_deref()) {
-            (Some(guide), Some(context)) => {
-                // User guide takes priority, append DB context as supplementary
-                Some(format!(
-                    "{guide}\n\n<vault_context>\n{context}\n</vault_context>"
-                ))
-            }
-            (Some(guide), None) => Some(guide.to_string()),
-            (None, Some(context)) => Some(context.to_string()),
-            (None, None) => None,
-        };
-        let effective_vault_guide = effective_vault_guide.as_deref();
-
         let effective_min_top = min_top_catalysts.or_else(|| {
             enzyme_config
                 .trending
@@ -457,7 +439,7 @@ pub async fn run_init(
                 .catalyst_format
                 .as_deref()
                 .unwrap_or(DEFAULT_FORMAT_KEY),
-            vault_guide: effective_vault_guide,
+            prompt_context: vault_context.as_deref(),
             model: &resolved.model,
             per_entity_allocations: Some(&allocations),
             max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
@@ -697,7 +679,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
     drop(db);
 
-    run_stale_catalyst_refresh(vault_path, None, None).await?;
+    run_stale_catalyst_refresh(vault_path, None).await?;
     Ok(())
 }
 
@@ -710,7 +692,6 @@ pub async fn run_refresh(
     vault_path: &Path,
     detached: bool,
     quiet: bool,
-    vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
@@ -722,7 +703,7 @@ pub async fn run_refresh(
     if quiet {
         return run_refresh_fast(vault_path).await;
     }
-    run_refresh_interactive(vault_path, vault_guide, min_top_catalysts).await
+    run_refresh_interactive(vault_path, min_top_catalysts).await
 }
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
@@ -943,14 +924,13 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         }
     };
 
-    run_stale_catalyst_refresh(vault_path, None, None).await?;
+    run_stale_catalyst_refresh(vault_path, None).await?;
     // Lock released on drop
     Ok(())
 }
 
 async fn run_stale_catalyst_refresh(
     vault_path: &Path,
-    vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<bool> {
     let paths = EnzymePaths::new(vault_path)?;
@@ -1030,16 +1010,6 @@ async fn run_stale_catalyst_refresh(
         let ctx_builder = ContextBuilder::new(&db);
         ctx_builder.build(&entities_to_process, 5, 300).ok()
     };
-    let effective_vault_guide = match (vault_guide, vault_context.as_deref()) {
-        (Some(guide), Some(context)) => Some(format!(
-            "{guide}\n\n<vault_context>\n{context}\n</vault_context>"
-        )),
-        (Some(guide), None) => Some(guide.to_string()),
-        (None, Some(context)) => Some(context.to_string()),
-        (None, None) => None,
-    };
-    let effective_vault_guide = effective_vault_guide.as_deref();
-
     let effective_min_top = min_top_catalysts.or_else(|| {
         enzyme_config
             .trending
@@ -1056,7 +1026,7 @@ async fn run_stale_catalyst_refresh(
             .catalyst_format
             .as_deref()
             .unwrap_or(DEFAULT_FORMAT_KEY),
-        vault_guide: effective_vault_guide,
+        prompt_context: vault_context.as_deref(),
         model: &api_config.model,
         per_entity_allocations: Some(&allocations),
         max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
@@ -1240,7 +1210,6 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
 /// catalyst pipeline only when catalyst staleness says it is needed.
 async fn run_refresh_interactive(
     vault_path: &Path,
-    vault_guide: Option<&str>,
     min_top_catalysts: Option<usize>,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
@@ -1251,7 +1220,6 @@ async fn run_refresh_interactive(
             false,
             false,
             false,
-            vault_guide,
             min_top_catalysts,
         )
         .await?;
@@ -1278,7 +1246,7 @@ async fn run_refresh_interactive(
     }
     drop(db);
 
-    run_stale_catalyst_refresh(vault_path, vault_guide, min_top_catalysts).await?;
+    run_stale_catalyst_refresh(vault_path, min_top_catalysts).await?;
 
     let db = Database::open(&paths.vault_db)?;
     let entity_names = load_stored_entity_names(&db)?;
