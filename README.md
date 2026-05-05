@@ -30,7 +30,7 @@ On macOS you can also use Homebrew:
 brew install jshph/enzyme/enzyme-cli
 ```
 
-Then add the Claude Code plugin:
+App plugins are optional and installed separately inside Claude Code or Codex:
 
 ```bash
 claude plugin marketplace add jshph/enzyme
@@ -54,7 +54,7 @@ cd /path/to/your/vault    # any folder of markdown files
 enzyme init                # compiles concept graph — under 20s for 1k docs
 ```
 
-Inside Claude Code, invoke `/enzyme` to explore your vault by concept.
+Inside Claude Code or Codex, invoke `/enzyme` only for first-time setup. After setup, the generated AGENTS/CLAUDE instructions and Enzyme commands handle ordinary use.
 
 ## What it does
 

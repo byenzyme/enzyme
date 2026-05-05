@@ -1,14 +1,24 @@
 {
   "name": "enzyme",
-  "description": "A compile step for knowledge bases — gives your agent a concept graph of your content",
-  "version": "0.5.6",
+  "description": "Set up and keep Enzyme fresh for local knowledge vaults",
+  "version": "0.5.7",
   "author": {
-    "name": "Joshua Pham"
+    "name": "Joshua Pham",
+    "url": "https://github.com/jshph"
   },
   "homepage": "https://enzyme.garden",
   "repository": "https://github.com/jshph/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Enzyme",
+    "shortDescription": "Set up semantic memory for your vault",
+    "longDescription": "Enzyme scans a local Markdown or Obsidian vault, confirms the entities and exclusions to persist, initializes the local index, and keeps it fresh while the app runs.",
+    "developerName": "Joshua Pham",
+    "category": "Productivity",
+    "capabilities": ["Local indexing", "Lifecycle refresh", "Vault setup"],
+    "websiteURL": "https://enzyme.garden"
+  }
 }
