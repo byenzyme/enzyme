@@ -12,8 +12,6 @@ Most files in this repo are synced from [enzyme-rust](https://github.com/jshph/e
 | `plugin.yaml` | `plugin/agent/plugin.yaml` |
 | `*.py` | `plugin/agent/*.py` |
 | `install.sh` | `plugin/agent/install.sh` |
-| `references/*.md` | `plugin/agent/*.md` (petri-guide, search-guide) |
-| `scripts/setup.sh` | `plugin/agent/scripts/setup.sh` |
 | `README.md` | `plugin/agent/README.md` |
 
 **Files managed by CI only (not from plugin/agent/):**

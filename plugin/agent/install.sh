@@ -42,14 +42,22 @@ if [ -d "$tmpdir/lib" ]; then
     cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
 fi
 
-# Clear previous index data but preserve auth.
+# Clear previous data (models, indices) but preserve auth and config.
 if [ -f "$HOME/.enzyme/auth.json" ]; then
     cp "$HOME/.enzyme/auth.json" "$tmpdir/auth.json.bak"
 fi
+if [ -f "$HOME/.enzyme/config.toml" ]; then
+    cp "$HOME/.enzyme/config.toml" "$tmpdir/config.toml.bak"
+fi
 rm -rf "$HOME/.enzyme"
-if [ -f "$tmpdir/auth.json.bak" ]; then
+if [ -f "$tmpdir/auth.json.bak" ] || [ -f "$tmpdir/config.toml.bak" ]; then
     mkdir -p "$HOME/.enzyme"
+fi
+if [ -f "$tmpdir/auth.json.bak" ]; then
     mv "$tmpdir/auth.json.bak" "$HOME/.enzyme/auth.json"
+fi
+if [ -f "$tmpdir/config.toml.bak" ]; then
+    mv "$tmpdir/config.toml.bak" "$HOME/.enzyme/config.toml"
 fi
 
 # Clean up legacy enzyme-python installation
@@ -118,20 +126,17 @@ case ":$PATH:" in
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 
-echo ""
-echo "Next steps:"
-echo "  cd /path/to/vault && enzyme init    # initialize your vault"
-
-# Install Claude Code plugin if claude is available
-if command -v claude &>/dev/null; then
+# Prompt login if not already authenticated
+if [ ! -f "$HOME/.enzyme/auth.json" ]; then
     echo ""
-    echo "Installing Claude Code plugin..."
-    claude plugin marketplace add jshph/enzyme 2>/dev/null || true
-    claude plugin install enzyme 2>/dev/null || true
-    echo "Plugin installed. Use /enzyme in Claude Code to explore your vault."
-else
-    echo ""
-    echo "Add the Claude Code plugin:"
-    echo "  claude plugin marketplace add jshph/enzyme"
-    echo "  claude plugin install enzyme"
+    echo "Creating your Enzyme account..."
+    "${INSTALL_DIR}/enzyme" login || true
 fi
+
+echo ""
+echo "Next: cd into your content folder and run enzyme init."
+echo ""
+echo "  cd /path/to/your/vault"
+echo "  enzyme init"
+echo ""
+echo "App plugins for Claude Code and Codex are installed separately from inside those apps."

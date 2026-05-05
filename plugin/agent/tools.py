@@ -18,7 +18,7 @@ def _not_initialized_error() -> str:
     return json.dumps(
         {
             "error": "enzyme vault is not initialized",
-            "next": "Run `enzyme scan` to review suggested entities, `enzyme scan --write-config` if the config should be created, then explicitly run `enzyme init`.",
+            "next": "Run `enzyme scan`, audit the vault independently, confirm the final entity/exclusion list with the user, then run `enzyme scan --write-config` and `enzyme init`.",
         }
     )
 

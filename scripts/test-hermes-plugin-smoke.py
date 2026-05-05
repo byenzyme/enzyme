@@ -54,7 +54,6 @@ def assert_layout() -> None:
         "hooks.py",
         "schemas.py",
         "tools.py",
-        "scripts/setup.sh",
         "SKILL.md",
     ]
     for rel in required:

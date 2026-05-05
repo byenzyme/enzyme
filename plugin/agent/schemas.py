@@ -88,8 +88,10 @@ ENZYME_SCAN = {
     "description": (
         "Scan vault structure before initialization. Returns suggested config entities "
         "from folders, tags, and wikilinks without reading or creating the enzyme DB. "
-        "By default this is a preview only; write_config persists the suggestion only "
-        "when the vault has no configured entities yet."
+        "By default this is a preview only. Audit the vault independently and confirm "
+        "the final entity/exclusion list with the user before setting write_config. "
+        "write_config persists the suggestion only when the vault has no configured "
+        "entities yet."
     ),
     "parameters": {
         "type": "object",

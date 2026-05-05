@@ -247,8 +247,11 @@ jobs:
           tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
           mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64
 
+          tar xzf artifacts/enzyme-linux-x86_64/enzyme-linux-x86_64.tar.gz -C tmp-bin
+          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-x86_64
+
           # Ensure executability
-          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64 plugin/plugins/enzyme/bin/enzyme-linux-arm64
+          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-darwin-arm64 plugin/plugins/enzyme/bin/enzyme-linux-arm64 plugin/plugins/enzyme/bin/enzyme-linux-x86_64
 
       - name: Download server.json from release
         env:
@@ -315,13 +318,14 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
           cd skill-repo
 
-          mkdir -p bin references scripts tmp-bin
+          mkdir -p bin tmp-bin
 
           # Remove legacy enzyme/ subdirectory if present (flatten to repo root)
           rm -rf enzyme
 
           # Remove legacy model files
           rm -rf models
+          rm -rf references
           rm -f setup.py
 
           # Extract platform binaries
@@ -332,7 +336,7 @@ jobs:
           done
           rm -rf tmp-bin
 
-          # Sync agent plugin files (SKILL.md, Hermes adapter, guides, install script)
+          # Sync agent plugin files (SKILL.md, Hermes adapter, install script)
           cp ../plugin/agent/SKILL.md ./SKILL.md
           cp ../plugin/agent/plugin.yaml ./plugin.yaml
           cp ../plugin/agent/__init__.py ./__init__.py
@@ -341,9 +345,6 @@ jobs:
           cp ../plugin/agent/hooks.py ./hooks.py
           cp ../plugin/agent/install.sh ./install.sh
           cp ../plugin/agent/setup-guide.md ./setup-guide.md
-          cp ../plugin/agent/petri-guide.md ./references/petri-guide.md
-          cp ../plugin/agent/search-guide.md ./references/search-guide.md
-          cp ../plugin/agent/scripts/setup.sh ./scripts/setup.sh
           cp ../plugin/agent/README.md ./README.md
           cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
 

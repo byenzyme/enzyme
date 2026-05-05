@@ -42,7 +42,7 @@ if [ -d "$tmpdir/lib" ]; then
     cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
 fi
 
-# Clear previous data (models, indices) but preserve auth and config
+# Clear previous data (models, indices) but preserve auth and config.
 if [ -f "$HOME/.enzyme/auth.json" ]; then
     cp "$HOME/.enzyme/auth.json" "$tmpdir/auth.json.bak"
 fi
@@ -139,4 +139,4 @@ echo ""
 echo "  cd /path/to/your/vault"
 echo "  enzyme init"
 echo ""
-echo "Enzyme will scan your vault and show you what it finds before proceeding."
+echo "App plugins for Claude Code and Codex are installed separately from inside those apps."

@@ -5,9 +5,9 @@ description: >
   find latent patterns across notes. Use when the user wants to explore their
   thinking, draw connections, or search their vault by concept rather than keyword.
 license: MIT
-compatibility: Requires shell access (macOS arm64, Linux x86_64/arm64). Binary is bundled — run scripts/setup.sh if enzyme is not on PATH.
+compatibility: Requires shell access (macOS arm64, Linux x86_64/arm64). Install the enzyme CLI if it is not on PATH.
 allowed-tools: Bash Read Glob Grep
-metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/jshph/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.4.5", "homepage": "https://enzyme.garden" }
+metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/jshph/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.5.7", "homepage": "https://enzyme.garden" }
 ---
 
 # Enzyme
@@ -99,6 +99,6 @@ If a previous decision is superseded, write a new note referencing the old one r
 
 ## Presentation
 
-Follow [petri-guide.md](references/petri-guide.md) for vault overviews and [search-guide.md](references/search-guide.md) for search results. Lead with the user's own words.
+Lead with the user's own words from matched excerpts. For vault overviews, name something the user is doing across the vault, then ground it with concrete source breadcrumbs. For search results, use any `presentation_guidance` returned in JSON, notice tensions across results, and suggest specific next searches using catalyst language.
 
 Never expose tool names to the user. Never open with energy assessments of the vault.

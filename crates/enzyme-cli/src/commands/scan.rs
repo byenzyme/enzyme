@@ -58,7 +58,11 @@ fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
     let discovery = FileDiscovery::new(vault_path.to_path_buf());
     let paths = discovery.discover()?;
     let processor = DocumentProcessor::new(vault_path.to_path_buf());
-    Ok(processor.process_all(&paths).into_iter().flatten().collect())
+    Ok(processor
+        .process_all(&paths)
+        .into_iter()
+        .flatten()
+        .collect())
 }
 
 fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Result<ScanSuggestion> {
@@ -118,9 +122,7 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
 fn suggested_folders(folder_counts: &HashMap<String, usize>) -> Vec<String> {
     sorted_counts(folder_counts)
         .into_iter()
-        .filter(|(folder, _)| {
-            !is_structural_folder(folder) && should_include_folder(folder)
-        })
+        .filter(|(folder, _)| !is_structural_folder(folder) && should_include_folder(folder))
         .map(|(folder, _)| folder)
         .collect()
 }
@@ -132,10 +134,7 @@ fn should_include_folder(folder: &str) -> bool {
     }
 
     let parent = folder.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-    let parent_name = parent
-        .rsplit('/')
-        .next()
-        .unwrap_or("");
+    let parent_name = parent.rsplit('/').next().unwrap_or("");
     if matches!(parent_name, "docs" | "projects" | "clients" | "work") {
         return true;
     }
@@ -144,7 +143,10 @@ fn should_include_folder(folder: &str) -> bool {
 }
 
 fn sorted_counts(map: &HashMap<String, usize>) -> Vec<(String, usize)> {
-    let mut entries: Vec<_> = map.iter().map(|(name, count)| (name.clone(), *count)).collect();
+    let mut entries: Vec<_> = map
+        .iter()
+        .map(|(name, count)| (name.clone(), *count))
+        .collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     entries
 }
@@ -169,7 +171,10 @@ fn default_excluded_folders() -> Vec<String> {
 }
 
 fn is_structural_folder(folder: &str) -> bool {
-    let name = folder.rsplit('/').next().unwrap_or(folder);
+    folder.split('/').any(is_structural_folder_component)
+}
+
+fn is_structural_folder_component(name: &str) -> bool {
     matches!(
         name,
         ".claude"
@@ -186,4 +191,31 @@ fn is_structural_folder(folder: &str) -> bool {
 
 fn is_structural_tag(tag: &str) -> bool {
     matches!(tag, "todo" | "template" | "archived" | "archive")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_folder_excludes_descendants() {
+        assert!(is_structural_folder(".claude"));
+        assert!(is_structural_folder(".claude/commands"));
+        assert!(is_structural_folder("projects/.obsidian/cache"));
+        assert!(is_structural_folder("work/templates/client"));
+        assert!(!is_structural_folder("people"));
+        assert!(!is_structural_folder("projects/client-a"));
+    }
+
+    #[test]
+    fn suggested_folders_filters_structural_descendants() {
+        let mut counts = HashMap::new();
+        counts.insert("emails".to_string(), 5);
+        counts.insert(".claude/commands".to_string(), 10);
+        counts.insert("people".to_string(), 3);
+
+        let folders = suggested_folders(&counts);
+
+        assert_eq!(folders, vec!["emails".to_string(), "people".to_string()]);
+    }
 }

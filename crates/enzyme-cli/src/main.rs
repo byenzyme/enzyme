@@ -132,7 +132,15 @@ enum Commands {
     Status,
 
     /// Sign in to enzyme.garden
-    Login,
+    Login {
+        /// Do not try to open a browser automatically
+        #[arg(long)]
+        no_open: bool,
+
+        /// Emit JSONL events for agent/app mediated login
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Sign out of enzyme.garden
     Logout,
@@ -281,9 +289,9 @@ async fn main() -> Result<()> {
             init_tracing(cli.verbose, None);
             return commands::mcp::run_mcp(cli.vault).await;
         }
-        Commands::Login => {
+        Commands::Login { no_open, json } => {
             init_tracing(cli.verbose, None);
-            return commands::login::run_login().await;
+            return commands::login::run_login(*no_open, *json).await;
         }
         Commands::Logout => {
             init_tracing(cli.verbose, None);
@@ -432,7 +440,7 @@ async fn main() -> Result<()> {
         Commands::Publish { json } => {
             commands::publish::run_publish(&vault_path, json).await?;
         }
-        Commands::Login | Commands::Logout => unreachable!(),
+        Commands::Login { .. } | Commands::Logout => unreachable!(),
         Commands::Mcp => unreachable!(),
     }
 

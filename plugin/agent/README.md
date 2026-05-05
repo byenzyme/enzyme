@@ -303,15 +303,9 @@ tools.py                    # Tool handlers (shell out to enzyme CLI)
 hooks.py                    # Lifecycle hooks (session start, pre-LLM, session end)
 install.sh                  # CLI installer (curl-pipe-bash)
 bin/                        # Platform binaries (macOS arm64, Linux x86_64/arm64)
-references/
-├── petri-guide.md          # How to present vault overview results
-└── search-guide.md         # How to present search results
-scripts/
-└── setup.sh                # Offline setup (uses bundled binaries)
 ```
 
-Two install paths:
-- **Bundled** (`scripts/setup.sh`) — copies the platform binary from `bin/`, no network needed; used by hooks and refreshed when the bundled binary is newer
+Install path:
 - **Download** (`install.sh`) — fetches latest release from GitHub
 
 ## Requirements

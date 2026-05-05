@@ -5,13 +5,11 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use serde::Deserialize;
 
-use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::service::RequestContext;
-use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
-use rmcp::{prompt, prompt_handler, prompt_router, tool, tool_handler, tool_router};
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
+use rmcp::{tool, tool_handler, tool_router};
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
@@ -24,10 +22,6 @@ use super::petri::build_petri_json;
 use super::status::build_status_json;
 
 const SKILL_MD: &str = include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/SKILL.md");
-const PETRI_GUIDE: &str =
-    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/petri-guide.md");
-const SEARCH_GUIDE: &str =
-    include_str!("../../../../plugin/plugins/enzyme/skills/enzyme/search-guide.md");
 
 /// Strip YAML frontmatter (delimited by `---`) from a string.
 fn strip_frontmatter(s: &str) -> &str {
@@ -48,8 +42,6 @@ struct EnzymeMcp {
     refreshed: Arc<AtomicBool>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    #[allow(dead_code)]
-    prompt_router: PromptRouter<Self>,
 }
 
 impl EnzymeMcp {
@@ -58,7 +50,6 @@ impl EnzymeMcp {
             vault_path: Arc::new(RwLock::new(vault_path)),
             refreshed: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
-            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -247,38 +238,13 @@ impl EnzymeMcp {
     }
 }
 
-#[prompt_router]
-impl EnzymeMcp {
-    #[prompt(name = "petri-guide", description = "How to present petri results")]
-    async fn petri_guide(&self) -> Result<GetPromptResult, McpError> {
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::Assistant,
-            PETRI_GUIDE,
-        )]))
-    }
-
-    #[prompt(name = "search-guide", description = "How to present search results")]
-    async fn search_guide(&self) -> Result<GetPromptResult, McpError> {
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::Assistant,
-            SEARCH_GUIDE,
-        )]))
-    }
-}
-
 #[tool_handler]
-#[prompt_handler]
 impl ServerHandler for EnzymeMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_prompts()
-                .build(),
-        )
-        .with_protocol_version(ProtocolVersion::LATEST)
-        .with_server_info(Implementation::new("enzyme", env!("CARGO_PKG_VERSION")))
-        .with_instructions(strip_frontmatter(SKILL_MD))
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::new("enzyme", env!("CARGO_PKG_VERSION")))
+            .with_instructions(strip_frontmatter(SKILL_MD))
     }
 }
 

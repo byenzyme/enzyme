@@ -1,7 +1,5 @@
 #!/bin/sh
 # Enzyme wrapper — resolves the bundled platform binary.
-# Installed as a symlink from ~/.local/bin/enzyme → <plugin>/bin/enzyme by the
-# Claude Code SessionStart hook.
 set -e
 
 # Resolve through symlinks to find the real plugin root.
@@ -23,6 +21,7 @@ ARCH=$(uname -m)
 
 case "${OS}-${ARCH}" in
     Darwin-arm64)   BINARY="enzyme-darwin-arm64" ;;
+    Linux-x86_64)   BINARY="enzyme-linux-x86_64" ;;
     Linux-aarch64)  BINARY="enzyme-linux-arm64"  ;;
     *)
         echo "enzyme: unsupported platform ${OS}-${ARCH}" >&2

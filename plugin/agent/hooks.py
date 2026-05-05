@@ -30,16 +30,8 @@ def is_enzyme_available() -> bool:
 
 
 def ensure_enzyme_installed() -> None:
-    """Install or refresh the bundled enzyme binary when the setup script exists."""
+    """Legacy hook retained for compatibility; install is handled by install.sh."""
     _ensure_local_bin_on_path()
-    setup_script = _PLUGIN_ROOT / "scripts" / "setup.sh"
-    if not setup_script.exists():
-        return
-    subprocess.run(
-        ["sh", str(setup_script), str(_PLUGIN_ROOT)],
-        capture_output=True,
-        timeout=30,
-    )
 
 
 def _vault_is_initialized() -> bool:

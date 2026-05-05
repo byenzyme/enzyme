@@ -1,9 +1,11 @@
 use std::time::Duration;
+use std::{io::Write, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use enzyme_core::config::auth::AuthToken;
 use enzyme_core::config::paths::EnzymePaths;
+use serde_json::json;
 
 const DEFAULT_API_BASE: &str = "https://api.enzyme.garden";
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -38,12 +40,23 @@ struct DeviceTokenError {
     error: String,
 }
 
-pub async fn run_login() -> Result<()> {
+pub async fn run_login(no_open: bool, json_output: bool) -> Result<()> {
     let paths_home = EnzymePaths::enzyme_home()?;
     let auth_path = paths_home.join("auth.json");
 
     // Check if already logged in
     if let Ok(token) = AuthToken::load(&auth_path) {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "event": "already_logged_in",
+                    "email": token.email,
+                    "auth_path": auth_path.display().to_string(),
+                }))?
+            );
+            return Ok(());
+        }
         eprintln!(
             "  Already logged in as {}{}{}",
             SetForegroundColor(Color::White),
@@ -79,36 +92,72 @@ pub async fn run_login() -> Result<()> {
         .context("failed to parse device code response")?;
 
     // Step 2: Show instructions and open browser
-    eprintln!(
-        "  {}Opening browser for authentication...{}",
-        SetForegroundColor(Color::DarkGrey),
-        ResetColor,
-    );
-    eprintln!();
-    eprintln!(
-        "  Visit: {}{}{}",
-        SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
-        device_resp.verification_uri,
-        ResetColor,
-    );
-    eprintln!();
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "event": "device_authorization",
+                "verification_uri": device_resp.verification_uri,
+                "expires_in": device_resp.expires_in,
+                "interval": device_resp.interval,
+                "auth_path": auth_path.display().to_string(),
+                "opened_browser": !no_open,
+            }))?
+        );
+        std::io::stdout().flush().ok();
+    } else {
+        if no_open {
+            eprintln!(
+                "  {}Open this URL to authenticate Enzyme:{}",
+                SetForegroundColor(Color::DarkGrey),
+                ResetColor,
+            );
+        } else {
+            eprintln!(
+                "  {}Opening browser for authentication...{}",
+                SetForegroundColor(Color::DarkGrey),
+                ResetColor,
+            );
+        }
+        eprintln!();
+        eprintln!(
+            "  Visit: {}{}{}",
+            SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
+            device_resp.verification_uri,
+            ResetColor,
+        );
+        eprintln!();
+    }
 
     // Try to open the browser
-    let _ = open_browser(&device_resp.verification_uri);
+    if !no_open {
+        let _ = open_browser(&device_resp.verification_uri);
+    }
 
     // Step 3: Poll for token
     let poll_interval = Duration::from_secs(device_resp.interval);
     let timeout = Duration::from_secs(device_resp.expires_in.min(POLL_TIMEOUT.as_secs()));
-    let start = std::time::Instant::now();
+    let start = Instant::now();
 
-    eprint!(
-        "  {}Waiting for approval...{}",
-        SetForegroundColor(Color::DarkGrey),
-        ResetColor,
-    );
+    if !json_output {
+        eprint!(
+            "  {}Waiting for approval...{}",
+            SetForegroundColor(Color::DarkGrey),
+            ResetColor,
+        );
+    }
 
     loop {
         if start.elapsed() > timeout {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "event": "expired",
+                        "message": "Device code expired. Run `enzyme login` again.",
+                    }))?
+                );
+            }
             eprintln!(" {}timed out{}", SetForegroundColor(Color::Red), ResetColor,);
             bail!("Device code expired. Run `enzyme login` again.");
         }
@@ -141,16 +190,27 @@ pub async fn run_login() -> Result<()> {
             };
             auth_token.save(&auth_path)?;
 
-            eprintln!(" {}done{}", SetForegroundColor(Color::Green), ResetColor,);
-            eprintln!();
-            eprintln!(
-                "  {}Logged in as {}{}{}",
-                SetForegroundColor(Color::DarkGrey),
-                SetForegroundColor(Color::White),
-                email,
-                ResetColor,
-            );
-            eprintln!();
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "event": "success",
+                        "email": email,
+                        "auth_path": auth_path.display().to_string(),
+                    }))?
+                );
+            } else {
+                eprintln!(" {}done{}", SetForegroundColor(Color::Green), ResetColor,);
+                eprintln!();
+                eprintln!(
+                    "  {}Logged in as {}{}{}",
+                    SetForegroundColor(Color::DarkGrey),
+                    SetForegroundColor(Color::White),
+                    email,
+                    ResetColor,
+                );
+                eprintln!();
+            }
             return Ok(());
         }
 
@@ -159,16 +219,37 @@ pub async fn run_login() -> Result<()> {
         if let Ok(err) = serde_json::from_str::<DeviceTokenError>(&body) {
             match err.error.as_str() {
                 "authorization_pending" | "slow_down" => {
-                    eprint!(".");
+                    if !json_output {
+                        eprint!(".");
+                    }
                     continue;
                 }
                 "expired_token" => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "event": "expired",
+                                "message": "Device code expired. Run `enzyme login` again.",
+                            }))?
+                        );
+                    }
                     eprintln!(" {}expired{}", SetForegroundColor(Color::Red), ResetColor,);
                     bail!("Device code expired. Run `enzyme login` again.");
                 }
                 _ => {
+                    let error = err.error;
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&json!({
+                                "event": "error",
+                                "error": error,
+                            }))?
+                        );
+                    }
                     eprintln!(" {}failed{}", SetForegroundColor(Color::Red), ResetColor,);
-                    bail!("Authentication failed: {}", err.error);
+                    bail!("Authentication failed: {}", error);
                 }
             }
         }
