@@ -698,7 +698,7 @@ mod tests {
             let trends = serde_json::json!({ "recency_score": score });
             db.execute_write(
                 "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends)
-                 VALUES (?1, ?2, 1, ?3, ?3, ?4)",
+                 VALUES (?1, ?2, 3, ?3, ?3, ?4)",
                 vec![
                     Value::Text(name.to_string()),
                     Value::Text(etype.to_string()),

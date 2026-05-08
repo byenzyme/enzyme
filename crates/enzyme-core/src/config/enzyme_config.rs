@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::config::paths::EnzymePaths;
-use crate::models::EntityType;
+use crate::models::{EntityType, ROOT_FOLDER_ENTITY};
 
 /// Comment header prepended to config.toml on every save.
 const CONFIG_HEADER: &str = "\
@@ -29,6 +29,7 @@ const CONFIG_HEADER: &str = "\
 #
 # [vaults.\"/Users/you/notes\"]
 # entities = [\"folder:projects\", \"[[Design Principles]]\"]
+# # Flat vault fallback: if notes live directly at the vault root, Enzyme may use \"folder:.\"
 # excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
 # targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
 # min_top_catalysts = 13                       # minimum catalysts for the largest entity
@@ -69,7 +70,7 @@ pub struct EnzymeConfig {
 /// A single entry in the config.
 ///
 /// Supports:
-/// - Simple string: `"#tag"` or `"folder:inbox"` or `"[[Note]]"`
+/// - Simple string: `"#tag"` or `"folder:inbox"` or `"folder:."` or `"[[Note]]"`
 /// - Legacy YAML map with options: `"#tag": { profile: "decision_trace" }`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -485,6 +486,11 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
         if name.is_empty() {
             return None;
         }
+        let name = if name == "." {
+            ROOT_FOLDER_ENTITY.to_string()
+        } else {
+            name
+        };
         Some(ParsedEntity {
             name,
             entity_type: EntityType::Folder,
@@ -524,6 +530,13 @@ mod tests {
     fn test_parse_entity_ref_folder() {
         let p = parse_entity_ref("folder:inbox").unwrap();
         assert_eq!(p.name, "inbox");
+        assert_eq!(p.entity_type, EntityType::Folder);
+    }
+
+    #[test]
+    fn test_parse_entity_ref_root_folder() {
+        let p = parse_entity_ref("folder:.").unwrap();
+        assert_eq!(p.name, ROOT_FOLDER_ENTITY);
         assert_eq!(p.entity_type, EntityType::Folder);
     }
 

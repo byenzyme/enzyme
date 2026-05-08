@@ -138,7 +138,7 @@ mod tests {
     use crate::config::enzyme_config::EnzymeConfig;
     use crate::config::paths::EnzymePaths;
     use crate::db::Database;
-    use crate::models::{EntityTrends, EntityType};
+    use crate::models::{EntityTrends, EntityType, ROOT_FOLDER_ENTITY};
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -305,6 +305,31 @@ mod tests {
         );
         // Expandable folders map should contain people
         assert!(result.expandable_folders.contains_key("people"));
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn selection_uses_root_folder_from_toml() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, ROOT_FOLDER_ENTITY, EntityType::Folder, 2);
+
+        let mut config = EnzymeConfig::default();
+        config
+            .set_auto_selected_entities(vault.path(), vec!["folder:.".to_string()])
+            .unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config));
+        assert_eq!(result.entities.len(), 1);
+        assert_eq!(result.entities[0].name, ROOT_FOLDER_ENTITY);
+        assert_eq!(result.entities[0].entity_type, EntityType::Folder);
 
         restore_env(old);
     }

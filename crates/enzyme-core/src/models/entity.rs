@@ -4,6 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use super::Timestamp;
 
+/// Synthetic folder entity used when every indexed document lives at vault root.
+///
+/// Config represents this as `folder:.`.
+pub const ROOT_FOLDER_ENTITY: &str = ".";
+
 /// The kind of entity extracted from vault documents.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

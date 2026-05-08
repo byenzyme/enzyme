@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
+use enzyme_core::models::ROOT_FOLDER_ENTITY;
 
 /// Filesystem-only vault scan used before init.
 ///
@@ -82,26 +83,7 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         }
     }
 
-    let mut entities = Vec::new();
-    let mut seen = HashSet::new();
-
-    for folder in suggested_folders(&folder_counts) {
-        push_entity(&mut entities, &mut seen, format!("folder:{folder}"));
-    }
-    for (tag, _) in sorted_counts(&tag_counts)
-        .into_iter()
-        .filter(|(tag, _)| !is_structural_tag(tag))
-        .take(20)
-    {
-        push_entity(&mut entities, &mut seen, format!("#{tag}"));
-    }
-    for (link, _) in sorted_counts(&link_counts)
-        .into_iter()
-        .filter(|(link, count)| *count >= 3 && !link.contains('/'))
-        .take(8)
-    {
-        push_entity(&mut entities, &mut seen, format!("[[{link}]]"));
-    }
+    let entities = suggested_entities(docs, &folder_counts, &tag_counts, &link_counts);
 
     let existing_configured = EnzymeConfig::load(vault_path)?
         .map(|config| config.has_curated_entities())
@@ -125,6 +107,49 @@ fn suggested_folders(folder_counts: &HashMap<String, usize>) -> Vec<String> {
         .filter(|(folder, _)| !is_structural_folder(folder) && should_include_folder(folder))
         .map(|(folder, _)| folder)
         .collect()
+}
+
+fn suggested_entities(
+    docs: &[ProcessedDocument],
+    folder_counts: &HashMap<String, usize>,
+    tag_counts: &HashMap<String, usize>,
+    link_counts: &HashMap<String, usize>,
+) -> Vec<String> {
+    let mut entities = Vec::new();
+    let mut seen = HashSet::new();
+
+    if is_flat_vault(docs) {
+        push_entity(&mut entities, &mut seen, "folder:.".to_string());
+    } else {
+        for folder in suggested_folders(folder_counts) {
+            push_entity(&mut entities, &mut seen, format!("folder:{folder}"));
+        }
+    }
+    for (tag, _) in sorted_counts(tag_counts)
+        .into_iter()
+        .filter(|(tag, _)| !is_structural_tag(tag))
+        .take(20)
+    {
+        push_entity(&mut entities, &mut seen, format!("#{tag}"));
+    }
+    for (link, _) in sorted_counts(link_counts)
+        .into_iter()
+        .filter(|(link, count)| *count >= 3 && !link.contains('/'))
+        .take(8)
+    {
+        push_entity(&mut entities, &mut seen, format!("[[{link}]]"));
+    }
+
+    entities
+}
+
+fn is_flat_vault(docs: &[ProcessedDocument]) -> bool {
+    !docs.is_empty()
+        && docs.iter().all(|doc| {
+            doc.folders
+                .iter()
+                .all(|folder| folder == ROOT_FOLDER_ENTITY)
+        })
 }
 
 fn should_include_folder(folder: &str) -> bool {
@@ -196,6 +221,27 @@ fn is_structural_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enzyme_core::models::DateSource;
+
+    fn doc(folders: Vec<&str>) -> ProcessedDocument {
+        ProcessedDocument {
+            source_ref: "note.md".to_string(),
+            title: None,
+            content: String::new(),
+            content_hash: "hash".to_string(),
+            word_count: 0,
+            char_count: 0,
+            created_at: 0,
+            created_source: DateSource::Filesystem,
+            modified_at: 0,
+            modified_source: DateSource::Filesystem,
+            tags: Vec::new(),
+            links: Vec::new(),
+            folders: folders.into_iter().map(str::to_string).collect(),
+            chunks: Vec::new(),
+            frontmatter: None,
+        }
+    }
 
     #[test]
     fn structural_folder_excludes_descendants() {
@@ -217,5 +263,14 @@ mod tests {
         let folders = suggested_folders(&counts);
 
         assert_eq!(folders, vec!["emails".to_string(), "people".to_string()]);
+    }
+
+    #[test]
+    fn flat_vault_suggests_root_folder_entity() {
+        let docs = vec![doc(Vec::new()), doc(Vec::new())];
+
+        let entities = suggested_entities(&docs, &HashMap::new(), &HashMap::new(), &HashMap::new());
+
+        assert_eq!(entities.first().map(String::as_str), Some("folder:."));
     }
 }

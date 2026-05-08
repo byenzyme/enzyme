@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use crate::db::Database;
-use crate::models::{Entity, EntityType};
+use crate::models::{Entity, EntityType, ROOT_FOLDER_ENTITY};
 use crate::pipeline::selection_steps;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -375,6 +375,14 @@ impl EntityMap {
         let entity_file_sets = db.get_entity_file_sets()?;
         let folder_file_sets = db.get_folder_file_sets()?;
 
+        if folder_file_sets.is_empty() {
+            if let Some(root) = all.iter().find(|entity| {
+                entity.entity_type == EntityType::Folder && entity.name == ROOT_FOLDER_ENTITY
+            }) {
+                return Ok(vec![root.clone()]);
+            }
+        }
+
         // Pre-compute folder link strength (how many active links live in each folder)
         let folder_active_links: HashMap<String, usize> = {
             let link_entities: HashMap<&str, &Entity> = all
@@ -665,6 +673,21 @@ mod tests {
 
         assert_eq!(map.links.len(), 1);
         assert_eq!(map.links[0].name, "alice");
+    }
+
+    #[test]
+    fn shortlist_uses_root_as_sole_entity_for_flat_vault() {
+        let db = test_db();
+        insert_doc(&db, "note-a.md");
+        insert_doc(&db, "note-b.md");
+        insert_entity(&db, ROOT_FOLDER_ENTITY, "folder", 2);
+        insert_entity(&db, "topic", "tag", 10);
+
+        let selected = EntityMap::select_shortlist(&db, 20).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].entity_type, EntityType::Folder);
+        assert_eq!(selected[0].name, ROOT_FOLDER_ENTITY);
     }
 
     // ── Page entity folding ─────────────────────────────────────────────

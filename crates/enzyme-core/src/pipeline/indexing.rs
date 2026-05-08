@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::db::Database;
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
-use crate::models::{EntityOccurrence, EntityTrends, EntityType};
+use crate::models::{EntityOccurrence, EntityTrends, EntityType, ROOT_FOLDER_ENTITY};
 
 /// Orchestrates the full indexing pipeline:
 /// discover files -> process -> diff against DB -> upsert new/changed ->
@@ -233,6 +233,7 @@ impl<'a> IndexingPipeline<'a> {
     ) -> Vec<(String, EntityType, EntityOccurrence)> {
         let now = chrono::Utc::now().timestamp_millis();
         let mut entries = Vec::new();
+        let flat_vault = !docs.is_empty() && docs.iter().all(|doc| doc.folders.is_empty());
 
         for doc in docs {
             // Pre-compute frontmatter sets for fast lookup
@@ -306,6 +307,25 @@ impl<'a> IndexingPipeline<'a> {
                 // Folder entity → always full file body
                 entries.push((
                     folder.clone(),
+                    EntityType::Folder,
+                    EntityOccurrence {
+                        id: None,
+                        entity_id: 0,
+                        file_path: doc.source_ref.clone(),
+                        context: full_body.clone(),
+                        created_at: now,
+                        effective_date: Some(doc.created_at),
+                        date_source: doc.created_source.as_str().to_string(),
+                    },
+                ));
+            }
+
+            if flat_vault {
+                // Flat vaults have no path-derived folder entities. Treat the
+                // vault root as the structural entity so selection has a
+                // corpus-level target.
+                entries.push((
+                    ROOT_FOLDER_ENTITY.to_string(),
                     EntityType::Folder,
                     EntityOccurrence {
                         id: None,
@@ -534,6 +554,30 @@ mod tests {
             has_nonzero,
             "at least one entity should have a non-zero recency score"
         );
+    }
+
+    #[test]
+    fn full_first_run_indexes_root_entity_for_flat_vault() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+        write_md(vault.path(), "note-a.md", "# Note A\nPlain root note.\n");
+        write_md(vault.path(), "note-b.md", "# Note B\nAnother root note.\n");
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        let stats = pipeline.run(true, |_| {}).unwrap();
+
+        assert_eq!(stats.files_discovered, 2);
+
+        let entities = db.get_all_entities().unwrap();
+        let root = entities
+            .iter()
+            .find(|entity| {
+                entity.entity_type == EntityType::Folder
+                    && entity.name == crate::models::ROOT_FOLDER_ENTITY
+            })
+            .expect("flat vault should index the root folder entity");
+
+        assert_eq!(root.frequency, 2);
     }
 
     // -----------------------------------------------------------------------

@@ -333,11 +333,7 @@ pub async fn run_init(
             .entities
             .iter()
             .filter(|entity| !expanded_children.contains(&entity.name))
-            .map(|entity| match entity.entity_type {
-                enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
-                enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),
-                enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
-            })
+            .map(selected_entity_ref)
             .collect();
         enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
     }
@@ -1395,6 +1391,19 @@ fn parse_entity_type(s: &str) -> enzyme_core::models::EntityType {
     }
 }
 
+fn selected_entity_ref(entity: &Entity) -> String {
+    match entity.entity_type {
+        enzyme_core::models::EntityType::Tag => format!("#{}", entity.name),
+        enzyme_core::models::EntityType::Link => format!("[[{}]]", entity.name),
+        enzyme_core::models::EntityType::Folder
+            if entity.name == enzyme_core::models::ROOT_FOLDER_ENTITY =>
+        {
+            "folder:.".to_string()
+        }
+        enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,12 +1422,31 @@ mod tests {
         }
     }
 
+    fn folder_entity(name: &str) -> Entity {
+        Entity {
+            entity_type: EntityType::Folder,
+            ..entity(name)
+        }
+    }
+
     #[test]
     fn embedding_refresh_skips_when_indexing_has_no_changes() {
         assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Skip);
         assert_eq!(
             embedding_refresh_plan(true),
             EmbeddingRefreshPlan::SinceIndexStart
+        );
+    }
+
+    #[test]
+    fn selected_entity_ref_formats_root_folder_for_config() {
+        assert_eq!(
+            selected_entity_ref(&folder_entity(enzyme_core::models::ROOT_FOLDER_ENTITY)),
+            "folder:."
+        );
+        assert_eq!(
+            selected_entity_ref(&folder_entity("projects")),
+            "folder:projects"
         );
     }
 
