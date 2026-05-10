@@ -33,10 +33,10 @@ Date:   2026-05-10
             from_ref="v0.5.4",
             to_ref="HEAD",
             commit_log=commit_log,
-            skill_path="docs/skills/weekly-release-notes/SKILL.md",
+            skill_path=".agents/skills/release-notes/SKILL.md",
         )
 
-        self.assertIn("Use the release-notes skill at `docs/skills/weekly-release-notes/SKILL.md`", prompt)
+        self.assertIn("Use the release-notes skill at `.agents/skills/release-notes/SKILL.md`", prompt)
         self.assertIn("v0.5.4..HEAD", prompt)
         self.assertIn("feat: preserve auth state on reinstall", prompt)
         self.assertIn("Keep existing tokens when the installer runs again.", prompt)

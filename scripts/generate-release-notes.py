@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_SKILL_PATH = "docs/skills/weekly-release-notes/SKILL.md"
+DEFAULT_SKILL_PATH = ".agents/skills/release-notes/SKILL.md"
 
 
 def run_git(args: list[str]) -> str:
