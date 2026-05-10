@@ -146,6 +146,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -284,8 +286,11 @@ jobs:
               headers={"Content-Type": "application/json"},
               method="POST",
           )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              print(f"Discord webhook returned HTTP {response.status}")
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  print(f"Discord webhook returned HTTP {response.status}")
+          except Exception as exc:
+              print(f"Warning: Discord release publish failed: {exc}")
           PY
 
   sync-plugin:
