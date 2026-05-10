@@ -48,7 +48,9 @@ def _run_enzyme(args: list[str], timeout: int = 30) -> str:
 def handle_petri(args: dict, **kwargs) -> str:
     if not _vault_is_initialized():
         return _not_initialized_error()
-    cmd = ["petri", "-n", str(args.get("top", 10))]
+    cmd = ["petri"]
+    if args.get("top") is not None:
+        cmd.extend(["-n", str(args["top"])])
     query = args.get("query")
     if query:
         cmd.extend(["--query", query])

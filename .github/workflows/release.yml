@@ -217,10 +217,16 @@ jobs:
           # Delete existing release if re-publishing the same tag
           gh release delete "$tag" --repo "$RELEASE_REPO" --yes 2>/dev/null || true
 
+          notes_file=".github/release-notes/${tag}.md"
+          notes_args=(--generate-notes)
+          if [ -f "$notes_file" ]; then
+            notes_args=(--notes-file "$notes_file")
+          fi
+
           gh release create "$tag" \
             --repo "$RELEASE_REPO" \
             --title "enzyme $tag" \
-            --generate-notes \
+            "${notes_args[@]}" \
             $files
 
       - name: Publish release notes to Discord

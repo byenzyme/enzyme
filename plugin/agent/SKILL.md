@@ -48,7 +48,7 @@ In both cases: you call petri and catalyze as tools. The difference is whether c
 ### `enzyme petri` — vault context
 
 ```bash
-enzyme petri                            # top 10 entities by recency
+enzyme petri                            # entities by recency
 enzyme petri --query "user's question"  # ranked by relevance
 ```
 
