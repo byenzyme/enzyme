@@ -144,6 +144,8 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
 
     steps:
       - uses: actions/checkout@v4
@@ -231,67 +233,49 @@ jobs:
             "${notes_args[@]}" \
             $files
 
-      - name: Publish release notes to Discord
+      - name: Load release metadata for Discord
+        id: release_metadata
         env:
           GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
         run: |
-          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "DISCORD_RELEASE_WEBHOOK_URL is not configured; skipping Discord publish."
-            exit 0
-          fi
-
           tag="${GITHUB_REF_NAME}"
           gh api "repos/${RELEASE_REPO}/releases/tags/${tag}" > release.json
 
           python3 <<'PY'
           import json
           import os
-          import urllib.request
 
           with open("release.json", encoding="utf-8") as handle:
               release = json.load(handle)
 
-          webhook_url = os.environ["DISCORD_WEBHOOK_URL"]
-          release_name = release.get("name") or release.get("tag_name") or "Release"
-          release_tag = release.get("tag_name", "")
-          release_url = release.get("html_url", "")
-          body = (release.get("body") or "").strip()
-
-          if not body:
-              body = "Release notes were not provided for this release."
-
-          max_description = 3800
-          if len(body) > max_description:
-              body = body[: max_description - 25].rstrip() + "\n\n...continued on GitHub."
-
-          title = f"jshph/enzyme {release_tag}".strip()
-          payload = {
-              "username": "Enzyme releases",
-              "embeds": [
-                  {
-                      "title": title,
-                      "url": release_url,
-                      "description": body,
-                      "color": 0x7C3AED,
-                      "footer": {"text": release_name},
-                  }
-              ],
+          values = {
+              "name": release.get("name") or release.get("tag_name") or "Release",
+              "body": (release.get("body") or "Release notes were not provided for this release.").strip(),
+              "html_url": release.get("html_url", ""),
           }
 
-          data = json.dumps(payload).encode("utf-8")
-          request = urllib.request.Request(
-              webhook_url,
-              data=data,
-              headers={"Content-Type": "application/json"},
-              method="POST",
-          )
-          try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  print(f"Discord webhook returned HTTP {response.status}")
-          except Exception as exc:
-              print(f"Warning: Discord release publish failed: {exc}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  marker = f"__{key.upper()}__"
+                  print(f"{key}<<{marker}", file=output)
+                  print(value, file=output)
+                  print(marker, file=output)
           PY
+
+      - name: Publish release notes to Discord
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK_URL != '' }}
+        continue-on-error: true
+        uses: SethCohen/github-releases-to-discord@v1.20.0
+        with:
+          webhook_url: ${{ env.DISCORD_RELEASE_WEBHOOK_URL }}
+          release_name: ${{ steps.release_metadata.outputs.name }}
+          release_body: ${{ steps.release_metadata.outputs.body }}
+          release_html_url: ${{ steps.release_metadata.outputs.html_url }}
+          color: "8141549"
+          username: "Enzyme releases"
+          footer_title: "jshph/enzyme"
+          reduce_headings: true
+          max_description: "3800"
 
   sync-plugin:
     needs: publish
