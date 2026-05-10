@@ -3,7 +3,7 @@
 
 This script deliberately does not classify commits or write release prose itself.
 It fetches the full git commit messages for a release range and injects them into
-an agent prompt that points at the project-local release-notes skill. The skill is
+an agent prompt that points at the project-local release skill. The skill is
 responsible for synthesizing user-facing notes instead of concatenating commits.
 """
 
@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_SKILL_PATH = ".agents/skills/release-notes/SKILL.md"
+DEFAULT_SKILL_PATH = ".agents/skills/release/SKILL.md"
 
 
 def run_git(args: list[str]) -> str:
@@ -70,7 +70,7 @@ def render_prompt(
     """Render an agent prompt that injects full commit history into the skill."""
     context = render_context(version, from_ref, to_ref, commit_log)
     return (
-        f"Use the release-notes skill at `{skill_path}` to draft Enzyme release notes.\n\n"
+        f"Use the release skill at `{skill_path}` to draft Enzyme release notes.\n\n"
         f"The full git commit history is injected below. Review it as the source of truth. "
         f"Do not concatenate commits. Synthesize user-facing changes, merge related commits "
         f"into coherent themes, and omit internal-only noise unless it changes user-visible "
@@ -87,7 +87,7 @@ def render_prompt(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fetch full git commit history and inject it into the Enzyme release-notes skill prompt."
+        description="Fetch full git commit history and inject it into the Enzyme release skill prompt."
     )
     parser.add_argument("--from", dest="from_ref", default=None, help="Base ref/tag. Defaults to the latest reachable tag.")
     parser.add_argument("--to", dest="to_ref", default="HEAD", help="Target ref. Defaults to HEAD.")
