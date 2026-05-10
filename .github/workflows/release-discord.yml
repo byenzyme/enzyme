@@ -1,0 +1,62 @@
+name: Post Release To Discord
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to post
+        required: true
+        default: v0.5.11
+
+env:
+  RELEASE_REPO: jshph/enzyme
+  DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Load release metadata
+        id: release_metadata
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh api "repos/${RELEASE_REPO}/releases/tags/${RELEASE_TAG}" > release.json
+
+          python3 <<'PY'
+          import json
+          import os
+
+          with open("release.json", encoding="utf-8") as handle:
+              release = json.load(handle)
+
+          values = {
+              "name": release.get("name") or release.get("tag_name") or "Release",
+              "body": (release.get("body") or "Release notes were not provided for this release.").strip(),
+              "html_url": release.get("html_url", ""),
+          }
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  marker = f"__{key.upper()}__"
+                  print(f"{key}<<{marker}", file=output)
+                  print(value, file=output)
+                  print(marker, file=output)
+          PY
+
+      - name: Publish release notes to Discord
+        if: ${{ env.DISCORD_RELEASE_WEBHOOK_URL != '' }}
+        uses: SethCohen/github-releases-to-discord@v1.20.0
+        with:
+          webhook_url: ${{ env.DISCORD_RELEASE_WEBHOOK_URL }}
+          release_name: ${{ steps.release_metadata.outputs.name }}
+          release_body: ${{ steps.release_metadata.outputs.body }}
+          release_html_url: ${{ steps.release_metadata.outputs.html_url }}
+          color: "8141549"
+          username: "Enzyme releases"
+          footer_title: "jshph/enzyme"
+          reduce_headings: true
+          max_description: "3800"
+
