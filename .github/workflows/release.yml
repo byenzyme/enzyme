@@ -333,6 +333,7 @@ jobs:
           rm -rf models
           rm -rf references
           rm -f setup.py
+          rm -f setup-guide.md
 
           # Extract platform binaries
           for platform in macos-arm64 linux-arm64 linux-x86_64; do
