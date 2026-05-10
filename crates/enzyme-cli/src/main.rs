@@ -153,6 +153,12 @@ enum Commands {
         write_config: bool,
     },
 
+    /// Install or update agent integrations for this vault
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommand,
+    },
+
     /// Start the HTTP API server for the explore UI
     Serve {
         /// Port to listen on
@@ -197,6 +203,23 @@ enum Commands {
         /// Minimum catalysts for the largest entity (by volume)
         #[arg(long)]
         min_top_catalysts: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    /// Install or update the Codex skill in .agents/skills/enzyme
+    Codex {
+        /// Template source: auto fetches GitHub copy and falls back to packaged copy
+        #[arg(long, value_enum, default_value = "auto")]
+        source: commands::agents::InstallSource,
+    },
+
+    /// Install or update the Claude skill in .claude/skills/enzyme
+    Claude {
+        /// Template source: auto fetches GitHub copy and falls back to packaged copy
+        #[arg(long, value_enum, default_value = "auto")]
+        source: commands::agents::InstallSource,
     },
 }
 
@@ -321,13 +344,7 @@ async fn main() -> Result<()> {
             quiet,
             min_top_catalysts,
         } => {
-            commands::init::run_refresh(
-                &vault_path,
-                detached,
-                quiet,
-                min_top_catalysts,
-            )
-            .await?;
+            commands::init::run_refresh(&vault_path, detached, quiet, min_top_catalysts).await?;
         }
         Commands::Catalyze {
             query,
@@ -372,6 +389,24 @@ async fn main() -> Result<()> {
         Commands::Scan { write_config } => {
             commands::scan::run_scan(&vault_path, write_config)?;
         }
+        Commands::Agents { command } => match command {
+            AgentsCommand::Codex { source } => {
+                commands::agents::run_agents_install(
+                    &vault_path,
+                    commands::agents::AgentTarget::Codex,
+                    source,
+                )
+                .await?;
+            }
+            AgentsCommand::Claude { source } => {
+                commands::agents::run_agents_install(
+                    &vault_path,
+                    commands::agents::AgentTarget::Claude,
+                    source,
+                )
+                .await?;
+            }
+        },
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
         }
@@ -392,12 +427,8 @@ async fn main() -> Result<()> {
             output,
             min_top_catalysts,
         } => {
-            commands::dump_prompts::run_dump_prompts(
-                &vault_path,
-                &output,
-                min_top_catalysts,
-            )
-            .await?;
+            commands::dump_prompts::run_dump_prompts(&vault_path, &output, min_top_catalysts)
+                .await?;
         }
         Commands::Publish { json } => {
             commands::publish::run_publish(&vault_path, json).await?;

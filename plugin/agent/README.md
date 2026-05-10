@@ -159,8 +159,8 @@ git clone https://github.com/jshph/enzyme-skill.git ~/.openclaw/skills/enzyme
 The SKILL.md loads with `always: true` — enzyme is available every session without explicit invocation. On first session, the agent:
 
 1. **Detects `anyBins: ["enzyme"]`** requirement and bootstraps the binary if missing
-2. **Walks you through vault setup** following the setup-guide
-3. **Writes enzyme instructions** into your AGENTS.md for persistence across sessions
+2. **Walks you through vault setup** using `enzyme scan`, `enzyme init --quiet`, and `enzyme agents claude`
+3. **Writes enzyme instructions** into your `AGENTS.md` and `.claude/skills/enzyme/SKILL.md` for persistence across sessions
 
 ### First session
 
@@ -335,7 +335,7 @@ The live test exercises real `hermes chat` turns, plugin hooks, and enzyme tool 
 
 ## Links
 
-- [enzyme.garden](https://enzyme.garden) — docs and setup guide
+- [enzyme.garden](https://enzyme.garden) — docs
 - [jshph/enzyme](https://github.com/jshph/enzyme) — CLI releases and Claude Code plugin
 - [Discord](https://discord.gg/nhvsqtKjQd)
 

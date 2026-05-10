@@ -46,6 +46,10 @@ make install
 # Initialize a vault (discovers, indexes, embeds, generates catalysts)
 enzyme init -p /path/to/vault
 
+# Install agent-facing instructions after init
+enzyme agents codex
+enzyme agents claude
+
 # Preview and persist first-time config before init
 enzyme scan -p /path/to/vault
 enzyme scan -p /path/to/vault --write-config

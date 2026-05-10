@@ -96,8 +96,8 @@ def on_session_end(**kwargs) -> None:
 
 _skip_injection = False
 
-# First-session instruction block — mirrors ENZYME_SECTION from the
-# Rust side but stays concise for ephemeral injection.
+# First-session instruction block — mirrors the agent instructions template but
+# stays concise for ephemeral injection.
 _FIRST_SESSION_INSTRUCTIONS = """\
 This is a personal knowledge vault indexed by enzyme.
 

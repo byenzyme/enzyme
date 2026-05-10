@@ -7,7 +7,7 @@ description: >
 license: MIT
 compatibility: Requires shell access (macOS arm64, Linux x86_64/arm64). Install the enzyme CLI if it is not on PATH.
 allowed-tools: Bash Read Glob Grep
-metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/jshph/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.5.9", "homepage": "https://enzyme.garden" }
+metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/jshph/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.5.10", "homepage": "https://enzyme.garden" }
 ---
 
 # Enzyme
@@ -16,7 +16,16 @@ Enzyme builds a concept graph from your vault's tags, links, folders, and timest
 
 Vault path: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory.
 
-If the vault isn't initialized (no `.enzyme/enzyme.db`), follow [setup-guide.md](setup-guide.md) first.
+If the vault isn't initialized (no `.enzyme/enzyme.db`), run first-time setup from the vault root:
+
+```bash
+enzyme scan
+enzyme scan --write-config
+enzyme init --quiet
+enzyme agents claude
+```
+
+For Codex, use `enzyme agents codex` instead of `enzyme agents claude`. The agent install command fetches current instruction templates from GitHub when available and falls back to the packaged copy.
 
 ## Session Lifecycle
 

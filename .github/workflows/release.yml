@@ -350,7 +350,6 @@ jobs:
           cp ../plugin/agent/tools.py ./tools.py
           cp ../plugin/agent/hooks.py ./hooks.py
           cp ../plugin/agent/install.sh ./install.sh
-          cp ../plugin/agent/setup-guide.md ./setup-guide.md
           cp ../plugin/agent/README.md ./README.md
           cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
 

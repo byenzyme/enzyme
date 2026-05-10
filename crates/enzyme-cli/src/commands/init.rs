@@ -600,12 +600,9 @@ pub async fn run_init(
 
     let cache_epoch = bump_collection_cache_epoch(&db)?;
 
-    // ── Step 9: Generate CLAUDE.md and hook (interactive mode only) ──────
+    // ── Step 9: Set up hook for Claude Code users (interactive mode only) ─
     if !quiet {
-        if let Err(e) = super::claude_md::generate_claude_md(vault_path) {
-            tracing::warn!("failed to update CLAUDE.md: {}", e);
-        }
-        // Set up petri hook for Claude Code users (only if .claude/ already exists)
+        // Agent instruction installation is handled explicitly by `enzyme agents`.
         if vault_path.join(".claude").exists() {
             if let Err(e) = setup_petri_hook(vault_path) {
                 tracing::warn!("failed to set up petri hook: {}", e);
@@ -1215,14 +1212,7 @@ async fn run_refresh_interactive(
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
-        let _ = run_init(
-            vault_path,
-            false,
-            false,
-            false,
-            min_top_catalysts,
-        )
-        .await?;
+        let _ = run_init(vault_path, false, false, false, min_top_catalysts).await?;
         return Ok(());
     }
 

@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Enzyme plugins for local markdown vault setup and indexing.",
-    "version": "0.5.9"
+    "version": "0.5.10"
   },
   "plugins": [
     {
