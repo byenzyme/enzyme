@@ -37,6 +37,8 @@ claude plugin marketplace add jshph/enzyme
 claude plugin install enzyme
 ```
 
+The repo includes marketplace metadata at the root and the actual plugin bundle under `plugins/enzyme/`. That nested layout is intentional: Claude Code and Codex marketplaces discover installable plugins from repository subdirectories, while the root files point each marketplace at the shared bundle.
+
 ### MCP server
 
 If you prefer MCP over the plugin, Enzyme ships a stdio MCP server that works with any MCP-compatible client (Claude Desktop, Cursor, etc):
