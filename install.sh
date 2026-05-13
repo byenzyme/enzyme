@@ -10,9 +10,7 @@ INSTALL_DIR="$HOME/.local/bin"
 # Detect platform
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)               TARGET="macos-arm64" ;;
-    Darwin-x86_64)
-        echo "Intel Macs are not supported." >&2
-        exit 1 ;;
+    Darwin-x86_64)              TARGET="macos-x86_64" ;;
     Linux-x86_64)               TARGET="linux-x86_64" ;;
     Linux-aarch64)              TARGET="linux-arm64" ;;
     *)
