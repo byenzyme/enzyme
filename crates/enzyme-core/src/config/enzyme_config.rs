@@ -17,13 +17,9 @@ const CONFIG_HEADER: &str = "\
 # This file configures how Enzyme processes your Obsidian vault(s).
 # Edit it directly \u{2014} changes take effect on the next `enzyme refresh`.
 #
-# [defaults]
-# catalyst_format  = \"question\"       # catalyst shape: question, thesis, claim
-# minimum_tags     = 8                # minimum trending tag entities to select
-# minimum_links    = 6                # minimum trending link entities
-# minimum_folders  = 6                # minimum trending folder entities
-# total_limit      = 30               # cap on total entities selected
-# max_embedding_files = 1024          # max docs to embed per run (0 = unlimited)
+# The [defaults] section below contains global settings used by every vault.
+# max_embedding_files caps the number of docs embedded per run, newest first.
+# Set max_embedding_files = 0 to embed all docs.
 #
 # Each vault gets its own section, keyed by absolute path:
 #
@@ -415,6 +411,10 @@ impl EnzymeConfig {
             global.defaults.minimum_folders = trending.minimum_folders;
             global.defaults.total_limit = trending.total_limit;
         }
+        if global.defaults.max_embedding_files.is_none() {
+            global.defaults.max_embedding_files =
+                Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES);
+        }
 
         let entry = global
             .vaults
@@ -671,6 +671,8 @@ entities = [
         // Verify the header comment is present in the written file
         let raw = fs::read_to_string(EnzymeConfig::config_path().unwrap()).unwrap();
         assert!(raw.starts_with("# Enzyme configuration"));
+        assert!(raw.contains("[defaults]"));
+        assert!(raw.contains("max_embedding_files = 1024"));
 
         let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
