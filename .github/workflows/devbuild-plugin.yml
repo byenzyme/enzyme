@@ -44,6 +44,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Add target to active toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

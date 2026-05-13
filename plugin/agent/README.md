@@ -302,7 +302,7 @@ schemas.py                  # Tool schemas (LLM-facing)
 tools.py                    # Tool handlers (shell out to enzyme CLI)
 hooks.py                    # Lifecycle hooks (session start, pre-LLM, session end)
 install.sh                  # CLI installer (curl-pipe-bash)
-bin/                        # Platform binaries (macOS arm64, Linux x86_64/arm64)
+bin/                        # Platform binaries (macOS arm64/x86_64, Linux x86_64/arm64)
 ```
 
 Install path:
@@ -310,7 +310,7 @@ Install path:
 
 ## Requirements
 
-- macOS Apple Silicon or Linux (x86_64, aarch64)
+- macOS Apple Silicon/Intel or Linux (x86_64, aarch64)
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
 - Catalyst generation uses [OpenRouter](https://openrouter.ai) free tier by default, or set `OPENAI_API_KEY`
 
