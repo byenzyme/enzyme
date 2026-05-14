@@ -202,15 +202,17 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
 /// This preserves the normal `enzyme init` contract while adding an earlier
 /// readiness contract for voice agents. The detached worker owns the real init
 /// pipeline, so LLM work is not duplicated; this foreground process only waits
-/// until entity-atomic catalyst inserts have made a seed petri readable.
+/// until streamed catalyst records have made a seed petri readable.
 pub async fn run_init_voice_ready(
     vault_path: &Path,
     seed_entities: usize,
+    seed_catalysts_per_entity: usize,
     timeout: Duration,
     min_top_catalysts: Option<usize>,
 ) -> Result<serde_json::Value> {
     let start = Instant::now();
     let seed_entities = seed_entities.max(1);
+    let seed_catalysts_per_entity = seed_catalysts_per_entity.max(1);
     let paths = EnzymePaths::new(vault_path)?;
     require_login(&paths.auth_token())?;
 
@@ -218,7 +220,7 @@ pub async fn run_init_voice_ready(
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
-    let background_spawned = spawn_background_init(vault_path, &paths, min_top_catalysts);
+    let background_spawned = spawn_background_init(vault_path, &paths, min_top_catalysts, true);
     let log_path = paths
         .vault_db
         .parent()
@@ -236,7 +238,7 @@ pub async fn run_init_voice_ready(
 
         match super::petri::build_petri_json(vault_path, 20, None, None) {
             Ok(petri) => {
-                let ready_entities = count_seed_petri_entities(&petri);
+                let ready_entities = count_seed_petri_entities(&petri, seed_catalysts_per_entity);
                 if ready_entities >= seed_entities {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     return Ok(json!({
@@ -250,6 +252,7 @@ pub async fn run_init_voice_ready(
                             "petri": "seed_ready",
                             "seed_entities_ready": ready_entities,
                             "seed_entities_required": seed_entities,
+                            "seed_catalysts_per_entity_required": seed_catalysts_per_entity,
                             "embeddings": "running",
                             "similarities": "pending",
                             "semantic_search": false,
@@ -263,7 +266,7 @@ pub async fn run_init_voice_ready(
                     }));
                 }
                 last_error = format!(
-                    "seed petri has {ready_entities}/{seed_entities} catalyzed entities"
+                    "seed petri has {ready_entities}/{seed_entities} entities with at least {seed_catalysts_per_entity} catalysts"
                 );
             }
             Err(e) => {
@@ -283,7 +286,7 @@ pub async fn run_init_voice_ready(
     }
 }
 
-fn count_seed_petri_entities(petri: &serde_json::Value) -> usize {
+fn count_seed_petri_entities(petri: &serde_json::Value, min_catalysts_per_entity: usize) -> usize {
     petri
         .get("entities")
         .and_then(|v| v.as_array())
@@ -294,7 +297,9 @@ fn count_seed_petri_entities(petri: &serde_json::Value) -> usize {
                     entity
                         .get("catalysts")
                         .and_then(|v| v.as_array())
-                        .map_or(false, |catalysts| !catalysts.is_empty())
+                        .map_or(false, |catalysts| {
+                            catalysts.len() >= min_catalysts_per_entity
+                        })
                 })
                 .count()
         })
@@ -335,6 +340,7 @@ pub async fn run_init(
     quiet: bool,
     json_progress: bool,
     min_top_catalysts: Option<usize>,
+    stream_partial_catalysts: bool,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
@@ -594,6 +600,7 @@ pub async fn run_init(
             concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            stream_partial_catalysts,
         };
 
         let stats = cat_pipeline
@@ -1180,6 +1187,7 @@ async fn run_stale_catalyst_refresh(
         concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok()),
+        stream_partial_catalysts: false,
     };
 
     let stats = cat_pipeline
@@ -1349,6 +1357,7 @@ fn spawn_background_init(
     vault_path: &Path,
     paths: &EnzymePaths,
     min_top_catalysts: Option<usize>,
+    stream_partial_catalysts: bool,
 ) -> bool {
     let enzyme_dir = match paths.vault_db.parent() {
         Some(p) => p,
@@ -1389,6 +1398,9 @@ fn spawn_background_init(
         .arg(vault_path);
     if let Some(value) = min_top_catalysts {
         cmd.arg("--min-top-catalysts").arg(value.to_string());
+    }
+    if stream_partial_catalysts {
+        cmd.arg("--stream-partial-catalysts");
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
@@ -1434,7 +1446,7 @@ async fn run_refresh_interactive(
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
-        let _ = run_init(vault_path, false, false, false, min_top_catalysts).await?;
+        let _ = run_init(vault_path, false, false, false, min_top_catalysts, false).await?;
         return Ok(());
     }
 
@@ -1737,7 +1749,8 @@ mod tests {
             ]
         });
 
-        assert_eq!(count_seed_petri_entities(&petri), 1);
+        assert_eq!(count_seed_petri_entities(&petri, 1), 1);
+        assert_eq!(count_seed_petri_entities(&petri, 2), 0);
     }
 
     #[test]

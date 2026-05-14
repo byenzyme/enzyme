@@ -60,9 +60,17 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         voice_entities: usize,
 
+        /// Minimum streamed catalysts each voice-ready entity must expose.
+        #[arg(long, default_value_t = 1)]
+        voice_catalysts_per_entity: usize,
+
         /// Seconds to wait for seed petri readiness before failing --voice-ready.
         #[arg(long, default_value_t = 90)]
         voice_timeout_secs: u64,
+
+        /// Internal worker mode: stream and persist complete catalyst records as they arrive.
+        #[arg(long, hide = true)]
+        stream_partial_catalysts: bool,
 
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
@@ -331,7 +339,9 @@ async fn main() -> Result<()> {
             min_top_catalysts,
             voice_ready,
             voice_entities,
+            voice_catalysts_per_entity,
             voice_timeout_secs,
+            stream_partial_catalysts,
             stage,
         } => {
             if stage.as_deref() == Some("index") {
@@ -340,6 +350,7 @@ async fn main() -> Result<()> {
                 let output = commands::init::run_init_voice_ready(
                     &vault_path,
                     voice_entities,
+                    voice_catalysts_per_entity,
                     std::time::Duration::from_secs(voice_timeout_secs),
                     min_top_catalysts,
                 )
@@ -357,6 +368,7 @@ async fn main() -> Result<()> {
                     quiet,
                     json_progress,
                     min_top_catalysts,
+                    stream_partial_catalysts,
                 )
                 .await?;
 
