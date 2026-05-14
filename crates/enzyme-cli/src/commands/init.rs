@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -197,12 +197,150 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     Ok(())
 }
 
+/// Start a detached full init and return when enough petri context is visible.
+///
+/// This preserves the normal `enzyme init` contract while adding an earlier
+/// readiness contract for voice agents. The detached worker owns the real init
+/// pipeline, so LLM work is not duplicated; this foreground process only waits
+/// until streamed catalyst records have made a seed petri readable.
+pub async fn run_init_voice_ready(
+    vault_path: &Path,
+    seed_entities: usize,
+    seed_min_catalysts: usize,
+    timeout: Duration,
+    min_top_catalysts: Option<usize>,
+) -> Result<serde_json::Value> {
+    let start = Instant::now();
+    let seed_entities = seed_entities.max(1);
+    let seed_min_catalysts = seed_min_catalysts.max(1);
+    let paths = EnzymePaths::new(vault_path)?;
+    require_login(&paths.auth_token())?;
+
+    if let Some(parent) = paths.vault_db.parent() {
+        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+    }
+
+    let background_spawned = spawn_background_init(vault_path, &paths, min_top_catalysts, true);
+    let log_path = paths
+        .vault_db
+        .parent()
+        .map(|dir| dir.join("background_init.log"));
+
+    let mut last_error = "no petri available yet".to_string();
+    loop {
+        if start.elapsed() >= timeout {
+            anyhow::bail!(
+                "voice-ready init timed out after {:.1}s waiting for seed petri ({})",
+                timeout.as_secs_f64(),
+                last_error
+            );
+        }
+
+        match super::petri::build_petri_json(vault_path, 20, None, None) {
+            Ok(petri) => {
+                let ready_entities = count_seed_petri_entities(&petri, seed_min_catalysts);
+                if ready_entities >= seed_entities {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    return Ok(json!({
+                        "status": "partial_ready",
+                        "fresh": false,
+                        "duration_ms": duration_ms,
+                        "background_spawned": background_spawned,
+                        "background_log": log_path.as_ref().map(|p| p.display().to_string()),
+                        "readiness": {
+                            "index": "ready",
+                            "petri": "seed_ready",
+                            "seed_entities_ready": ready_entities,
+                            "seed_entities_required": seed_entities,
+                            "seed_min_catalysts_required": seed_min_catalysts,
+                            "embeddings": "running",
+                            "similarities": "pending",
+                            "semantic_search": false,
+                            "background": if background_spawned { "spawned" } else { "already_running_or_unavailable" },
+                        },
+                        "capabilities": {
+                            "semantic_search": false,
+                            "catalysts": true,
+                        },
+                        "petri": petri,
+                    }));
+                }
+                last_error = format!(
+                    "seed petri has {ready_entities}/{seed_entities} entities with at least {seed_min_catalysts} catalysts"
+                );
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+
+        if let Some(reason) = background_init_terminal_reason(log_path.as_deref()) {
+            anyhow::bail!(
+                "voice-ready init failed before seed petri became ready: {} ({})",
+                reason,
+                last_error
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn count_seed_petri_entities(petri: &serde_json::Value, min_catalysts_per_entity: usize) -> usize {
+    petri
+        .get("entities")
+        .and_then(|v| v.as_array())
+        .map(|entities| {
+            entities
+                .iter()
+                .filter(|entity| {
+                    entity
+                        .get("catalysts")
+                        .and_then(|v| v.as_array())
+                        .map_or(false, |catalysts| {
+                            catalysts.len() >= min_catalysts_per_entity
+                        })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn background_init_terminal_reason(log_path: Option<&Path>) -> Option<String> {
+    let log_path = log_path?;
+    let contents = fs::read_to_string(log_path).ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(line) = trimmed.lines().find(|line| line.starts_with("Error:")) {
+        return Some(line.to_string());
+    }
+
+    let last_line = trimmed.lines().last()?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(last_line) {
+        if value.get("status").and_then(|v| v.as_str()) == Some("completed") {
+            let generated = value
+                .get("catalysts_generated")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if generated == 0 {
+                return Some("background init completed with 0 generated catalysts".to_string());
+            }
+        }
+    }
+
+    None
+}
+
 pub async fn run_init(
     vault_path: &Path,
-    _detached: bool,
+    detached: bool,
     quiet: bool,
     json_progress: bool,
     min_top_catalysts: Option<usize>,
+    stream_partial_catalysts: bool,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
@@ -212,6 +350,17 @@ pub async fn run_init(
     if let Some(parent) = paths.vault_db.parent() {
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
+
+    let _detached_lock = if detached {
+        let enzyme_dir = paths
+            .vault_db
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| vault_path.join(".enzyme"));
+        Some(acquire_refresh_lock(&enzyme_dir)?)
+    } else {
+        None
+    };
 
     if !should_preserve_db_only_corpus(&paths, vault_path)? {
         reset_vault_database(&paths)?;
@@ -451,6 +600,7 @@ pub async fn run_init(
             concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            stream_partial_catalysts,
         };
 
         let stats = cat_pipeline
@@ -1037,6 +1187,7 @@ async fn run_stale_catalyst_refresh(
         concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
             .ok()
             .and_then(|v| v.parse().ok()),
+        stream_partial_catalysts: false,
     };
 
     let stats = cat_pipeline
@@ -1201,6 +1352,89 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
     }
 }
 
+/// Spawn a detached full init worker for the voice-ready foreground path.
+fn spawn_background_init(
+    vault_path: &Path,
+    paths: &EnzymePaths,
+    min_top_catalysts: Option<usize>,
+    stream_partial_catalysts: bool,
+) -> bool {
+    let enzyme_dir = match paths.vault_db.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    if is_refresh_locked(enzyme_dir) {
+        debug!("background init or refresh already running, skipping spawn");
+        return false;
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            debug!("failed to get current exe: {}", e);
+            return false;
+        }
+    };
+
+    let log_path = enzyme_dir.join("background_init.log");
+    let log_file = match fs::File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("failed to create background init log: {}", e);
+            return false;
+        }
+    };
+    let log_stderr = match log_file.try_clone() {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("failed to clone background init log file handle: {}", e);
+            return false;
+        }
+    };
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["init", "--detached", "--quiet", "-p"])
+        .arg(vault_path);
+    if let Some(value) = min_top_catalysts {
+        cmd.arg("--min-top-catalysts").arg(value.to_string());
+    }
+    if stream_partial_catalysts {
+        cmd.arg("--stream-partial-catalysts");
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_stderr));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                match libc::fork() {
+                    -1 => Err(std::io::Error::last_os_error()),
+                    0 => Ok(()),
+                    _ => libc::_exit(0),
+                }
+            });
+        }
+    }
+
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let _ = child.wait();
+            debug!("spawned background init (double-forked)");
+            true
+        }
+        Err(e) => {
+            debug!("failed to spawn background init: {}", e);
+            false
+        }
+    }
+}
+
 /// Interactive refresh path.
 ///
 /// Runs the same local incremental work as quiet refresh, then runs the
@@ -1212,7 +1446,7 @@ async fn run_refresh_interactive(
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
-        let _ = run_init(vault_path, false, false, false, min_top_catalysts).await?;
+        let _ = run_init(vault_path, false, false, false, min_top_catalysts, false).await?;
         return Ok(());
     }
 
@@ -1503,5 +1737,51 @@ mod tests {
                 .map(|entity| entity.name)
                 .collect();
         assert_eq!(no_catalyst_names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn seed_petri_count_requires_nonempty_top_level_catalysts() {
+        let petri = serde_json::json!({
+            "entities": [
+                {"name": "ready", "catalysts": [{"text": "one"}]},
+                {"name": "empty", "catalysts": []},
+                {"name": "missing"}
+            ]
+        });
+
+        assert_eq!(count_seed_petri_entities(&petri, 1), 1);
+        assert_eq!(count_seed_petri_entities(&petri, 2), 0);
+    }
+
+    #[test]
+    fn background_init_terminal_reason_detects_worker_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("background_init.log");
+        std::fs::write(&log, "Error: insufficient credits\n").unwrap();
+
+        assert_eq!(
+            background_init_terminal_reason(Some(&log)).as_deref(),
+            Some("Error: insufficient credits")
+        );
+    }
+
+    #[test]
+    fn background_init_terminal_reason_detects_zero_catalyst_completion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("background_init.log");
+        std::fs::write(
+            &log,
+            serde_json::json!({
+                "status": "completed",
+                "catalysts_generated": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            background_init_terminal_reason(Some(&log)).as_deref(),
+            Some("background init completed with 0 generated catalysts")
+        );
     }
 }

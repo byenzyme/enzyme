@@ -99,6 +99,10 @@ Read Enzyme JSON directly. Do not pipe through Python or jq unless the output is
    ```
 
    The quiet output includes petri data under `petri`; do not run a separate `enzyme petri` call during setup.
+   For voice agents that need an immediate first turn, use
+   `enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1`
+   instead. It returns once seed petri context exists; the detached worker
+   finishes embeddings, final catalysts, and similarities in the background.
 
 7. **Install persistent agent instructions.** `enzyme init --quiet` does not install agent-facing instructions, so app-mediated setup must do it explicitly after init. Use the command for the active agent:
 
