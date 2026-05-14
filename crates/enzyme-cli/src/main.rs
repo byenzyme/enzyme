@@ -52,6 +52,18 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
+        /// Return once a seed petri is available while a detached worker finishes init.
+        #[arg(long)]
+        voice_ready: bool,
+
+        /// Number of catalyzed petri entities required before --voice-ready returns.
+        #[arg(long, default_value_t = 1)]
+        voice_entities: usize,
+
+        /// Seconds to wait for seed petri readiness before failing --voice-ready.
+        #[arg(long, default_value_t = 90)]
+        voice_timeout_secs: u64,
+
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
         stage: Option<String>,
@@ -317,10 +329,27 @@ async fn main() -> Result<()> {
             quiet,
             json_progress,
             min_top_catalysts,
+            voice_ready,
+            voice_entities,
+            voice_timeout_secs,
             stage,
         } => {
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
+            } else if voice_ready {
+                let output = commands::init::run_init_voice_ready(
+                    &vault_path,
+                    voice_entities,
+                    std::time::Duration::from_secs(voice_timeout_secs),
+                    min_top_catalysts,
+                )
+                .await?;
+
+                if quiet || json_progress {
+                    println!("{}", serde_json::to_string(&output)?);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
             } else {
                 let init_result = commands::init::run_init(
                     &vault_path,
