@@ -58,6 +58,9 @@ enzyme scan -p /path/to/vault --write-config
 enzyme init -q -p /path/to/vault
 enzyme refresh -q -p /path/to/vault
 
+# Voice-ready init — return once seed petri context exists; full init continues in background
+enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1 -p /path/to/vault
+
 # Search using catalysts
 enzyme catalyze "tension between shipping fast and getting it right" -p /path/to/vault
 

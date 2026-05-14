@@ -206,13 +206,13 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
 pub async fn run_init_voice_ready(
     vault_path: &Path,
     seed_entities: usize,
-    seed_catalysts_per_entity: usize,
+    seed_min_catalysts: usize,
     timeout: Duration,
     min_top_catalysts: Option<usize>,
 ) -> Result<serde_json::Value> {
     let start = Instant::now();
     let seed_entities = seed_entities.max(1);
-    let seed_catalysts_per_entity = seed_catalysts_per_entity.max(1);
+    let seed_min_catalysts = seed_min_catalysts.max(1);
     let paths = EnzymePaths::new(vault_path)?;
     require_login(&paths.auth_token())?;
 
@@ -238,7 +238,7 @@ pub async fn run_init_voice_ready(
 
         match super::petri::build_petri_json(vault_path, 20, None, None) {
             Ok(petri) => {
-                let ready_entities = count_seed_petri_entities(&petri, seed_catalysts_per_entity);
+                let ready_entities = count_seed_petri_entities(&petri, seed_min_catalysts);
                 if ready_entities >= seed_entities {
                     let duration_ms = start.elapsed().as_millis() as u64;
                     return Ok(json!({
@@ -252,7 +252,7 @@ pub async fn run_init_voice_ready(
                             "petri": "seed_ready",
                             "seed_entities_ready": ready_entities,
                             "seed_entities_required": seed_entities,
-                            "seed_catalysts_per_entity_required": seed_catalysts_per_entity,
+                            "seed_min_catalysts_required": seed_min_catalysts,
                             "embeddings": "running",
                             "similarities": "pending",
                             "semantic_search": false,
@@ -266,7 +266,7 @@ pub async fn run_init_voice_ready(
                     }));
                 }
                 last_error = format!(
-                    "seed petri has {ready_entities}/{seed_entities} entities with at least {seed_catalysts_per_entity} catalysts"
+                    "seed petri has {ready_entities}/{seed_entities} entities with at least {seed_min_catalysts} catalysts"
                 );
             }
             Err(e) => {

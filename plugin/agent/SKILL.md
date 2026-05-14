@@ -27,6 +27,11 @@ enzyme agents claude
 
 For Codex, use `enzyme agents codex` instead of `enzyme agents claude`. The agent install command fetches current instruction templates from GitHub when available and falls back to the packaged copy.
 
+For voice agents that need to start the first turn before the full init barrier,
+use `enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1`.
+It returns once seed petri context exists; semantic search becomes available
+after the detached init worker finishes.
+
 ## Session Lifecycle
 
 What's automatic depends on your runtime:

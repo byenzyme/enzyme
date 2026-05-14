@@ -60,9 +60,9 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         voice_entities: usize,
 
-        /// Minimum streamed catalysts each voice-ready entity must expose.
+        /// Minimum catalysts each voice-ready entity must expose.
         #[arg(long, default_value_t = 1)]
-        voice_catalysts_per_entity: usize,
+        voice_min_catalysts: usize,
 
         /// Seconds to wait for seed petri readiness before failing --voice-ready.
         #[arg(long, default_value_t = 90)]
@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
             min_top_catalysts,
             voice_ready,
             voice_entities,
-            voice_catalysts_per_entity,
+            voice_min_catalysts,
             voice_timeout_secs,
             stream_partial_catalysts,
             stage,
@@ -350,7 +350,7 @@ async fn main() -> Result<()> {
                 let output = commands::init::run_init_voice_ready(
                     &vault_path,
                     voice_entities,
-                    voice_catalysts_per_entity,
+                    voice_min_catalysts,
                     std::time::Duration::from_secs(voice_timeout_secs),
                     min_top_catalysts,
                 )
