@@ -6,4 +6,4 @@ pub mod spinner;
 #[allow(dead_code)]
 pub mod tree;
 
-pub use progress::{DisplayEvent, InitDisplay};
+pub use progress::{CompletionStatus, DisplayEvent, InitDisplay};

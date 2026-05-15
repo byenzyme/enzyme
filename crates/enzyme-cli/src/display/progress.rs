@@ -14,6 +14,13 @@ use super::colors;
 use super::spinner::HelixSpinner;
 use super::tree;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStatus {
+    Done,
+    Degraded,
+    Failed,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -126,6 +133,8 @@ pub enum DisplayEvent {
     // Done
     Done {
         duration_ms: u64,
+        status: CompletionStatus,
+        message: Option<String>,
     },
 }
 
@@ -565,16 +574,31 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     documents,
                 );
             }
-            DisplayEvent::Done { duration_ms } => {
+            DisplayEvent::Done {
+                duration_ms,
+                status,
+                message,
+            } => {
                 clear_lines(out, *lines_written);
                 let secs = duration_ms as f64 / 1000.0;
+                let (label, color) = match status {
+                    CompletionStatus::Done => ("Done!", colors::FOREST_GREEN),
+                    CompletionStatus::Degraded => {
+                        ("Completed with warnings", crossterm::style::Color::Yellow)
+                    }
+                    CompletionStatus::Failed => ("Failed", crossterm::style::Color::Red),
+                };
                 let _ = writeln!(
                     out,
-                    "  {}Done!{} ({:.1}s)",
-                    crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
+                    "  {}{}{} ({:.1}s)",
+                    crossterm::style::SetForegroundColor(color),
+                    label,
                     crossterm::style::ResetColor,
                     secs,
                 );
+                if let Some(message) = message {
+                    let _ = writeln!(out, "  {}", message);
+                }
                 let _ = out.flush();
                 return true;
             }
@@ -892,9 +916,21 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         catalysts, documents
                     );
                 }
-                DisplayEvent::Done { duration_ms } => {
+                DisplayEvent::Done {
+                    duration_ms,
+                    status,
+                    message,
+                } => {
                     let secs = duration_ms as f64 / 1000.0;
-                    println!("Done! ({:.1}s)", secs);
+                    let label = match status {
+                        CompletionStatus::Done => "Done!",
+                        CompletionStatus::Degraded => "Completed with warnings",
+                        CompletionStatus::Failed => "Failed",
+                    };
+                    println!("{} ({:.1}s)", label, secs);
+                    if let Some(message) = message {
+                        println!("  {}", message);
+                    }
                     return;
                 }
             },
@@ -1020,8 +1056,17 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     } => {
                         json!({"stage": "similarity", "status": "complete", "catalysts": catalysts, "documents": documents})
                     }
-                    DisplayEvent::Done { duration_ms } => {
-                        let obj = json!({"stage": "done", "duration_ms": duration_ms});
+                    DisplayEvent::Done {
+                        duration_ms,
+                        status,
+                        message,
+                    } => {
+                        let status = match status {
+                            CompletionStatus::Done => "done",
+                            CompletionStatus::Degraded => "degraded",
+                            CompletionStatus::Failed => "failed",
+                        };
+                        let obj = json!({"stage": "done", "status": status, "message": message, "duration_ms": duration_ms});
                         eprintln!("{}", serde_json::to_string(&obj).unwrap());
                         return;
                     }

@@ -14,7 +14,7 @@ use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
-use crate::display::{DisplayEvent, InitDisplay};
+use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 
 pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> Result<()> {
     let start = Instant::now();
@@ -160,7 +160,12 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    tx.send(DisplayEvent::Done { duration_ms }).ok();
+    tx.send(DisplayEvent::Done {
+        duration_ms,
+        status: CompletionStatus::Done,
+        message: None,
+    })
+    .ok();
 
     display.finish();
 

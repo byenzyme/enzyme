@@ -14,7 +14,7 @@ use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
 use enzyme_core::models::Entity;
 use enzyme_core::pipeline::catalysts::{
-    CatalystConfig, CatalystEvent, CatalystPipeline, calculate_allocations,
+    CatalystConfig, CatalystEvent, CatalystPipeline, CatalystStats, calculate_allocations,
 };
 use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::embedding::{EmbeddingPipeline, EmbeddingStats};
@@ -28,7 +28,7 @@ use enzyme_core::pipeline::staleness::{
 
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
-use crate::display::{DisplayEvent, InitDisplay};
+use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 use enzyme_core::config::auth::require_login;
 
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
@@ -80,6 +80,57 @@ impl LocalRefreshResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalystQuality {
+    Passed,
+    Degraded,
+    Failed,
+}
+
+struct CatalystQualityGate {
+    quality: CatalystQuality,
+    message: Option<String>,
+}
+
+fn evaluate_catalyst_quality(stats: &CatalystStats, total_entities: usize) -> CatalystQualityGate {
+    let failed = stats.errors.len();
+    let succeeded = stats.entities_processed;
+    let attempted = succeeded + failed;
+
+    if stats.catalysts_generated == 0 {
+        return CatalystQualityGate {
+            quality: CatalystQuality::Failed,
+            message: Some(format!(
+                "Catalyst generation produced 0 catalysts for {attempted}/{total_entities} attempted entities"
+            )),
+        };
+    }
+
+    if total_entities > 0 && succeeded * 2 < total_entities {
+        return CatalystQualityGate {
+            quality: CatalystQuality::Failed,
+            message: Some(format!(
+                "Catalyst generation succeeded for {succeeded}/{total_entities} entities; refusing to mark catalysts fresh"
+            )),
+        };
+    }
+
+    if failed > 0 {
+        return CatalystQualityGate {
+            quality: CatalystQuality::Degraded,
+            message: Some(format!(
+                "Catalyst generation completed with {failed} failed entities and {} generated catalysts",
+                stats.catalysts_generated
+            )),
+        };
+    }
+
+    CatalystQualityGate {
+        quality: CatalystQuality::Passed,
+        message: None,
+    }
+}
+
 // Persisted under the historical key so existing databases remain readable.
 // Semantically this is a cache epoch: it bumps when collection-derived caches
 // should be invalidated, not when user-visible collection content is versioned.
@@ -108,6 +159,7 @@ fn maybe_bump_collection_cache_epoch(db: &Database, changed: bool) -> Result<u64
 
 /// Stats collected during an init run, used for JSON output in quiet mode.
 pub struct InitResult {
+    pub status: CompletionStatus,
     pub files_discovered: usize,
     pub files_new: usize,
     pub files_updated: usize,
@@ -127,7 +179,11 @@ impl InitResult {
     pub fn to_json(&self, vault_path: &Path) -> Result<serde_json::Value> {
         let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
         let mut output = json!({
-            "status": "completed",
+            "status": match self.status {
+                CompletionStatus::Done => "completed",
+                CompletionStatus::Degraded => "completed_with_warnings",
+                CompletionStatus::Failed => "failed",
+            },
             "fresh": false,
             "indexing": {
                 "files_discovered": self.files_discovered,
@@ -687,6 +743,31 @@ pub async fn run_init(
         warnings.push(msg);
         None
     };
+    let catalyst_gate = cat_stats
+        .as_ref()
+        .map(|stats| evaluate_catalyst_quality(stats, sel_result.entities.len()));
+    if let Some(gate) = &catalyst_gate {
+        match gate.quality {
+            CatalystQuality::Passed => {
+                info!(
+                    catalysts = cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
+                    "init stage=catalysts status=ok"
+                );
+            }
+            CatalystQuality::Degraded => {
+                if let Some(message) = &gate.message {
+                    warnings.push(message.clone());
+                    tracing::warn!(message = %message, "init stage=catalysts status=degraded");
+                }
+            }
+            CatalystQuality::Failed => {
+                if let Some(message) = &gate.message {
+                    warnings.push(message.clone());
+                    tracing::warn!(message = %message, "init stage=catalysts status=failed");
+                }
+            }
+        }
+    }
 
     // ── Step 6: Wait for background embedding ─────────────────────────────
     // EmbeddingComplete was already sent from inside the spawn_blocking task,
@@ -707,10 +788,14 @@ pub async fn run_init(
     let emb_completed = emb_stats.is_some();
 
     // ── Step 7: Similarity computation ────────────────────────────────────
+    let mut similarities_recomputed = false;
     if emb_completed
         && cat_stats
             .as_ref()
             .map_or(false, |s| s.catalysts_generated > 0)
+        && catalyst_gate
+            .as_ref()
+            .map_or(false, |g| g.quality != CatalystQuality::Failed)
     {
         tx.send(DisplayEvent::SimilarityStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
@@ -730,25 +815,40 @@ pub async fn run_init(
             documents: sim_stats.documents_compared,
         })
         .ok();
+        similarities_recomputed = true;
     }
 
-    if cat_stats.is_some() {
+    if catalyst_gate
+        .as_ref()
+        .map_or(false, |g| g.quality == CatalystQuality::Passed)
+    {
         let entity_names: Vec<String> =
             sel_result.entities.iter().map(|e| e.name.clone()).collect();
         if let Err(e) = store_staleness_bookkeeping(&db, vault_path, &entity_names) {
             tracing::warn!("failed to store catalyst staleness bookkeeping: {}", e);
         }
+    } else if cat_stats.is_some() {
+        tracing::warn!("init stage=staleness status=skipped reason=catalyst_quality_not_clean");
     }
 
     // ── Step 8: Re-apply targets ──────────────────────────────────────────
     if cat_stats
         .as_ref()
         .map_or(false, |s| s.catalysts_generated > 0)
+        && catalyst_gate
+            .as_ref()
+            .map_or(false, |g| g.quality != CatalystQuality::Failed)
     {
         reapply_targets(vault_path).await;
     }
 
-    let cache_epoch = bump_collection_cache_epoch(&db)?;
+    let retrieval_changed = has_index_changes(&idx_stats)
+        || emb_completed
+        || similarities_recomputed
+        || catalyst_gate
+            .as_ref()
+            .map_or(false, |g| g.quality != CatalystQuality::Failed);
+    let cache_epoch = maybe_bump_collection_cache_epoch(&db, retrieval_changed)?;
 
     // ── Step 9: Set up hook for Claude Code users (interactive mode only) ─
     if !quiet {
@@ -761,10 +861,40 @@ pub async fn run_init(
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    tx.send(DisplayEvent::Done { duration_ms }).ok();
+    let completion_status = match catalyst_gate.as_ref().map(|g| g.quality) {
+        Some(CatalystQuality::Failed) => CompletionStatus::Failed,
+        Some(CatalystQuality::Degraded) => CompletionStatus::Degraded,
+        _ if !warnings.is_empty() => CompletionStatus::Degraded,
+        _ => CompletionStatus::Done,
+    };
+    let completion_message = match completion_status {
+        CompletionStatus::Failed | CompletionStatus::Degraded => warnings.last().cloned(),
+        CompletionStatus::Done => None,
+    };
+    tracing::info!(
+        status = ?completion_status,
+        warnings = warnings.len(),
+        catalysts = cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
+        catalyst_errors = cat_stats.as_ref().map_or(0, |s| s.errors.len()),
+        duration_ms,
+        "init complete"
+    );
+    tx.send(DisplayEvent::Done {
+        duration_ms,
+        status: completion_status,
+        message: completion_message.clone(),
+    })
+    .ok();
 
     // Wait for display thread to finish rendering
     display.finish();
+
+    if completion_status == CompletionStatus::Failed {
+        anyhow::bail!(
+            "{}",
+            completion_message.unwrap_or_else(|| "init failed quality checks".to_string())
+        );
+    }
 
     // Show starter prompt on interactive init
     if !quiet && !json_progress {
@@ -792,6 +922,7 @@ pub async fn run_init(
 
     if quiet || json_progress {
         Ok(Some(InitResult {
+            status: completion_status,
             files_discovered: idx_stats.files_discovered,
             files_new: idx_stats.files_new,
             files_updated: idx_stats.files_updated,
@@ -1193,21 +1324,34 @@ async fn run_stale_catalyst_refresh(
     let stats = cat_pipeline
         .run(&entities_to_process, &cat_config, |_event| {})
         .await?;
+    let catalyst_gate = evaluate_catalyst_quality(&stats, entities_to_process.len());
 
     info!(
         entities = stats.entities_processed,
         catalysts = stats.catalysts_generated,
+        errors = stats.errors.len(),
+        quality = ?catalyst_gate.quality,
         "catalyst refresh: generation complete"
     );
 
+    if catalyst_gate.quality == CatalystQuality::Failed {
+        let message = catalyst_gate
+            .message
+            .unwrap_or_else(|| "catalyst refresh failed quality checks".to_string());
+        tracing::warn!(message = %message, "refresh stage=catalysts status=failed");
+        anyhow::bail!("{message}");
+    }
+
     let is_partial = reason.stale_entity_names().is_some();
-    if is_partial {
+    if catalyst_gate.quality == CatalystQuality::Passed && is_partial {
         let names: Vec<String> = entities_to_process.iter().map(|e| e.name.clone()).collect();
         store_staleness_bookkeeping_partial(&db, &names)?;
-    } else {
+    } else if catalyst_gate.quality == CatalystQuality::Passed {
         let entity_names: Vec<String> =
             sel_result.entities.iter().map(|e| e.name.clone()).collect();
         store_staleness_bookkeeping(&db, vault_path, &entity_names)?;
+    } else {
+        tracing::warn!("refresh stage=staleness status=skipped reason=catalyst_quality_degraded");
     }
 
     if stats.catalysts_generated > 0 {
@@ -1651,6 +1795,36 @@ mod tests {
             entity_type: EntityType::Folder,
             ..entity(name)
         }
+    }
+
+    fn catalyst_stats(succeeded: usize, generated: usize, failed: usize) -> CatalystStats {
+        CatalystStats {
+            entities_processed: succeeded,
+            catalysts_generated: generated,
+            errors: (0..failed)
+                .map(|i| (format!("entity-{i}"), "failed".to_string()))
+                .collect(),
+            duration_ms: 0,
+            rate_limited: 0,
+        }
+    }
+
+    #[test]
+    fn catalyst_quality_fails_zero_generated() {
+        let gate = evaluate_catalyst_quality(&catalyst_stats(0, 0, 3), 3);
+        assert_eq!(gate.quality, CatalystQuality::Failed);
+    }
+
+    #[test]
+    fn catalyst_quality_degrades_partial_success_above_threshold() {
+        let gate = evaluate_catalyst_quality(&catalyst_stats(3, 21, 1), 4);
+        assert_eq!(gate.quality, CatalystQuality::Degraded);
+    }
+
+    #[test]
+    fn catalyst_quality_fails_majority_entity_failure() {
+        let gate = evaluate_catalyst_quality(&catalyst_stats(1, 7, 3), 4);
+        assert_eq!(gate.quality, CatalystQuality::Failed);
     }
 
     #[test]
