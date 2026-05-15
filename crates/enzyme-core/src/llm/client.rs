@@ -278,7 +278,8 @@ pub struct LlmClient {
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<Message>,
-    max_tokens: u32,
+    #[serde(flatten)]
+    token_limit: CompletionTokenLimit,
     temperature: f32,
     top_p: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +288,53 @@ struct ChatCompletionRequest {
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CompletionTokenLimit {
+    MaxTokens { max_tokens: u32 },
+    MaxCompletionTokens { max_completion_tokens: u32 },
+}
+
+fn completion_token_limit(base_url: &str, model: &str, max_tokens: u32) -> CompletionTokenLimit {
+    if requires_max_completion_tokens(base_url, model) {
+        CompletionTokenLimit::MaxCompletionTokens {
+            max_completion_tokens: max_tokens,
+        }
+    } else {
+        CompletionTokenLimit::MaxTokens { max_tokens }
+    }
+}
+
+fn requires_max_completion_tokens(base_url: &str, model: &str) -> bool {
+    let base_url = base_url.to_lowercase();
+    let model = model.to_lowercase();
+
+    base_url.contains("api.openai.com")
+        && (model.starts_with("gpt-5")
+            || model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4"))
+}
+
+fn chat_completion_request(
+    base_url: &str,
+    model: &str,
+    messages: Vec<Message>,
+    params: GenerationParams,
+    stream: Option<bool>,
+) -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        model: model.to_string(),
+        messages,
+        token_limit: completion_token_limit(base_url, model, params.max_tokens),
+        temperature: params.temperature,
+        top_p: params.top_p,
+        top_k: params.top_k,
+        response_format: params.response_format,
+        stream,
+    }
 }
 
 #[derive(Deserialize)]
@@ -500,16 +548,7 @@ impl LlmClient {
     ) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let request_body = ChatCompletionRequest {
-            model: model.to_string(),
-            messages,
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            top_k: params.top_k,
-            response_format: params.response_format,
-            stream: None,
-        };
+        let request_body = chat_completion_request(&self.base_url, model, messages, params, None);
 
         debug!(
             "Sending chat completion request to {} with model {}",
@@ -548,16 +587,8 @@ impl LlmClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let url = format!("{}/chat/completions", self.base_url);
 
-        let request_body = ChatCompletionRequest {
-            model: model.to_string(),
-            messages,
-            max_tokens: params.max_tokens,
-            temperature: params.temperature,
-            top_p: params.top_p,
-            top_k: params.top_k,
-            response_format: params.response_format,
-            stream: Some(true),
-        };
+        let request_body =
+            chat_completion_request(&self.base_url, model, messages, params, Some(true));
 
         debug!(
             "Sending streaming chat completion request to {} with model {}",
@@ -836,4 +867,63 @@ pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
 /// Backward-compatible: resolve just the API key.
 pub async fn resolve_api_key() -> Result<String> {
     resolve_api_config().await.map(|c| c.api_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_gpt5_requests_use_max_completion_tokens() {
+        let request = chat_completion_request(
+            "https://api.openai.com/v1",
+            "gpt-5.4-nano",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                max_tokens: 123,
+                ..GenerationParams::default()
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["max_completion_tokens"], 123);
+        assert!(json.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn legacy_openai_requests_keep_max_tokens() {
+        let request = chat_completion_request(
+            "https://api.openai.com/v1",
+            "gpt-3.5-turbo",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                max_tokens: 123,
+                ..GenerationParams::default()
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["max_tokens"], 123);
+        assert!(json.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn openrouter_requests_keep_max_tokens() {
+        let request = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "openai/gpt-5.4-nano",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                max_tokens: 123,
+                ..GenerationParams::default()
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["max_tokens"], 123);
+        assert!(json.get("max_completion_tokens").is_none());
+    }
 }
