@@ -1,40 +1,16 @@
 <!-- enzyme:start -->
-## Enzyme CLI
+## Enzyme Workspace Context
 
-Use Enzyme for retrieving context from this vault. Run all `enzyme` commands from the vault root.
+This workspace uses Enzyme for local semantic retrieval over markdown. Run `enzyme` commands from this workspace root.
 
-### Working memory
+Use the installed Enzyme skill for operational details. The skill contains the setup workflow, retrieval workflow, note-writing guidance, and presentation rules. This `AGENTS.md` section is intentionally small so workspace instructions stay readable.
 
-`enzyme petri` is working memory: it returns current entities and catalysts, which are thematic phrases from the vault.
+If `.enzyme/enzyme.db` is missing, initialize Enzyme with the skill workflow: scan the workspace, preserve existing Obsidian/markdown structure, validate `~/.enzyme/config.toml`, run `enzyme init --quiet`, then run `enzyme install` for the active runtime.
 
-- For a specific user prompt, run `enzyme petri --query "user's question"`.
-- For a broad prompt or first orientation, run `enzyme petri`.
-- Treat nested children under a tag or folder as evidence inside that parent cluster by default.
+Retrieval defaults:
+- Start broad sessions with `enzyme petri` or `enzyme petri --query "user prompt"`.
+- Use catalyst phrases from petri to compose `enzyme catalyze "query"` searches.
+- Use exact search only for names, tags, wikilinks, and literal text.
 
-Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect to precomputed content that the user's raw words may not find.
-
-### Search
-
-- `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
-- `enzyme refresh --quiet` re-indexes changed content.
-- `enzyme apply ./target-dir` indexes external content using vault catalysts; then search it with `enzyme catalyze "query" --target ./target-dir`.
-- Use `grep` for exact names, `#tags`, `[[wikilinks]]`, and literal text.
-- Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
-
-### Presentation
-
-Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs, scores, or tool names to the user unless asked.
-
-Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
-
-For broad exploration, use petri plus 1-2 catalyze searches, then open with one specific question about what the user is doing across their notes. Do not present a topic list.
-
-For search results, do not lead with metadata. Notice tensions, repeated words, time gaps, or changes in framing across results. End with one concrete next direction, not a generic invitation.
-
-Presentation registers for `enzyme catalyze --register`:
-- `explore`: wonder, probe, notice patterns.
-- `continuity`: restore what the user knew, show trajectory, enable forward motion.
-- `reference`: surface what drew attention and connect imports to the user's own thinking.
-
-Follow any `presentation_guidance` returned by Enzyme when framing surfaced content.
+Structure policy: do not impose a new memory schema. Treat existing folders, inboxes, daily notes, people/contact pages, tags, wikilinks, and frontmatter dates/entity fields as retrieval signal. Propose frontmatter, people-page, or folder backfills only with user confirmation.
 <!-- enzyme:end -->

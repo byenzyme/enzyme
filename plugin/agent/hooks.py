@@ -68,11 +68,12 @@ def on_session_start(**kwargs) -> None:
 
 
 def on_session_end(**kwargs) -> None:
-    """Prompt the agent to capture session insights before closing.
+    """Refresh changed markdown before closing.
 
     Hermes passes: session_id, completed, interrupted, model, platform.
     Only fires on completed sessions — interrupted ones may lack context.
-    Returns context string that nudges the agent to review and capture.
+    The runtime skill decides whether the agent should write memory notes;
+    this hook makes those markdown changes live for future retrieval.
     """
     if not is_enzyme_available():
         return
@@ -83,9 +84,6 @@ def on_session_end(**kwargs) -> None:
     if not _vault_is_initialized():
         return
 
-    # No-op for now: the SKILL.md instructions handle capture decisions.
-    # This hook exists as a registration point for future session-end
-    # logic (e.g., auto-refresh after a productive session).
     subprocess.run(
         ["enzyme", "refresh", "--quiet"],
         capture_output=True,

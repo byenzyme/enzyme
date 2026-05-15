@@ -173,10 +173,15 @@ enum Commands {
         write_config: bool,
     },
 
-    /// Install or update agent integrations for this vault
-    Agents {
-        #[command(subcommand)]
-        command: AgentsCommand,
+    /// Install or update this workspace's agent integration
+    Install {
+        /// Agent runtime to configure
+        #[arg(value_enum, default_value = "hermes")]
+        target: commands::agents::AgentTarget,
+
+        /// Template source: auto fetches GitHub copy and falls back to packaged copy
+        #[arg(long, value_enum, default_value = "auto")]
+        source: commands::agents::InstallSource,
     },
 
     /// Start the HTTP API server for the explore UI
@@ -223,23 +228,6 @@ enum Commands {
         /// Minimum catalysts for the largest entity (by volume)
         #[arg(long)]
         min_top_catalysts: Option<usize>,
-    },
-}
-
-#[derive(Subcommand)]
-enum AgentsCommand {
-    /// Install or update the Codex skill in .agents/skills/enzyme
-    Codex {
-        /// Template source: auto fetches GitHub copy and falls back to packaged copy
-        #[arg(long, value_enum, default_value = "auto")]
-        source: commands::agents::InstallSource,
-    },
-
-    /// Install or update the Claude skill in .claude/skills/enzyme
-    Claude {
-        /// Template source: auto fetches GitHub copy and falls back to packaged copy
-        #[arg(long, value_enum, default_value = "auto")]
-        source: commands::agents::InstallSource,
     },
 }
 
@@ -430,24 +418,9 @@ async fn main() -> Result<()> {
         Commands::Scan { write_config } => {
             commands::scan::run_scan(&vault_path, write_config)?;
         }
-        Commands::Agents { command } => match command {
-            AgentsCommand::Codex { source } => {
-                commands::agents::run_agents_install(
-                    &vault_path,
-                    commands::agents::AgentTarget::Codex,
-                    source,
-                )
-                .await?;
-            }
-            AgentsCommand::Claude { source } => {
-                commands::agents::run_agents_install(
-                    &vault_path,
-                    commands::agents::AgentTarget::Claude,
-                    source,
-                )
-                .await?;
-            }
-        },
+        Commands::Install { target, source } => {
+            commands::agents::run_agents_install(&vault_path, target, source).await?;
+        }
         Commands::Serve { port } => {
             commands::serve::run_serve(&vault_path, port).await?;
         }

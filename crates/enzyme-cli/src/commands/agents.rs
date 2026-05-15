@@ -1,6 +1,6 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{env, fs};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -20,6 +20,8 @@ const LOCAL_SKILL: &str = include_str!("../../../../plugin/agent-runtime-skill.m
 pub enum AgentTarget {
     Codex,
     Claude,
+    Hermes,
+    Openclaw,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -54,6 +56,13 @@ pub async fn run_agents_install(
     }
     if matches!(target, AgentTarget::Claude) {
         installed.push(write_skill(vault_path, ".claude", &skill.content)?);
+    }
+    if matches!(target, AgentTarget::Hermes) {
+        ensure_hermes_instructions(vault_path, &agents_path)?;
+        installed.push(write_hermes_skill(&skill.content)?);
+    }
+    if matches!(target, AgentTarget::Openclaw) {
+        installed.push(write_openclaw_skill(&skill.content)?);
     }
 
     eprintln!(
@@ -157,6 +166,46 @@ fn write_skill(vault_path: &Path, agent_dir: &str, skill: &str) -> Result<PathBu
     Ok(skill_path)
 }
 
+fn write_hermes_skill(skill: &str) -> Result<PathBuf> {
+    let hermes_home = hermes_home_dir();
+    let path = hermes_home.join("skills").join("enzyme");
+    fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
+    let skill_path = path.join("SKILL.md");
+    fs::write(&skill_path, format!("{}\n", skill.trim_end()))
+        .with_context(|| format!("failed to write {}", skill_path.display()))?;
+    Ok(skill_path)
+}
+
+fn write_openclaw_skill(skill: &str) -> Result<PathBuf> {
+    let openclaw_home = openclaw_home_dir();
+    let path = openclaw_home.join("skills").join("enzyme");
+    fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
+    let skill_path = path.join("SKILL.md");
+    fs::write(&skill_path, format!("{}\n", skill.trim_end()))
+        .with_context(|| format!("failed to write {}", skill_path.display()))?;
+    Ok(skill_path)
+}
+
+fn hermes_home_dir() -> PathBuf {
+    if let Some(home) = env::var_os("HERMES_HOME") {
+        return PathBuf::from(home);
+    }
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home).join(".hermes");
+    }
+    PathBuf::from(".hermes")
+}
+
+fn openclaw_home_dir() -> PathBuf {
+    if let Some(home) = env::var_os("OPENCLAW_HOME") {
+        return PathBuf::from(home);
+    }
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home).join(".openclaw");
+    }
+    PathBuf::from(".openclaw")
+}
+
 const CONTEXT_FILES: &[&str] = &[
     ".hermes.md",
     "HERMES.md",
@@ -213,6 +262,32 @@ fn ensure_claude_import(vault_path: &Path, target_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_hermes_instructions(vault_path: &Path, target_path: &Path) -> Result<()> {
+    let Some(file_name) = target_path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+
+    let hermes_path = vault_path.join(".hermes.md");
+    if hermes_path.exists() {
+        return Ok(());
+    }
+
+    if file_name == "AGENTS.md" || file_name == "agents.md" {
+        return Ok(());
+    }
+
+    fs::write(
+        &hermes_path,
+        format!(
+            "# Hermes workspace context\n\nFollow the Enzyme instructions in `{}` when retrieving workspace context.\n",
+            target_path.display()
+        ),
+    )
+    .with_context(|| format!("failed to write {}", hermes_path.display()))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,7 +306,7 @@ mod tests {
         write_agents_section(dir.path(), LOCAL_INSTRUCTIONS).unwrap();
 
         let content = fs::read_to_string(agents).unwrap();
-        assert!(content.contains("## Enzyme CLI"));
+        assert!(content.contains("## Enzyme Workspace Context"));
         assert!(!content.contains("\nold\n"));
         assert!(content.contains("## Rest"));
         assert_eq!(content.matches(MARKER_START).count(), 1);
@@ -242,6 +317,49 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_skill(dir.path(), ".agents", LOCAL_SKILL).unwrap();
         assert_eq!(path, dir.path().join(".agents/skills/enzyme/SKILL.md"));
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("name: enzyme"));
+    }
+
+    #[test]
+    fn hermes_target_uses_agents_when_available() {
+        let dir = TempDir::new().unwrap();
+        let agents = write_agents_section(dir.path(), LOCAL_INSTRUCTIONS).unwrap();
+
+        ensure_hermes_instructions(dir.path(), &agents).unwrap();
+
+        assert_eq!(agents, dir.path().join("AGENTS.md"));
+        assert!(!dir.path().join(".hermes.md").exists());
+    }
+
+    #[test]
+    fn hermes_home_defaults_to_env_override() {
+        let dir = TempDir::new().unwrap();
+        unsafe {
+            env::set_var("HERMES_HOME", dir.path());
+        }
+        let path = write_hermes_skill(LOCAL_SKILL).unwrap();
+        unsafe {
+            env::remove_var("HERMES_HOME");
+        }
+
+        assert_eq!(path, dir.path().join("skills/enzyme/SKILL.md"));
+        let content = fs::read_to_string(path).unwrap();
+        assert!(content.contains("name: enzyme"));
+    }
+
+    #[test]
+    fn openclaw_home_defaults_to_env_override() {
+        let dir = TempDir::new().unwrap();
+        unsafe {
+            env::set_var("OPENCLAW_HOME", dir.path());
+        }
+        let path = write_openclaw_skill(LOCAL_SKILL).unwrap();
+        unsafe {
+            env::remove_var("OPENCLAW_HOME");
+        }
+
+        assert_eq!(path, dir.path().join("skills/enzyme/SKILL.md"));
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("name: enzyme"));
     }

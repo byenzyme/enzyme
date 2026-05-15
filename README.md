@@ -47,8 +47,10 @@ make install
 enzyme init -p /path/to/vault
 
 # Install agent-facing instructions after init
-enzyme agents codex
-enzyme agents claude
+enzyme install hermes
+enzyme install openclaw
+enzyme install codex
+enzyme install claude
 
 # Preview and persist first-time config before init
 enzyme scan -p /path/to/vault
@@ -88,11 +90,12 @@ If no entities are configured, Enzyme selects from trending analysis automatical
 
 Enzyme needs an API key only for catalyst generation. Resolution order:
 
-1. `OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL` for custom endpoints)
-2. `OPENROUTER_API_KEY` env var
-3. `~/.enzyme/auth.json` → `{"openrouter_api_key": "..."}`
+1. `ENZYME_LLM_API_KEY` env var (+ optional `ENZYME_LLM_BASE_URL`, `ENZYME_LLM_MODEL`)
+2. `OPENROUTER_API_KEY` env var (+ optional `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL`)
+3. `OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL`, `OPENAI_MODEL`)
+4. Enzyme's hosted fallback for logged-in users
 
-If no key is found, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
+If no env key is found and the hosted fallback is unavailable, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
 
 ## App Plugins
 

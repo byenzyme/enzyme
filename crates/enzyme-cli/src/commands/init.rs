@@ -852,7 +852,7 @@ pub async fn run_init(
 
     // ── Step 9: Set up hook for Claude Code users (interactive mode only) ─
     if !quiet {
-        // Agent instruction installation is handled explicitly by `enzyme agents`.
+        // Agent instruction installation is handled explicitly by `enzyme install`.
         if vault_path.join(".claude").exists() {
             if let Err(e) = setup_petri_hook(vault_path) {
                 tracing::warn!("failed to set up petri hook: {}", e);

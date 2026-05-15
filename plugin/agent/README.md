@@ -44,7 +44,7 @@ enzyme │ enabled │ 0.x.x │ Vault intelligence — concept graph and semant
 
 ### First session
 
-Start Hermes in your vault directory:
+Start Hermes in your workspace or vault directory:
 
 ```bash
 cd ~/your-vault
@@ -56,6 +56,10 @@ On your first session, enzyme will:
 1. **Bootstrap the binary** if `enzyme` isn't on PATH (~38 MB download, takes 10-30s)
 2. **Refresh the index** to catch any vault changes since last session
 3. **Register tools** — five tools become available to the model
+
+If the workspace is not initialized yet, ask Hermes to set up Enzyme for the current workspace. The agent should inspect the markdown corpus, preserve existing Obsidian or markdown conventions, run `enzyme scan`, validate the generated `~/.enzyme/config.toml`, add any missing important folders, run `enzyme init`, and finish with `enzyme install hermes`. That command writes a small workspace marker to the context file and installs the full Enzyme runtime skill into Hermes. It should treat folders like inboxes, daily notes, projects, people/contacts, meetings, and decisions as existing retrieval structure rather than replacing them with a new memory schema.
+
+Hermes loads `.hermes.md`/`HERMES.md` by walking upward from the launch directory and loads `AGENTS.md` from the current working directory at startup. For the smoothest install, launch Hermes from the root of the markdown workspace you want Enzyme to index.
 
 Just start talking. The model reaches for enzyme tools when it needs vault context — you don't have to ask for it.
 
@@ -110,7 +114,7 @@ The `pre_llm_call` hook fires on the first turn to seed the model with vault con
 | `enzyme_catalyze` | Semantic search — returns note excerpts, file paths, and the catalysts that bridged the match. |
 | `enzyme_refresh` | Incremental re-index. Fast (~100ms) when nothing changed. |
 | `enzyme_status` | Document count, entity count, embedding coverage, API key status. |
-| `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. |
+| `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. The agent should run scan and config validation before this. |
 
 Tools are gated by `check_fn` — hidden from the model until the enzyme binary is installed and on PATH.
 
@@ -121,6 +125,10 @@ Enzyme generates catalysts using an LLM. Without an API key, everything works ex
 Set one of these in your `~/.hermes/.env`:
 
 ```bash
+ENZYME_LLM_API_KEY=your-key     # OpenAI-compatible custom endpoint
+ENZYME_LLM_BASE_URL=https://openrouter.ai/api/v1
+ENZYME_LLM_MODEL=google/gemini-3-flash-preview
+# or
 OPENROUTER_API_KEY=your-key    # Free tier works
 # or
 OPENAI_API_KEY=your-key
@@ -156,11 +164,20 @@ Then update with `cd ~/.hermes/enzyme-skill-repo && git pull`.
 git clone https://github.com/jshph/enzyme-skill.git ~/.openclaw/skills/enzyme
 ```
 
+If the Enzyme CLI is already installed, the equivalent local activation command is:
+
+```bash
+cd /path/to/workspace
+enzyme install openclaw
+```
+
+That writes a small workspace marker to `AGENTS.md` and installs the full Enzyme runtime skill into `~/.openclaw/skills/enzyme/SKILL.md` (or `$OPENCLAW_HOME/skills/enzyme/SKILL.md`).
+
 The SKILL.md loads with `always: true` — enzyme is available every session without explicit invocation. On first session, the agent:
 
 1. **Detects `anyBins: ["enzyme"]`** requirement and bootstraps the binary if missing
-2. **Walks you through vault setup** using `enzyme scan`, `enzyme init --quiet`, and `enzyme agents claude`
-3. **Writes enzyme instructions** into your `AGENTS.md` and `.claude/skills/enzyme/SKILL.md` for persistence across sessions
+2. **Walks you through vault setup** using `enzyme scan`, `enzyme init --quiet`, and `enzyme install openclaw`
+3. **Writes enzyme instructions** into your `AGENTS.md` and `~/.openclaw/skills/enzyme/SKILL.md` for persistence across sessions
 
 ### First session
 
@@ -183,12 +200,13 @@ The SKILL.md gives the agent instructions for the full session lifecycle:
 
 | Phase | What the agent does |
 |-------|---------------------|
-| Session start | Runs `enzyme refresh --quiet` to catch vault changes |
+| Session start | Runs `enzyme refresh --quiet` to catch vault changes, unless the plugin hook already did it |
 | First message | Runs `enzyme petri` — open-ended if the prompt is broad, or `--query "..."` if the user has a specific direction |
 | Deeper search | Uses `enzyme catalyze` with catalyst vocabulary from petri to reach content the user's words wouldn't match |
-| Writing notes | Follows the note template with existing tags and wikilinks |
+| Writing notes | Near the end, writes durable markdown only when the session produced a decision, reframe, open thread, project state, or useful people/company context |
+| End refresh | Runs `enzyme refresh --quiet` after useful notes are written so catalysts can retrieve them later |
 
-Unlike Hermes, OpenClaw doesn't have lifecycle hooks — context injection and refresh are driven by skill instructions rather than automated callbacks. The agent decides when to call enzyme. Petri runs once at the start to seed context, not on every turn.
+OpenClaw can use both the skill and plugin hooks. The skill decides when a markdown note deserves to exist. The plugin can inject petri context before turns and run refresh at `agent_end` when `autoRefresh` is enabled. Petri seeds the model with the live shape of the vault; targeted catalyze searches go deeper.
 
 The same organic behavior applies — the agent composes its own enzyme queries, combines them with file reads and grep, and surfaces vault content without you specifying tools.
 
@@ -234,7 +252,7 @@ skills: {
 }
 ```
 
-Or set `OPENAI_API_KEY` / `OPENROUTER_API_KEY` in your environment. OpenRouter's free tier works.
+Or set `ENZYME_LLM_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY` in your environment. OpenRouter's free tier works.
 
 ### Update the skill
 
@@ -260,12 +278,23 @@ Install the CLI directly:
 curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
 ```
 
-Then point your agent at `SKILL.md` for the full workflow, or add this to your agent's system prompt:
+Then point your agent at `SKILL.md` for the full workflow, or install durable workspace instructions:
+
+```bash
+cd /path/to/workspace
+enzyme install hermes
+```
+
+For other agents, use `enzyme install openclaw`, `enzyme install codex`, or `enzyme install claude`.
+
+If you are wiring this manually, add this to your agent's system prompt:
 
 ```
 On session start, run `enzyme refresh --quiet`.
 On the user's first message, run `enzyme petri --query "their message"` for vault context.
 Use catalyst phrases from petri to compose `enzyme catalyze` queries.
+Near the end, write durable markdown only if the session produced a decision, reframe, open thread, or project/person context worth retrieving later.
+After writing notes, run `enzyme refresh --quiet`.
 ```
 
 ---
@@ -312,7 +341,7 @@ Install path:
 
 - macOS Apple Silicon/Intel or Linux (x86_64, aarch64)
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
-- Catalyst generation uses [OpenRouter](https://openrouter.ai) free tier by default, or set `OPENAI_API_KEY`
+- Catalyst generation uses Enzyme's hosted fallback by default, or set `ENZYME_LLM_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`
 
 ## Testing
 
