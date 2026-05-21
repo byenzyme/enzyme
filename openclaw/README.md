@@ -17,6 +17,19 @@ Then install the plugin:
 openclaw plugins install @jshph/enzyme-openclaw
 ```
 
+Then activate Enzyme for the workspace you want OpenClaw to use:
+
+```bash
+cd /path/to/your/vault
+enzyme scan
+# Review the proposed entities/exclusions, then persist them:
+enzyme scan --write-config
+enzyme init --quiet
+enzyme install openclaw
+```
+
+`enzyme install openclaw` writes the small workspace marker into `AGENTS.md` and installs the full runtime skill into `~/.openclaw/skills/enzyme/SKILL.md` or `$OPENCLAW_HOME/skills/enzyme/SKILL.md`. The plugin handles automatic recall and optional refresh; the skill tells OpenClaw how to interpret Enzyme's retrieval results and preserve the user's existing markdown structure.
+
 For local development (`--link` mode), OpenClaw rejects symlinked deps that resolve outside the plugin root. Use a packed tarball of the sibling bridge package:
 
 ```bash
@@ -60,7 +73,7 @@ Configure your vault in `~/.openclaw/openclaw.json`:
 ## Hooks
 
 - **`before_prompt_build`** — when `autoRecall: true` (default), `enzyme petri --query <user msg>` runs before each turn and prepends the result as system context.
-- **`agent_end`** — when `autoRefresh: true`, runs `enzyme refresh --quiet` after each turn.
+- **`agent_end`** — when `autoRefresh: true`, runs `enzyme refresh --quiet` so markdown written near the end of a turn/session becomes retrievable.
 
 ## Caveats
 

@@ -25,7 +25,7 @@
       "autoRefresh": {
         "type": "boolean",
         "default": false,
-        "description": "Run `enzyme refresh --quiet` after each agent turn (requires hooks.allowConversationAccess)."
+        "description": "Run `enzyme refresh --quiet` at agent_end so markdown written during the turn/session becomes retrievable (requires hooks.allowConversationAccess)."
       }
     }
   },
@@ -47,7 +47,7 @@
     "autoRefresh": {
       "label": "Auto-refresh",
       "advanced": true,
-      "help": "Re-index after each turn. Requires conversation access."
+      "help": "Re-index at agent_end after markdown writes. Requires conversation access."
     }
   }
 }
