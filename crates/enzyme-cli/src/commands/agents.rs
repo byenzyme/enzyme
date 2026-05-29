@@ -45,7 +45,7 @@ pub async fn run_agents_install(
     let instructions = load_template(INSTRUCTIONS_URL, LOCAL_INSTRUCTIONS, source).await?;
     let skill = load_template(SKILL_URL, LOCAL_SKILL, source).await?;
 
-    let agents_path = write_agents_section(vault_path, &instructions.content)?;
+    let agents_path = write_agents_section(vault_path, target, &instructions.content)?;
     if matches!(target, AgentTarget::Claude) {
         ensure_claude_import(vault_path, &agents_path)?;
     }
@@ -125,8 +125,8 @@ async fn fetch_template(url: &str) -> Result<String> {
     Ok(response.text().await?.trim_end().to_string())
 }
 
-fn write_agents_section(vault_path: &Path, section: &str) -> Result<PathBuf> {
-    let path = find_context_file(vault_path);
+fn write_agents_section(vault_path: &Path, target: AgentTarget, section: &str) -> Result<PathBuf> {
+    let path = find_context_file_for_target(vault_path, target);
     let content = if path.exists() {
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?
     } else {
@@ -154,6 +154,23 @@ fn ensure_marked_section(section: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{MARKER_START}\n{trimmed}\n{MARKER_END}")
+    }
+}
+
+fn remove_marked_section(content: &str) -> String {
+    if let (Some(start), Some(end)) = (content.find(MARKER_START), content.find(MARKER_END)) {
+        let end = end + MARKER_END.len();
+        let mut new_content = format!("{}{}", &content[..start], &content[end..]);
+        while new_content.contains("\n\n\n") {
+            new_content = new_content.replace("\n\n\n", "\n\n");
+        }
+        if new_content.trim().is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", new_content.trim())
+        }
+    } else {
+        content.to_string()
     }
 }
 
@@ -216,7 +233,11 @@ const CONTEXT_FILES: &[&str] = &[
     ".cursorrules",
 ];
 
-fn find_context_file(vault_path: &Path) -> PathBuf {
+fn find_context_file_for_target(vault_path: &Path, target: AgentTarget) -> PathBuf {
+    if matches!(target, AgentTarget::Codex | AgentTarget::Claude) {
+        return vault_path.join("AGENTS.md");
+    }
+
     for name in CONTEXT_FILES {
         let path = vault_path.join(name);
         if path.exists() {
@@ -244,13 +265,22 @@ fn ensure_claude_import(vault_path: &Path, target_path: &Path) -> Result<()> {
     if claude_path.exists() {
         let content = fs::read_to_string(&claude_path)
             .with_context(|| format!("failed to read {}", claude_path.display()))?;
-        if content.lines().any(|line| line.trim() == import_line) {
+        let content_without_legacy_section = remove_marked_section(&content);
+        let has_import = content_without_legacy_section
+            .lines()
+            .any(|line| line.trim() == import_line);
+        if has_import && content_without_legacy_section == content {
             return Ok(());
         }
-        let new_content = if content.trim().is_empty() {
+        let new_content = if has_import {
+            content_without_legacy_section
+        } else if content_without_legacy_section.trim().is_empty() {
             format!("{import_line}\n")
         } else {
-            format!("{import_line}\n\n{}", content.trim_start())
+            format!(
+                "{import_line}\n\n{}",
+                content_without_legacy_section.trim_start()
+            )
         };
         fs::write(&claude_path, new_content)
             .with_context(|| format!("failed to write {}", claude_path.display()))?;
@@ -303,13 +333,58 @@ mod tests {
         )
         .unwrap();
 
-        write_agents_section(dir.path(), LOCAL_INSTRUCTIONS).unwrap();
+        write_agents_section(dir.path(), AgentTarget::Codex, LOCAL_INSTRUCTIONS).unwrap();
 
         let content = fs::read_to_string(agents).unwrap();
         assert!(content.contains("## Enzyme Workspace Context"));
         assert!(!content.contains("\nold\n"));
         assert!(content.contains("## Rest"));
         assert_eq!(content.matches(MARKER_START).count(), 1);
+    }
+
+    #[test]
+    fn codex_target_writes_agents_even_when_claude_has_marker() {
+        let dir = TempDir::new().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(
+            &claude,
+            "# Claude\n\n<!-- enzyme:start -->\nold\n<!-- enzyme:end -->\n",
+        )
+        .unwrap();
+
+        let agents =
+            write_agents_section(dir.path(), AgentTarget::Codex, LOCAL_INSTRUCTIONS).unwrap();
+
+        assert_eq!(agents, dir.path().join("AGENTS.md"));
+        assert!(
+            fs::read_to_string(&agents)
+                .unwrap()
+                .contains("## Enzyme Workspace Context")
+        );
+        assert!(fs::read_to_string(&claude).unwrap().contains("\nold\n"));
+    }
+
+    #[test]
+    fn claude_target_imports_agents_and_removes_legacy_claude_marker() {
+        let dir = TempDir::new().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        fs::write(
+            &claude,
+            "# Claude notes\n\n<!-- enzyme:start -->\nold\n<!-- enzyme:end -->\n\nKeep this.\n",
+        )
+        .unwrap();
+
+        let agents =
+            write_agents_section(dir.path(), AgentTarget::Claude, LOCAL_INSTRUCTIONS).unwrap();
+        ensure_claude_import(dir.path(), &agents).unwrap();
+
+        assert_eq!(agents, dir.path().join("AGENTS.md"));
+        let claude_content = fs::read_to_string(&claude).unwrap();
+        assert!(claude_content.starts_with("@AGENTS.md\n\n"));
+        assert!(claude_content.contains("# Claude notes"));
+        assert!(claude_content.contains("Keep this."));
+        assert!(!claude_content.contains(MARKER_START));
+        assert!(!claude_content.contains("\nold\n"));
     }
 
     #[test]
@@ -324,7 +399,8 @@ mod tests {
     #[test]
     fn hermes_target_uses_agents_when_available() {
         let dir = TempDir::new().unwrap();
-        let agents = write_agents_section(dir.path(), LOCAL_INSTRUCTIONS).unwrap();
+        let agents =
+            write_agents_section(dir.path(), AgentTarget::Hermes, LOCAL_INSTRUCTIONS).unwrap();
 
         ensure_hermes_instructions(dir.path(), &agents).unwrap();
 

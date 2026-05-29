@@ -3,7 +3,7 @@
 
 This workspace uses Enzyme for local semantic retrieval over markdown. Run `enzyme` commands from this workspace root.
 
-Use the installed Enzyme skill for operational details. The skill contains the setup workflow, retrieval workflow, note-writing guidance, and presentation rules. This `AGENTS.md` section is intentionally small so workspace instructions stay readable.
+Use the installed Enzyme skill for operational details. The skill contains the setup workflow, retrieval workflow, note-writing guidance, and presentation rules. This Enzyme workspace context section is intentionally small so workspace instructions stay readable.
 
 If `.enzyme/enzyme.db` is missing, initialize Enzyme with the skill workflow: confirm the Enzyme CLI is already installed, scan the workspace, audit existing markdown structure, show a setup preview, create/tune `~/.enzyme/config.toml` before init, run `enzyme init --quiet`, then simulate one useful prompt with petri/catalyze.
 
