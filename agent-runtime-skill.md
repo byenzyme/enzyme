@@ -24,7 +24,7 @@ enzyme scan --write-config
 # Read and tune ~/.enzyme/config.toml before init.
 enzyme init --quiet
 enzyme petri
-# Show the active map, then simulate one useful prompt.
+# Show the active map, then complete the first value demo.
 enzyme petri --query "<simulated user prompt>"
 enzyme catalyze "<query composed from prompt + petri catalyst vocabulary>"
 ```
@@ -34,9 +34,9 @@ Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence f
 - what is already working as Enzyme signal;
 - why the user does not need a new memory architecture;
 - small habit upgrades, such as stable wikilinks for central people/projects/concepts and durable existing tags;
-- the proposed stance for live capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
+- the proposed stance for ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
 - 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes;
-- how the demo should show the map-to-connection loop: petri recognizes active ideas, then catalyze activates those ideas as source-grounded connections;
+- how the demo should show the map-to-connection loop: petri recognizes active ideas, then catalyze places source notes beside each other so a useful question appears;
 - any external corpora that could be searched with `enzyme apply`;
 - if the vault would materially benefit, a minimal high-confidence retrieval repair offer before init, with exact scope and user confirmation.
 
@@ -63,6 +63,34 @@ enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1
 ```
 
 It returns once seed petri context exists; semantic search becomes available after the detached init worker finishes.
+
+## First Value Demo
+
+After first-time setup, broad orientation, or a first retrieval session, do not end with setup status or a list of topics. Verification is internal. The user should immediately see Enzyme turn their own notes into a source-grounded connection that would have been hard to find with grep or ordinary file browsing.
+
+Use this framing:
+
+1. Open with: `A connection worth opening: <plain-language phrase>.`
+2. Show 2-4 short excerpts or tight paraphrases from specific files, especially the user's own annotations or decision notes rather than only imported source text.
+3. Put the excerpts beside each other with minimal interpretation:
+   - `In <file>, you wrote...`
+   - `Elsewhere, this shows up as...`
+   - `Put together, the question becomes...`
+4. Offer one concrete next move:
+   - `We could follow this into <tag/file/source> next.`
+   - `Or compare it against <related file/tag/source>.`
+
+Prefer words from the user's own notes. Avoid performative meta-language such as "live thread," "you are circling," "tension," "resonance," or "emerging pattern" unless those are the user's words. Do not claim intimacy with the user; create recognition by staying close to the artifacts.
+
+Choose the first demo connection by vault type:
+
+- Readwise/reference vault: place saved passages and the user's annotations beside each other until a question appears.
+- Project/work vault: place a decision, blocker, meeting note, or artifact beside a later note that changes its meaning or next step.
+- Journal/daily vault: place two entries from different dates beside each other to show how the wording, stakes, or desired action changed.
+- People/CRM vault: place context notes beside a recent interaction or commitment to reveal one concrete next step.
+- Research vault: place sources that sharpen an assumption, disagreement, missing evidence, or possible synthesis.
+
+The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet.
 
 ## Existing Structure
 
@@ -161,7 +189,7 @@ After writing memory notes at the end of the session, run:
 enzyme refresh --quiet
 ```
 
-Refresh is the Enzyme equivalent of making the new memory live. It re-indexes changed markdown and updates catalyst retrieval; no background dreaming or consolidation pass is required.
+Refresh is the Enzyme equivalent of making the new memory available to retrieval. It re-indexes changed markdown and updates catalyst retrieval; no background dreaming or consolidation pass is required.
 
 ## Presentation
 
@@ -169,9 +197,9 @@ Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs
 
 Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
 
-For broad exploration, use petri plus 1-2 catalyze searches, then open with one specific question about what the user is doing across their notes. Do not present a topic list.
+For broad exploration, use petri plus 1-2 catalyze searches, then open one specific connection among the user's notes. Do not present a topic list.
 
-For search results, do not lead with metadata. Notice tensions, repeated words, time gaps, or changes in framing across results. End with one concrete next direction, not a generic invitation.
+For search results, do not lead with metadata. Notice repeated words, time gaps, changed wording, adjacent ideas, practical consequences, or source disagreements across results. End with one concrete next direction, not a generic invitation.
 
 Presentation registers for `enzyme catalyze --register`:
 - `explore`: wonder, probe, notice patterns.

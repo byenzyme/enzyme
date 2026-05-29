@@ -94,7 +94,7 @@ The preview must include:
 1. **What is already working as signal** — observed folders/tags/wikilinks/dates/frontmatter from the scan, with counts and 1-2 concrete examples from `entity_samples`, `frontmatter_samples`, or `sample_files`.
 2. **Why more organization is not required** — Enzyme is designed to work with partial, living markdown structure.
 3. **Small habit upgrades** — link central people/projects/concepts, reuse durable tags, preserve date/frontmatter conventions, avoid hidden memory files.
-4. **Proposed Enzyme stance** — which surfaces are live capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
+4. **Proposed Enzyme stance** — which surfaces are ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
 5. **Profile posture** — translate catalyst profiles into human language:
    - `relational`: people, relationships, clients, community, hospitality.
    - `operational`: projects, work, meetings, tasks, inbox/current execution.
@@ -110,7 +110,7 @@ The preview must include:
 Example framing:
 
 ```md
-This vault already has enough signal for Enzyme. I would treat `inbox/` as live capture, `people/` and repeated wikilinks as relationship context, `Readwise/` as reference material, and `#enzyme`/`#founding` as decision/product threads. You do not need a separate memory tree; Enzyme compiles ordinary markdown handles into petri, catalysts, and semantic retrieval.
+This vault already has enough signal for Enzyme. I would treat `inbox/` as ongoing capture, `people/` and repeated wikilinks as relationship context, `Readwise/` as reference material, and `#enzyme`/`#founding` as decision/product threads. You do not need a separate memory tree; Enzyme compiles ordinary markdown handles into petri, catalysts, and semantic retrieval.
 
 If this setup works, prompts like these should return grounded notes:
 - ...
@@ -216,14 +216,28 @@ Onboarding is not complete until the user sees how Enzyme helps an agent recogni
    enzyme catalyze "<query composed from the prompt plus catalyst vocabulary>"
    ```
 
-5. Present the result as an activated connection path, grounded in source-note excerpts:
+5. Present one first-value connection, grounded in source-note excerpts. Do not end with setup status or a topic list.
 
-   ```md
-   The map surfaced <active idea A> and <active idea B>. Catalyzing that connection found these source notes: ...
-   This is what an Enzyme-aware agent can recover without a custom memory file.
-   ```
+   Use this framing:
+   - `A connection worth opening: <plain-language phrase>.`
+   - Show 2-4 short excerpts or tight paraphrases from specific files, especially the user's own annotations or decision notes rather than only imported source text.
+   - Put the excerpts beside each other with minimal interpretation:
+     - `In <file>, you wrote...`
+     - `Elsewhere, this shows up as...`
+     - `Put together, the question becomes...`
+   - Offer one concrete next move, such as following into a tag/file/source or comparing against a related note.
 
-Do not expose catalyst IDs, raw scores, or tool mechanics unless asked. The point is to show that Enzyme turns natural notes, wikilinks, tags, dates, and prose into an active map, then turns that map into source-grounded connections.
+Prefer words from the user's own notes. Avoid performative meta-language such as "live thread," "you are circling," "tension," "resonance," or "emerging pattern" unless those are the user's words. Do not claim intimacy with the user; create recognition by staying close to the artifacts.
+
+Choose the first demo connection by vault type:
+
+- Readwise/reference vault: place saved passages and the user's annotations beside each other until a question appears.
+- Project/work vault: place a decision, blocker, meeting note, or artifact beside a later note that changes its meaning or next step.
+- Journal/daily vault: place two entries from different dates beside each other to show how the wording, stakes, or desired action changed.
+- People/CRM vault: place context notes beside a recent interaction or commitment to reveal one concrete next step.
+- Research vault: place sources that sharpen an assumption, disagreement, missing evidence, or possible synthesis.
+
+Do not expose catalyst IDs, raw scores, or tool mechanics unless asked. The point is to show that Enzyme turns natural notes, wikilinks, tags, dates, and prose into an active map, then places source notes beside each other so a useful question appears. The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet.
 
 ### 9. Demonstrate or propose `enzyme apply`
 
