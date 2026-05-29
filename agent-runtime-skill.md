@@ -7,30 +7,54 @@ description: Use Enzyme to retrieve working memory and semantic context from an 
 
 Use Enzyme for local semantic retrieval over an initialized markdown workspace. Run all `enzyme` commands from the vault/workspace root. For Hermes, this is the directory where Hermes is launched.
 
+Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
+
 Enzyme does not replace the user's memory system. It indexes the markdown structure the user already has: folders, tags, wikilinks, dates, inboxes, daily notes, people pages, and frontmatter. Preserve that structure and use it as retrieval signal.
 
 Do not build a separate context tree. Learn from the user's folders, but prefer lightweight markdown signals: tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts. Create new folders or people pages only when the vault already uses that convention or the user asks for it.
 
 ## First-Time Setup
 
-If `.enzyme/enzyme.db` is missing, do setup before normal retrieval:
+If `.enzyme/enzyme.db` is missing, do setup before normal retrieval. Setup should demonstrate value, not interrogate the user or impose a schema.
 
 ```bash
 enzyme scan
-# Review proposed entities/exclusions against the workspace.
+# Read the structured scan evidence and produce a setup preview.
 enzyme scan --write-config
+# Read and tune ~/.enzyme/config.toml before init.
 enzyme init --quiet
-enzyme install hermes
-# or: enzyme install openclaw
-# or: enzyme install codex
-# or: enzyme install claude
+enzyme petri
+# Show the active map, then simulate one useful prompt.
+enzyme petri --query "<simulated user prompt>"
+enzyme catalyze "<query composed from prompt + petri catalyst vocabulary>"
 ```
 
-Use `enzyme install hermes`, `enzyme install openclaw`, `enzyme install codex`, or `enzyme install claude` for the active runtime.
+Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence for setup. Read the structured fields directly, do only bounded follow-up when the scan is ambiguous, then produce a concrete setup preview:
 
-Before `enzyme init`, read `~/.enzyme/config.toml` and compare it with the workspace. Add missing important markdown folders as `folder:<path>` entries when they are central and not covered by a parent. Common folders include `inbox`, `daily`, `journal`, `docs`, `notes`, `research`, `logs`, `decisions`, `meetings`, `transcripts`, `sessions`, `projects`, `areas`, `resources`, `people`, `contacts`, `clients`, and `companies`.
+- what is already working as Enzyme signal;
+- why the user does not need a new memory architecture;
+- small habit upgrades, such as stable wikilinks for central people/projects/concepts and durable existing tags;
+- the proposed stance for live capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
+- 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes;
+- how the demo should show the map-to-connection loop: petri recognizes active ideas, then catalyze activates those ideas as source-grounded connections;
+- any external corpora that could be searched with `enzyme apply`;
+- if the vault would materially benefit, a minimal high-confidence retrieval repair offer before init, with exact scope and user confirmation.
 
-Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
+Ask for corrections to that stance before writing config. Do not ask the user to classify the vault up front.
+
+If offering a minimal repair, keep it small, reversible, and based on existing conventions: adding missing date frontmatter to date-named notes, adding `people:`/`projects:` fields only where those fields already exist and exact wikilinks are present, adding a few central wikilinks to obvious notes, or excluding runtime/generated folders from config. Do not move files, create a new taxonomy, generate summaries, or bulk-normalize the vault during first setup. If the user declines, initialize as-is and still demonstrate value; after the demo, offer the remaining refinements as optional next steps.
+
+If the vault uses Obsidian, optionally offer capture templates after the demo. Core Obsidian Templates are enough for simple date/time templates inserted into a note, and Daily notes can apply a daily template. Do not require new plugins during Enzyme setup. Frame templates as optional capture affordances for future new notes, not prerequisites: they help users create inbox/daily/meeting/project notes with existing date/tag/wikilink handles so Enzyme can build on them later.
+
+After `enzyme scan --write-config`, read `~/.enzyme/config.toml` and compare it with the scan evidence before `enzyme init`. Add missing important markdown folders as `folder:<path>` entries when they are central and not covered by a parent. Common folders include `inbox`, `daily`, `journal`, `docs`, `notes`, `research`, `logs`, `decisions`, `meetings`, `transcripts`, `sessions`, `projects`, `areas`, `resources`, `people`, `contacts`, `clients`, and `companies`. Keep the entity list focused; prefer scan-backed top-level surfaces over every subfolder.
+
+For expandable folders, look for scan/petri evidence that a selected folder contains page files that are also wikilinks elsewhere (`page_entities`, `page_entity_children`, `sampled_children`, `catalyzed_children`, or similar folder-page evidence). In Rust Enzyme, selecting the parent folder is usually enough: the selection pipeline auto-detects expandable folders, caps/ranks children, and materializes child page links as their own catalyst entities. Do not manually add every child wikilink to config just because it lives in a selected folder; add a child link separately only when it has a distinct role independent of the parent folder.
+
+Use profile overrides only when the posture is clear. Loose examples: people/relationships → `relational`; projects/work/inbox → `operational`; product/strategy/decisions → `decision_trace`; Readwise/research/PKM → `resonance_trace`; journal/daily/writing → `reflective`; faith/philosophy/tradeoffs → `tension_trace`; taste/feedback/activity logs → `preference_evidence`. Example TOML entity: `{ "folder:people" = { profile = "relational" } }`. Leave ambiguous entities un-overridden rather than guessing.
+
+Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.agents`, `.codex`, `.codex-work`, `.pi`, `.local`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
+
+For persistent `targets = [...]` / `enzyme apply` targets, use raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
 
 For voice agents that need an immediate first turn, use:
 
@@ -68,9 +92,32 @@ Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect 
 
 - `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
 - `enzyme refresh --quiet` re-indexes changed content.
-- `enzyme apply ./target-dir` indexes external content using vault catalysts; then search it with `enzyme catalyze "query" --target ./target-dir`.
 - Use exact search for names, `#tags`, `[[wikilinks]]`, and literal text.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
+
+### External references with `enzyme apply`
+
+Use `enzyme apply ./target-dir` when the user wants to draw from external material without merging it into the vault: Readwise exports, articles/books, transcripts, research dumps, client docs, code repos, converted PDFs, Discord/Slack exports, or downloaded archives.
+
+```bash
+enzyme apply ./target-dir
+enzyme catalyze "query" --target ./target-dir
+```
+
+Apply projects the source vault's catalysts onto the target corpus:
+
+```text
+source vault catalysts → external target chunks
+```
+
+The vault is the lens. Search both sides when comparison matters:
+
+```bash
+enzyme catalyze "query"
+enzyme catalyze "query" --target ./target-dir
+```
+
+Present it as: "I searched your own notes for the internal thread, then searched the external material through the same conceptual frame." Mention that `apply` may miss themes that exist only in the target and not in the user's vault.
 
 ## Writing Notes
 
