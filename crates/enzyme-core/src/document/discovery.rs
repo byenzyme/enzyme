@@ -23,12 +23,24 @@ impl FileDiscovery {
             vault_path,
             include_patterns: vec!["**/*.md".to_string()],
             exclude_patterns: vec![
+                ".agents/**".to_string(),
+                ".claude/**".to_string(),
+                ".codex/**".to_string(),
+                ".codex-work/**".to_string(),
+                ".conversations/**".to_string(),
                 ".enzyme/**".to_string(),
                 ".enzyme-embeddings/**".to_string(),
-                ".obsidian/**".to_string(),
-                ".trash/**".to_string(),
                 ".git/**".to_string(),
+                ".hermes/**".to_string(),
+                ".local/**".to_string(),
+                ".obsidian/**".to_string(),
+                ".pi/**".to_string(),
+                ".trash/**".to_string(),
+                "__pycache__/**".to_string(),
+                "build/**".to_string(),
+                "dist/**".to_string(),
                 "node_modules/**".to_string(),
+                "target/**".to_string(),
                 "ENZYME_GUIDE.md".to_string(),
                 "enzyme-config.yaml".to_string(),
             ],
@@ -125,6 +137,12 @@ mod tests {
         fs::write(root.join(".obsidian/app.json"), "{}").unwrap();
         fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         fs::write(root.join("node_modules/pkg/readme.md"), "# pkg").unwrap();
+        fs::create_dir_all(root.join(".agents/runs")).unwrap();
+        fs::write(root.join(".agents/runs/transcript.md"), "# agent run").unwrap();
+        fs::create_dir_all(root.join(".pi/cache")).unwrap();
+        fs::write(root.join(".pi/cache/session.md"), "# pi session").unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("target/debug/build-log.md"), "# build log").unwrap();
 
         dir
     }
@@ -158,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn test_excludes_enzyme_and_obsidian_dirs() {
+    fn test_excludes_runtime_and_structural_dirs() {
         let vault = create_test_vault();
         let discovery = FileDiscovery::new(vault.path().to_path_buf());
         let files = discovery.discover().unwrap();
@@ -178,6 +196,17 @@ mod tests {
             assert!(
                 !path_str.starts_with("node_modules"),
                 "node_modules not excluded: {:?}",
+                path
+            );
+            assert!(
+                !path_str.starts_with(".agents"),
+                ".agents not excluded: {:?}",
+                path
+            );
+            assert!(!path_str.starts_with(".pi"), ".pi not excluded: {:?}", path);
+            assert!(
+                !path_str.starts_with("target"),
+                "target not excluded: {:?}",
                 path
             );
         }

@@ -17,26 +17,33 @@ Enzyme builds a concept graph from your vault's tags, links, folders, and timest
 
 Vault path: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory.
 
+Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
+
 For Hermes, this skill is for operational use inside a user's workspace, not for developing Hermes itself. Run Enzyme from the directory where Hermes is launched so the same `AGENTS.md`/`.hermes.md` context and markdown corpus are visible to both.
 
 Respect the user's existing markdown system. Enzyme should read Obsidian-style folders, inboxes, daily notes, people pages, tags, wikilinks, and frontmatter conventions before suggesting any structure. Do not impose a memory schema or context tree; use existing structure as retrieval signal and propose optional backfills only when the user asks for setup help. Prefer tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts before creating folders or person-specific structures. Preserve existing note-level entity fields such as `people:`, `organizations:`, `companies:`, `clients:`, `projects:`, and `relationships:`.
 
-If the vault isn't initialized (no `.enzyme/enzyme.db`), run first-time setup from the vault root:
+If the vault isn't initialized (no `.enzyme/enzyme.db`), run first-time setup from the vault root. Setup should demonstrate what Enzyme can already do with the vault, not ask the user to design a memory architecture.
 
 ```bash
 enzyme scan
-# Review proposed entities/exclusions against the workspace.
+# Read the structured scan evidence and produce a setup preview.
 enzyme scan --write-config
+# Read and tune ~/.enzyme/config.toml before init.
 enzyme init --quiet
-enzyme install hermes
-# or: enzyme install openclaw
-# or: enzyme install codex
-# or: enzyme install claude
+enzyme petri
+# Show the active map, then simulate one useful prompt.
+enzyme petri --query "<simulated user prompt>"
+enzyme catalyze "<query composed from prompt + petri catalyst vocabulary>"
 ```
 
-Use `enzyme install hermes`, `enzyme install openclaw`, `enzyme install codex`, or `enzyme install claude` for the active runtime. The install command fetches current instruction templates from GitHub when available and falls back to the packaged copy.
+Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence for setup. Read the structured fields directly, do only bounded follow-up when the scan is ambiguous, then show a concrete setup preview and ask for corrections before writing config or editing files.
 
-Before `enzyme init`, read `~/.enzyme/config.toml` after `enzyme scan --write-config` and compare it with the workspace scan. Add missing important markdown folders as `folder:<path>` entries when they are central to the workspace and not covered by a parent. Common folders include `inbox`, `daily`, `journal`, `docs`, `notes`, `research`, `logs`, `decisions`, `meetings`, `transcripts`, `sessions`, `projects`, `areas`, `resources`, `people`, `contacts`, `clients`, and `companies`. Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
+Minimal repairs must be small, reversible, and based on existing conventions: adding missing date frontmatter to date-named notes, adding `people:`/`projects:` fields only where those fields already exist and exact wikilinks are present, adding a few central wikilinks to obvious notes, or excluding runtime/generated folders from config. Do not move files, create a new taxonomy, generate summaries, or bulk-normalize the vault during first setup. If the user declines, initialize as-is and still demonstrate value; after the demo, offer the remaining refinements as optional next steps.
+
+If the vault uses Obsidian, optionally offer capture templates after the demo. Core Obsidian Templates are enough for simple date/time templates inserted into a note, and Daily notes can apply a daily template. Do not require new plugins during Enzyme setup. Frame templates as optional capture affordances for future new notes, not prerequisites: they help users create inbox/daily/meeting/project notes with existing date/tag/wikilink handles so Enzyme can build on them later.
+
+Before `enzyme init`, read `~/.enzyme/config.toml` after `enzyme scan --write-config` and compare it with the scan evidence. Add missing important markdown folders as `folder:<path>` entries when they are central to the workspace and not covered by a parent. Common folders include `inbox`, `daily`, `journal`, `docs`, `notes`, `research`, `logs`, `decisions`, `meetings`, `transcripts`, `sessions`, `projects`, `areas`, `resources`, `people`, `contacts`, `clients`, and `companies`. Keep the entity list focused; prefer scan-backed top-level surfaces over every subfolder. Use profile overrides only when the posture is clear. Loose examples: people/relationships → `relational`; projects/work/inbox → `operational`; product/strategy/decisions → `decision_trace`; Readwise/research/PKM → `resonance_trace`; journal/daily/writing → `reflective`; ethics/philosophy/tradeoffs → `tension_trace`; taste/feedback/activity logs → `preference_evidence`. Example TOML entity: `{ "folder:people" = { profile = "relational" } }`. Leave ambiguous entities un-overridden rather than guessing. Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.agents`, `.codex`, `.codex-work`, `.pi`, `.local`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
 
 For voice agents that need to start the first turn before the full init barrier,
 use `enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1`.
@@ -48,7 +55,7 @@ after the detached init worker finishes.
 What's automatic depends on your runtime:
 
 **Hermes** (hooks handle it):
-- **First install** — the plugin can bootstrap the binary; the workspace still needs `enzyme scan`, TOML validation, `enzyme init`, and `enzyme install hermes` once
+- **First setup** — the plugin can bootstrap the binary; the workspace still needs `enzyme scan`, TOML validation, and `enzyme init` once
 - **Session start** — binary bootstrap + `enzyme refresh` run automatically
 - **Each turn** — `enzyme petri --query` injects vault context before the model sees your message
 - **Session end** — after any useful markdown notes are written, `enzyme refresh` indexes them
@@ -85,14 +92,27 @@ enzyme catalyze "what I decided about X" --register continuity
 
 Use grep for exact anchors (names, tags, wikilinks). Use catalyze when you only have a theme.
 
-### `enzyme apply ./target-dir` — project catalysts onto other content
+### `enzyme apply ./target-dir` — project the vault's lens onto external refs
 
 ```bash
 enzyme apply ./target-dir
 enzyme catalyze "query" --target ./target-dir
 ```
 
-Apply indexes external content using the vault's catalysts. Use it when the user wants to bring the shape of their existing knowledge to another folder or corpus.
+Apply indexes external content using the source vault's catalysts:
+
+```text
+source vault catalysts → external target chunks
+```
+
+Use it when the user wants to draw from outside material without merging it into memory: Readwise exports, article/book folders, transcripts, research dumps, client docs, code repos, converted PDFs, Discord/Slack exports, or downloaded archives. Search both the vault and the target when comparison matters:
+
+```bash
+enzyme catalyze "query"
+enzyme catalyze "query" --target ./target-dir
+```
+
+Present it as: "I searched your own notes for the internal thread, then searched the external material through the same conceptual frame." The vault is the lens; `apply` may miss themes that exist only in the target and not in the user's vault.
 
 ### `enzyme refresh` / `enzyme status`
 
