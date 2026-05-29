@@ -303,8 +303,14 @@ mod tests {
             "expected at least one child to be expanded, got: {:?}",
             names
         );
-        // Expandable folders map should contain people
+        // Expandable folders map should contain people, but the persisted base
+        // config remains parent-only; child links are runtime materialization.
         assert!(result.expandable_folders.contains_key("people"));
+        let reloaded = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        let prefs = reloaded.parse_preferences();
+        assert_eq!(prefs.entities.len(), 1);
+        assert_eq!(prefs.entities[0].name, "people");
+        assert_eq!(prefs.entities[0].entity_type, EntityType::Folder);
 
         restore_env(old);
     }

@@ -11,6 +11,7 @@ use enzyme_core::document::{
 };
 use enzyme_core::llm::CATALYST_PROFILES;
 use enzyme_core::models::ROOT_FOLDER_ENTITY;
+use enzyme_core::pipeline::selection_steps::{EXPANDABLE_DENSITY_THRESHOLD, MAX_FOLDER_CHILDREN};
 
 /// Filesystem-only vault scan used before init.
 ///
@@ -64,6 +65,7 @@ struct ScanSuggestion {
     top_links: Vec<EntityEvidence>,
     top_folders: Vec<EntityEvidence>,
     folder_stats: Vec<FolderStat>,
+    folder_page_entities: Vec<FolderPageEntityGroup>,
     folder_children: Vec<ChildGroup>,
     tag_children: Vec<ChildGroup>,
     frontmatter_samples: Vec<FrontmatterSample>,
@@ -112,6 +114,26 @@ struct FolderStat {
     spec: String,
     file_count: usize,
     word_count: i64,
+    latest_modified: Option<String>,
+    page_entities: Vec<String>,
+    expandable_candidate: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct FolderPageEntityGroup {
+    folder: String,
+    spec: String,
+    file_count: usize,
+    page_entities: Vec<FolderPageEntity>,
+    expandable_candidate: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct FolderPageEntity {
+    name: String,
+    spec: String,
+    source_ref: String,
+    link_frequency: usize,
     latest_modified: Option<String>,
 }
 
@@ -223,7 +245,15 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         }
     }
 
-    let entities = suggested_entities(docs, &folder_counts, &tag_counts, &link_counts);
+    let folder_page_entities =
+        folder_page_entities(docs, &folder_counts, &link_counts, 25, MAX_FOLDER_CHILDREN);
+    let entities = suggested_entities(
+        docs,
+        &folder_counts,
+        &tag_counts,
+        &link_counts,
+        &folder_page_entities,
+    );
     let metrics = build_metrics(docs);
     let current_config = current_config_summary(vault_path)?;
     let existing_configured = current_config.has_curated_entities;
@@ -242,7 +272,9 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         vault_path: vault_path.to_string_lossy().to_string(),
         generated_at: Utc::now().to_rfc3339(),
         instructions: vec![
-            "Use entities/top_entities as bounded setup candidates; keep existing flat fields for compatibility.".to_string(),
+            "Use entities/top_entities as bounded base setup candidates; keep existing flat fields for compatibility.".to_string(),
+            "Prefer base folders over descendant folders; inspect folder_children/folder_stats for covered descendants.".to_string(),
+            "Use folder_page_entities to identify expandable folders whose page-link children should be materialized at runtime, not persisted as config children.".to_string(),
             "Prefer top_entities with supporting entity_samples; avoid structural folders listed in excluded_folders.".to_string(),
             "Use folder/tag/link child maps and frontmatter_samples to infer profile and exclusion choices.".to_string(),
         ],
@@ -251,7 +283,8 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         top_tags: top_evidence_by_type(&metrics, "tag", 25),
         top_links: top_evidence_by_type(&metrics, "link", 25),
         top_folders: top_evidence_by_type(&metrics, "folder", 25),
-        folder_stats: folder_stats(docs, &metrics, 50),
+        folder_stats: folder_stats(docs, &metrics, &folder_page_entities, 50),
+        folder_page_entities,
         folder_children: folder_children(&metrics, 25, 25),
         tag_children: tag_children(&metrics, 25, 25),
         frontmatter_samples: frontmatter_samples(docs, 12),
@@ -428,9 +461,99 @@ fn sort_evidence(entries: &mut [EntityEvidence]) {
     });
 }
 
+fn folder_page_entities(
+    docs: &[ProcessedDocument],
+    folder_counts: &HashMap<String, usize>,
+    link_counts: &HashMap<String, usize>,
+    parent_limit: usize,
+    child_limit: usize,
+) -> Vec<FolderPageEntityGroup> {
+    let mut direct_pages: HashMap<String, Vec<FolderPageEntity>> = HashMap::new();
+
+    for doc in docs {
+        let Some((folder, stem)) = direct_child_stem(&doc.source_ref) else {
+            continue;
+        };
+        let folder = folder.to_lowercase();
+        if is_structural_folder(&folder) || !folder_counts.contains_key(&folder) {
+            continue;
+        }
+
+        let link_name = stem.to_lowercase();
+        let Some(link_frequency) = link_counts.get(&link_name).copied() else {
+            continue;
+        };
+
+        direct_pages
+            .entry(folder)
+            .or_default()
+            .push(FolderPageEntity {
+                name: link_name.clone(),
+                spec: entity_spec("link", &link_name),
+                source_ref: doc.source_ref.clone(),
+                link_frequency,
+                latest_modified: millis_to_rfc3339(doc.modified_at),
+            });
+    }
+
+    let mut groups: Vec<_> = direct_pages
+        .into_iter()
+        .filter_map(|(folder, mut page_entities)| {
+            page_entities.sort_by(|a, b| {
+                b.link_frequency
+                    .cmp(&a.link_frequency)
+                    .then_with(|| b.latest_modified.cmp(&a.latest_modified))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+            page_entities.dedup_by(|a, b| a.name == b.name);
+
+            let file_count = folder_counts.get(&folder).copied().unwrap_or_default();
+            if file_count == 0 {
+                return None;
+            }
+
+            let active_page_entity_count = page_entities
+                .iter()
+                .filter(|entity| entity.link_frequency >= 3)
+                .count();
+            let expandable_candidate =
+                active_page_entity_count as f64 / file_count as f64 >= EXPANDABLE_DENSITY_THRESHOLD;
+
+            page_entities.truncate(child_limit);
+            Some(FolderPageEntityGroup {
+                spec: entity_spec("folder", &folder),
+                folder,
+                file_count,
+                page_entities,
+                expandable_candidate,
+            })
+        })
+        .collect();
+
+    groups.sort_by(|a, b| {
+        b.expandable_candidate
+            .cmp(&a.expandable_candidate)
+            .then_with(|| b.page_entities.len().cmp(&a.page_entities.len()))
+            .then_with(|| b.file_count.cmp(&a.file_count))
+            .then_with(|| a.folder.cmp(&b.folder))
+    });
+    groups.truncate(parent_limit);
+    groups
+}
+
+fn direct_child_stem(source_ref: &str) -> Option<(&str, &str)> {
+    let (folder, file_name) = source_ref.split_once('/')?;
+    if folder.is_empty() || file_name.contains('/') {
+        return None;
+    }
+    let stem = file_name.strip_suffix(".md").unwrap_or(file_name).trim();
+    (!stem.is_empty()).then_some((folder, stem))
+}
+
 fn folder_stats(
     docs: &[ProcessedDocument],
     metrics: &HashMap<String, Metric>,
+    folder_page_entities: &[FolderPageEntityGroup],
     limit: usize,
 ) -> Vec<FolderStat> {
     let mut word_counts: HashMap<String, i64> = HashMap::new();
@@ -442,16 +565,36 @@ fn folder_stats(
         }
     }
 
+    let page_entity_by_folder: HashMap<&str, &FolderPageEntityGroup> = folder_page_entities
+        .iter()
+        .map(|group| (group.folder.as_str(), group))
+        .collect();
+
     let mut stats: Vec<_> = metrics
         .iter()
         .filter_map(|(spec, metric)| {
             let entity_ref = entity_ref_from_spec(spec)?;
-            (entity_ref.entity_type == "folder").then(|| FolderStat {
-                folder: entity_ref.name.to_string(),
-                spec: spec.clone(),
-                file_count: metric.files.len(),
-                word_count: *word_counts.get(entity_ref.name).unwrap_or(&0),
-                latest_modified: metric.latest_modified.and_then(millis_to_rfc3339),
+            (entity_ref.entity_type == "folder").then(|| {
+                let page_group = page_entity_by_folder.get(entity_ref.name).copied();
+                FolderStat {
+                    folder: entity_ref.name.to_string(),
+                    spec: spec.clone(),
+                    file_count: metric.files.len(),
+                    word_count: *word_counts.get(entity_ref.name).unwrap_or(&0),
+                    latest_modified: metric.latest_modified.and_then(millis_to_rfc3339),
+                    page_entities: page_group
+                        .map(|group| {
+                            group
+                                .page_entities
+                                .iter()
+                                .map(|entity| entity.name.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    expandable_candidate: page_group
+                        .map(|group| group.expandable_candidate)
+                        .unwrap_or(false),
+                }
             })
         })
         .collect();
@@ -769,7 +912,7 @@ fn millis_to_rfc3339(millis: i64) -> Option<String> {
 fn suggested_folders(folder_counts: &HashMap<String, usize>) -> Vec<String> {
     sorted_counts(folder_counts)
         .into_iter()
-        .filter(|(folder, _)| !is_structural_folder(folder) && should_include_folder(folder))
+        .filter(|(folder, _)| is_base_folder_candidate(folder))
         .map(|(folder, _)| folder)
         .collect()
 }
@@ -779,17 +922,32 @@ fn suggested_entities(
     folder_counts: &HashMap<String, usize>,
     tag_counts: &HashMap<String, usize>,
     link_counts: &HashMap<String, usize>,
+    folder_page_entities: &[FolderPageEntityGroup],
 ) -> Vec<String> {
     let mut entities = Vec::new();
     let mut seen = HashSet::new();
+    let mut selected_folders = HashSet::new();
 
     if is_flat_vault(docs) {
         push_entity(&mut entities, &mut seen, "folder:.".to_string());
     } else {
         for folder in suggested_folders(folder_counts) {
+            selected_folders.insert(folder.clone());
             push_entity(&mut entities, &mut seen, format!("folder:{folder}"));
         }
     }
+
+    let covered_page_links: HashSet<&str> = folder_page_entities
+        .iter()
+        .filter(|group| selected_folders.contains(&group.folder))
+        .flat_map(|group| {
+            group
+                .page_entities
+                .iter()
+                .map(|entity| entity.name.as_str())
+        })
+        .collect();
+
     for (tag, _) in sorted_counts(tag_counts)
         .into_iter()
         .filter(|(tag, _)| !is_structural_tag(tag))
@@ -799,7 +957,9 @@ fn suggested_entities(
     }
     for (link, _) in sorted_counts(link_counts)
         .into_iter()
-        .filter(|(link, count)| *count >= 3 && !link.contains('/'))
+        .filter(|(link, count)| {
+            *count >= 3 && !link.contains('/') && !covered_page_links.contains(link.as_str())
+        })
         .take(8)
     {
         push_entity(&mut entities, &mut seen, format!("[[{link}]]"));
@@ -817,19 +977,8 @@ fn is_flat_vault(docs: &[ProcessedDocument]) -> bool {
         })
 }
 
-fn should_include_folder(folder: &str) -> bool {
-    let depth = folder.split('/').count();
-    if depth <= 2 {
-        return true;
-    }
-
-    let parent = folder.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-    let parent_name = parent.rsplit('/').next().unwrap_or("");
-    if matches!(parent_name, "docs" | "projects" | "clients" | "work") {
-        return true;
-    }
-
-    false
+fn is_base_folder_candidate(folder: &str) -> bool {
+    !folder.contains('/') && !is_structural_folder(folder) && folder != ROOT_FOLDER_ENTITY
 }
 
 fn sorted_counts(map: &HashMap<String, usize>) -> Vec<(String, usize)> {
@@ -915,9 +1064,13 @@ fn is_structural_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enzyme_core::config::enzyme_config::EnzymeConfig;
     use enzyme_core::document::Frontmatter;
     use enzyme_core::models::DateSource;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn doc(folders: Vec<&str>) -> ProcessedDocument {
         doc_with(folders, Vec::new(), Vec::new(), None, "note.md", 0, "")
@@ -948,6 +1101,16 @@ mod tests {
             folders: folders.into_iter().map(str::to_string).collect(),
             chunks: Vec::new(),
             frontmatter,
+        }
+    }
+
+    fn restore_env(old: Option<String>) {
+        // SAFETY: tests that mutate ENZYME_HOME hold ENV_LOCK.
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("ENZYME_HOME", value),
+                None => std::env::remove_var("ENZYME_HOME"),
+            }
         }
     }
 
@@ -985,10 +1148,38 @@ mod tests {
     }
 
     #[test]
+    fn suggested_folders_fold_descendant_prefixes_into_base_folders() {
+        let mut counts = HashMap::new();
+        counts.insert("readwise".to_string(), 10);
+        counts.insert("readwise/articles".to_string(), 10);
+        counts.insert("projects".to_string(), 7);
+        counts.insert("projects/done".to_string(), 7);
+        counts.insert("interview_prep".to_string(), 5);
+        counts.insert("interview_prep/system design".to_string(), 5);
+
+        let folders = suggested_folders(&counts);
+
+        assert_eq!(
+            folders,
+            vec![
+                "readwise".to_string(),
+                "projects".to_string(),
+                "interview_prep".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn flat_vault_suggests_root_folder_entity() {
         let docs = vec![doc(Vec::new()), doc(Vec::new())];
 
-        let entities = suggested_entities(&docs, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let entities = suggested_entities(
+            &docs,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+        );
 
         assert_eq!(entities.first().map(String::as_str), Some("folder:."));
     }
@@ -1062,5 +1253,155 @@ mod tests {
         assert!(!value["entity_samples"].as_array().unwrap().is_empty());
         assert!(!value["sample_files"].as_array().unwrap().is_empty());
         assert!(!value["available_profiles"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn scan_json_includes_folder_page_entity_evidence() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let home = TempDir::new().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("ENZYME_HOME", home.path()) };
+
+        let vault = TempDir::new().unwrap();
+        let docs = vec![
+            doc_with(
+                vec!["people"],
+                Vec::new(),
+                Vec::new(),
+                None,
+                "people/Alice.md",
+                1_700_000_000_000,
+                "Alice profile",
+            ),
+            doc_with(
+                vec!["people"],
+                Vec::new(),
+                Vec::new(),
+                None,
+                "people/Bob.md",
+                1_700_000_010_000,
+                "Bob profile",
+            ),
+            doc_with(
+                vec!["projects"],
+                Vec::new(),
+                vec!["alice", "bob"],
+                None,
+                "projects/launch.md",
+                1_700_000_020_000,
+                "Working with [[alice]] and [[bob]]",
+            ),
+            doc_with(
+                vec!["meetings"],
+                Vec::new(),
+                vec!["alice", "bob"],
+                None,
+                "meetings/one.md",
+                1_700_000_030_000,
+                "Talked to [[alice]] and [[bob]]",
+            ),
+            doc_with(
+                vec!["meetings"],
+                Vec::new(),
+                vec!["alice", "bob"],
+                None,
+                "meetings/two.md",
+                1_700_000_040_000,
+                "Follow-up with [[alice]] and [[bob]]",
+            ),
+        ];
+
+        let suggestion = build_scan_suggestion(vault.path(), &docs).unwrap();
+        let value = serde_json::to_value(&suggestion).unwrap();
+        let groups = value["folder_page_entities"].as_array().unwrap();
+        let people = groups
+            .iter()
+            .find(|group| group["folder"] == "people")
+            .expect("people page-entity group");
+
+        assert_eq!(people["expandable_candidate"], true);
+        assert!(
+            people["page_entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["name"] == "alice" && entry["spec"] == "[[alice]]" })
+        );
+        assert!(
+            value["folder_stats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| {
+                    entry["folder"] == "people"
+                        && entry["expandable_candidate"] == true
+                        && entry["page_entities"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&serde_json::json!("alice"))
+                })
+        );
+        assert!(
+            !suggestion
+                .entities
+                .iter()
+                .any(|entity| entity == "[[alice]]"),
+            "page link covered by selected folder should not be persisted: {:?}",
+            suggestion.entities
+        );
+
+        restore_env(old);
+    }
+
+    #[test]
+    fn scan_write_config_persists_base_folders_not_descendants_or_page_children() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let home = TempDir::new().unwrap();
+        let vault = TempDir::new().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("ENZYME_HOME", home.path()) };
+
+        let files = [
+            ("readwise/articles/a.md", "Article about [[alice]]"),
+            ("projects/done/b.md", "Project notes for [[alice]]"),
+            (
+                "interview_prep/system design/c.md",
+                "System design with [[alice]]",
+            ),
+            ("people/Alice.md", "Alice profile"),
+        ];
+        for (relative, content) in files {
+            let path = vault.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        run_scan(vault.path(), true).unwrap();
+        let config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
+        let refs = config_entity_refs(&config.catalyzed_entities);
+
+        assert!(refs.contains(&"folder:readwise".to_string()), "{refs:?}");
+        assert!(refs.contains(&"folder:projects".to_string()), "{refs:?}");
+        assert!(
+            refs.contains(&"folder:interview_prep".to_string()),
+            "{refs:?}"
+        );
+        assert!(
+            !refs.contains(&"folder:readwise/articles".to_string()),
+            "{refs:?}"
+        );
+        assert!(
+            !refs.contains(&"folder:projects/done".to_string()),
+            "{refs:?}"
+        );
+        assert!(
+            !refs.contains(&"folder:interview_prep/system design".to_string()),
+            "{refs:?}"
+        );
+        assert!(!refs.contains(&"[[alice]]".to_string()), "{refs:?}");
+
+        restore_env(old);
     }
 }
