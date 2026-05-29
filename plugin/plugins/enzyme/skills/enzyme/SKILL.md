@@ -29,13 +29,9 @@ Enzyme resolves the vault path in this order: `-p` flag > `ENZYME_VAULT_ROOT` en
 
 Resolve the vault root once and run the workflow from that directory. For Hermes, prefer the directory where the user launches `hermes`; Hermes loads `.hermes.md`/`HERMES.md` and `AGENTS.md` relative to startup paths, so the workspace root matters.
 
-Check initialization:
+Check initialization with `enzyme status` or by looking for `${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db` from the resolved vault root. On FUSE/Cowork filesystems Enzyme may mirror the active SQLite database into an app cache path, so do not rely on a fixed `/tmp/enzyme/enzyme.db` location.
 
-```bash
-ls /tmp/enzyme/enzyme.db ${ENZYME_VAULT_ROOT:-.}/.enzyme/enzyme.db 2>/dev/null
-```
-
-If `enzyme.db` exists, do not blindly re-init. Audit the current config and explain whether a repair would require editing `~/.enzyme/config.toml` plus `enzyme refresh` or a deliberate re-init.
+If `enzyme.db` exists or `enzyme status` reports an initialized vault, do not blindly re-init. Audit the current config and explain whether a repair would require editing `~/.enzyme/config.toml` plus `enzyme refresh` or a deliberate re-init.
 
 ## Commands
 
@@ -78,6 +74,8 @@ Read JSONL events directly. Show the `verification_uri` when `device_authorizati
 ### 3. Interpret scan evidence with bounded follow-up
 
 Use the scan to understand the vault shape, then add judgment. Favor recurring, recent, human-meaningful folders/tags/links over raw frequency alone. Use samples to check whether a candidate actually means what its name suggests. Use child maps to avoid selecting both a parent and many near-duplicate children unless the child has a distinct role. Use frontmatter samples to preserve conventions, not to invent a schema.
+
+For expandable folders, look for scan/petri evidence that a selected folder contains page files that are also wikilinks elsewhere (`page_entities`, `page_entity_children`, `sampled_children`, `catalyzed_children`, or similar folder-page evidence). In Rust Enzyme, selecting the parent folder is usually enough: the selection pipeline auto-detects expandable folders, caps/ranks children, and materializes child page links as their own catalyst entities. Do not manually add every child wikilink to config just because it lives in a selected folder; add a child link separately only when it has a distinct role independent of the parent folder.
 
 Profile overrides are optional. Add them when the surface has an obvious stance; otherwise leave the entity un-overridden. As loose heuristics: people/relationships tend relational; projects/work/inbox tend operational; product/strategy/decisions tend decision_trace; Readwise/research/PKM tend resonance_trace; journal/daily/personal writing tend reflective; ethics/philosophy/tradeoffs tend tension_trace; taste/feedback/activity logs tend preference_evidence.
 
@@ -166,7 +164,9 @@ Validate and tune:
 - Set `min_top_catalysts` when a large/live entity needs enough catalyst coverage for the onboarding demo.
 - Use scan `excluded_folders` as the baseline, and keep runtime/build folders excluded: `.claude`, `.agents`, `.codex`, `.codex-work`, `.conversations`, `.enzyme`, `.git`, `.hermes`, `.obsidian`, `.pi`, `.trash`, `.local`, `node_modules`, `target`, `dist`, `build`, `__pycache__`, and templates.
 - Treat recurring frontmatter entity fields as note-writing conventions, not config entities.
-- Treat apply targets as `targets = [...]` only when the user confirms the external corpus should persist as an applied target; otherwise demo `enzyme apply` manually later.
+- Treat apply targets as `targets = [...]` only when the user confirms the external corpus should persist as an applied target; otherwise demo `enzyme apply` manually later. `targets` entries are raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
+
+Expandable folders are runtime-derived from selected folder entities. If `folder:people` has page-entity children, Rust may expand those children into separate catalyst entities during selection; children are not normally persisted in config.
 
 Profile-aware TOML shape:
 

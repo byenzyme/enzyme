@@ -9,13 +9,14 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
-const FREE_CONFIG_URL: &str =
-    "https://api.enzyme.garden/enzyme-python/free-config";
+const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/enzyme-python/free-config";
 
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]
 pub enum ConfigProvider {
-    OpenAiEnv,
+    Env,
     ServerFallback,
 }
 
@@ -761,47 +762,83 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
     })
 }
 
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+fn first_env_value<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    get_env: &impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    names.into_iter().find_map(get_env)
+}
+
+fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Option<ResolvedConfig>> {
+    let openai_key = first_env_value(["OPENAI_API_KEY"], &get_env);
+    let openrouter_key = first_env_value(["OPENROUTER_API_KEY"], &get_env);
+
+    if let Some(key) = openai_key {
+        let base_url = first_env_value(["OPENAI_BASE_URL"], &get_env)
+            .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_string());
+        let model = first_env_value(["OPENAI_MODEL"], &get_env)
+            .unwrap_or_else(|| OPENAI_DEFAULT_MODEL.to_string());
+        debug!(
+            "Resolved API key from OPENAI_API_KEY (base_url={}, model={})",
+            base_url, model
+        );
+        return Ok(Some(ResolvedConfig {
+            api_key: key,
+            base_url,
+            model,
+            provider: ConfigProvider::Env,
+        }));
+    }
+
+    if let Some(key) = openrouter_key {
+        let base_url = first_env_value(["OPENROUTER_BASE_URL"], &get_env)
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let model = first_env_value(["OPENROUTER_MODEL"], &get_env)
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        debug!(
+            "Resolved API key from OPENROUTER_API_KEY (base_url={}, model={})",
+            base_url, model
+        );
+        return Ok(Some(ResolvedConfig {
+            api_key: key,
+            base_url,
+            model,
+            provider: ConfigProvider::Env,
+        }));
+    }
+
+    for var in [
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "OPENROUTER_BASE_URL",
+        "OPENROUTER_MODEL",
+    ] {
+        if get_env(var).is_some() {
+            warn!("{var} is set but no LLM API key env var is set — ignoring partial env config");
+            break;
+        }
+    }
+
+    Ok(None)
+}
+
 /// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
-/// 1. `OPENAI_API_KEY` env var + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
-/// 2. `/tmp/enzyme-api-cache`
-/// 3. Enzyme server free-config endpoint (shared key for first-time users)
+/// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
+/// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
+/// 3. `/tmp/enzyme-api-cache`
+/// 4. Enzyme server free-config endpoint (shared key for first-time users)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    // 1. OPENAI_API_KEY short-circuits free-tier resolution. OPENAI_BASE_URL is
-    // optional and defaults to the OpenRouter-compatible endpoint for legacy
-    // Enzyme/OpenRouter BYOK setups.
-    let has_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|v| !v.is_empty());
-    let has_url = std::env::var("OPENAI_BASE_URL")
-        .ok()
-        .filter(|v| !v.is_empty());
-
-    match (&has_key, &has_url) {
-        (Some(key), base_url) => {
-            let base_url = base_url
-                .clone()
-                .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-            let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-            debug!(
-                "Resolved API key from OPENAI_API_KEY (base_url={}, model={})",
-                base_url, model
-            );
-            return Ok(ResolvedConfig {
-                api_key: key.clone(),
-                base_url: base_url.clone(),
-                model,
-                provider: ConfigProvider::OpenAiEnv,
-            });
-        }
-        (None, Some(_)) => {
-            warn!("OPENAI_BASE_URL is set but OPENAI_API_KEY is not — ignoring partial env config");
-        }
-        (None, None) => {}
+    if let Some(config) = resolved_env_config(env_value)? {
+        return Ok(config);
     }
 
-    // 2. Reuse cached free-tier config from /tmp if present and not expired
+    // 3. Reuse cached free-tier config from /tmp if present and not expired
     let cache_path = std::path::Path::new("/tmp/enzyme-api-cache");
     if cache_path.exists() {
         let contents = std::fs::read_to_string(cache_path)
@@ -838,7 +875,7 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         }
     }
 
-    // 3. Fetch shared key from Enzyme server
+    // 4. Fetch shared key from Enzyme server
     match fetch_free_config().await {
         Ok(cfg) => {
             write_free_config_cache(cache_path, &cfg);
@@ -850,9 +887,9 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     }
 
     bail!(
-        "No API key found. Checked: OPENAI_API_KEY, /tmp/enzyme-api-cache, \
-         and Enzyme server. Set OPENAI_API_KEY and OPENAI_BASE_URL or \
-         ensure network access for the free tier."
+        "No API key found. Checked: OPENAI_API_KEY, OPENROUTER_API_KEY, \
+         /tmp/enzyme-api-cache, and Enzyme server. Set an LLM API key env var \
+         or ensure network access for the free tier."
     )
 }
 
@@ -872,11 +909,68 @@ pub async fn resolve_api_key() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let values: HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        move |key| values.get(key).cloned()
+    }
 
     #[test]
-    fn openai_gpt5_requests_use_max_completion_tokens() {
+    fn openrouter_env_uses_openrouter_defaults() {
+        let config = resolved_env_config(env(&[("OPENROUTER_API_KEY", "openrouter-key")]))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(config.api_key, "openrouter-key");
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        assert_eq!(config.model, DEFAULT_MODEL);
+        assert!(matches!(config.provider, ConfigProvider::Env));
+    }
+
+    #[test]
+    fn openai_env_accepts_overrides() {
+        let config = resolved_env_config(env(&[
+            ("OPENAI_API_KEY", "openai-key"),
+            ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            ("OPENAI_MODEL", "gpt-4o-mini"),
+        ]))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(config.api_key, "openai-key");
+        assert_eq!(config.base_url, "https://api.openai.com/v1");
+        assert_eq!(config.model, "gpt-4o-mini");
+        assert!(matches!(config.provider, ConfigProvider::Env));
+    }
+
+    #[test]
+    fn openai_env_uses_openai_defaults() {
+        let config = resolved_env_config(env(&[("OPENAI_API_KEY", "openai-key")]))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(config.api_key, "openai-key");
+        assert_eq!(config.base_url, OPENAI_DEFAULT_BASE_URL);
+        assert_eq!(config.model, OPENAI_DEFAULT_MODEL);
+        assert!(matches!(config.provider, ConfigProvider::Env));
+    }
+
+    #[test]
+    fn partial_env_config_does_not_block_fallback() {
+        let config =
+            resolved_env_config(env(&[("OPENAI_BASE_URL", "https://llm.example/v1")])).unwrap();
+
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn openai_requests_use_max_completion_tokens() {
         let request = chat_completion_request(
-            "https://api.openai.com/v1",
+            OPENAI_DEFAULT_BASE_URL,
             "gpt-5.4-nano",
             vec![Message::text("user", "hello")],
             GenerationParams {
@@ -894,7 +988,7 @@ mod tests {
     #[test]
     fn legacy_openai_requests_keep_max_tokens() {
         let request = chat_completion_request(
-            "https://api.openai.com/v1",
+            OPENAI_DEFAULT_BASE_URL,
             "gpt-3.5-turbo",
             vec![Message::text("user", "hello")],
             GenerationParams {
@@ -910,10 +1004,10 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_requests_keep_max_tokens() {
+    fn non_openai_requests_keep_max_tokens() {
         let request = chat_completion_request(
             DEFAULT_BASE_URL,
-            "openai/gpt-5.4-nano",
+            DEFAULT_MODEL,
             vec![Message::text("user", "hello")],
             GenerationParams {
                 max_tokens: 123,

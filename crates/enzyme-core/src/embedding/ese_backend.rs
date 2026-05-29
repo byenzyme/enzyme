@@ -1,4 +1,7 @@
+use std::time::Instant;
+
 use anyhow::Result;
+use tracing::debug;
 
 use super::backend::EmbeddingBackend;
 
@@ -19,8 +22,26 @@ impl EmbeddingBackend for EseBackend {
             return Ok(vec![]);
         }
 
+        let encode_start = Instant::now();
         let embeddings = ese::encode(texts.iter().copied());
-        Ok(embeddings.into_iter().map(|arr| arr.to_vec()).collect())
+        let raw_encode = encode_start.elapsed();
+
+        let convert_start = Instant::now();
+        let vectors = embeddings.into_iter().map(|arr| arr.to_vec()).collect();
+        let conversion = convert_start.elapsed();
+
+        debug!(
+            texts = texts.len(),
+            raw_encode_ms = raw_encode.as_millis() as u64,
+            conversion_ms = conversion.as_millis() as u64,
+            "ese embed batch complete"
+        );
+
+        Ok(vectors)
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        Ok(ese::encode_single(text).to_vec())
     }
 
     fn dimension(&self) -> usize {

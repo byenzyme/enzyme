@@ -491,9 +491,15 @@ jobs:
               <<~EOS
                 Enzyme installed successfully!
 
-                Initialize your vault:
+                Install agent instructions from your vault:
                   cd /path/to/your/vault
-                  enzyme init
+                  enzyme install codex      # Codex / Pi / generic .agents
+                  enzyme install claude     # Claude Code
+                  enzyme install hermes     # Hermes
+                  enzyme install openclaw   # OpenClaw
+
+                Then ask your agent: Use Enzyme to inspect and initialize this vault.
+                Terminal-only setup: enzyme scan --write-config && enzyme init
 
                 Setup guide: https://enzyme.garden/setup
               EOS

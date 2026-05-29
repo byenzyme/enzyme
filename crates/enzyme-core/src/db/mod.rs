@@ -13,7 +13,9 @@ pub mod schema;
 
 pub use connection::Database;
 pub use errors::DbError;
-pub use repository::{EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats};
+pub use repository::{
+    DocumentForEmbedding, EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats,
+};
 
 #[cfg(test)]
 mod tests {
@@ -788,10 +790,12 @@ mod tests {
         .unwrap();
 
         let needing = db.get_documents_needing_embedding(None, None).unwrap();
-        let refs: Vec<&str> = needing.iter().map(|(_, r, _, _)| r.as_str()).collect();
+        let refs: Vec<&str> = needing.iter().map(|doc| doc.source_ref.as_str()).collect();
         assert!(refs.contains(&"a.md"));
         assert!(refs.contains(&"c.md"));
         assert!(!refs.contains(&"b.md"));
+        assert!(needing.iter().any(|doc| doc.content_hash == "h1"));
+        assert!(needing.iter().any(|doc| doc.content_hash == "h3-new"));
 
         let limited = db.get_documents_needing_embedding(Some(1), None).unwrap();
         assert_eq!(limited.len(), 1);
@@ -801,6 +805,48 @@ mod tests {
             .get_documents_needing_embedding(None, Some(future))
             .unwrap();
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_replace_chunk_embeddings_for_documents_bulk() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        db.execute_write(
+            "INSERT INTO docs (source_ref, content_hash, created_at, modified_at, indexed_at)
+             VALUES ('a.md', 'h1', ?1, ?1, ?1)",
+            vec![Value::Integer(now)],
+        )
+        .unwrap();
+        let doc_id: i64 = db
+            .query_read(
+                "SELECT id FROM docs WHERE source_ref = 'a.md'",
+                vec![],
+                |r| r.get::<i64>(0),
+            )
+            .unwrap()[0];
+
+        db.upsert_chunk_embeddings(&[("a.md".to_string(), 0, vec![0.1, 0.2])])
+            .unwrap();
+
+        db.replace_chunk_embeddings_for_documents(
+            vec!["a.md".to_string()],
+            vec![
+                ("a.md".to_string(), 0, vec![1.0, 2.0]),
+                ("a.md".to_string(), 1, vec![3.0, 4.0]),
+            ],
+            vec![(doc_id, "h1".to_string(), now + 1)],
+        )
+        .unwrap();
+
+        let embeddings = db.get_all_chunk_embeddings().unwrap();
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0], ("a.md".to_string(), 0, vec![1.0, 2.0]));
+        assert_eq!(embeddings[1], ("a.md".to_string(), 1, vec![3.0, 4.0]));
+
+        let doc = db.get_document_by_path("a.md").unwrap().unwrap();
+        assert_eq!(doc.embedded_content_hash.as_deref(), Some("h1"));
+        assert_eq!(doc.embedded_at, Some(now + 1));
     }
 
     // -- get_folder_children_by_references ------------------------------------

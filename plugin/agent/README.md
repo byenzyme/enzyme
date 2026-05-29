@@ -57,7 +57,7 @@ On your first session, enzyme will:
 2. **Refresh the index** to catch any vault changes since last session
 3. **Register tools** — five tools become available to the model
 
-If the workspace is not initialized yet, ask Hermes to set up Enzyme for the current workspace. The agent should inspect the markdown corpus, preserve existing Obsidian or markdown conventions, run `enzyme scan`, validate the generated `~/.enzyme/config.toml`, add any missing important folders, run `enzyme init`, and finish with `enzyme install hermes`. That command writes a small workspace marker to the context file and installs the full Enzyme runtime skill into Hermes. It should treat folders like inboxes, daily notes, projects, people/contacts, meetings, and decisions as existing retrieval structure rather than replacing them with a new memory schema.
+If the workspace is not initialized yet, ask Hermes to set up Enzyme for the current workspace. The agent should inspect the markdown corpus, preserve existing Obsidian or markdown conventions, run `enzyme scan`, validate the generated `~/.enzyme/config.toml`, add any missing important folders, and run `enzyme init`. If you installed the CLI outside the Hermes plugin path, run `enzyme install hermes` from the workspace before starting Hermes so the runtime skill and workspace marker are in place. It should treat folders like inboxes, daily notes, projects, people/contacts, meetings, and decisions as existing retrieval structure rather than replacing them with a new memory schema.
 
 Hermes loads `.hermes.md`/`HERMES.md` by walking upward from the launch directory and loads `AGENTS.md` from the current working directory at startup. For the smoothest install, launch Hermes from the root of the markdown workspace you want Enzyme to index.
 
@@ -122,16 +122,13 @@ Tools are gated by `check_fn` — hidden from the model until the enzyme binary 
 
 Enzyme generates catalysts using an LLM. Without an API key, everything works except catalyst regeneration.
 
-Set one of these in your `~/.hermes/.env`:
+Set this in your `~/.hermes/.env`:
 
 ```bash
-ENZYME_LLM_API_KEY=your-key     # OpenAI-compatible custom endpoint
-ENZYME_LLM_BASE_URL=https://openrouter.ai/api/v1
-ENZYME_LLM_MODEL=google/gemini-3-flash-preview
-# or
-OPENROUTER_API_KEY=your-key    # Free tier works
-# or
 OPENAI_API_KEY=your-key
+# Optional, for custom OpenAI-compatible endpoints:
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+OPENAI_MODEL=google/gemini-3-flash-preview
 ```
 
 ### Update the plugin
@@ -176,8 +173,8 @@ That writes a small workspace marker to `AGENTS.md` and installs the full Enzyme
 The SKILL.md loads with `always: true` — enzyme is available every session without explicit invocation. On first session, the agent:
 
 1. **Detects `anyBins: ["enzyme"]`** requirement and bootstraps the binary if missing
-2. **Walks you through vault setup** using `enzyme scan`, `enzyme init --quiet`, and `enzyme install openclaw`
-3. **Writes enzyme instructions** into your `AGENTS.md` and `~/.openclaw/skills/enzyme/SKILL.md` for persistence across sessions
+2. **Walks you through vault setup** using `enzyme scan`, config validation, and `enzyme init --quiet`
+3. **Uses the installed enzyme instructions** in your `AGENTS.md` and `~/.openclaw/skills/enzyme/SKILL.md` for persistence across sessions
 
 ### First session
 
@@ -245,14 +242,14 @@ skills: {
   entries: {
     enzyme: {
       env: {
-        OPENROUTER_API_KEY: "your-key"
+        OPENAI_API_KEY: "your-key"
       }
     }
   }
 }
 ```
 
-Or set `ENZYME_LLM_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY` in your environment. OpenRouter's free tier works.
+Or set `OPENAI_API_KEY` in your environment, with optional `OPENAI_BASE_URL` / `OPENAI_MODEL` overrides for OpenAI-compatible providers.
 
 ### Update the skill
 
@@ -341,7 +338,7 @@ Install path:
 
 - macOS Apple Silicon/Intel or Linux (x86_64, aarch64)
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
-- Catalyst generation uses Enzyme's hosted fallback by default, or set `ENZYME_LLM_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`
+- Catalyst generation uses Enzyme's hosted fallback by default, or set `OPENAI_API_KEY` for an OpenAI-compatible provider
 
 ## Testing
 

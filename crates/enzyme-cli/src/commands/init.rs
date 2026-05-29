@@ -436,9 +436,8 @@ pub async fn run_init(
     };
 
     // Free-tier preflight: deduct 3 credits up front so we fail fast on
-    // insufficient balance instead of running embedding + N catalyst calls
-    // that all 402. BYOK users (env vars set → OpenAiEnv) pay their own
-    // inference and skip this gate.
+    // insufficient balance instead of running embedding + N catalyst calls.
+    // BYOK users pay their own inference and skip this gate.
     let is_free_tier = api_config.as_ref().map_or(false, |(cfg, _)| {
         matches!(
             cfg.provider,
@@ -474,7 +473,7 @@ pub async fn run_init(
         let tx = idx_display.sender();
 
         if let Some((ref cfg, _)) = api_config {
-            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::OpenAiEnv) {
+            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::Env) {
                 tx.send(DisplayEvent::ApiConfig {
                     base_url: cfg.base_url.clone(),
                     model: cfg.model.clone(),

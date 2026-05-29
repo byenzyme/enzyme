@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
@@ -146,20 +146,23 @@ impl<'a> EmbeddingPipeline<'a> {
         let mut doc_chunk_ranges: Vec<(usize, usize)> = Vec::new();
         let mut non_empty_docs: Vec<usize> = Vec::new();
 
-        for (i, (_doc_id, _source_ref, _created_at, chunks)) in docs_needing.iter().enumerate() {
-            if chunks.is_empty() {
+        for (i, doc) in docs_needing.iter().enumerate() {
+            if doc.chunks.is_empty() {
                 continue;
             }
             let start_idx = flat_chunks.len();
-            for chunk in chunks {
+            for chunk in &doc.chunks {
                 flat_chunks.push(chunk.as_str());
             }
-            doc_chunk_ranges.push((start_idx, chunks.len()));
+            doc_chunk_ranges.push((start_idx, doc.chunks.len()));
             non_empty_docs.push(i);
         }
 
         // Build a vec of created_at dates aligned with non_empty_docs for progress.
-        let doc_dates: Vec<i64> = non_empty_docs.iter().map(|&i| docs_needing[i].2).collect();
+        let doc_dates: Vec<i64> = non_empty_docs
+            .iter()
+            .map(|&i| docs_needing[i].created_at)
+            .collect();
 
         // Step 4: Embed all chunks at once.
         let total_non_empty = non_empty_docs.len();
@@ -185,55 +188,48 @@ impl<'a> EmbeddingPipeline<'a> {
         let encode_ms = encode_duration.as_millis() as u64;
 
         // Step 5: Scatter results back to documents and write to DB.
+        let db_write_start = Instant::now();
         let mut chunks_embedded = 0usize;
         let mut documents_embedded = 0usize;
         let mut oldest_embedded_ms: Option<i64> = None;
 
+        let now: Timestamp = chrono::Utc::now().timestamp_millis();
+        let mut file_paths = Vec::with_capacity(non_empty_docs.len());
+        let mut embedding_entries = Vec::with_capacity(all_vectors.len());
+        let mut embedded_docs = Vec::with_capacity(non_empty_docs.len());
+
         for (range_idx, &doc_idx) in non_empty_docs.iter().enumerate() {
-            let (doc_id, source_ref, created_at, _chunks) = &docs_needing[doc_idx];
+            let doc = &docs_needing[doc_idx];
             let (start_idx, count) = doc_chunk_ranges[range_idx];
             let vectors = &all_vectors[start_idx..start_idx + count];
 
-            // Replace old chunk embeddings for this file
-            self.db.delete_chunk_embeddings_for_file(source_ref)?;
-
-            // Insert new chunk embeddings
-            let entries: Vec<(String, u32, Vec<f32>)> = vectors
-                .iter()
-                .enumerate()
-                .map(|(i, v)| (source_ref.clone(), i as u32, v.clone()))
-                .collect();
-            self.db.upsert_chunk_embeddings(&entries)?;
-
-            // Mark as embedded in DB
-            let now: Timestamp = chrono::Utc::now().timestamp_millis();
-            match self.db.get_document_by_path(source_ref) {
-                Ok(Some(doc)) => {
-                    self.db
-                        .mark_document_embedded(*doc_id, &doc.content_hash, now)?;
-                }
-                Ok(None) => {
-                    warn!(
-                        source_ref,
-                        "document disappeared from DB before marking embedded"
-                    );
-                }
-                Err(e) => {
-                    warn!(source_ref, "failed to look up document for hash: {}", e);
-                }
-            }
+            file_paths.push(doc.source_ref.clone());
+            embedding_entries.extend(
+                vectors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (doc.source_ref.clone(), i as u32, v.clone())),
+            );
+            embedded_docs.push((doc.doc_id, doc.content_hash.clone(), now));
 
             chunks_embedded += count;
             documents_embedded += 1;
             // Docs are sorted newest-first, so the last one processed is oldest.
-            oldest_embedded_ms = Some(*created_at);
+            oldest_embedded_ms = Some(doc.created_at);
         }
 
+        self.db.replace_chunk_embeddings_for_documents(
+            file_paths,
+            embedding_entries,
+            embedded_docs,
+        )?;
+
+        let db_write_ms = db_write_start.elapsed().as_millis() as u64;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         info!(
             documents_embedded,
-            chunks_embedded, encode_ms, duration_ms, "embedding complete"
+            chunks_embedded, encode_ms, db_write_ms, duration_ms, "embedding complete"
         );
 
         Ok(EmbeddingStats {

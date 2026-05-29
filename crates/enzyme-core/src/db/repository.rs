@@ -50,6 +50,16 @@ pub struct FileChunk {
     pub content: String,
 }
 
+/// Document and chunks that need embedding.
+#[derive(Debug, Clone)]
+pub struct DocumentForEmbedding {
+    pub doc_id: i64,
+    pub source_ref: String,
+    pub content_hash: String,
+    pub created_at: i64,
+    pub chunks: Vec<String>,
+}
+
 /// Per-entity evidence used by catalyst refresh staleness checks.
 #[derive(Debug, Clone)]
 pub struct EntityRefreshStats {
@@ -311,10 +321,10 @@ impl Database {
         &self,
         max_count: Option<usize>,
         indexed_since: Option<i64>,
-    ) -> Result<Vec<(i64, String, i64, Vec<String>)>> {
+    ) -> Result<Vec<DocumentForEmbedding>> {
         let mut params: Vec<Value> = Vec::new();
         let mut sql = String::from(
-            "SELECT id, source_ref, created_at FROM docs
+            "SELECT id, source_ref, content_hash, created_at FROM docs
              WHERE (embedded_content_hash IS NULL
                 OR embedded_content_hash != content_hash
                 OR embedded_at IS NULL)",
@@ -336,18 +346,25 @@ impl Database {
             Ok((
                 row.get::<i64>(0)?,
                 row.get::<String>(1)?,
-                row.get::<i64>(2)?,
+                row.get::<String>(2)?,
+                row.get::<i64>(3)?,
             ))
         })?;
 
         let mut results = Vec::with_capacity(docs.len());
-        for (doc_id, source_ref, created_at) in docs {
+        for (doc_id, source_ref, content_hash, created_at) in docs {
             let chunks = self.query_read(
                 "SELECT content FROM chunks WHERE doc_id = ?1 ORDER BY chunk_index",
                 vec![Value::Integer(doc_id)],
                 |row| row.get::<String>(0),
             )?;
-            results.push((doc_id, source_ref, created_at, chunks));
+            results.push(DocumentForEmbedding {
+                doc_id,
+                source_ref,
+                content_hash,
+                created_at,
+                chunks,
+            });
         }
 
         Ok(results)
@@ -1639,6 +1656,63 @@ impl Database {
             tx.commit()
                 .await
                 .context("failed to commit upsert_chunk_embeddings")?;
+            Ok(())
+        })
+    }
+
+    /// Replace chunk embeddings for many documents and mark them embedded in one transaction.
+    pub fn replace_chunk_embeddings_for_documents(
+        &self,
+        file_paths: Vec<String>,
+        embeddings: Vec<(String, u32, Vec<f32>)>,
+        embedded_docs: Vec<(i64, String, Timestamp)>,
+    ) -> Result<()> {
+        if file_paths.is_empty() && embeddings.is_empty() && embedded_docs.is_empty() {
+            return Ok(());
+        }
+
+        block_in_place_sync(async move {
+            let tx = self.conn.transaction().await.context(
+                "failed to begin transaction for replace_chunk_embeddings_for_documents",
+            )?;
+
+            for file_path in &file_paths {
+                tx.execute(
+                    "DELETE FROM chunk_embeddings WHERE file_path = ?1",
+                    vec![Value::Text(file_path.clone())],
+                )
+                .await?;
+            }
+
+            for (file_path, chunk_index, vector) in &embeddings {
+                let blob = f32_vec_to_blob(vector);
+                tx.execute(
+                    "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
+                     VALUES (?1, ?2, ?3)",
+                    vec![
+                        Value::Text(file_path.clone()),
+                        Value::Integer(*chunk_index as i64),
+                        Value::Blob(blob),
+                    ],
+                )
+                .await?;
+            }
+
+            for (doc_id, content_hash, embedded_at) in &embedded_docs {
+                tx.execute(
+                    "UPDATE docs SET embedded_at = ?1, embedded_content_hash = ?2 WHERE id = ?3",
+                    vec![
+                        Value::Integer(*embedded_at),
+                        Value::Text(content_hash.clone()),
+                        Value::Integer(*doc_id),
+                    ],
+                )
+                .await?;
+            }
+
+            tx.commit()
+                .await
+                .context("failed to commit replace_chunk_embeddings_for_documents")?;
             Ok(())
         })
     }

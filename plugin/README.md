@@ -51,12 +51,23 @@ The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you c
 
 ## Quick start
 
+For agent-guided setup, install the runtime instructions from your markdown vault:
+
 ```bash
-cd /path/to/your/vault    # any folder of markdown files
-enzyme init                # compiles concept graph — under 20s for 1k docs
+cd /path/to/your/vault
+enzyme install codex      # Codex / Pi / generic .agents
+enzyme install claude     # Claude Code
 ```
 
-Inside Claude Code or Codex, invoke `/enzyme` only for first-time setup. After setup, the generated AGENTS/CLAUDE instructions and Enzyme commands handle ordinary use.
+Then ask your agent: "Use Enzyme to inspect and initialize this vault." The skill will scan the workspace, confirm the setup stance, persist `~/.enzyme/config.toml`, run `enzyme init`, and demonstrate `petri`/`catalyze`.
+
+Terminal-only setup is also supported:
+
+```bash
+enzyme scan --write-config
+$EDITOR ~/.enzyme/config.toml
+enzyme init                # compiles concept graph — under 20s for 1k docs
+```
 
 ## What it does
 
@@ -168,7 +179,7 @@ This matters when you're building on imported content (reading highlights, curat
 
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
 - macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
-- Works out of the box via [OpenRouter](https://openrouter.ai)'s free tier — or bring your own API key (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`)
+- Works out of the box via Enzyme's hosted fallback for logged-in users — or bring your own OpenAI-compatible key with `OPENAI_API_KEY`
 
 ## Links
 

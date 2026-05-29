@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install enzyme — local-first knowledge indexing for Obsidian vaults
+# Install enzyme — local-first knowledge indexing for markdown vaults
 # Usage: curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
 
 set -euo pipefail
@@ -132,9 +132,14 @@ if [ ! -f "$HOME/.enzyme/auth.json" ]; then
 fi
 
 echo ""
-echo "Next: cd into your content folder and run enzyme init."
+echo "Next: cd into your markdown vault and install agent instructions."
 echo ""
 echo "  cd /path/to/your/vault"
-echo "  enzyme init"
+echo "  enzyme install codex      # Codex / Pi / generic .agents"
+echo "  enzyme install claude     # Claude Code"
+echo "  enzyme install hermes     # Hermes"
+echo "  enzyme install openclaw   # OpenClaw"
 echo ""
-echo "App plugins for Claude Code and Codex are installed separately from inside those apps."
+echo "Then ask your agent: Use Enzyme to inspect and initialize this vault."
+echo ""
+echo "Terminal-only setup: enzyme scan --write-config && enzyme init"
