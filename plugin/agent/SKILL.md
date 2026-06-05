@@ -1,10 +1,11 @@
 ---
 name: enzyme
 description: >
-  Set up, repair, or explore an Obsidian, Markdown, or Hermes agent workspace
-  using Enzyme. Use for first-time vault setup, setup repair, working-memory
-  retrieval, drawing connections between ideas, or semantic search by concept
-  rather than keyword.
+  Use Enzyme in an already activated Obsidian, Markdown, or Hermes workspace
+  for working-memory retrieval, source-grounded exploration, semantic search by
+  concept rather than keyword, runtime note-writing, and refresh. If the
+  workspace is not initialized, follow the first-time setup section before
+  normal retrieval.
 license: MIT
 compatibility: Requires shell access (macOS arm64/x86_64, Linux x86_64/arm64). Install the enzyme CLI if it is not on PATH.
 allowed-tools: Bash Read Glob Grep
@@ -25,9 +26,18 @@ Enzyme does not replace the user's memory system. It indexes the markdown struct
 
 Do not build a separate context tree. Learn from the user's folders, but prefer lightweight markdown signals: tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts. Create new folders or people pages only when the vault already uses that convention or the user asks for it.
 
+Treat setup as an indexability assessment. A workspace may start anywhere on the spectrum from raw JSON exports to a highly structured agent-team markdown repo. Do not assume either is already Enzyme-ready. The final setup target is an Enzyme-indexable markdown workspace: meaningful folders, explicit dates when temporal retrieval matters, stable tags/wikilinks/frontmatter entity handles where the vault benefits from them, and enough source text for grounded retrieval. Use the audit to explain what is already indexable, what is missing, and what work would make Enzyme materially better before init. Ask for user feedback on that interpretation before writing config, materializing imports, or repairing structure.
+
 ## First-Time Setup
 
 If `.enzyme/enzyme.db` is missing, do setup before normal retrieval. Setup should demonstrate value, not interrogate the user or impose a schema.
+
+Import materialization and structural repair belong in setup/repair, not routine runtime note-writing. Use this phase flow:
+
+1. **Assess indexability** — run `enzyme scan`; if raw exports or weakly structured markdown are present, use a scripted read-only audit to report what is already indexable, what is missing, and what would materially improve Enzyme.
+2. **Preview the target shape** — explain the Enzyme-readable workspace you are aiming for: meaningful folders, dates when temporal retrieval matters, stable entity handles, scope boundaries, and source text.
+3. **Materialize or repair only with approval** — required outputs are an audit summary, a dry-run plan or sample diff, and a backup plan. Preserve raw artifacts. Apply only deterministic high-confidence changes the user approves.
+4. **Configure, initialize, validate** — tune TOML, run init/refresh, then test with petri/catalyze prompts that should cite the newly indexable captures.
 
 ```bash
 enzyme scan
@@ -44,6 +54,7 @@ enzyme catalyze "<query composed from prompt + petri catalyst vocabulary>"
 Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence for setup. Read the structured fields directly, do only bounded follow-up when the scan is ambiguous, then produce a concrete setup preview:
 
 - what is already working as Enzyme signal;
+- what is not yet Enzyme-indexable or would be weakly indexable, such as raw dumps, missing dates, missing entity handles, or scope boundaries that are only implicit;
 - why the user does not need a new memory architecture;
 - small habit upgrades, such as stable wikilinks for central people/projects/concepts and durable existing tags;
 - the proposed stance for ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
@@ -114,7 +125,7 @@ Prefer words from the user's own notes. Avoid performative meta-language such as
 
 Choose the first demo connection by vault type:
 
-- Readwise/reference vault: place saved passages and the user's annotations beside each other until a question appears.
+- Annotated reference/import vault (for example Readwise, web clips, papers, book notes, transcript highlights): start from one user annotation, marginal note, or explicit reaction when present, quote it as source text, then place it beside the saved passage and one adjacent source until a question appears. If the user names a title or distinctive phrase, use exact search to find that obvious note before using petri/catalyze for adjacent connections.
 - Project/work vault: place a decision, blocker, meeting note, or artifact beside a later note that changes its meaning or next step.
 - Journal/daily vault: place two entries from different dates beside each other to show how the wording, stakes, or desired action changed.
 - People/CRM vault: place context notes beside a recent interaction or commitment to reveal one concrete next step.
@@ -150,7 +161,8 @@ Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect 
 
 - `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
 - `enzyme refresh --quiet` re-indexes changed content.
-- Use exact search for names, `#tags`, `[[wikilinks]]`, and literal text.
+- Use exact search for names, source titles, distinctive phrases, `#tags`, `[[wikilinks]]`, and literal text.
+- For annotated reference/import vaults, if the user names a title or phrase, find that obvious note first with exact search, then use petri/catalyze to connect it to adjacent material.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
 
 ### External references with `enzyme apply`
@@ -179,7 +191,7 @@ Present it as: "I searched your own notes for the internal thread, then searched
 
 ## Writing Notes
 
-Write memory as ordinary markdown, not as a separate memory store. The point is to leave useful notes that Enzyme can refresh and retrieve through Petri, Catalyze, and Apply.
+Write runtime memory as ordinary markdown observations, not as a separate memory store. The point is to leave sparse, source-linked notes that Enzyme can refresh and retrieve through Petri, Catalyze, and Apply when a durable conclusion, commitment, reframe, or open loop is worth carrying forward.
 
 The best time to write is near the end of a session or after a meaningful decision, when the durable outcome is clear. Do not interrupt the user's flow to capture routine Q&A.
 
@@ -227,13 +239,11 @@ Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs
 
 Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
 
-For broad exploration, use petri plus 1-2 catalyze searches, then open one specific connection among the user's notes. Do not present a topic list.
+For broad exploration, use petri plus 1-2 catalyze searches, then open one specific connection among the user's notes. Do not present a topic list. If exact search finds an obvious named note but catalyze misses it, say so plainly and use Enzyme for adjacent connections rather than pretending semantic retrieval found the note unaided.
 
 For search results, do not lead with metadata. Notice repeated words, time gaps, changed wording, adjacent ideas, practical consequences, or source disagreements across results. End with one concrete next direction, not a generic invitation.
 
-Presentation registers for `enzyme catalyze --register`:
-- `explore`: wonder, probe, notice patterns.
-- `continuity`: restore what the user knew, show trajectory, enable forward motion.
-- `reference`: surface what drew attention and connect imports to the user's own thinking.
-
-Follow any `presentation_guidance` returned by Enzyme when framing surfaced content.
+Choose the presentation posture from the user's task, not from the `catalyze` response:
+- Exploration: wonder, probe, notice patterns, and open one specific connection.
+- Continuity: restore what the user knew, show trajectory and stopping points, and enable forward motion.
+- Reference/imports: surface what drew attention and connect imports to the user's own thinking without treating them as authoritative.

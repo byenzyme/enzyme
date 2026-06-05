@@ -1,4 +1,4 @@
-.PHONY: install build-native install-native native-cpu bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native
+.PHONY: install build-native install-native native-cpu sync-agent-skill check-agent-skill bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native
 
 # Build release binary and install to cargo bin
 install:
@@ -18,6 +18,14 @@ install-native:
 native-cpu:
 	@rustc -vV | grep '^host:'
 	@rustc --print target-cpus | grep -E '^    native|^    apple-|^    x86-64' | head -20
+
+# Keep the packaged Hermes/OpenClaw skill body in sync with the runtime skill
+# template used by `enzyme install <runtime>`.
+sync-agent-skill:
+	python3 scripts/sync-agent-runtime-skill.py
+
+check-agent-skill:
+	python3 scripts/sync-agent-runtime-skill.py --check
 
 # Microbenchmark ESE encoding and 512-dim cosine loops with portable CPU settings.
 bench-cpu-portable:
