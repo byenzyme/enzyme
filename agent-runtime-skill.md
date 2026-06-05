@@ -18,7 +18,20 @@ For Hermes, this skill is for operational use inside a user's workspace, not for
 
 Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
 
+Provider/key safeguard: never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. By default, `enzyme init` and `enzyme refresh` use Enzyme hosted credits/auth and ignore inherited LLM env keys. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, pass `--use-env-llm`:
+
+```bash
+enzyme init --quiet --use-env-llm
+enzyme refresh --quiet --use-env-llm
+```
+
+Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. Use direct OpenAI or another OpenAI-compatible provider only when the user intentionally configured it. Treat localhost/`ENZYME_LOCAL_MODEL=1` as the local-model path. If provider intent is unclear, ask before running expensive catalyst generation.
+
 Enzyme does not replace the user's memory system. It indexes the markdown structure the user already has: folders, tags, wikilinks, dates, inboxes, daily notes, people pages, and frontmatter. Preserve that structure and use it as retrieval signal.
+
+User-facing mental model: Enzyme does the slow interpretive pass once, then leaves behind fast search handles. During init, it reads the shape of the vault and creates a small set of source-grounded questions for the ideas that keep showing up. Those questions are not summaries; they are questions the user's notes are good at answering. Later, when an agent needs context, it can use those precomputed questions to find relevant notes immediately instead of rereading the vault or guessing keywords. Refresh folds new markdown into that compiled map so future sessions can use it.
+
+Do not expose embedding implementation details unless asked. Prefer simple language such as: "Enzyme turns your notes into questions an agent can search with," "the slow interpretive pass happens during init," and "runtime retrieval uses precomputed handles, so it is fast."
 
 Do not build a separate context tree. Learn from the user's folders, but prefer lightweight markdown signals: tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts. Create new folders or people pages only when the vault already uses that convention or the user asks for it.
 
@@ -55,7 +68,7 @@ Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence f
 - small habit upgrades, such as stable wikilinks for central people/projects/concepts and durable existing tags;
 - the proposed stance for ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
 - 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes;
-- how the demo should show the map-to-connection loop: petri recognizes active ideas, then catalyze places source notes beside each other so a useful question appears;
+- how the demo should show the map-to-connection loop: Enzyme's precomputed questions help the agent recognize active ideas, then source-grounded retrieval places notes beside each other so a useful question appears;
 - any external corpora that could be searched with `enzyme apply`;
 - if the vault would materially benefit, a minimal high-confidence retrieval repair offer before init, with exact scope and user confirmation.
 
@@ -85,15 +98,19 @@ It returns once seed petri context exists; semantic search becomes available aft
 
 ## Session Lifecycle
 
+Explain setup/refresh simply when useful: init is the slow compile step that turns the vault into source-grounded questions; refresh is how new notes join that compiled map; normal retrieval is fast because the agent uses those precomputed handles instead of starting from scratch.
+
 What's automatic depends on your runtime:
 
 **Hermes** (hooks handle it):
+
 - **First setup** — the plugin can bootstrap the binary; the workspace still needs `enzyme scan`, TOML validation, and `enzyme init` once
 - **Session start** — binary bootstrap + `enzyme refresh` run automatically
 - **Each turn** — `enzyme petri --query` injects vault context before the model sees your message
 - **Session end** — after any useful markdown notes are written, `enzyme refresh` indexes them
 
 **OpenClaw** (skill instructions + config):
+
 - **Session start** — run `enzyme refresh --quiet` (add to AGENTS.md or heartbeat)
 - **First turn / context-dependent turns** — run `enzyme petri --query "user's message"` before responding, unless the plugin already injected petri context
 - **Session end** — write useful markdown notes if the session produced durable memory, then run `enzyme refresh --quiet`
@@ -209,7 +226,7 @@ If the vault has no stronger template, write compact notes in this shape:
 ---
 tags:
   - existing-tag
-created: '[[YYYY-MM-DD]]'
+created: "[[YYYY-MM-DD]]"
 ---
 
 ## descriptive title
@@ -240,6 +257,7 @@ For broad exploration, use petri plus 1-2 catalyze searches, then open one speci
 For search results, do not lead with metadata. Notice repeated words, time gaps, changed wording, adjacent ideas, practical consequences, or source disagreements across results. End with one concrete next direction, not a generic invitation.
 
 Choose the presentation posture from the user's task, not from the `catalyze` response:
+
 - Exploration: wonder, probe, notice patterns, and open one specific connection.
 - Continuity: restore what the user knew, show trajectory and stopping points, and enable forward motion.
 - Reference/imports: surface what drew attention and connect imports to the user's own thinking without treating them as authoritative.

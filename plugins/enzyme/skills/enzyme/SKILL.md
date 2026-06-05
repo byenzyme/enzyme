@@ -18,6 +18,8 @@ For Hermes, this is an operational workspace setup path, not Hermes development.
 
 Enzyme bootstraps on top of the user's existing markdown system. Do not impose PARA, LLM Wiki, GBrain, a context tree, or an agent-written memory schema. Treat existing folders, inboxes, daily notes, tags, wikilinks, people pages, frontmatter, timestamps, and ordinary prose as retrieval signal. Prefer tiny habits over reorganization: stable wikilinks for central people/projects/concepts, durable tags for recurring themes, and normal notes in the vault's existing locations.
 
+User-facing mental model: Enzyme does the slow interpretive pass once, then leaves behind fast search handles. During init, it reads the shape of the vault and creates a small set of source-grounded questions for the ideas that keep showing up. Those questions are not summaries; they are questions the user's notes are good at answering. Later, when an agent needs context, it can use those precomputed questions to find relevant notes immediately instead of rereading the vault or guessing keywords. Refresh folds new markdown into that compiled map so future sessions can use it. Do not expose embedding implementation details unless asked.
+
 Treat setup as an indexability assessment. A workspace may start anywhere on the spectrum from raw JSON exports to a highly structured agent-team markdown repo. Do not assume either is already Enzyme-ready. The final setup target is an Enzyme-indexable markdown workspace: meaningful folders, explicit dates when temporal retrieval matters, stable tags/wikilinks/frontmatter entity handles where the vault benefits from them, and enough source text for grounded retrieval. Use the audit to explain what is already indexable, what is missing, and what work would make Enzyme materially better before init. Ask for user feedback on that interpretation before writing config, materializing imports, or repairing structure.
 
 ## Prerequisite
@@ -69,9 +71,11 @@ Run `enzyme scan` before init. Treat it as the primary setup evidence and propos
 
 The scan is structured for setup agents. Read it as a compact map of the vault rather than as a final answer.
 
-### 2. Handle login if needed
+### 2. Handle login and LLM provider intent
 
-If there is no API key in the environment and no `~/.enzyme/auth.json`, start login in the background:
+Default setup uses Enzyme hosted credits/auth. Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell. `enzyme init` and `enzyme refresh` ignore inherited LLM env keys unless the user intentionally passes `--use-env-llm`.
+
+If there is no `~/.enzyme/auth.json` and the user has not explicitly asked to use their own LLM key, start login in the background:
 
 ```bash
 nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
@@ -81,6 +85,13 @@ cat /tmp/enzyme-login.log
 ```
 
 Read JSONL events directly. Show the `verification_uri` when `device_authorization` appears. Keep checking until `success`, `expired`, or `error`. Do not ask the user to paste API keys.
+
+If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider instead of hosted credits, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
+
+```bash
+enzyme init --quiet --use-env-llm
+enzyme refresh --quiet --use-env-llm
+```
 
 ### 3. Interpret scan evidence with bounded follow-up
 
@@ -109,9 +120,10 @@ The preview must include:
 1. **What is already working as signal** — observed folders/tags/wikilinks/dates/frontmatter from the scan, with counts and 1-2 concrete examples from `entity_samples`, `frontmatter_samples`, or `sample_files`.
 2. **What is not yet indexable or is weakly indexable** — raw dumps, missing dates, missing entity handles, implicit project/client/person scopes, or generated/noisy folders that would make Enzyme less useful unless materialized, repaired, or excluded.
 3. **Why more organization is not required** — Enzyme is designed to work with partial, living markdown structure.
-4. **Small habit upgrades** — link central people/projects/concepts, reuse durable tags, preserve date/frontmatter conventions, avoid hidden memory files.
-5. **Proposed Enzyme stance** — which surfaces are ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
-6. **Profile posture** — translate catalyst profiles into human language:
+4. **Why init/refresh matter** — explain simply that init does the slow compile step once, turning recurring vault ideas into source-grounded questions the agent can search with quickly later; refresh folds new notes into that compiled map.
+5. **Small habit upgrades** — link central people/projects/concepts, reuse durable tags, preserve date/frontmatter conventions, avoid hidden memory files.
+6. **Proposed Enzyme stance** — which surfaces are ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
+7. **Profile posture** — translate catalyst profiles into human language:
    - `relational`: people, relationships, clients, community, hospitality.
    - `operational`: projects, work, meetings, tasks, inbox/current execution.
    - `decision_trace`: product, strategy, founding, architecture, decisions.
@@ -119,16 +131,16 @@ The preview must include:
    - `reflective`: journal, daily, travel, writing, personal reflection, capture.
    - `tension_trace`: faith, philosophy, concepts, unresolved tradeoffs.
    - `preference_evidence`: taste, preferences, feedback, recipes, activities.
-7. **Falsifiable outcomes** — 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes.
-8. **Minimal repair offer** — if the vault could be in better shape, propose the smallest high-confidence edit set that would improve retrieval before init, with exact files/counts and why it matters. If the vault is already in good shape, explicitly skip this.
-9. **Import materialization opportunities** — raw exports or dumps that could become markdown captures, the high-level audit/materialization plan, and what entity/date/scope handles would make them Enzyme-readable.
-10. **Handle vs source-text explanation for imports/references** — for annotated imports, explicitly say which structures are Enzyme handles and which are readable source text. Example: “source fields are readable text; folders/tags/wikilinks/frontmatter are handles; user annotations are high-value prose, not special primitives.”
-11. **Apply opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
+8. **Falsifiable outcomes** — 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes.
+9. **Minimal repair offer** — if the vault could be in better shape, propose the smallest high-confidence edit set that would improve retrieval before init, with exact files/counts and why it matters. If the vault is already in good shape, explicitly skip this.
+10. **Import materialization opportunities** — raw exports or dumps that could become markdown captures, the high-level audit/materialization plan, and what entity/date/scope handles would make them Enzyme-readable.
+11. **Handle vs source-text explanation for imports/references** — for annotated imports, explicitly say which structures are Enzyme handles and which are readable source text. Example: “source fields are readable text; folders/tags/wikilinks/frontmatter are handles; user annotations are high-value prose, not special primitives.”
+12. **Apply opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
 
 Example framing:
 
 ```md
-This vault already has enough signal for Enzyme. I would treat `inbox/` as ongoing capture, `people/` and repeated wikilinks as relationship context, `Readwise/` as reference material, and `#enzyme`/`#founding` as decision/product threads. You do not need a separate memory tree; Enzyme compiles ordinary markdown handles into petri, catalysts, and semantic retrieval.
+This vault already has enough signal for Enzyme. I would treat `inbox/` as ongoing capture, `people/` and repeated wikilinks as relationship context, `Readwise/` as reference material, and `#enzyme`/`#founding` as decision/product threads. You do not need a separate memory tree. Enzyme will do the slower compile step once: it turns recurring ideas in ordinary markdown into source-grounded questions an agent can search with quickly later. Refresh is how new notes join that compiled map.
 
 If this setup works, prompts like these should return grounded notes:
 
@@ -378,9 +390,7 @@ tags:
 
 - decision
   projects:
--
-
----
+- ***
 
 ## {{title}}
 

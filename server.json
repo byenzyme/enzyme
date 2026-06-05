@@ -3,7 +3,7 @@
   "name": "io.github.jshph/enzyme",
   "title": "Enzyme",
   "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
-  "version": "0.5.14",
+  "version": "0.5.15",
   "websiteUrl": "https://enzyme.garden",
   "repository": {
     "url": "https://github.com/jshph/enzyme",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.14/enzyme-mcp-0.5.14-macos-arm64.mcpb",
-      "fileSha256": "72d081c0e74908b522e7bf6c6fcf902b5f9fc615bf56b843725c7cb5796e46c7",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.15/enzyme-mcp-0.5.15-macos-arm64.mcpb",
+      "fileSha256": "c95940ac9037dba68e738074e963a618bcc65aa5e2a42d6e0e53f42c22e42ab5",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -26,8 +26,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.14/enzyme-mcp-0.5.14-macos-x86_64.mcpb",
-      "fileSha256": "0fb7b5c8271ad848f72d25afe3c4813d57b0190bcfcb924edbd8c71d57f298f7",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.15/enzyme-mcp-0.5.15-macos-x86_64.mcpb",
+      "fileSha256": "11a7d016f7f74a764ea44879478cf1fd7c4dd330a844513774aaa284e5d90624",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -40,8 +40,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.14/enzyme-mcp-0.5.14-linux-x86_64.mcpb",
-      "fileSha256": "c7e549a55527f1384c90f1164d6afec54d8807dd6aa49eedcb29d2d804b9e341",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.15/enzyme-mcp-0.5.15-linux-x86_64.mcpb",
+      "fileSha256": "3a63526cc4ce8daf66db0a2e5ceb8d7f7386fe27422d92575370a4cb6a703d53",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -54,8 +54,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.14/enzyme-mcp-0.5.14-linux-arm64.mcpb",
-      "fileSha256": "7ad2fa95e8fdfffb0b1b10886a0401f16c076ccfb66e8909c81edb9f2a4cf65a",
+      "identifier": "https://github.com/jshph/enzyme/releases/download/v0.5.15/enzyme-mcp-0.5.15-linux-arm64.mcpb",
+      "fileSha256": "fbe7a9071fe8ecd2be8e77be014754bb5bb28b93776bf7258c78600dd8e44e7b",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
