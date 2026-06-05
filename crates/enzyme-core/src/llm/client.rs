@@ -29,6 +29,15 @@ pub struct ResolvedConfig {
     pub provider: ConfigProvider,
 }
 
+/// Which LLM credentials the caller explicitly wants to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmCredentialMode {
+    /// Use Enzyme hosted credits/auth and ignore inherited env LLM keys.
+    Hosted,
+    /// Use OPENAI_*/OPENROUTER_* env configuration only.
+    Env,
+}
+
 impl ResolvedConfig {
     /// Format a masked display of the API key (e.g. `sk-••••••••abcd`).
     pub fn masked_api_key(&self) -> String {
@@ -826,19 +835,8 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
     Ok(None)
 }
 
-/// Resolve the API key, base URL, and model for LLM requests.
-///
-/// Checks (in order):
-/// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
-/// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
-/// 3. `/tmp/enzyme-api-cache`
-/// 4. Enzyme server free-config endpoint (shared key for first-time users)
-pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    if let Some(config) = resolved_env_config(env_value)? {
-        return Ok(config);
-    }
-
-    // 3. Reuse cached free-tier config from /tmp if present and not expired
+async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
+    // Reuse cached free-tier config from /tmp if present and not expired.
     let cache_path = std::path::Path::new("/tmp/enzyme-api-cache");
     if cache_path.exists() {
         let contents = std::fs::read_to_string(cache_path)
@@ -875,7 +873,7 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
         }
     }
 
-    // 4. Fetch shared key from Enzyme server
+    // Fetch shared key from Enzyme server.
     match fetch_free_config().await {
         Ok(cfg) => {
             write_free_config_cache(cache_path, &cfg);
@@ -887,16 +885,53 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     }
 
     bail!(
-        "No API key found. Checked: OPENAI_API_KEY, OPENROUTER_API_KEY, \
-         /tmp/enzyme-api-cache, and Enzyme server. Set an LLM API key env var \
-         or ensure network access for the free tier."
+        "No hosted Enzyme LLM config available. Run `enzyme login` and ensure \
+         network access/credits, or pass `--use-env-llm` to intentionally use \
+         OPENAI_API_KEY or OPENROUTER_API_KEY."
     )
+}
+
+/// Resolve the API key, base URL, and model for LLM requests.
+///
+/// Checks (in order):
+/// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
+/// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
+/// 3. `/tmp/enzyme-api-cache`
+/// 4. Enzyme server free-config endpoint (hosted credits)
+pub async fn resolve_api_config() -> Result<ResolvedConfig> {
+    if let Some(config) = resolved_env_config(env_value)? {
+        return Ok(config);
+    }
+    resolve_hosted_api_config().await
+}
+
+/// Resolve API configuration in an explicit credential mode.
+pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<ResolvedConfig> {
+    match mode {
+        LlmCredentialMode::Hosted => resolve_hosted_api_config().await,
+        LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "No env LLM config found. Set OPENAI_API_KEY or OPENROUTER_API_KEY, \
+                 or omit `--use-env-llm` to use Enzyme hosted credits."
+            )
+        }),
+    }
 }
 
 /// Resolve API configuration and construct an LLM client that preserves
 /// provider metadata such as free-tier refresh behavior.
 pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
     let config = resolve_api_config().await?;
+    let client = LlmClient::from_config(&config);
+    Ok((config, client))
+}
+
+/// Resolve API configuration in an explicit credential mode and construct an
+/// LLM client that preserves provider metadata such as free-tier behavior.
+pub async fn resolve_llm_client_for_mode(
+    mode: LlmCredentialMode,
+) -> Result<(ResolvedConfig, LlmClient)> {
+    let config = resolve_api_config_for_mode(mode).await?;
     let client = LlmClient::from_config(&config);
     Ok((config, client))
 }

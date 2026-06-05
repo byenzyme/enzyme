@@ -72,6 +72,10 @@ enum Commands {
         #[arg(long, hide = true)]
         stream_partial_catalysts: bool,
 
+        /// Use OPENAI_*/OPENROUTER_* env LLM credentials instead of Enzyme hosted credits.
+        #[arg(long)]
+        use_env_llm: bool,
+
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
         stage: Option<String>,
@@ -90,6 +94,10 @@ enum Commands {
         /// Minimum catalysts for the largest entity (by volume).
         #[arg(long)]
         min_top_catalysts: Option<usize>,
+
+        /// Use OPENAI_*/OPENROUTER_* env LLM credentials instead of Enzyme hosted credits.
+        #[arg(long)]
+        use_env_llm: bool,
     },
 
     /// Search using catalyst-based approximate matching
@@ -330,6 +338,7 @@ async fn main() -> Result<()> {
             voice_min_catalysts,
             voice_timeout_secs,
             stream_partial_catalysts,
+            use_env_llm,
             stage,
         } => {
             if stage.as_deref() == Some("index") {
@@ -341,6 +350,7 @@ async fn main() -> Result<()> {
                     voice_min_catalysts,
                     std::time::Duration::from_secs(voice_timeout_secs),
                     min_top_catalysts,
+                    use_env_llm,
                 )
                 .await?;
 
@@ -357,6 +367,7 @@ async fn main() -> Result<()> {
                     json_progress,
                     min_top_catalysts,
                     stream_partial_catalysts,
+                    use_env_llm,
                 )
                 .await?;
 
@@ -372,8 +383,16 @@ async fn main() -> Result<()> {
             detached,
             quiet,
             min_top_catalysts,
+            use_env_llm,
         } => {
-            commands::init::run_refresh(&vault_path, detached, quiet, min_top_catalysts).await?;
+            commands::init::run_refresh(
+                &vault_path,
+                detached,
+                quiet,
+                min_top_catalysts,
+                use_env_llm,
+            )
+            .await?;
         }
         Commands::Catalyze {
             query,

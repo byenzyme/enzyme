@@ -11,7 +11,9 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
-use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, resolve_llm_client};
+use enzyme_core::llm::{
+    DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmCredentialMode, resolve_llm_client_for_mode,
+};
 use enzyme_core::models::Entity;
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, CatalystStats, calculate_allocations,
@@ -30,6 +32,15 @@ use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 use enzyme_core::config::auth::require_login;
+
+async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
+    if use_env_llm {
+        let _ = resolve_llm_client_for_mode(LlmCredentialMode::Env)
+            .await
+            .context("--use-env-llm was set but no env LLM config could be resolved")?;
+    }
+    Ok(())
+}
 
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
     if paths.vault_db.exists() {
@@ -265,18 +276,23 @@ pub async fn run_init_voice_ready(
     seed_min_catalysts: usize,
     timeout: Duration,
     min_top_catalysts: Option<usize>,
+    use_env_llm: bool,
 ) -> Result<serde_json::Value> {
     let start = Instant::now();
     let seed_entities = seed_entities.max(1);
     let seed_min_catalysts = seed_min_catalysts.max(1);
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    if !use_env_llm {
+        require_login(&paths.auth_token())?;
+    }
+    preflight_env_llm(use_env_llm).await?;
 
     if let Some(parent) = paths.vault_db.parent() {
         fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
     }
 
-    let background_spawned = spawn_background_init(vault_path, &paths, min_top_catalysts, true);
+    let background_spawned =
+        spawn_background_init(vault_path, &paths, min_top_catalysts, true, use_env_llm);
     let log_path = paths
         .vault_db
         .parent()
@@ -397,10 +413,14 @@ pub async fn run_init(
     json_progress: bool,
     min_top_catalysts: Option<usize>,
     stream_partial_catalysts: bool,
+    use_env_llm: bool,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    if !use_env_llm {
+        require_login(&paths.auth_token())?;
+    }
+    preflight_env_llm(use_env_llm).await?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -427,9 +447,18 @@ pub async fn run_init(
     let _sync_guard = paths.sync_on_drop();
 
     // Resolve API config early (needed for both LLM selection and catalyst generation)
-    let api_config = match resolve_llm_client().await {
+    let llm_mode = if use_env_llm {
+        LlmCredentialMode::Env
+    } else {
+        LlmCredentialMode::Hosted
+    };
+    let api_config = match resolve_llm_client_for_mode(llm_mode).await {
         Ok(resolved) => Some(resolved),
         Err(e) => {
+            if use_env_llm {
+                return Err(e)
+                    .context("--use-env-llm was set but no env LLM config could be resolved");
+            }
             tracing::warn!("API config resolution failed: {}", e);
             None
         }
@@ -954,7 +983,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
     drop(db);
 
-    run_stale_catalyst_refresh(vault_path, None).await?;
+    run_stale_catalyst_refresh(vault_path, None, false).await?;
     Ok(())
 }
 
@@ -968,17 +997,21 @@ pub async fn run_refresh(
     detached: bool,
     quiet: bool,
     min_top_catalysts: Option<usize>,
+    use_env_llm: bool,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    if !use_env_llm {
+        require_login(&paths.auth_token())?;
+    }
+    preflight_env_llm(use_env_llm).await?;
 
     if detached {
-        return run_refresh_detached(vault_path).await;
+        return run_refresh_detached(vault_path, use_env_llm).await;
     }
     if quiet {
-        return run_refresh_fast(vault_path).await;
+        return run_refresh_fast(vault_path, use_env_llm).await;
     }
-    run_refresh_interactive(vault_path, min_top_catalysts).await
+    run_refresh_interactive(vault_path, min_top_catalysts, use_env_llm).await
 }
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
@@ -986,7 +1019,7 @@ pub async fn run_refresh(
 /// Runs only cheap local work (indexing, embedding, similarity) synchronously,
 /// then spawns a background process for expensive LLM catalyst generation if
 /// the vault is stale.
-async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
+async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -1010,7 +1043,7 @@ async fn run_refresh_fast(vault_path: &Path) -> Result<()> {
         StalenessResult::Fresh => false,
         StalenessResult::Stale(reason) => {
             debug!(?reason, "fast refresh: stale, spawning background");
-            spawn_background_refresh(vault_path, &paths)
+            spawn_background_refresh(vault_path, &paths, use_env_llm)
         }
     };
     let cache_epoch = maybe_bump_collection_cache_epoch(&db, collection_changed)?;
@@ -1183,7 +1216,7 @@ fn database_has_catalysts(db: &Database) -> bool {
 ///
 /// Called by `spawn_background_refresh` via `enzyme refresh --detached --quiet`.
 /// Acquires a lockfile to prevent concurrent runs.
-async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
+async fn run_refresh_detached(vault_path: &Path, use_env_llm: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
     let enzyme_dir = paths
         .vault_db
@@ -1200,7 +1233,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
         }
     };
 
-    run_stale_catalyst_refresh(vault_path, None).await?;
+    run_stale_catalyst_refresh(vault_path, None, use_env_llm).await?;
     // Lock released on drop
     Ok(())
 }
@@ -1208,6 +1241,7 @@ async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
 async fn run_stale_catalyst_refresh(
     vault_path: &Path,
     min_top_catalysts: Option<usize>,
+    use_env_llm: bool,
 ) -> Result<bool> {
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
@@ -1254,7 +1288,12 @@ async fn run_stale_catalyst_refresh(
         return Ok(false);
     }
 
-    let (api_config, llm) = resolve_llm_client().await?;
+    let llm_mode = if use_env_llm {
+        LlmCredentialMode::Env
+    } else {
+        LlmCredentialMode::Hosted
+    };
+    let (api_config, llm) = resolve_llm_client_for_mode(llm_mode).await?;
 
     // Free-tier preflight: deduct 1 credit up front. Bail before LLM work
     // if balance is insufficient. BYOK users skip this gate.
@@ -1417,7 +1456,7 @@ async fn reapply_targets(vault_path: &Path) {
 ///
 /// Returns `true` if a background process was spawned, `false` if skipped
 /// (e.g., another refresh is already running).
-fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
+fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths, use_env_llm: bool) -> bool {
     let enzyme_dir = match paths.vault_db.parent() {
         Some(p) => p,
         None => return false,
@@ -1457,8 +1496,11 @@ fn spawn_background_refresh(vault_path: &Path, paths: &EnzymePaths) -> bool {
 
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["refresh", "--detached", "--quiet", "-p"])
-        .arg(vault_path)
-        .stdin(std::process::Stdio::null())
+        .arg(vault_path);
+    if use_env_llm {
+        cmd.arg("--use-env-llm");
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_stderr));
 
@@ -1501,6 +1543,7 @@ fn spawn_background_init(
     paths: &EnzymePaths,
     min_top_catalysts: Option<usize>,
     stream_partial_catalysts: bool,
+    use_env_llm: bool,
 ) -> bool {
     let enzyme_dir = match paths.vault_db.parent() {
         Some(p) => p,
@@ -1545,6 +1588,9 @@ fn spawn_background_init(
     if stream_partial_catalysts {
         cmd.arg("--stream-partial-catalysts");
     }
+    if use_env_llm {
+        cmd.arg("--use-env-llm");
+    }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_stderr));
@@ -1585,11 +1631,21 @@ fn spawn_background_init(
 async fn run_refresh_interactive(
     vault_path: &Path,
     min_top_catalysts: Option<usize>,
+    use_env_llm: bool,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     if !paths.vault_db.exists() {
-        let _ = run_init(vault_path, false, false, false, min_top_catalysts, false).await?;
+        let _ = run_init(
+            vault_path,
+            false,
+            false,
+            false,
+            min_top_catalysts,
+            false,
+            use_env_llm,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1614,7 +1670,7 @@ async fn run_refresh_interactive(
     }
     drop(db);
 
-    run_stale_catalyst_refresh(vault_path, min_top_catalysts).await?;
+    run_stale_catalyst_refresh(vault_path, min_top_catalysts, use_env_llm).await?;
 
     let db = Database::open(&paths.vault_db)?;
     let entity_names = load_stored_entity_names(&db)?;

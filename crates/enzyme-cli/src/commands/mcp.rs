@@ -143,7 +143,15 @@ impl EnzymeMcp {
 
         let handle = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
-            handle.block_on(run_init(&vault_path, false, true, false, None, false))
+            handle.block_on(run_init(
+                &vault_path,
+                false,
+                true,
+                false,
+                None,
+                false,
+                false,
+            ))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?

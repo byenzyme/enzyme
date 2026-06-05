@@ -1053,12 +1053,12 @@ impl<'a> CatalystPipeline<'a> {
         // serve one request at a time. We keep concurrency conservative to avoid
         // 429s from upstream providers, and use a generous timeout to accommodate
         // retries with exponential backoff.
-        let is_remote = self.llm.is_openrouter();
-        let concurrency = config.concurrency.unwrap_or(if is_remote { 8 } else { 1 });
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs: u64 = if is_remote { 30 } else { 300 };
-
         let local_model = self.llm.is_local();
+        let concurrency = config
+            .concurrency
+            .unwrap_or(if local_model { 1 } else { 8 });
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let entity_timeout_secs: u64 = if local_model { 300 } else { 30 };
 
         // Build the response_format once based on provider capabilities. Local
         // SmolLM2 checkpoints were trained before eraLabels were stable, so do
