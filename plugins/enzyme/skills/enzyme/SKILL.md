@@ -4,7 +4,8 @@ description: >
   Set up Enzyme for an uninitialized Obsidian, Markdown, or Hermes agent
   workspace. Use when the workspace needs compatibility assessment, first-time
   scan, user-confirmed entity selection, TOML config validation, persistent
-  agent instructions, optional apply targets, or onboarding demo prompts.
+  agent instructions, optional apply targets, or onboarding demo prompts. Do not
+  use for routine retrieval in an already initialized vault.
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: [vault-path]
 ---
@@ -16,6 +17,8 @@ Use this skill only for first-time workspace setup or setup repair. If the vault
 For Hermes, this is an operational workspace setup path, not Hermes development. The goal is to leave the agent with a local Enzyme index, durable workspace instructions, and a concrete demonstration of how Enzyme makes natural markdown capture useful.
 
 Enzyme bootstraps on top of the user's existing markdown system. Do not impose PARA, LLM Wiki, GBrain, a context tree, or an agent-written memory schema. Treat existing folders, inboxes, daily notes, tags, wikilinks, people pages, frontmatter, timestamps, and ordinary prose as retrieval signal. Prefer tiny habits over reorganization: stable wikilinks for central people/projects/concepts, durable tags for recurring themes, and normal notes in the vault's existing locations.
+
+Treat setup as an indexability assessment. A workspace may start anywhere on the spectrum from raw JSON exports to a highly structured agent-team markdown repo. Do not assume either is already Enzyme-ready. The final setup target is an Enzyme-indexable markdown workspace: meaningful folders, explicit dates when temporal retrieval matters, stable tags/wikilinks/frontmatter entity handles where the vault benefits from them, and enough source text for grounded retrieval. Use the audit to explain what is already indexable, what is missing, and what work would make Enzyme materially better before init. Ask for user feedback on that interpretation before writing config, materializing imports, or repairing structure.
 
 ## Prerequisite
 
@@ -52,6 +55,14 @@ Read Enzyme JSON directly. Do not pipe through Python or jq unless the output is
 
 ## Setup Workflow
 
+Run setup as a phase-based indexability flow. The detailed steps below map to these phases:
+
+1. **Assess indexability** — combine `enzyme scan` with bounded inspection. If raw exports, dumps, or weakly structured markdown are present, propose a scripted read-only audit.
+2. **Preview the target shape** — explain what is already Enzyme-indexable, what is missing, and what markdown handles would make retrieval materially better.
+3. **Materialize or repair only with approval** — for scripted work, required outputs are an audit summary, a dry-run plan or sample diff, and a backup plan. Preserve raw artifacts; do not infer uncertain aliases, rewrite source bodies, or bulk-summarize captures without explicit user request.
+4. **Configure and initialize** — tune TOML from the confirmed stance, then run init/refresh.
+5. **Validate** — use petri/catalyze prompts that should cite the newly indexable notes or captures.
+
 ### 1. Run scan preview
 
 Run `enzyme scan` before init. Treat it as the primary setup evidence and proposal, not truth. Do not run `enzyme scan --write-config` yet.
@@ -83,7 +94,11 @@ If the scan is ambiguous, read a bounded amount of extra context: structural fil
 
 Also note possible `enzyme apply` targets from the scan and filesystem shape: Readwise exports, article/book folders, transcripts, research dumps, client docs, code repos, PDFs converted to markdown, Discord/Slack exports, or downloaded archives.
 
-Only offer retrieval repairs when there is a small, high-confidence gap. Do not move files, create a new taxonomy, generate summaries, or bulk-normalize the vault during first setup. Good Enzyme fits have durable markdown traces: decisions, research, project journals, meeting notes, transcripts, reading notes, reflections, or agent-written summaries. Weak fits are mostly binary assets, generated outputs, dependencies, or code without markdown traces.
+For annotated reference/import markdown such as Readwise exports, web clips, papers, book notes, or transcript highlights, distinguish first-class handles from readable source text. Tags, folders, and wikilinks are Enzyme handles. Source-specific fields such as `Author::`, `Title::`, `Last-Highlighted-Date::`, or `Source-URL::` are useful evidence the agent can read, but they are not separate Enzyme schema fields unless represented as tags, links, folders, or frontmatter. User annotations, marginalia, or explicit reactions such as `**Note**:` are often the most recognizable prose in the vault; treat them as high-value source text for demos, not as a special index primitive.
+
+If the workspace contains raw exports or dumps such as Granola JSON, ChatGPT exports, email archives, Slack/Discord exports, call transcripts, Readwise exports, or other unstructured data, treat them as import materialization candidates. The agent should reason about what the audit script needs to discover, not hand-inspect or hand-rewrite files one by one.
+
+Only offer retrieval repairs or materialization when there is a high-confidence gap that would materially improve indexing. Do not move files, create a new taxonomy, generate summaries, or bulk-normalize the vault during first setup. Good Enzyme fits have durable markdown traces: decisions, research, project journals, meeting notes, transcripts, reading notes, reflections, or agent-written summaries. Weak fits are mostly binary assets, generated outputs, dependencies, or code without markdown traces.
 
 ### 4. Produce a setup preview, not an interview
 
@@ -92,10 +107,11 @@ Before writing config, show a concrete preview. Ask for corrections, not a quest
 The preview must include:
 
 1. **What is already working as signal** — observed folders/tags/wikilinks/dates/frontmatter from the scan, with counts and 1-2 concrete examples from `entity_samples`, `frontmatter_samples`, or `sample_files`.
-2. **Why more organization is not required** — Enzyme is designed to work with partial, living markdown structure.
-3. **Small habit upgrades** — link central people/projects/concepts, reuse durable tags, preserve date/frontmatter conventions, avoid hidden memory files.
-4. **Proposed Enzyme stance** — which surfaces are ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
-5. **Profile posture** — translate catalyst profiles into human language:
+2. **What is not yet indexable or is weakly indexable** — raw dumps, missing dates, missing entity handles, implicit project/client/person scopes, or generated/noisy folders that would make Enzyme less useful unless materialized, repaired, or excluded.
+3. **Why more organization is not required** — Enzyme is designed to work with partial, living markdown structure.
+4. **Small habit upgrades** — link central people/projects/concepts, reuse durable tags, preserve date/frontmatter conventions, avoid hidden memory files.
+5. **Proposed Enzyme stance** — which surfaces are ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise.
+6. **Profile posture** — translate catalyst profiles into human language:
    - `relational`: people, relationships, clients, community, hospitality.
    - `operational`: projects, work, meetings, tasks, inbox/current execution.
    - `decision_trace`: product, strategy, founding, architecture, decisions.
@@ -103,9 +119,11 @@ The preview must include:
    - `reflective`: journal, daily, travel, writing, personal reflection, capture.
    - `tension_trace`: faith, philosophy, concepts, unresolved tradeoffs.
    - `preference_evidence`: taste, preferences, feedback, recipes, activities.
-6. **Falsifiable outcomes** — 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes.
-7. **Minimal repair offer** — if the vault could be in better shape, propose the smallest high-confidence edit set that would improve retrieval before init, with exact files/counts and why it matters. If the vault is already in good shape, explicitly skip this.
-8. **Apply opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
+7. **Falsifiable outcomes** — 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes.
+8. **Minimal repair offer** — if the vault could be in better shape, propose the smallest high-confidence edit set that would improve retrieval before init, with exact files/counts and why it matters. If the vault is already in good shape, explicitly skip this.
+9. **Import materialization opportunities** — raw exports or dumps that could become markdown captures, the high-level audit/materialization plan, and what entity/date/scope handles would make them Enzyme-readable.
+10. **Handle vs source-text explanation for imports/references** — for annotated imports, explicitly say which structures are Enzyme handles and which are readable source text. Example: “source fields are readable text; folders/tags/wikilinks/frontmatter are handles; user annotations are high-value prose, not special primitives.”
+11. **Apply opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
 
 Example framing:
 
@@ -113,6 +131,7 @@ Example framing:
 This vault already has enough signal for Enzyme. I would treat `inbox/` as ongoing capture, `people/` and repeated wikilinks as relationship context, `Readwise/` as reference material, and `#enzyme`/`#founding` as decision/product threads. You do not need a separate memory tree; Enzyme compiles ordinary markdown handles into petri, catalysts, and semantic retrieval.
 
 If this setup works, prompts like these should return grounded notes:
+
 - ...
 - ...
 
@@ -127,6 +146,7 @@ If the audit found a small, high-confidence set of vault edits that would materi
 
 ```md
 I can make one minimal retrieval repair before init:
+
 - add `created:` to 12 date-named meeting notes using their filenames
 - add `people:` links to 6 notes that already mention existing `people/*.md` pages
 - add `#decision` to 4 notes that already use the vault's decision-note pattern
@@ -137,10 +157,10 @@ This does not move files or create a new schema. It only makes existing structur
 Rules:
 
 - Only offer this when the vault would actually benefit. If existing folders/tags/links/dates are already strong enough, say so and skip.
-- Keep the first repair small, reversible, and reviewable. Prefer tens of files, not hundreds.
-- Use only conventions the vault already has, or ask the user to approve the convention explicitly.
-- Show exact files or a precise file-count/scope before editing.
-- Never move files, create a parallel memory tree, generate synthetic summaries, or bulk-normalize the vault during first setup.
+- Keep the first repair small, reversible, and reviewable.
+- For broad repairs, use scripted audits/batches and present required outputs: audit summary, backup plan, dry-run plan or sample diff.
+- Use only existing conventions or explicitly approved new ones.
+- Preserve raw artifacts. Do not infer uncertain aliases, rewrite source bodies, bulk-summarize captures, create new people/company pages, or create a parallel memory tree without explicit user approval.
 - If the user declines, initialize as-is and still demonstrate value.
 
 After the demo, offer the remaining lower-priority refinements as optional next steps.
@@ -210,6 +230,7 @@ Onboarding is not complete until the user sees how Enzyme helps an agent recogni
    ```
 
    Explain which active ideas the query pulled forward and what search vocabulary the map suggests.
+
 4. Compose a catalyze query from the prompt plus petri catalyst vocabulary, then run:
 
    ```bash
@@ -231,13 +252,13 @@ Prefer words from the user's own notes. Avoid performative meta-language such as
 
 Choose the first demo connection by vault type:
 
-- Readwise/reference vault: place saved passages and the user's annotations beside each other until a question appears.
+- Annotated reference/import vault (for example Readwise, web clips, papers, book notes, transcript highlights): start from one user annotation, marginal note, or explicit reaction when present, quote it as source text, then place it beside the saved passage and one adjacent source until a question appears. If the user names a title or distinctive phrase, use exact search to find that obvious note before using petri/catalyze for adjacent connections.
 - Project/work vault: place a decision, blocker, meeting note, or artifact beside a later note that changes its meaning or next step.
 - Journal/daily vault: place two entries from different dates beside each other to show how the wording, stakes, or desired action changed.
 - People/CRM vault: place context notes beside a recent interaction or commitment to reveal one concrete next step.
 - Research vault: place sources that sharpen an assumption, disagreement, missing evidence, or possible synthesis.
 
-Do not expose catalyst IDs, raw scores, or tool mechanics unless asked. The point is to show that Enzyme turns natural notes, wikilinks, tags, dates, and prose into an active map, then places source notes beside each other so a useful question appears. The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet.
+Do not expose catalyst IDs, raw scores, or tool mechanics unless asked. The point is to show that Enzyme turns natural notes, wikilinks, tags, dates, and prose into an active map, then places source notes beside each other so a useful question appears. The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet. If exact search finds an obvious named note but catalyze misses it, say so plainly and use that as a retrieval limitation; do not pretend semantic retrieval found the connection unaided.
 
 ### 9. Demonstrate or propose `enzyme apply`
 
@@ -267,9 +288,11 @@ The vault is the lens. `apply` may miss themes that exist only in the target and
 After the user has seen the map-to-connection demo, offer the rest of the optional improvements as next steps. Keep them ranked by impact and separate them from the successful initial setup.
 
 Good candidates:
+
 - broader date frontmatter backfill inferred from filename/path dates;
 - note-level entity fields matched to existing wikilinks and existing vault conventions;
 - `people:`/company/project fields for synced emails, transcripts, meeting notes, or CRM notes when central;
+- scripted materialization of raw Granola, ChatGPT, email, Slack/Discord, meeting, or other JSON/export dumps into markdown captures with `created:`, `source:`, `raw_path:`, exact existing entity handles, and approved project/client/person scope boundaries;
 - creating missing people/contact/company stubs only when repeatedly referenced and user-confirmed;
 - deciding whether active inbox/transcript/import folders should remain first-class retrieval entities or become secondary/reference surfaces.
 
@@ -301,10 +324,14 @@ Possible templates:
 
 ```md
 # Quick capture
+
 ---
+
 created: {{date:YYYY-MM-DD}}
 tags:
-  - capture
+
+- capture
+
 ---
 
 ## {{title}}
@@ -318,14 +345,16 @@ Related:
 
 ```md
 # Meeting / conversation
+
 ---
+
 created: {{date:YYYY-MM-DD}}
 people:
-  -
-projects:
-  -
-tags:
-  - meeting
+
+- projects:
+- tags:
+- meeting
+
 ---
 
 ## {{title}}
@@ -341,12 +370,16 @@ Related:
 
 ```md
 # Decision
+
 ---
+
 created: {{date:YYYY-MM-DD}}
 tags:
-  - decision
-projects:
-  -
+
+- decision
+  projects:
+-
+
 ---
 
 ## {{title}}
@@ -365,6 +398,7 @@ Only create or edit templates after user confirmation. Use the vault's existing 
 ### 12. Report setup result
 
 Tell the user:
+
 - initialized note/entity/catalyst counts;
 - persisted entity list, profile stance, and exclusions;
 - demo prompt used and what it proved;
