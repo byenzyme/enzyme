@@ -31,7 +31,7 @@ use enzyme_core::pipeline::staleness::{
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
-use enzyme_core::config::auth::require_login;
+use enzyme_core::config::auth::{AuthToken, require_login};
 
 async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
     if use_env_llm {
@@ -40,6 +40,32 @@ async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
             .context("--use-env-llm was set but no env LLM config could be resolved")?;
     }
     Ok(())
+}
+
+fn loginless_hosted_init_allowed_for_keys(current_key: &str, configured_keys: &[String]) -> bool {
+    configured_keys.is_empty()
+        || (configured_keys.len() == 1 && configured_keys.first().is_some_and(|k| k == current_key))
+}
+
+/// Enzyme's first hosted init should be frictionless: a user can scan/configure
+/// one vault and run `enzyme init` without signing in. Once this machine has
+/// global config for multiple vaults, or the user is using refresh, we require a
+/// real login so hosted usage is tied to an account.
+fn require_login_for_hosted_init_if_needed(vault_path: &Path, paths: &EnzymePaths) -> Result<()> {
+    if AuthToken::load(&paths.auth_token()).is_ok() {
+        return Ok(());
+    }
+
+    let current_key = EnzymeConfig::vault_key(vault_path);
+    let configured_keys = EnzymeConfig::configured_vault_keys()?;
+    if loginless_hosted_init_allowed_for_keys(&current_key, &configured_keys) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Login required before initializing another vault on this machine. First init can run without login, but this Enzyme home already has {} configured vault(s). Run `enzyme login` and retry.",
+        configured_keys.len()
+    )
 }
 
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
@@ -228,7 +254,7 @@ impl InitResult {
 /// Desktop app uses quiet mode (JSON output) to populate its setup text box.
 pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    require_login_for_hosted_init_if_needed(vault_path, &paths)?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -283,7 +309,7 @@ pub async fn run_init_voice_ready(
     let seed_min_catalysts = seed_min_catalysts.max(1);
     let paths = EnzymePaths::new(vault_path)?;
     if !use_env_llm {
-        require_login(&paths.auth_token())?;
+        require_login_for_hosted_init_if_needed(vault_path, &paths)?;
     }
     preflight_env_llm(use_env_llm).await?;
 
@@ -418,7 +444,7 @@ pub async fn run_init(
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
     if !use_env_llm {
-        require_login(&paths.auth_token())?;
+        require_login_for_hosted_init_if_needed(vault_path, &paths)?;
     }
     preflight_env_llm(use_env_llm).await?;
 
@@ -475,17 +501,19 @@ pub async fn run_init(
     });
     if is_free_tier {
         let auth_path = paths.auth_token();
-        let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
-            .context("Not logged in. Run `enzyme login` first.")?;
-        let remaining =
-            enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init").await?;
-        if remaining <= 3.0 && !quiet {
-            eprintln!(
-                "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
-                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                remaining,
-                crossterm::style::ResetColor,
-            );
+        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+            let remaining =
+                enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init").await?;
+            if remaining <= 3.0 && !quiet {
+                eprintln!(
+                    "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
+                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                    remaining,
+                    crossterm::style::ResetColor,
+                );
+            }
+        } else {
+            debug!("hosted init has no login token; skipping account credit preflight");
         }
     }
 
@@ -1889,6 +1917,23 @@ mod tests {
             embedding_refresh_plan(true),
             EmbeddingRefreshPlan::SinceIndexStart
         );
+    }
+
+    #[test]
+    fn loginless_hosted_init_is_limited_to_first_configured_vault() {
+        assert!(loginless_hosted_init_allowed_for_keys("/vault/a", &[]));
+        assert!(loginless_hosted_init_allowed_for_keys(
+            "/vault/a",
+            &["/vault/a".to_string()]
+        ));
+        assert!(!loginless_hosted_init_allowed_for_keys(
+            "/vault/b",
+            &["/vault/a".to_string()]
+        ));
+        assert!(!loginless_hosted_init_allowed_for_keys(
+            "/vault/a",
+            &["/vault/a".to_string(), "/vault/b".to_string()]
+        ));
     }
 
     #[test]

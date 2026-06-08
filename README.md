@@ -88,13 +88,14 @@ If no entities are configured, Enzyme selects from trending analysis automatical
 
 ## API keys
 
-Enzyme needs an API key only for catalyst generation. Resolution order:
+Enzyme needs an API key only for catalyst generation. By default, `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` / `OPENROUTER_*` variables so it does not silently spend your personal key. The first configured vault on a machine can initialize without login; refresh, publishing, account credits, and additional vaults require `enzyme login`.
+
+If you intentionally want to bring your own OpenAI/OpenRouter/OpenAI-compatible key, pass `--use-env-llm`. In that mode Enzyme reads:
 
 1. `OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL`, `OPENAI_MODEL`)
 2. `OPENROUTER_API_KEY` env var (+ optional `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL`)
-3. Enzyme's hosted fallback for logged-in users
 
-If no env key is found and the hosted fallback is unavailable, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
+If no hosted or env key is available, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
 
 ## App Plugins
 

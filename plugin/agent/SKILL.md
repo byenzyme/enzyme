@@ -22,7 +22,7 @@ For Hermes, this skill is for operational use inside a user's workspace, not for
 
 Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
 
-Provider/key safeguard: never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. By default, `enzyme init` and `enzyme refresh` use Enzyme hosted credits/auth and ignore inherited LLM env keys. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, pass `--use-env-llm`:
+Provider/key safeguard: never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. By default, first `enzyme init` can use Enzyme's hosted bootstrap without login, while refresh/additional vaults use hosted auth/credits; both commands ignore inherited LLM env keys. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, pass `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm

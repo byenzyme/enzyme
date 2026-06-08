@@ -73,9 +73,11 @@ The scan is structured for setup agents. Read it as a compact map of the vault r
 
 ### 2. Handle login and LLM provider intent
 
-Default setup uses Enzyme hosted credits/auth. Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell. `enzyme init` and `enzyme refresh` ignore inherited LLM env keys unless the user intentionally passes `--use-env-llm`.
+Default first setup uses Enzyme's hosted bootstrap and should not require login for the first configured vault on a machine. Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell. `enzyme init` and `enzyme refresh` ignore inherited LLM env keys unless the user intentionally passes `--use-env-llm`.
 
-If there is no `~/.enzyme/auth.json` and the user has not explicitly asked to use their own LLM key, start login in the background:
+If there is no `~/.enzyme/auth.json`, proceed with scan/config/init for the first vault. Ask the user to run `enzyme login` only when the CLI reports that login is required, which should happen for refresh, publishing, account credits, or initializing another vault after the first configured vault.
+
+If login is needed, start it in the background and read JSONL events directly. Show the `verification_uri` when `device_authorization` appears. Keep checking until `success`, `expired`, or `error`. Do not ask the user to paste API keys.
 
 ```bash
 nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
@@ -84,9 +86,7 @@ sleep 3
 cat /tmp/enzyme-login.log
 ```
 
-Read JSONL events directly. Show the `verification_uri` when `device_authorization` appears. Keep checking until `success`, `expired`, or `error`. Do not ask the user to paste API keys.
-
-If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider instead of hosted credits, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
+If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider instead of hosted bootstrap/credits, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm
