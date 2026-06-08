@@ -118,17 +118,18 @@ The `pre_llm_call` hook fires on the first turn to seed the model with vault con
 
 Tools are gated by `check_fn` — hidden from the model until the enzyme binary is installed and on PATH.
 
-### Optional: Set an API key for catalysts
+### Optional: bring your own LLM key
 
-Enzyme generates catalysts using an LLM. Without an API key, everything works except catalyst regeneration.
+Enzyme generates catalysts using an LLM. The first vault init can use Enzyme's hosted bootstrap without login; refresh, additional vaults, publishing, and account credits use `enzyme login`.
 
-Set this in your `~/.hermes/.env`:
+If you intentionally want to use your own OpenAI/OpenRouter/OpenAI-compatible provider instead, set the provider env vars and run init/refresh with `--use-env-llm`:
 
 ```bash
 OPENAI_API_KEY=your-key
 # Optional, for custom OpenAI-compatible endpoints:
 OPENAI_BASE_URL=https://openrouter.ai/api/v1
 OPENAI_MODEL=google/gemini-3-flash-preview
+enzyme init --use-env-llm
 ```
 
 ### Update the plugin
@@ -235,7 +236,7 @@ cron: {
 
 Then tell your agent: *"Create a daily cron job that runs `enzyme refresh --quiet` at 9 AM."*
 
-**Set your API key** for catalyst generation (optional — enzyme works without it, but catalysts won't regenerate):
+**Optional BYOK provider** for catalyst generation: first vault init can use Enzyme's hosted bootstrap without login. If you intentionally want your own provider, set env vars and have the agent pass `--use-env-llm` on init/refresh:
 
 ```json5
 skills: {
@@ -249,7 +250,7 @@ skills: {
 }
 ```
 
-Or set `OPENAI_API_KEY` in your environment, with optional `OPENAI_BASE_URL` / `OPENAI_MODEL` overrides for OpenAI-compatible providers.
+You can also set `OPENAI_BASE_URL` / `OPENAI_MODEL` overrides for OpenAI-compatible providers.
 
 ### Update the skill
 
@@ -338,7 +339,7 @@ Install path:
 
 - macOS Apple Silicon/Intel or Linux (x86_64, aarch64)
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
-- Catalyst generation uses Enzyme's hosted fallback by default, or set `OPENAI_API_KEY` for an OpenAI-compatible provider
+- First vault catalyst generation uses Enzyme's hosted bootstrap by default; use `enzyme login` for refresh/additional vaults or `--use-env-llm` for an intentional OpenAI-compatible provider
 
 ## Testing
 

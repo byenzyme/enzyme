@@ -32,7 +32,7 @@ pub struct ResolvedConfig {
 /// Which LLM credentials the caller explicitly wants to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmCredentialMode {
-    /// Use Enzyme hosted credits/auth and ignore inherited env LLM keys.
+    /// Use Enzyme hosted bootstrap/auth and ignore inherited env LLM keys.
     Hosted,
     /// Use OPENAI_*/OPENROUTER_* env configuration only.
     Env,
@@ -395,6 +395,11 @@ struct CachedFreeConfig {
     cached_at: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct BootstrapIdentity {
+    bootstrap_id: String,
+}
+
 impl LlmClient {
     pub fn new(api_key: &str) -> Self {
         Self {
@@ -719,6 +724,31 @@ fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig) {
     }
 }
 
+fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
+    if path.exists() {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if let Ok(identity) = serde_json::from_str::<BootstrapIdentity>(&contents) {
+            if !identity.bootstrap_id.trim().is_empty() {
+                return Ok(identity.bootstrap_id);
+            }
+        }
+    }
+
+    let identity = BootstrapIdentity {
+        bootstrap_id: uuid::Uuid::new_v4().to_string(),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let contents = serde_json::to_string_pretty(&identity)
+        .context("failed to serialize bootstrap identity")?;
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(identity.bootstrap_id)
+}
+
 /// Fetch a free shared API key from the Enzyme server.
 async fn fetch_free_config() -> Result<ResolvedConfig> {
     let client = reqwest::Client::builder()
@@ -728,19 +758,32 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 
     debug!("Fetching free config from {}", FREE_CONFIG_URL);
 
-    // Free-config now requires login: the server gates on user_credits.
-    let auth_path = crate::config::paths::EnzymePaths::enzyme_home()
-        .context("failed to resolve enzyme home for auth lookup")?
-        .join("auth.json");
-    let token = crate::config::auth::AuthToken::load(&auth_path)
-        .context("Not logged in. Run `enzyme login` first.")?;
+    // If the user is logged in, attach auth so the server can gate/charge
+    // account credits. First initialization is allowed to be loginless; in
+    // that case the server may dispense a limited bootstrap config.
+    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
+        .context("failed to resolve enzyme home for auth lookup")?;
+    let auth_path = enzyme_home.join("auth.json");
+    let token = crate::config::auth::AuthToken::load(&auth_path).ok();
 
-    let resp = client
-        .get(FREE_CONFIG_URL)
-        .header("Authorization", format!("Bearer {}", token.api_key))
+    let mut req = client.get(FREE_CONFIG_URL);
+    if let Some(token) = &token {
+        req = req.header("Authorization", format!("Bearer {}", token.api_key));
+    } else {
+        let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
+        req = req.header("X-Enzyme-Bootstrap-Id", bootstrap_id);
+    }
+
+    let resp = req
         .send()
         .await
         .context("failed to reach Enzyme server for free config")?;
+
+    if token.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
+        bail!(
+            "Enzyme hosted bootstrap is unavailable without login. Run `enzyme login` and retry, or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
+        );
+    }
 
     if resp.status().as_u16() == 402 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();

@@ -179,7 +179,7 @@ This matters when you're building on imported content (reading highlights, curat
 
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
 - macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
-- Works out of the box via Enzyme's hosted fallback for logged-in users — or bring your own OpenAI-compatible key with `OPENAI_API_KEY`
+- First vault init works out of the box via Enzyme's hosted bootstrap; login is used for refresh, publishing, account credits, and additional vaults. You can also bring your own OpenAI-compatible key with `--use-env-llm`.
 
 ## Links
 

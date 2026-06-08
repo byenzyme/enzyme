@@ -229,6 +229,27 @@ impl EnzymeConfig {
         Ok(EnzymePaths::enzyme_home()?.join("config.toml"))
     }
 
+    /// Canonical key used for this vault in the global TOML config.
+    pub fn vault_key(vault_path: &Path) -> String {
+        canonical_vault_key(vault_path)
+    }
+
+    /// Return the configured vault keys from `~/.enzyme/config.toml`.
+    ///
+    /// This intentionally ignores legacy vault-local YAML because the loginless
+    /// first-init gate is about the machine-global TOML state: once a machine
+    /// has configured multiple vaults, hosted usage should be attached to a
+    /// signed-in account.
+    pub fn configured_vault_keys() -> Result<Vec<String>> {
+        let config_path = Self::config_path()?;
+        if !config_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let global = load_global_toml(&config_path)?;
+        Ok(global.vaults.keys().cloned().collect())
+    }
+
     pub fn load(vault_path: &Path) -> Result<Option<Self>> {
         let config_path = Self::config_path()?;
         if config_path.exists() {
