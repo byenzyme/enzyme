@@ -84,6 +84,8 @@ A search for "why we keep rewriting the auth layer" finds the ADR from six month
 
 ### Example: petri output
 
+`enzyme petri` renders a readable tree in an interactive terminal. When stdout is piped or captured, it emits JSON for tools like `jq`:
+
 ```bash
 enzyme petri | jq '.entities[:2]'
 ```
@@ -179,7 +181,7 @@ This matters when you're building on imported content (reading highlights, curat
 
 - A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
 - macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
-- Works out of the box via Enzyme's hosted fallback for logged-in users — or bring your own OpenAI-compatible key with `OPENAI_API_KEY`
+- First vault init works out of the box via Enzyme's hosted bootstrap; login is used for refresh, publishing, account credits, and additional vaults. You can also bring your own OpenAI-compatible key with `--use-env-llm`.
 
 ## Links
 

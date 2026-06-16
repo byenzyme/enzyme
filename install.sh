@@ -124,11 +124,11 @@ case ":$PATH:" in
     *) echo "Add to PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
 esac
 
-# Prompt login if not already authenticated
+# First vault initialization can use Enzyme's hosted bootstrap without login.
+# Login remains available for refresh, additional vaults, publishing, and account credits.
 if [ ! -f "$HOME/.enzyme/auth.json" ]; then
     echo ""
-    echo "Creating your Enzyme account..."
-    "${INSTALL_DIR}/enzyme" login || true
+    echo "No login required for your first vault init. Later, run: enzyme login"
 fi
 
 echo ""

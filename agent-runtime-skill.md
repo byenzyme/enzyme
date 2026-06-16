@@ -18,14 +18,16 @@ For Hermes, this skill is for operational use inside a user's workspace, not for
 
 Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
 
-Provider/key safeguard: never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. By default, `enzyme init` and `enzyme refresh` use Enzyme hosted credits/auth and ignore inherited LLM env keys. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, pass `--use-env-llm`:
+Auth and provider safety: let Enzyme decide when auth is needed. Do not preflight `~/.enzyme/auth.json` or start login before a command asks for it. If an Enzyme command reports that login is required, start device login in the background, read JSONL events from `/tmp/enzyme-login.log`, show the verification URI/code when present, wait for success/error/expiry, then retry the original command. Never ask the user to paste API keys or auth tokens.
+
+Never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of env vars without printing values and pass `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm
 enzyme refresh --quiet --use-env-llm
 ```
 
-Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. Use direct OpenAI or another OpenAI-compatible provider only when the user intentionally configured it. Treat localhost/`ENZYME_LOCAL_MODEL=1` as the local-model path. If provider intent is unclear, ask before running expensive catalyst generation.
+Treat localhost/`ENZYME_LOCAL_MODEL=1` as the local-model path. If provider intent is unclear, ask before running expensive catalyst generation.
 
 Enzyme does not replace the user's memory system. It indexes the markdown structure the user already has: folders, tags, wikilinks, dates, inboxes, daily notes, people pages, and frontmatter. Preserve that structure and use it as retrieval signal.
 
