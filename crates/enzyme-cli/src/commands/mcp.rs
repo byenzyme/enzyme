@@ -14,7 +14,6 @@ use rmcp::{tool, tool_handler, tool_router};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::ContentRegister;
 use enzyme_core::search::context::ContextSearch;
 
 use super::init::{ensure_fresh_vault, run_init};
@@ -105,12 +104,6 @@ struct CatalyzeParams {
     /// Maximum results
     #[schemars(description = "Maximum results")]
     limit: Option<u64>,
-
-    /// Presentation register: "explore" (default, profile-specific guidance for wonder/exploration),
-    /// "continuity" (restore what the user knew, show trajectory, enable forward motion),
-    /// "reference" (surface what drew attention, capture patterns)
-    #[schemars(description = "Presentation register: explore (default), continuity, or reference")]
-    register: Option<String>,
 }
 
 #[tool_router]
@@ -208,15 +201,6 @@ impl EnzymeMcp {
         let response = search
             .catalyze_search(&p.query, limit)
             .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;
-
-        // Enrich with register-appropriate presentation guidance
-        let register = p
-            .register
-            .as_deref()
-            .and_then(ContentRegister::from_str_opt)
-            .unwrap_or_default();
-        let response =
-            response.with_presentation_guidance(register, &std::collections::HashMap::new(), None);
 
         let text = serde_json::to_string_pretty(&response).map_err(|e| {
             McpError::internal_error(format!("json serialization failed: {e}"), None)

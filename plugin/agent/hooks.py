@@ -106,7 +106,9 @@ catalysts to compose enzyme_catalyze queries for semantic search.
 Workflow:
 1. enzyme_petri (with --query if the user's message is specific) → get entities and catalysts
 2. enzyme_catalyze using catalyst-inspired queries → get excerpts with file paths and dates
-3. Present findings using the user's own words. Never expose tool names.
+3. Present findings using the user's own words and file attribution. Never expose tool names.
+
+Presentation: for exploration, open one specific connection rather than a topic list; for continuity, restore prior conclusions and stopping points; for imported references, lead with what the user chose to save and bridge to their own notes when possible.
 
 Use enzyme tools instead of grep/search_files for vault content — they find \
 content by concept, not keyword."""

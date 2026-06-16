@@ -84,6 +84,8 @@ A search for "why we keep rewriting the auth layer" finds the ADR from six month
 
 ### Example: petri output
 
+`enzyme petri` renders a readable tree in an interactive terminal. When stdout is piped or captured, it emits JSON for tools like `jq`:
+
 ```bash
 enzyme petri | jq '.entities[:2]'
 ```

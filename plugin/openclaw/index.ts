@@ -47,7 +47,7 @@ export default definePluginEntry({
       },
       async execute(_id: string, params: { query?: string }) {
         const cfg = getCfg();
-        const args = ["petri", "--json"];
+        const args = ["petri"];
         if (params?.query) args.push("--query", params.query);
         const r = await runEnzyme(args, cfg, { timeoutMs: 15_000 });
         if (r.code !== 0) {
@@ -69,17 +69,11 @@ export default definePluginEntry({
         required: ["query"],
         properties: {
           query: { type: "string", description: "Concept-style query." },
-          register: {
-            type: "string",
-            enum: ["explore", "continuity", "reference"],
-            description: "Presentation register. Default: explore.",
-          },
         },
       },
-      async execute(_id: string, params: { query: string; register?: string }) {
+      async execute(_id: string, params: { query: string }) {
         const cfg = getCfg();
-        const args = ["catalyze", params.query, "--json"];
-        if (params?.register) args.push("--register", params.register);
+        const args = ["catalyze", params.query];
         const r = await runEnzyme(args, cfg, { timeoutMs: 30_000 });
         if (r.code !== 0) {
           return {
@@ -118,7 +112,7 @@ export default definePluginEntry({
         if (!userPrompt || userPrompt.length < 3) return;
 
         const r = await runEnzyme(
-          ["petri", "--query", userPrompt, "--json"],
+          ["petri", "--query", userPrompt],
           cfg,
           { timeoutMs: 8_000 },
         );

@@ -60,16 +60,6 @@ ENZYME_CATALYZE = {
                 "description": "Max results to return. Default: 10.",
                 "default": 10,
             },
-            "register": {
-                "type": "string",
-                "enum": ["explore", "continuity", "reference"],
-                "description": (
-                    "'explore' (default): surface patterns and tensions. "
-                    "'continuity': restore prior decisions and context. "
-                    "'reference': show what the user chose to capture."
-                ),
-                "default": "explore",
-            },
         },
         "required": ["query"],
     },

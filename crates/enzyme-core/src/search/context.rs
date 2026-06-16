@@ -6,7 +6,6 @@ use tracing::debug;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::llm::ContentRegister;
 use crate::models::Embedding;
 
 /// Structured response from catalyst-based search.
@@ -14,13 +13,6 @@ use crate::models::Embedding;
 pub struct CatalyzeResponse {
     pub results: Vec<CatalyzeResultItem>,
     pub top_contributing_catalysts: Vec<TopCatalyst>,
-    /// Response-level presentation guidance (for continuity/reference registers).
-    /// Empty for explore register, where guidance is per-catalyst instead.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub presentation_guidance: Vec<String>,
-    /// The register used for this response.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub register: Option<ContentRegister>,
 }
 
 /// A single result from catalyst-based search.
@@ -29,6 +21,9 @@ pub struct CatalyzeResultItem {
     pub file_path: String,
     pub content: String,
     pub similarity: f64,
+    /// Catalyst bridge that contributed the strongest score for this result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_catalyst_id: Option<String>,
 }
 
 /// A catalyst that contributed to search results.
@@ -40,40 +35,6 @@ pub struct TopCatalyst {
     pub topic_name: Option<String>,
     pub relevance_score: f64,
     pub contribution_count: usize,
-    /// Profile-specific guidance for how to present this catalyst's results.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub presentation_guidance: Vec<String>,
-}
-
-impl CatalyzeResponse {
-    /// Enrich response with presentation guidance based on the selected register.
-    ///
-    /// - **Explore**: per-catalyst guidance from entity profiles (profile-specific).
-    /// - **Continuity/Reference**: response-level guidance (uniform across all results).
-    pub fn with_presentation_guidance(
-        mut self,
-        register: ContentRegister,
-        entity_profiles: &HashMap<String, String>,
-        default_profile: Option<&str>,
-    ) -> Self {
-        self.register = Some(register);
-        match register {
-            ContentRegister::Explore => {
-                for catalyst in &mut self.top_contributing_catalysts {
-                    catalyst.presentation_guidance = crate::llm::presentation_guidance_for_entity(
-                        &catalyst.entity,
-                        entity_profiles,
-                        default_profile,
-                    );
-                }
-            }
-            _ => {
-                self.presentation_guidance =
-                    crate::llm::presentation_guidance_for_register(register);
-            }
-        }
-        self
-    }
 }
 
 /// A single result from direct (non-catalyst) search.
@@ -136,8 +97,6 @@ impl<'a> ContextSearch<'a> {
             return Ok(CatalyzeResponse {
                 results: Vec::new(),
                 top_contributing_catalysts: Vec::new(),
-                presentation_guidance: Vec::new(),
-                register: None,
             });
         }
 
@@ -372,12 +331,18 @@ impl<'a> ContextSearch<'a> {
                     topic_name: None,
                     relevance_score: (*relevance_score * 1000.0).round() / 1000.0,
                     contribution_count: count,
-                    presentation_guidance: Vec::new(),
                 })
             })
             .collect();
-        top_catalysts.sort_by(|a, b| b.contribution_count.cmp(&a.contribution_count));
-        top_catalysts.truncate(3);
+        top_catalysts.sort_by(|a, b| {
+            b.contribution_count
+                .cmp(&a.contribution_count)
+                .then_with(|| {
+                    b.relevance_score
+                        .partial_cmp(&a.relevance_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
 
         // Build result items using already-fetched content
         let results: Vec<CatalyzeResultItem> = scored
@@ -386,14 +351,13 @@ impl<'a> ContextSearch<'a> {
                 file_path: s.file_path.clone(),
                 content: s.content.clone(),
                 similarity: (s.score * 1000.0).round() / 1000.0,
+                via_catalyst_id: Some(s.best_catalyst_id.clone()),
             })
             .collect();
 
         Ok(CatalyzeResponse {
             results,
             top_contributing_catalysts: top_catalysts,
-            presentation_guidance: Vec::new(),
-            register: None,
         })
     }
 

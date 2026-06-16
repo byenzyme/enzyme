@@ -50,7 +50,6 @@ enzyme catalyze "..."       # Show grounded source-note retrieval
 enzyme apply ./target-dir   # Project this vault's catalysts onto external refs
 enzyme catalyze "..." --target ./target-dir
 enzyme status
-nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
 ```
 
 Read Enzyme JSON directly. Do not pipe through Python or jq unless the output is malformed or too large to inspect. If `enzyme scan` output is too large for the agent interface, redirect it to a temporary file and read focused sections from that file; do not rerun broad filesystem audits just to compensate for display limits.
@@ -71,13 +70,9 @@ Run `enzyme scan` before init. Treat it as the primary setup evidence and propos
 
 The scan is structured for setup agents. Read it as a compact map of the vault rather than as a final answer.
 
-### 2. Handle login and LLM provider intent
+### 2. Auth and provider safety
 
-Default first setup uses Enzyme's hosted bootstrap and should not require login for the first configured vault on a machine. Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell. `enzyme init` and `enzyme refresh` ignore inherited LLM env keys unless the user intentionally passes `--use-env-llm`.
-
-If there is no `~/.enzyme/auth.json`, proceed with scan/config/init for the first vault. Ask the user to run `enzyme login` only when the CLI reports that login is required, which should happen for refresh, publishing, account credits, or initializing another vault after the first configured vault.
-
-If login is needed, start it in the background and read JSONL events directly. Show the `verification_uri` when `device_authorization` appears. Keep checking until `success`, `expired`, or `error`. Do not ask the user to paste API keys.
+Let Enzyme decide when auth is needed. Do not preflight `~/.enzyme/auth.json` or start login before a command asks for it. If an Enzyme command reports that login is required, start device login in the background:
 
 ```bash
 nohup enzyme login --json --no-open > /tmp/enzyme-login.log 2>&1 &
@@ -86,7 +81,9 @@ sleep 3
 cat /tmp/enzyme-login.log
 ```
 
-If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider instead of hosted bootstrap/credits, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
+Read JSONL events directly. Show the verification URI/code when present, wait for `success`, `expired`, or `error`, then retry the original command. Never ask the user to paste API keys or auth tokens.
+
+Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell; Enzyme ignores inherited LLM env keys by default. If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm

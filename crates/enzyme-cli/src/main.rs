@@ -113,8 +113,8 @@ enum Commands {
         #[arg(long)]
         target: Option<PathBuf>,
 
-        /// Presentation register: explore (default), continuity, or reference
-        #[arg(long, default_value = "explore")]
+        /// Deprecated no-op: presentation is controlled by installed agent instructions
+        #[arg(long, default_value = "explore", hide = true)]
         register: String,
     },
 

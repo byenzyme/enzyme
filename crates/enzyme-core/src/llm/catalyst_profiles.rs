@@ -6,88 +6,6 @@
 ///   - A held contradiction (both things true)
 ///   - An aspiration (current self ↔ desired self)
 ///   - A resistance (wanting to engage ↔ wanting to avoid)
-use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// Content register — determines presentation posture
-// ---------------------------------------------------------------------------
-
-/// The presentation register passed by the caller to select how results are framed.
-///
-/// - **Explore**: Default. Profile-specific guidance — wonder, probe, notice patterns.
-/// - **Continuity**: Restore what the user knew. Show trajectory, conclusions, next steps.
-/// - **Reference**: Surface what drew attention. Capture patterns and resonance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ContentRegister {
-    #[default]
-    Explore,
-    Continuity,
-    Reference,
-}
-
-impl ContentRegister {
-    /// Parse from a string, case-insensitive. Returns None for unrecognized values.
-    pub fn from_str_opt(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "explore" => Some(Self::Explore),
-            "continuity" | "continue" => Some(Self::Continuity),
-            "reference" | "ref" => Some(Self::Reference),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Register-level presentation guidance (continuity + reference)
-// ---------------------------------------------------------------------------
-
-/// Presentation guidance for continuity register.
-///
-/// The user wants to pick up where they left off. The value is restoration —
-/// they don't have to re-derive what they already knew.
-pub const CONTINUITY_GUIDANCE: &[&str] = &[
-    "Lead with what the user had concluded or decided, not what's unresolved. \
-Present findings as ground to stand on: 'You'd figured out that...' or \
-'The last time this came up, you'd landed on...'",
-    "Show the trajectory when it's visible — how the user's thinking moved \
-from question to understanding. 'You started by asking X, then realized Y, \
-then concluded Z.' The arc matters more than any single excerpt.",
-    "Surface the stopping point. Where did the thread end? What was the last \
-thing being worked on? If a conversation trailed off mid-topic, name that: \
-'This was still open — you hadn't decided...'",
-    "Don't re-open settled questions. If the user reached a conclusion, present \
-it as settled unless they explicitly ask to revisit. The trust-building moment \
-is showing you remember what they figured out.",
-    "Follow-up is about forward motion, not further exploration. 'Given what \
-you'd concluded, what would you do about...' or 'You'd identified the blocker \
-as X — has that changed?' Build on their prior understanding rather than \
-inviting them to re-examine it.",
-];
-
-/// Presentation guidance for reference register.
-///
-/// The content is imported material — highlights, annotations, saved articles.
-/// The value is surfacing what drew the user's attention and connecting it
-/// to their own thinking.
-pub const REFERENCE_GUIDANCE: &[&str] = &[
-    "Lead with what the user chose to save — the act of capture is the signal. \
-'You highlighted this passage...' or 'You saved this from...' The selection \
-itself tells you something about what matters to them.",
-    "Bridge to their own words when possible. A highlight sitting next to a \
-journal entry on the same theme is worth calling out. But only flag the \
-connection when it's genuine — forced bridges erode trust.",
-    "Notice the pattern of capture over time. Are they saving the same kind of \
-thing repeatedly? Has the focus shifted? 'You saved three things about X in \
-the last month — that's new.'",
-    "Don't treat imported content as authoritative. The user may have saved \
-something they disagree with, something aspirational, or something they wanted \
-to argue against. Probe lightly: 'Does this still land?'",
-    "Follow-up should connect outward: 'This highlight touches something you \
-wrote about in...' or 'There's a tension between what this author claims and \
-what you concluded in...' The value is in the resonance, not the reference itself.",
-];
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -100,7 +18,6 @@ pub struct CatalystProfile {
     pub sample_prompts: &'static [&'static str],
     pub footer: Option<&'static str>,
     pub detection_patterns: &'static [&'static str],
-    pub presentation_guidance: &'static [&'static str],
 }
 
 pub struct CatalystFormat {
@@ -237,13 +154,6 @@ are inferred from concrete actions.",
         "Agent observations about what the user tends to prefer or reject",
         "Folder patterns: preferences/, activity/, recipes/, design-decisions/, traces/, feedback/",
     ],
-    presentation_guidance: &[
-        "Open with a concrete repeated signal: something they keep choosing, changing, or avoiding.",
-        "Distinguish stable preference from a one-off note.",
-        "Use the source domain's vocabulary instead of generic psychology.",
-        "Connect preference to context: occasion, constraint, material, tool, audience, or outcome.",
-        "End with the retrieval axis that would help find more evidence.",
-    ],
 };
 
 pub const PROFILE_TENSION_TRACE: CatalystProfile = CatalystProfile {
@@ -275,13 +185,6 @@ and any material where the important retrieval target is the unresolved pressure
         "Folder patterns: ideas/, concepts/, thinking/, notes/",
         "Default choice when no other profile clearly matches",
     ],
-    presentation_guidance: &[
-        "Open with their words: 'You wrote...' then notice something small.",
-        "After surfacing their words, notice something small—a word choice, a sentiment, a tension.",
-        "Don't rush to make it legible. 'There's something about how X shows up here...' is better than 'So the pattern is Y.'",
-        "Use their vocabulary. Some notes carry weight—acknowledge it without dramatizing.",
-        "End with a specific thread. Name what you noticed and invite them to follow it.",
-    ],
 };
 
 pub const PROFILE_RESONANCE_TRACE: CatalystProfile = CatalystProfile {
@@ -311,13 +214,6 @@ valuable because they reveal what repeatedly draws attention and where it resona
         "Saved articles, book highlights, podcast notes",
         "Content with clear external attribution",
         "Folder patterns: Readwise/, sources/, reading/, highlights/, clips/, library/",
-    ],
-    presentation_guidance: &[
-        "Open with a highlight that seems to carry weight for them.",
-        "Bridge immediately to their own words—'You saved this, and elsewhere you wrote...'",
-        "Don't treat imports as authoritative. Probe whether this actually fits their thinking.",
-        "Notice what they're drawn to save. The pattern of capture reveals something.",
-        "End with implication: what does this mean for something they're working on or thinking through?",
     ],
 };
 
@@ -350,13 +246,6 @@ users reflect on who matters and why.",
         "Reflection on relationship dynamics",
         "Folder patterns: people/, contacts/, relationships/, network/, CRM/",
     ],
-    presentation_guidance: &[
-        "Open with something specific—a recent interaction, a pattern you noticed.",
-        "Don't flatten relationships to transactions. Probe for meaning and mutuality.",
-        "Notice what's unsaid. Relationship notes often contain what someone won't say directly.",
-        "Connect this person to the user's broader landscape—projects, other people, themes.",
-        "End with forward motion: what's the next meaningful step, not just next action?",
-    ],
 };
 
 pub const PROFILE_OPERATIONAL: CatalystProfile = CatalystProfile {
@@ -388,13 +277,6 @@ might be avoiding.",
         "Content with deadlines, milestones, or deliverables",
         "Folder patterns: projects/, work/, meetings/, clients/, sprints/",
     ],
-    presentation_guidance: &[
-        "Open with what seems stuck or unresolved—not what's going well.",
-        "Don't add to the task list. Surface what's already there but being ignored.",
-        "Notice the gap between what's written and what's happening.",
-        "Probe for the real blocker—often it's not the obvious one.",
-        "End with one thing that would create movement, not a comprehensive action plan.",
-    ],
 };
 
 pub const PROFILE_DECISION_TRACE: CatalystProfile = CatalystProfile {
@@ -423,13 +305,6 @@ design choices, agent traces, architecture logs, and any domain where the artifa
         "Content about bets, risks, or resource allocation",
         "Agent traces explaining why a tool, architecture, canvas shape, or design choice was selected",
         "Folder patterns: decisions/, strategy/, planning/, bets/, architecture/, design-decisions/",
-    ],
-    presentation_guidance: &[
-        "Open with the trade-off that seems most alive—not the whole decision tree.",
-        "Don't help them analyze more. Surface what they already know but won't act on.",
-        "Notice when the 'need more information' is actually 'don't want to decide.'",
-        "Rotate perspectives to reveal different constraints and stakes.",
-        "End with decision clarity: what would make this decidable, or what's really at stake?",
     ],
 };
 
@@ -461,13 +336,6 @@ something else—a piece of writing, a decision, a conversation.",
         "Creative writing and drafts",
         "Personal narrative and life documentation",
         "Folder patterns: journal/, daily/, reflection/, writing/, drafts/, creative/",
-    ],
-    presentation_guidance: &[
-        "Open with a pattern you've noticed across entries—not just the latest one.",
-        "Don't push toward production. Some writing is for processing, not publishing.",
-        "Notice what's being written around—the thing that keeps almost surfacing.",
-        "Honor the rhythm. Reflective work has seasons; not everything is ready.",
-        "End with possibility: what might this become, if anything? Let them decide.",
     ],
 };
 
@@ -519,41 +387,6 @@ pub fn full_guidance_lines(profile: &CatalystProfile) -> Vec<&'static str> {
     let mut lines = CORE_CATALYST_GUIDANCE.to_vec();
     lines.extend_from_slice(profile.guidance_lines);
     lines
-}
-
-/// Look up presentation guidance for an entity based on its profile (explore register).
-///
-/// Resolution order: entity-specific profile override → vault-wide default → tension_trace.
-/// Only used in explore mode — continuity and reference have register-level guidance.
-pub fn presentation_guidance_for_entity(
-    entity_name: &str,
-    entity_profiles: &std::collections::HashMap<String, String>,
-    default_profile: Option<&str>,
-) -> Vec<String> {
-    let profile_key = entity_profiles
-        .get(entity_name)
-        .map(|s| s.as_str())
-        .or(default_profile)
-        .unwrap_or(DEFAULT_PROFILE_KEY);
-
-    let profile =
-        get_profile(profile_key).unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
-
-    profile
-        .presentation_guidance
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-}
-
-/// Return presentation guidance for a non-explore register.
-pub fn presentation_guidance_for_register(register: ContentRegister) -> Vec<String> {
-    let lines: &[&str] = match register {
-        ContentRegister::Continuity => CONTINUITY_GUIDANCE,
-        ContentRegister::Reference => REFERENCE_GUIDANCE,
-        ContentRegister::Explore => &[], // shouldn't be called for explore — use per-entity
-    };
-    lines.iter().map(|s| s.to_string()).collect()
 }
 
 #[cfg(test)]

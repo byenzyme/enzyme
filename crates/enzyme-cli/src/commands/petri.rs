@@ -497,9 +497,268 @@ pub async fn run_petri(
     }
 
     let output = build_petri_json(vault_path, top, query, catalyst_budget)?;
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    if atty::is(atty::Stream::Stdout) {
+        let display_catalyst_budget =
+            catalyst_budget.unwrap_or(if query.is_some() { 3 } else { 7 });
+        print_petri_tree(&output, display_catalyst_budget);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    }
 
     Ok(())
+}
+
+fn print_petri_tree(output: &serde_json::Value, catalyst_display_budget: usize) {
+    if let Some(query) = output.get("query").and_then(|v| v.as_str()) {
+        println!("Petri for \"{query}\"");
+    } else {
+        println!("Petri");
+    }
+
+    let entities = output
+        .get("entities")
+        .and_then(|v| v.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let targets = output
+        .get("applied_targets")
+        .and_then(|v| v.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+
+    if entities.is_empty() && targets.is_empty() {
+        println!("└─ no catalyzed entities yet");
+        return;
+    }
+
+    for (idx, entity) in entities.iter().enumerate() {
+        let has_targets = !targets.is_empty();
+        let is_last = idx + 1 == entities.len() && !has_targets;
+        render_entity_tree(entity, "", is_last, catalyst_display_budget);
+    }
+
+    if !targets.is_empty() {
+        println!("└─ applied targets");
+        for (idx, target) in targets.iter().enumerate() {
+            let is_last = idx + 1 == targets.len();
+            let connector = if is_last { "└─" } else { "├─" };
+            let path = target
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let docs = target
+                .get("doc_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let catalysts = target
+                .get("catalyst_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            println!("   {connector} {path} · {docs} docs · {catalysts} catalysts");
+        }
+    }
+}
+
+fn render_entity_tree(
+    entity: &serde_json::Value,
+    prefix: &str,
+    is_last: bool,
+    catalyst_display_budget: usize,
+) {
+    let connector = if is_last { "└─" } else { "├─" };
+    let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+    let name = entity
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>");
+    let entity_type = entity
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("entity");
+    let label = entity_label(entity_type, name);
+    let trend = entity
+        .get("activity_trend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let frequency = entity
+        .get("frequency")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let relevance = entity
+        .get("relevance")
+        .and_then(|v| v.as_f64())
+        .map(|r| format!(" · relevance {r:.3}"))
+        .unwrap_or_default();
+
+    println!(
+        "{prefix}{connector} {label} · {entity_type} · {trend} · {frequency} mentions{relevance}"
+    );
+
+    let mut sections: Vec<(&str, &str, Option<&Vec<serde_json::Value>>)> = Vec::new();
+    sections.push((
+        "catalysts",
+        "catalysts",
+        entity.get("catalysts").and_then(|v| v.as_array()),
+    ));
+    sections.push((
+        "significant children",
+        "significant_children",
+        entity
+            .get("significant_children")
+            .and_then(|v| v.as_array()),
+    ));
+    sections.push((
+        "page children",
+        "page_entity_children",
+        entity
+            .get("page_entity_children")
+            .and_then(|v| v.as_array()),
+    ));
+    sections.push((
+        "sampled children",
+        "sampled_children",
+        entity.get("sampled_children").and_then(|v| v.as_array()),
+    ));
+
+    let nonempty_sections: Vec<_> = sections
+        .into_iter()
+        .filter(|(_, _, items)| items.map_or(false, |items| !items.is_empty()))
+        .collect();
+
+    for (section_idx, (label, key, items)) in nonempty_sections.iter().enumerate() {
+        let section_last = section_idx + 1 == nonempty_sections.len();
+        let section_connector = if section_last { "└─" } else { "├─" };
+        let section_child_prefix = format!(
+            "{}{}",
+            child_prefix,
+            if section_last { "   " } else { "│  " }
+        );
+        println!("{child_prefix}{section_connector} {label}");
+        let items = items.unwrap();
+        if *key == "catalysts" {
+            let render_count = items.len().min(catalyst_display_budget.max(1));
+            let omitted = items.len().saturating_sub(render_count);
+            for (item_idx, item) in items.iter().take(render_count).enumerate() {
+                let item_last = item_idx + 1 == render_count && omitted == 0;
+                render_catalyst_item(item, &section_child_prefix, item_last);
+            }
+            if omitted > 0 {
+                render_more_item(omitted, &section_child_prefix);
+            }
+        } else {
+            for (item_idx, item) in items.iter().enumerate() {
+                let item_last = item_idx + 1 == items.len();
+                match *key {
+                    "significant_children" | "page_entity_children" => render_entity_tree(
+                        item,
+                        &section_child_prefix,
+                        item_last,
+                        catalyst_display_budget,
+                    ),
+                    "sampled_children" => {
+                        render_sampled_child(item, &section_child_prefix, item_last)
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn render_more_item(count: usize, prefix: &str) {
+    println!("{prefix}└─ … {count} more catalysts");
+}
+
+fn render_catalyst_item(catalyst: &serde_json::Value, prefix: &str, is_last: bool) {
+    let connector = if is_last { "└─" } else { "├─" };
+    let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+    let text = catalyst.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let relevance = catalyst
+        .get("relevance")
+        .and_then(|v| v.as_f64())
+        .map(|r| format!(" · {r:.3}"))
+        .unwrap_or_default();
+    let mut wrapped = wrap_text(
+        text,
+        petri_wrap_width(),
+        &format!("{prefix}{connector} "),
+        &child_prefix,
+    );
+    if let Some(first) = wrapped.first_mut() {
+        first.push_str(&relevance);
+    }
+    for line in wrapped {
+        println!("{line}");
+    }
+}
+
+fn render_sampled_child(child: &serde_json::Value, prefix: &str, is_last: bool) {
+    let connector = if is_last { "└─" } else { "├─" };
+    let entity = child
+        .get("entity")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>");
+    let refs = child
+        .get("reference_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    println!("{prefix}{connector} {entity} · {refs} refs");
+}
+
+fn entity_label(entity_type: &str, name: &str) -> String {
+    match entity_type {
+        "tag" => format!("#{name}"),
+        "link" => format!("[[{name}]]"),
+        "folder" => format!("▣ {name}"),
+        _ => format!("• {name}"),
+    }
+}
+
+fn petri_wrap_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(width, _)| width as usize)
+        .unwrap_or(120)
+        .saturating_sub(12)
+        .clamp(80, 140)
+}
+
+fn wrap_text(text: &str, width: usize, first_prefix: &str, rest_prefix: &str) -> Vec<String> {
+    let available = width.max(1);
+    let mut out = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= available {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            let prefix = if out.is_empty() {
+                first_prefix
+            } else {
+                rest_prefix
+            };
+            out.push(format!("{prefix}{current}"));
+            current.clear();
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() {
+        let prefix = if out.is_empty() {
+            first_prefix
+        } else {
+            rest_prefix
+        };
+        out.push(format!("{prefix}{current}"));
+    }
+
+    if out.is_empty() {
+        out.push(first_prefix.trim_end().to_string());
+    }
+
+    out
 }
 
 #[cfg(test)]
