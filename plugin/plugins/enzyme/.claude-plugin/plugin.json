@@ -10,6 +10,5 @@
   "repository": "https://github.com/jshph/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
-  "skills": "./skills/",
-  "hooks": "./.claude-plugin/hooks/hooks.json"
+  "skills": "./skills/"
 }

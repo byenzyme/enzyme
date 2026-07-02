@@ -3,9 +3,16 @@
 **/*.rs.bk
 Cargo.lock
 
+# Python/local build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+
 # IDE
 .idea/
 .vscode/
+.claude/settings*.json
 *.swp
 *.swo
 *~
@@ -15,6 +22,7 @@ Cargo.lock
 
 # Environment
 .env
+.local/
 infra/.turso-config
 infra/.supabase-config
 
@@ -30,6 +38,15 @@ vault/
 # Enzyme runtime
 .enzyme/
 .enzyme-embeddings/
+
+# Local run artifacts
+*.stderr
+benchmark_results*.json
+benchmark_stderr.txt
+plugin*.zip
+pi-session-*.html
+prompts.jsonl
+examples/source-adapters/*.db
 
 # Working docs (not part of releases)
 docs/agent-plugin-test-plan.md

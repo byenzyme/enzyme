@@ -887,7 +887,7 @@ pub async fn run_init(
         tracing::warn!("init stage=staleness status=skipped reason=catalyst_quality_not_clean");
     }
 
-    // ── Step 8: Re-apply targets ──────────────────────────────────────────
+    // ── Step 8: Refresh prepared targets ─────────────────────────────────
     if cat_stats
         .as_ref()
         .map_or(false, |s| s.catalysts_generated > 0)
@@ -895,7 +895,7 @@ pub async fn run_init(
             .as_ref()
             .map_or(false, |g| g.quality != CatalystQuality::Failed)
     {
-        reapply_targets(vault_path).await;
+        refresh_targets(vault_path).await;
     }
 
     let retrieval_changed = has_index_changes(&idx_stats)
@@ -905,16 +905,6 @@ pub async fn run_init(
             .as_ref()
             .map_or(false, |g| g.quality != CatalystQuality::Failed);
     let cache_epoch = maybe_bump_collection_cache_epoch(&db, retrieval_changed)?;
-
-    // ── Step 9: Set up hook for Claude Code users (interactive mode only) ─
-    if !quiet {
-        // Agent instruction installation is handled explicitly by `enzyme install`.
-        if vault_path.join(".claude").exists() {
-            if let Err(e) = setup_petri_hook(vault_path) {
-                tracing::warn!("failed to set up petri hook: {}", e);
-            }
-        }
-    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let completion_status = match catalyst_gate.as_ref().map(|g| g.quality) {
@@ -1427,22 +1417,22 @@ async fn run_stale_catalyst_refresh(
                 info!("catalyst refresh: similarity failed: {}", e);
             }
         }
-        reapply_targets(vault_path).await;
+        refresh_targets(vault_path).await;
         let _ = bump_collection_cache_epoch(&db)?;
     }
 
     Ok(stats.catalysts_generated > 0)
 }
 
-/// Re-apply all previously applied targets using the vault's current catalysts.
+/// Refresh all configured target indexes using the vault's current catalysts.
 ///
 /// Merges targets from config.toml (declarative, survives DB resets) and the
 /// `applied_targets` DB table (runtime record). Config is the source of truth;
-/// DB targets that aren't in config are also re-applied for backward compat.
+/// DB targets that aren't in config are also refreshed for backward compat.
 ///
 /// Called after catalyst regeneration so that target similarity mappings stay
 /// in sync. Errors are logged but don't fail the parent operation.
-async fn reapply_targets(vault_path: &Path) {
+async fn refresh_targets(vault_path: &Path) {
     let paths = match EnzymePaths::new(vault_path) {
         Ok(p) => p,
         Err(_) => return,
@@ -1470,12 +1460,12 @@ async fn reapply_targets(vault_path: &Path) {
     for target in &target_paths {
         let target_path = std::path::PathBuf::from(target);
         if !target_path.exists() {
-            info!(path = %target, "skipping re-apply: target path no longer exists");
+            info!(path = %target, "skipping target refresh: target path no longer exists");
             continue;
         }
-        info!(path = %target, "re-applying target after catalyst regeneration");
-        if let Err(e) = super::apply::run_apply(vault_path, &target_path, true).await {
-            info!(path = %target, err = %e, "re-apply failed for target");
+        info!(path = %target, "refreshing target after catalyst regeneration");
+        if let Err(e) = super::target::prepare_target(vault_path, &target_path).await {
+            info!(path = %target, err = %e, "target refresh failed");
         }
     }
 }
@@ -1742,92 +1732,6 @@ async fn run_refresh_interactive(
                 old_names.intersection(&new_names).count()
             );
         }
-    }
-
-    Ok(())
-}
-
-/// Set up a UserPromptSubmit hook that auto-injects query-aware petri context.
-///
-/// Creates `.claude/hooks/enzyme-petri.sh` and merges the hook config into
-/// `.claude/settings.json`. Idempotent — skips if already configured.
-fn setup_petri_hook(vault_path: &Path) -> Result<()> {
-    let claude_dir = vault_path.join(".claude");
-    let hooks_dir = claude_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir)?;
-
-    // Write hook script (always overwrite — it's generated)
-    let hook_path = hooks_dir.join("enzyme-petri.sh");
-    let script = format!(
-        r#"#!/bin/bash
-INPUT=$(cat)
-PROMPT=$(echo "$INPUT" | jq -r '.prompt')
-RESULTS=$(enzyme petri -p "{vault}" --query "$PROMPT" 2>/dev/null)
-if [ $? -eq 0 ] && [ -n "$RESULTS" ]; then
-  ESCAPED=$(echo "$RESULTS" | jq -Rs .)
-  echo "{{\"additionalContext\": $ESCAPED}}"
-fi
-"#,
-        vault = vault_path.display()
-    );
-    fs::write(&hook_path, &script)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))?;
-    }
-
-    // Merge hook config into settings.json
-    let settings_path = claude_dir.join("settings.json");
-    let mut settings: serde_json::Value = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    let hook_command = ".claude/hooks/enzyme-petri.sh";
-    let already_configured = settings
-        .get("hooks")
-        .and_then(|h| h.get("UserPromptSubmit"))
-        .and_then(|ups| ups.as_array())
-        .map(|arr| {
-            arr.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(|h| h.as_array())
-                    .map(|hooks| {
-                        hooks.iter().any(|h| {
-                            h.get("command").and_then(|c| c.as_str()) == Some(hook_command)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-
-    if !already_configured {
-        let hook_entry = json!({
-            "hooks": [{
-                "type": "command",
-                "command": hook_command
-            }]
-        });
-
-        let hooks = settings
-            .as_object_mut()
-            .unwrap()
-            .entry("hooks")
-            .or_insert(json!({}));
-        let ups = hooks
-            .as_object_mut()
-            .unwrap()
-            .entry("UserPromptSubmit")
-            .or_insert(json!([]));
-        ups.as_array_mut().unwrap().push(hook_entry);
-
-        fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
     }
 
     Ok(())

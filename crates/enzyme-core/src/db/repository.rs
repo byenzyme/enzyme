@@ -1610,7 +1610,7 @@ impl Database {
         Ok(())
     }
 
-    /// Get all applied targets.
+    /// Get all prepared external targets.
     pub fn get_all_applied_targets(&self) -> Result<Vec<AppliedTarget>> {
         let rows = self.query_read(
             "SELECT id, target_path, doc_count, catalyst_count, applied_at

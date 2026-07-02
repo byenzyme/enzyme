@@ -255,11 +255,11 @@ impl EnzymePaths {
         self.home.join("auth.json")
     }
 
-    /// Path to a target-specific database for `enzyme apply`.
+    /// Path to a target-specific database for `enzyme catalyze --target`.
     ///
     /// Target data lives in `<vault>/.enzyme/targets/<hash>.db` where
     /// `<hash>` is a truncated SHA-256 of the canonical target path.
-    /// This keeps all apply artifacts in the source vault — the target
+    /// This keeps all target artifacts in the source vault — the target
     /// directory is never modified.
     pub fn target_db(&self, target_path: &Path) -> PathBuf {
         let canonical = target_path

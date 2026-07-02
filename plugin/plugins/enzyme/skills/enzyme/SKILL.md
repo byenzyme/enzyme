@@ -4,7 +4,7 @@ description: >
   Set up Enzyme for an uninitialized Obsidian, Markdown, or Hermes agent
   workspace. Use when the workspace needs compatibility assessment, first-time
   scan, user-confirmed entity selection, TOML config validation, persistent
-  agent instructions, optional apply targets, or onboarding demo prompts. Do not
+  agent instructions, optional external target searches, or onboarding demo prompts. Do not
   use for routine retrieval in an already initialized vault.
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write
 argument-hint: [vault-path]
@@ -24,7 +24,9 @@ Treat setup as an indexability assessment. A workspace may start anywhere on the
 
 ## Prerequisite
 
-The Enzyme CLI binary must already be installed before this setup flow starts. If `enzyme --version` fails, install the binary first via Homebrew, the curl installer, or the host plugin's bootstrap path.
+Check the installed binary first with `enzyme --version`. If the binary is missing, install Enzyme before setup via Homebrew, the curl installer, or the host plugin's bootstrap path. If Enzyme is installed but old, tell the user you are upgrading Enzyme to the latest release before setup, then run the normal installer path.
+
+If the pre-upgrade version is older than `0.5.8`, warn that older Enzyme releases used a different auth/provider contract. After upgrading, ask before clearing stale authentication. Never delete `~/.enzyme/auth.json` or run `enzyme logout` without explicit confirmation. If the user declines, continue with the upgraded binary and let Enzyme ask for login only if a command reports that auth is required.
 
 This skill should not normally call `enzyme install <runtime>`. That command is how a user installs/updates Enzyme's runtime skill and workspace instructions; if this skill is already loaded, that has already happened or the host plugin provided it. Mention `enzyme install <runtime>` only when the user explicitly asks how to install/update runtime instructions outside the current setup flow.
 
@@ -47,8 +49,7 @@ enzyme init --quiet         # Initialize using confirmed TOML entities/profiles
 enzyme petri                # Show the live entity/catalyst map
 enzyme petri --query "..."  # Simulate a user prompt
 enzyme catalyze "..."       # Show grounded source-note retrieval
-enzyme apply ./target-dir   # Project this vault's catalysts onto external refs
-enzyme catalyze "..." --target ./target-dir
+enzyme catalyze "..." --target ./target-dir  # Search external refs through this vault's catalysts
 enzyme status
 ```
 
@@ -83,7 +84,17 @@ cat /tmp/enzyme-login.log
 
 Read JSONL events directly. Show the verification URI/code when present, wait for `success`, `expired`, or `error`, then retry the original command. Never ask the user to paste API keys or auth tokens.
 
-Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell; Enzyme ignores inherited LLM env keys by default. If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of env vars without printing values, then run init/refresh with `--use-env-llm`:
+Before `enzyme init`, inspect only which LLM env variable names exist:
+
+```bash
+env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'
+```
+
+Do not silently spend a user's personal `OPENAI_API_KEY`/`OPENROUTER_API_KEY` just because it exists in the shell; Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround.
+
+If `OPENAI_API_KEY` is present, warn that intentionally using env credentials should normally include the complete OpenAI-compatible triple: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. A bare `OPENAI_API_KEY` falls back to OpenAI defaults, which can produce unauthorized/provider-mismatch errors when the key actually belongs to OpenRouter, a local proxy, or another compatible provider. If only model/base-url vars are present without a matching key, treat it as partial env config and do not use it.
+
+Default setup should omit `--use-env-llm` and let Enzyme use hosted bootstrap/auth. If the user intentionally wants their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of the needed env var names without printing values, then run init/refresh with `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm
@@ -100,7 +111,7 @@ Profile overrides are optional. Add them when the surface has an obvious stance;
 
 If the scan is ambiguous, read a bounded amount of extra context: structural files such as `CLAUDE.md`, `AGENTS.md`, `README.md`, `MOC.md`, `Index.md`, or `_index.md` for conventions, and `sample_files` or a tiny number of scan-surfaced notes for meaning. Avoid recursive vault inspection unless the user asks or setup would otherwise be underdetermined.
 
-Also note possible `enzyme apply` targets from the scan and filesystem shape: Readwise exports, article/book folders, transcripts, research dumps, client docs, code repos, PDFs converted to markdown, Discord/Slack exports, or downloaded archives.
+Also note possible `enzyme catalyze --target` targets from the scan and filesystem shape: Readwise exports, article/book folders, transcripts, research dumps, client docs, code repos, PDFs converted to markdown, Discord/Slack exports, or downloaded archives.
 
 For annotated reference/import markdown such as Readwise exports, web clips, papers, book notes, or transcript highlights, distinguish first-class handles from readable source text. Tags, folders, and wikilinks are Enzyme handles. Source-specific fields such as `Author::`, `Title::`, `Last-Highlighted-Date::`, or `Source-URL::` are useful evidence the agent can read, but they are not separate Enzyme schema fields unless represented as tags, links, folders, or frontmatter. User annotations, marginalia, or explicit reactions such as `**Note**:` are often the most recognizable prose in the vault; treat them as high-value source text for demos, not as a special index primitive.
 
@@ -132,7 +143,7 @@ The preview must include:
 9. **Minimal repair offer** — if the vault could be in better shape, propose the smallest high-confidence edit set that would improve retrieval before init, with exact files/counts and why it matters. If the vault is already in good shape, explicitly skip this.
 10. **Import materialization opportunities** — raw exports or dumps that could become markdown captures, the high-level audit/materialization plan, and what entity/date/scope handles would make them Enzyme-readable.
 11. **Handle vs source-text explanation for imports/references** — for annotated imports, explicitly say which structures are Enzyme handles and which are readable source text. Example: “source fields are readable text; folders/tags/wikilinks/frontmatter are handles; user annotations are high-value prose, not special primitives.”
-12. **Apply opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
+12. **External target opportunities** — external targets that could be searched through the vault's catalysts and what that would prove.
 
 Example framing:
 
@@ -193,7 +204,7 @@ Validate and tune:
 - Set `min_top_catalysts` when a large/live entity needs enough catalyst coverage for the onboarding demo.
 - Use scan `excluded_folders` as the baseline, and keep runtime/build folders excluded: `.claude`, `.agents`, `.codex`, `.codex-work`, `.conversations`, `.enzyme`, `.git`, `.hermes`, `.obsidian`, `.pi`, `.trash`, `.local`, `node_modules`, `target`, `dist`, `build`, `__pycache__`, and templates.
 - Treat recurring frontmatter entity fields as note-writing conventions, not config entities.
-- Treat apply targets as `targets = [...]` only when the user confirms the external corpus should persist as an applied target; otherwise demo `enzyme apply` manually later. `targets` entries are raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
+- Treat persistent external targets as `targets = [...]` only when the user confirms the external corpus should stay configured. Otherwise use `enzyme catalyze "..." --target ./target-dir` directly. `targets` entries are raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
 
 Expandable folders are runtime-derived from selected folder entities. If `folder:people` has page-entity children, Rust may expand those children into separate catalyst entities during selection; children are not normally persisted in config.
 
@@ -269,12 +280,11 @@ Choose the first demo connection by vault type:
 
 Do not expose catalyst IDs, raw scores, or tool mechanics unless asked. The point is to show that Enzyme turns natural notes, wikilinks, tags, dates, and prose into an active map, then places source notes beside each other so a useful question appears. The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet. If exact search finds an obvious named note but catalyze misses it, say so plainly and use that as a retrieval limitation; do not pretend semantic retrieval found the connection unaided.
 
-### 9. Demonstrate or propose `enzyme apply`
+### 9. Demonstrate or propose external target search
 
 If the audit found a strong external reference candidate and the user approves, run:
 
 ```bash
-enzyme apply ./target-dir
 enzyme catalyze "<same or related query>" --target ./target-dir
 ```
 
@@ -284,13 +294,13 @@ Then compare the internal and external searches:
 I searched your own notes for the internal thread, then searched the external corpus through the same conceptual lens. Your notes say X; the outside material adds/challenges Y.
 ```
 
-Use `apply` when the user wants to draw from external refs without merging them into memory. Explain the mechanism accurately:
+Use `--target` when the user wants to draw from external refs without merging them into memory. Enzyme prepares the target automatically on first use. Explain the mechanism accurately:
 
 ```text
 source vault catalysts → external target chunks
 ```
 
-The vault is the lens. `apply` may miss themes that exist only in the target and not in the user's vault.
+The vault is the lens. Target search may miss themes that exist only in the target and not in the user's vault.
 
 ### 10. Offer remaining retrieval refinements
 
@@ -409,7 +419,7 @@ Tell the user:
 - initialized note/entity/catalyst counts;
 - persisted entity list, profile stance, and exclusions;
 - demo prompt used and what it proved;
-- apply targets added or recommended;
+- external targets added or recommended;
 - minimal repair performed or skipped, and remaining refinements offered for later;
 - capture template created/updated or intentionally skipped.
 

@@ -80,7 +80,7 @@ A search for "why we keep rewriting the auth layer" finds the ADR from six month
 - **Entities** — the tags, links, and folders in your content. Each one becomes a semantic cluster.
 - **Catalysts** — pre-computed themes Enzyme discovers across your material. Searching through catalysts connects content that keyword and vector search miss.
 - **Petri** — the compiled index: what's trending, what entities exist, and what catalysts are anchored to each.
-- **Apply** — project your concept graph onto an unfamiliar corpus. `enzyme apply /path/to/other/repo` maps your catalysts onto new content. See [apply docs](https://enzyme.garden/docs/apply/).
+- **Target search** — search an unfamiliar corpus through your vault's catalysts with `enzyme catalyze "query" --target /path/to/other/repo`. Enzyme prepares the target automatically on first use.
 
 ### Example: petri output
 
@@ -186,5 +186,5 @@ This matters when you're building on imported content (reading highlights, curat
 ## Links
 
 - [enzyme.garden](https://enzyme.garden) — landing page
-- [Docs](https://enzyme.garden/docs) — how it works, catalysts, apply, for teams
+- [Docs](https://enzyme.garden/docs) — how it works, catalysts, target search, for teams
 - [Setup guide](https://enzyme.garden/setup) — install and configure

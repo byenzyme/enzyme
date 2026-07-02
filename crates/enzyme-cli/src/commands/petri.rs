@@ -158,15 +158,15 @@ pub fn build_petri_json(
         entity_list.push(entry);
     }
 
-    let applied_targets = db.get_all_applied_targets()?;
-    let targets_json: Vec<serde_json::Value> = applied_targets
+    let prepared_targets = db.get_all_applied_targets()?;
+    let targets_json: Vec<serde_json::Value> = prepared_targets
         .iter()
         .map(|t| {
             json!({
                 "path": t.target_path,
                 "doc_count": t.doc_count,
                 "catalyst_count": t.catalyst_count,
-                "applied_at": t.applied_at.to_rfc3339(),
+                "prepared_at": t.applied_at.to_rfc3339(),
             })
         })
         .collect();
@@ -174,7 +174,7 @@ pub fn build_petri_json(
     let mut output = json!({
         "entities": entity_list,
         "total_entities": entity_list.len(),
-        "applied_targets": targets_json,
+        "targets": targets_json,
     });
 
     if let Some(q) = query {
@@ -521,7 +521,7 @@ fn print_petri_tree(output: &serde_json::Value, catalyst_display_budget: usize) 
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
     let targets = output
-        .get("applied_targets")
+        .get("targets")
         .and_then(|v| v.as_array())
         .map(|v| v.as_slice())
         .unwrap_or(&[]);
@@ -538,7 +538,7 @@ fn print_petri_tree(output: &serde_json::Value, catalyst_display_budget: usize) 
     }
 
     if !targets.is_empty() {
-        println!("└─ applied targets");
+        println!("└─ external targets");
         for (idx, target) in targets.iter().enumerate() {
             let is_last = idx + 1 == targets.len();
             let connector = if is_last { "└─" } else { "├─" };

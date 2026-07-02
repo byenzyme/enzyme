@@ -31,7 +31,7 @@ impl<'a> SimilarityPipeline<'a> {
         self.run_with_catalysts(&catalysts, true, on_progress)
     }
 
-    /// Run similarity with externally-provided catalysts (e.g. from a source vault via `apply`).
+    /// Run similarity with externally-provided catalysts from a source vault.
     ///
     /// When `cache_catalyst_embeddings` is true, catalyst embeddings are saved to the
     /// database for reuse in `catalyze_search`.

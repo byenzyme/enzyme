@@ -198,13 +198,13 @@ The SKILL.md gives the agent instructions for the full session lifecycle:
 
 | Phase | What the agent does |
 |-------|---------------------|
-| Session start | Runs `enzyme refresh --quiet` to catch vault changes, unless the plugin hook already did it |
+| Session start | Runs `enzyme refresh --quiet` to catch vault changes |
 | First message | Runs `enzyme petri` — open-ended if the prompt is broad, or `--query "..."` if the user has a specific direction |
 | Deeper search | Uses `enzyme catalyze` with catalyst vocabulary from petri to reach content the user's words wouldn't match |
 | Writing notes | Near the end, writes durable markdown only when the session produced a decision, reframe, open thread, project state, or useful people/company context |
 | End refresh | Runs `enzyme refresh --quiet` after useful notes are written so catalysts can retrieve them later |
 
-OpenClaw can use both the skill and plugin hooks. The skill decides when a markdown note deserves to exist. The plugin can inject petri context before turns and run refresh at `agent_end` when `autoRefresh` is enabled. Petri seeds the model with the live shape of the vault; targeted catalyze searches go deeper.
+Default setup does not install Petri or refresh hooks. The skill decides when a markdown note deserves to exist, runs `enzyme petri` before context-dependent turns, and uses targeted `enzyme catalyze` searches when it needs to go deeper. OpenClaw hook behavior remains an explicit optional configuration, such as `autoRefresh`, not something Enzyme installs by default.
 
 The same organic behavior applies — the agent composes its own enzyme queries, combines them with file reads and grep, and surfaces vault content without you specifying tools.
 
