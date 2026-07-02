@@ -21,7 +21,7 @@ Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect 
 
 - `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
 - `enzyme refresh --quiet` re-indexes changed content.
-- `enzyme apply ./target-dir` indexes external content using vault catalysts; then search it with `enzyme catalyze "query" --target ./target-dir`.
+- `enzyme catalyze "query" --target ./target-dir` prepares external content using vault catalysts, then searches it.
 - Use `grep` for exact names, `#tags`, `[[wikilinks]]`, and literal text.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
 

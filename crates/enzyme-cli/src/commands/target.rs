@@ -16,9 +16,13 @@ use enzyme_core::pipeline::similarity::SimilarityPipeline;
 
 use crate::display::{DisplayEvent, InitDisplay};
 
-pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> Result<()> {
+pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()> {
     let start = Instant::now();
-    info!(?source_path, ?target_path, "enzyme apply");
+    info!(?source_path, ?target_path, "preparing catalyze target");
+
+    if !target_path.is_dir() {
+        bail!("target is not a directory: {}", target_path.display());
+    }
 
     // ── Phase 1: Setup ─────────────────────────────────────────────────────
     let source_paths = EnzymePaths::new(source_path)?;
@@ -43,23 +47,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
     // Target DB lives in source vault's .enzyme/targets/ directory
     let target_db_path = source_paths.target_db(target_path);
 
-    if !quiet {
-        // Print header before starting display (not animated)
-        println!("enzyme apply");
-        println!(
-            "  source: {} ({} catalysts)",
-            source_path.display(),
-            catalysts.len()
-        );
-        println!("  target: {}", target_path.display());
-    }
-
-    // Start animated display
-    let display = if quiet {
-        InitDisplay::start_quiet()
-    } else {
-        InitDisplay::start()
-    };
+    let display = InitDisplay::start_quiet();
     let tx = display.sender();
 
     // ── Phase 2: Index target ──────────────────────────────────────────────
@@ -139,7 +127,7 @@ pub async fn run_apply(source_path: &Path, target_path: &Path, quiet: bool) -> R
     })
     .ok();
 
-    // ── Record applied target in source vault ─────────────────────────────
+    // ── Record target in source vault for future refreshes ────────────────
     let canonical_target = target_path
         .canonicalize()
         .unwrap_or_else(|_| target_path.to_path_buf());

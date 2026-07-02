@@ -81,7 +81,7 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
 
-        /// Target directory (from `enzyme apply`) to search instead of the vault itself
+        /// Target directory to prepare and search instead of the vault itself
         #[arg(long)]
         target: Option<PathBuf>,
 
@@ -103,20 +103,6 @@ enum Commands {
         /// Maximum catalysts per entity in query mode (default: 3)
         #[arg(long)]
         catalyst_budget: Option<usize>,
-    },
-
-    /// Apply vault catalysts to an external directory
-    Apply {
-        /// Target directory to apply catalysts to
-        target: PathBuf,
-
-        /// Source vault (defaults to current vault)
-        #[arg(long)]
-        source: Option<PathBuf>,
-
-        /// Run in background
-        #[arg(long)]
-        detached: bool,
     },
 
     /// Show vault status and configuration
@@ -374,14 +360,6 @@ async fn main() -> Result<()> {
                 catalyst_budget,
             )
             .await?;
-        }
-        Commands::Apply {
-            target,
-            source,
-            detached: _,
-        } => {
-            let source_path = source.as_deref().unwrap_or(&vault_path);
-            commands::apply::run_apply(source_path, &target, false).await?;
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;

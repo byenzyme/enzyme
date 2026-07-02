@@ -111,6 +111,11 @@ struct CatalyzeParams {
     /// "reference" (surface what drew attention, capture patterns)
     #[schemars(description = "Presentation register: explore (default), continuity, or reference")]
     register: Option<String>,
+
+    /// Optional target corpus to prepare and search instead of the source vault.
+    /// The source vault still supplies catalysts.
+    #[schemars(description = "Optional path to a corpus to prepare and search")]
+    target: Option<String>,
 }
 
 #[tool_router]
@@ -181,7 +186,7 @@ impl EnzymeMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Search vault by concept using catalyst-based matching")]
+    #[tool(description = "Search vault or a target corpus by concept using catalyst-based matching")]
     async fn catalyze(
         &self,
         Parameters(p): Parameters<CatalyzeParams>,
@@ -196,7 +201,28 @@ impl EnzymeMcp {
         let service = get_embedding_service(&paths.home).map_err(|e| {
             McpError::internal_error(format!("embedding service failed: {e}"), None)
         })?;
-        let search = ContextSearch::new(&db, service);
+        let target_db;
+        let search = if let Some(target) = p.target.as_deref() {
+            let target_path = PathBuf::from(target);
+            if !target_path.is_dir() {
+                return Err(McpError::invalid_params(
+                    format!("Not a directory: {}", target_path.display()),
+                    None,
+                ));
+            }
+            let target_db_path = paths.target_db(&target_path);
+            super::target::prepare_target(&vault_path, &target_path)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("target preparation failed: {e}"), None)
+                })?;
+            target_db = Database::open(&target_db_path).map_err(|e| {
+                McpError::internal_error(format!("target db open failed: {e}"), None)
+            })?;
+            ContextSearch::with_target(&db, &target_db, service)
+        } else {
+            ContextSearch::new(&db, service)
+        };
         let response = search
             .catalyze_search(&p.query, limit)
             .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;

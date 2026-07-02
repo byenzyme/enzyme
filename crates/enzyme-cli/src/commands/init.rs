@@ -590,7 +590,7 @@ pub async fn run_init(
         }
     }
 
-    // ── Step 8: Re-apply targets ──────────────────────────────────────────
+    // ── Step 8: Refresh prepared targets ──────────────────────────────────
     if cat_stats
         .as_ref()
         .map_or(false, |s| s.catalysts_generated > 0)
@@ -1073,7 +1073,7 @@ async fn run_stale_catalyst_refresh(
     Ok(stats.catalysts_generated > 0)
 }
 
-/// Re-apply all previously applied targets using the vault's current catalysts.
+/// Refresh all previously prepared targets using the vault's current catalysts.
 ///
 /// Merges targets from config.toml (declarative, survives DB resets) and the
 /// `applied_targets` DB table (runtime record). Config is the source of truth;
@@ -1109,12 +1109,12 @@ async fn reapply_targets(vault_path: &Path) {
     for target in &target_paths {
         let target_path = std::path::PathBuf::from(target);
         if !target_path.exists() {
-            info!(path = %target, "skipping re-apply: target path no longer exists");
+            info!(path = %target, "skipping target refresh: target path no longer exists");
             continue;
         }
-        info!(path = %target, "re-applying target after catalyst regeneration");
-        if let Err(e) = super::apply::run_apply(vault_path, &target_path, true).await {
-            info!(path = %target, err = %e, "re-apply failed for target");
+        info!(path = %target, "refreshing target after catalyst regeneration");
+        if let Err(e) = super::target::prepare_target(vault_path, &target_path).await {
+            info!(path = %target, err = %e, "target refresh failed");
         }
     }
 }

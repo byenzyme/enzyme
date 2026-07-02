@@ -1,5 +1,4 @@
 pub mod agents;
-pub mod apply;
 pub mod benchmark;
 pub mod catalyze;
 pub mod dump_prompts;
@@ -14,4 +13,5 @@ pub mod publish;
 pub mod scan;
 pub mod serve;
 pub mod status;
+pub mod target;
 pub mod vault_summary;

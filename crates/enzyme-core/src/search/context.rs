@@ -87,7 +87,7 @@ pub struct DirectSearchResult {
 
 /// Catalyst-based search over pre-computed similarities.
 ///
-/// Supports an optional **target** database for split-DB mode (after `enzyme apply`):
+/// Supports an optional **target** database for split-DB mode (`enzyme catalyze --target`):
 /// - Catalysts come from the **source** DB
 /// - Catalyst embeddings, similarities, and chunk content come from the **target** DB
 pub struct ContextSearch<'a> {

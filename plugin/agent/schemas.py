@@ -60,6 +60,14 @@ ENZYME_CATALYZE = {
                 "description": "Max results to return. Default: 10.",
                 "default": 10,
             },
+            "target": {
+                "type": "string",
+                "description": (
+                    "Optional path to a foreign corpus. When set, catalyze prepares "
+                    "that corpus with the user's vault catalysts, then returns excerpts "
+                    "from the target corpus."
+                ),
+            },
             "register": {
                 "type": "string",
                 "enum": ["explore", "continuity", "reference"],

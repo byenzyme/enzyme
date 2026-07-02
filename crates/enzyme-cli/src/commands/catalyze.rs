@@ -38,19 +38,11 @@ pub async fn run_catalyze(
 
     let service = get_embedding_service(&paths.home)?;
 
-    // When a target is provided, open its DB from source's targets/ directory
+    // When a target is provided, refresh its index before searching it.
     let target_db;
     let search = if let Some(target_path) = target {
         let target_db_path = paths.target_db(target_path);
-        if !target_db_path.exists() {
-            let output = json!({
-                "error": format!("Target not initialized. Run 'enzyme apply {}' first.", target_path.display()),
-                "query": query,
-                "results": []
-            });
-            println!("{}", serde_json::to_string(&output)?);
-            return Ok(());
-        }
+        super::target::prepare_target(vault_path, target_path).await?;
         target_db = Database::open(&target_db_path)?;
         ContextSearch::with_target(&db, &target_db, service)
     } else {
