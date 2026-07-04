@@ -62,7 +62,14 @@ def handle_catalyze(args: dict, **kwargs) -> str:
         return _not_initialized_error()
     query = args.get("query", "")
     cmd = ["catalyze", query, "-n", str(args.get("limit", 10))]
-    return _run_enzyme(cmd)
+    target = args.get("target")
+    if target:
+        cmd.extend(["--target", target])
+    register = args.get("register", "explore")
+    if register != "explore":
+        cmd.extend(["--register", register])
+    timeout = 300 if target else 30
+    return _run_enzyme(cmd, timeout=timeout)
 
 
 def handle_refresh(args: dict, **kwargs) -> str:

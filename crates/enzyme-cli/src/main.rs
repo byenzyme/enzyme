@@ -109,7 +109,7 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
 
-        /// Target directory to search instead of the vault itself
+        /// Target directory to prepare and search instead of the vault itself
         #[arg(long)]
         target: Option<PathBuf>,
 

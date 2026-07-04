@@ -68,6 +68,17 @@ fn require_login_for_hosted_init_if_needed(vault_path: &Path, paths: &EnzymePath
     )
 }
 
+/// Returns true when the user has set a non-empty OPENAI_API_KEY (BYOK mode).
+///
+/// BYOK users pay their own inference costs and do not need an Enzyme account,
+/// so the login gate is skipped for them.
+fn byok_active() -> bool {
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+}
+
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
     if paths.vault_db.exists() {
         fs::remove_file(&paths.vault_db)
@@ -254,7 +265,8 @@ impl InitResult {
 /// Desktop app uses quiet mode (JSON output) to populate its setup text box.
 pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
-    require_login_for_hosted_init_if_needed(vault_path, &paths)?;
+    // Index-only runs do zero LLM/credit work (no catalysts, no Enzyme server
+    // calls), so no login is required. Mirrors `catalyze --target` behaviour.
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -443,7 +455,7 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    if !use_env_llm {
+    if !use_env_llm && !byok_active() {
         require_login_for_hosted_init_if_needed(vault_path, &paths)?;
     }
     preflight_env_llm(use_env_llm).await?;
@@ -887,7 +899,7 @@ pub async fn run_init(
         tracing::warn!("init stage=staleness status=skipped reason=catalyst_quality_not_clean");
     }
 
-    // ── Step 8: Refresh prepared targets ─────────────────────────────────
+    // ── Step 8: Refresh prepared targets ──────────────────────────────────
     if cat_stats
         .as_ref()
         .map_or(false, |s| s.catalysts_generated > 0)
@@ -1424,7 +1436,7 @@ async fn run_stale_catalyst_refresh(
     Ok(stats.catalysts_generated > 0)
 }
 
-/// Refresh all configured target indexes using the vault's current catalysts.
+/// Refresh all previously prepared targets using the vault's current catalysts.
 ///
 /// Merges targets from config.toml (declarative, survives DB resets) and the
 /// `applied_targets` DB table (runtime record). Config is the source of truth;

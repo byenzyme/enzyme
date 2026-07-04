@@ -755,7 +755,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
 
             let _ = out.flush();
         } else if embedding_status.is_some() {
-            // Standalone embedding spinner (no discovery tree, e.g. target preparation)
+            // Standalone embedding spinner (no discovery tree, e.g. catalyze target prep)
             clear_lines(&mut out, lines_written);
             lines_written = 0;
 
