@@ -220,6 +220,21 @@ enum Commands {
         json: bool,
     },
 
+    /// Report vault structure facts: duplicates, conventions, semantic scatter, links, shape (read-only; never writes)
+    Structure {
+        /// Emit structured JSON to stdout
+        #[arg(long)]
+        json: bool,
+
+        /// Minimum folder size (doc count) for the convention-mix table
+        #[arg(long, default_value_t = 5)]
+        min_folder_size: usize,
+
+        /// Cap on ranked lists in human output (top-K)
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
+
     /// Dump catalyst prompts to JSONL for training data generation
     DumpPrompts {
         /// Output file path (JSONL)
@@ -453,6 +468,13 @@ async fn main() -> Result<()> {
         }
         Commands::Doctor { json } => {
             commands::doctor::run_doctor(&vault_path, json).await?;
+        }
+        Commands::Structure {
+            json,
+            min_folder_size,
+            top,
+        } => {
+            commands::structure::run_structure(&vault_path, json, min_folder_size, top).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
         Commands::Mcp => unreachable!(),
