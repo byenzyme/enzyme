@@ -31,6 +31,17 @@ use super::vault_summary;
 use crate::display::{DisplayEvent, InitDisplay};
 use enzyme_core::config::auth::require_login;
 
+/// Returns true when the user has set a non-empty OPENAI_API_KEY (BYOK mode).
+///
+/// BYOK users pay their own inference costs and do not need an Enzyme account,
+/// so the login gate is skipped for them.
+fn byok_active() -> bool {
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+}
+
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
     if paths.vault_db.exists() {
         fs::remove_file(&paths.vault_db)
@@ -161,7 +172,8 @@ impl InitResult {
 /// Desktop app uses quiet mode (JSON output) to populate its setup text box.
 pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    // Index-only runs do zero LLM/credit work (no catalysts, no Enzyme server
+    // calls), so no login is required. Mirrors `catalyze --target` behaviour.
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -206,7 +218,12 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    require_login(&paths.auth_token())?;
+    // BYOK users supply their own API key via OPENAI_API_KEY and pay their own
+    // inference costs; they don't need an Enzyme account. Skip the login gate
+    // for them — the free-tier credit check below already exempts them.
+    if !byok_active() {
+        require_login(&paths.auth_token())?;
+    }
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
