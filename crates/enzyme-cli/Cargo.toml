@@ -24,6 +24,8 @@ crossterm = { workspace = true }
 atty = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+libsql = { workspace = true }
+ignore = { workspace = true }
 rmcp = { version = "1", features = ["server", "transport-io"] }
 schemars = "1"
 fs2 = "0.4"
