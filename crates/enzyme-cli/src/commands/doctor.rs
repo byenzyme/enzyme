@@ -13,6 +13,8 @@ use enzyme_core::document::{DocumentProcessor, FileDiscovery, parse_frontmatter}
 
 // Human-mode truncation limit for long lists.
 const HUMAN_LIST_LIMIT: usize = 20;
+// Human-mode truncation limit for duplicate_sets.
+const DUP_LIST_LIMIT: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -91,6 +93,42 @@ struct StaleIndex {
 }
 
 #[derive(Debug, Serialize)]
+struct DuplicateSet {
+    content_hash: String,
+    count: u64,
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicateSets {
+    duplicate_set_count: u64,
+    duplicated_doc_count: u64,
+    sets: Vec<DuplicateSet>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreatedSourceCounts {
+    frontmatter: u64,
+    filename: u64,
+    filesystem: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct FolderDateEntry {
+    folder: String,
+    doc_count: u64,
+    vault_share_percent: String,
+    dated_fraction: String,
+    created_source: CreatedSourceCounts,
+}
+
+#[derive(Debug, Serialize)]
+struct FolderDateCoverage {
+    min_folder_size: usize,
+    folders: Vec<FolderDateEntry>,
+}
+
+#[derive(Debug, Serialize)]
 struct DoctorReport {
     vault: String,
     database: String,
@@ -100,6 +138,8 @@ struct DoctorReport {
     undated_docs: Vec<UndatedDoc>,
     embedding: EmbeddingFacts,
     stale_index: StaleIndex,
+    duplicate_sets: DuplicateSets,
+    folder_date_coverage: FolderDateCoverage,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +184,35 @@ where
         results.push(map_row(row)?);
     }
     Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: folder of a source_ref
+// ---------------------------------------------------------------------------
+
+/// Return the top-level folder component of a source_ref as a display string.
+/// Top-level files (no directory) return "(root)".
+/// Otherwise return the parent directory with a trailing slash, e.g. "misc/".
+fn folder_of(source_ref: &str) -> String {
+    let p = std::path::Path::new(source_ref);
+    match p.parent() {
+        None => "(root)".to_string(),
+        Some(p) if p.as_os_str().is_empty() => "(root)".to_string(),
+        Some(parent) => {
+            let s = parent.to_string_lossy().to_string();
+            let s = s.replace('\\', "/");
+            if s.is_empty() {
+                "(root)".to_string()
+            } else {
+                format!("{s}/")
+            }
+        }
+    }
+}
+
+/// Format a float as a fixed-decimal string.
+fn fmt_fixed(x: f64, decimals: usize) -> String {
+    format!("{:.*}", decimals, x)
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +572,145 @@ fn collect_stale(
 }
 
 // ---------------------------------------------------------------------------
+// Collect: duplicate_sets
+// Groups of docs sharing content_hash.
+// Sets sorted by (count DESC, first path ASC); paths within each set sorted ASC.
+// ---------------------------------------------------------------------------
+
+async fn collect_duplicate_sets(conn: &Connection) -> Result<DuplicateSets> {
+    // Hashes with count > 1, sorted by (count DESC, content_hash ASC) for determinism
+    let hash_counts: Vec<(String, u64)> = query_all(
+        conn,
+        "SELECT content_hash, count(*) AS n FROM docs \
+         GROUP BY content_hash HAVING n > 1 \
+         ORDER BY n DESC, content_hash ASC",
+        |row| {
+            let hash: String = row.get(0).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let n: i64 = row.get(1).map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok((hash, n as u64))
+        },
+    )
+    .await?;
+
+    let mut sets = Vec::with_capacity(hash_counts.len());
+    let mut duplicated_doc_count: u64 = 0;
+
+    for (hash, count) in &hash_counts {
+        duplicated_doc_count += count;
+
+        // Per-group paths, sorted lexicographically
+        let sql = format!(
+            "SELECT source_ref FROM docs WHERE content_hash = '{}' ORDER BY source_ref",
+            hash.replace('\'', "''")
+        );
+        let paths: Vec<String> = query_all(conn, &sql, |row| {
+            row.get::<String>(0).map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await?;
+
+        sets.push(DuplicateSet {
+            content_hash: hash.clone(),
+            count: *count,
+            paths,
+        });
+    }
+
+    // sets are already sorted by (count DESC, content_hash ASC) from the SQL ORDER BY.
+    // Within equal count, sort by first path ASC as a secondary tiebreak.
+    sets.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| {
+                let pa = a.paths.first().map(|s| s.as_str()).unwrap_or("");
+                let pb = b.paths.first().map(|s| s.as_str()).unwrap_or("");
+                pa.cmp(pb)
+            })
+    });
+
+    Ok(DuplicateSets {
+        duplicate_set_count: sets.len() as u64,
+        duplicated_doc_count,
+        sets,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Collect: folder_date_coverage
+// For each folder with >= min_folder_size docs: doc count, vault share %,
+// dated fraction (created_source != 'filesystem'), and created_source split.
+// Sorted by doc count DESC, then folder ASC for determinism.
+// ---------------------------------------------------------------------------
+
+fn collect_folder_date_coverage(
+    db_docs: &[(String, String)], // (source_ref, created_source)
+    docs_total: u64,
+    min_folder_size: usize,
+) -> FolderDateCoverage {
+    // Accumulate per folder using BTreeMap for deterministic order during insertion
+    struct FolderAccum {
+        doc_count: u64,
+        frontmatter: u64,
+        filename: u64,
+        filesystem: u64,
+    }
+
+    let mut by_folder: BTreeMap<String, FolderAccum> = BTreeMap::new();
+
+    for (source_ref, created_source) in db_docs {
+        let folder = folder_of(source_ref);
+        let entry = by_folder.entry(folder).or_insert(FolderAccum {
+            doc_count: 0,
+            frontmatter: 0,
+            filename: 0,
+            filesystem: 0,
+        });
+        entry.doc_count += 1;
+        match created_source.as_str() {
+            "frontmatter" => entry.frontmatter += 1,
+            "filename" => entry.filename += 1,
+            _ => entry.filesystem += 1, // filesystem or unknown
+        }
+    }
+
+    let mut folders: Vec<FolderDateEntry> = by_folder
+        .into_iter()
+        .filter(|(_, a)| a.doc_count >= min_folder_size as u64)
+        .map(|(folder, a)| {
+            let dated = a.frontmatter + a.filename;
+            let dated_frac = if a.doc_count > 0 {
+                dated as f64 / a.doc_count as f64
+            } else {
+                0.0
+            };
+            let vault_share = if docs_total > 0 {
+                a.doc_count as f64 / docs_total as f64 * 100.0
+            } else {
+                0.0
+            };
+            FolderDateEntry {
+                folder,
+                doc_count: a.doc_count,
+                vault_share_percent: fmt_fixed(vault_share, 1),
+                dated_fraction: fmt_fixed(dated_frac, 3),
+                created_source: CreatedSourceCounts {
+                    frontmatter: a.frontmatter,
+                    filename: a.filename,
+                    filesystem: a.filesystem,
+                },
+            }
+        })
+        .collect();
+
+    // Sort by doc_count DESC, then folder ASC for determinism
+    folders.sort_by(|a, b| b.doc_count.cmp(&a.doc_count).then(a.folder.cmp(&b.folder)));
+
+    FolderDateCoverage {
+        min_folder_size,
+        folders,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Human-readable rendering
 // ---------------------------------------------------------------------------
 
@@ -675,6 +883,61 @@ fn render_human(report: &DoctorReport) -> String {
             report.stale_index.db_rows_for_deleted_files.len() - HUMAN_LIST_LIMIT
         ));
     }
+    out.push('\n');
+
+    // Duplicate sets
+    out.push_str("duplicate_sets\n");
+    out.push_str(&format!(
+        "  duplicate_set_count: {}\n",
+        report.duplicate_sets.duplicate_set_count
+    ));
+    out.push_str(&format!(
+        "  duplicated_doc_count: {}\n",
+        report.duplicate_sets.duplicated_doc_count
+    ));
+    if !report.duplicate_sets.sets.is_empty() {
+        let sets = &report.duplicate_sets.sets;
+        let shown = sets.len().min(DUP_LIST_LIMIT);
+        for s in &sets[..shown] {
+            let hash_short = if s.content_hash.len() > 8 {
+                format!("{}...", &s.content_hash[..8])
+            } else {
+                s.content_hash.clone()
+            };
+            let paths_str = s.paths.join(", ");
+            out.push_str(&format!("  n={}  hash={}  {}\n", s.count, hash_short, paths_str));
+        }
+        if sets.len() > DUP_LIST_LIMIT {
+            out.push_str(&format!(
+                "  ... {} more; use --json\n",
+                sets.len() - DUP_LIST_LIMIT
+            ));
+        }
+    }
+    out.push('\n');
+
+    // Folder date coverage
+    out.push_str("folder_date_coverage\n");
+    out.push_str(&format!(
+        "  min_folder_size: {}\n",
+        report.folder_date_coverage.min_folder_size
+    ));
+    if report.folder_date_coverage.folders.is_empty() {
+        out.push_str("  (no folders meet min_folder_size threshold)\n");
+    } else {
+        for f in &report.folder_date_coverage.folders {
+            out.push_str(&format!(
+                "  {}  n={}  share={}%  dated={}  (frontmatter={} filename={} filesystem={})\n",
+                f.folder,
+                f.doc_count,
+                f.vault_share_percent,
+                f.dated_fraction,
+                f.created_source.frontmatter,
+                f.created_source.filename,
+                f.created_source.filesystem,
+            ));
+        }
+    }
 
     out
 }
@@ -727,7 +990,7 @@ pub async fn run_doctor(vault_path: &Path, json: bool) -> Result<()> {
 
     let docs_in_db = db_docs_full.len() as u64;
 
-    // source_ref + created_source pairs for frontmatter/undated checks
+    // source_ref + created_source pairs for frontmatter/undated/folder-date checks
     let db_docs: Vec<(String, String)> = db_docs_full
         .iter()
         .map(|(sr, cs, _)| (sr.clone(), cs.clone()))
@@ -769,6 +1032,8 @@ pub async fn run_doctor(vault_path: &Path, json: bool) -> Result<()> {
     let undated_docs = collect_undated(&db_docs);
     let embedding = collect_embedding(&needing_embedding, window_size, docs_in_db as i64);
     let stale_index = collect_stale(vault_path, &md_files, &db_source_refs, &db_hashes)?;
+    let duplicate_sets = collect_duplicate_sets(&conn).await?;
+    let folder_date_coverage = collect_folder_date_coverage(&db_docs, docs_in_db, 5);
 
     let report = DoctorReport {
         vault: vault_path.display().to_string(),
@@ -779,6 +1044,8 @@ pub async fn run_doctor(vault_path: &Path, json: bool) -> Result<()> {
         undated_docs,
         embedding,
         stale_index,
+        duplicate_sets,
+        folder_date_coverage,
     };
 
     if json {
@@ -811,6 +1078,49 @@ mod tests {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS test (id INTEGER PRIMARY KEY)",
             (),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Create a docs table in an in-memory-style temp DB.
+    async fn make_test_db(dir: &Path) -> libsql::Connection {
+        let db_path = dir.join("enzyme.db");
+        let db = Builder::new_local(db_path.to_str().unwrap())
+            .build()
+            .await
+            .unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS docs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_ref TEXT NOT NULL UNIQUE,
+                title TEXT,
+                content TEXT,
+                content_hash TEXT NOT NULL,
+                created_at INTEGER,
+                created_source TEXT NOT NULL DEFAULT 'filesystem',
+                modified_at INTEGER,
+                embedded_at INTEGER,
+                embedded_content_hash TEXT,
+                metadata TEXT
+            )",
+            (),
+        )
+        .await
+        .unwrap();
+        conn
+    }
+
+    async fn insert_doc(
+        conn: &libsql::Connection,
+        source_ref: &str,
+        content_hash: &str,
+        created_source: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO docs (source_ref, title, content, content_hash, created_at, created_source) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql::params![source_ref, source_ref, "body", content_hash, 1000i64, created_source],
         )
         .await
         .unwrap();
@@ -1012,21 +1322,172 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // duplicate_sets tests
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn duplicate_sets_grouped_by_hash() {
+        let dir = TempDir::new().unwrap();
+        let conn = make_test_db(dir.path()).await;
+
+        insert_doc(&conn, "a.md", "abc", "filename").await;
+        insert_doc(&conn, "b.md", "abc", "filename").await;
+        insert_doc(&conn, "c.md", "xyz", "filename").await;
+
+        let db_path = dir.path().join("enzyme.db");
+        let ro_conn = open_read_only_conn(&db_path).await.unwrap();
+        let result = collect_duplicate_sets(&ro_conn).await.unwrap();
+
+        assert_eq!(result.duplicate_set_count, 1);
+        assert_eq!(result.duplicated_doc_count, 2);
+        assert_eq!(result.sets[0].content_hash, "abc");
+        assert_eq!(result.sets[0].count, 2);
+        assert_eq!(result.sets[0].paths, vec!["a.md", "b.md"]);
+    }
+
+    #[tokio::test]
+    async fn duplicate_sets_three_way_before_two_way() {
+        let dir = TempDir::new().unwrap();
+        let conn = make_test_db(dir.path()).await;
+
+        // 3-way duplicate should sort before 2-way
+        insert_doc(&conn, "a.md", "hash3", "filename").await;
+        insert_doc(&conn, "b.md", "hash3", "filename").await;
+        insert_doc(&conn, "c.md", "hash3", "filename").await;
+        insert_doc(&conn, "d.md", "hash2", "filename").await;
+        insert_doc(&conn, "e.md", "hash2", "filename").await;
+
+        let db_path = dir.path().join("enzyme.db");
+        let ro_conn = open_read_only_conn(&db_path).await.unwrap();
+        let result = collect_duplicate_sets(&ro_conn).await.unwrap();
+
+        assert_eq!(result.sets.len(), 2);
+        assert_eq!(result.sets[0].count, 3); // 3-way first
+        assert_eq!(result.sets[1].count, 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_sets_tie_broken_by_first_path() {
+        let dir = TempDir::new().unwrap();
+        let conn = make_test_db(dir.path()).await;
+
+        // Two 2-way sets: "zzz" group has first path "z1.md", "aaa" group has "a1.md"
+        // After sort by (count DESC, first_path ASC): "aaa" set should come first
+        insert_doc(&conn, "z1.md", "zzz", "filename").await;
+        insert_doc(&conn, "z2.md", "zzz", "filename").await;
+        insert_doc(&conn, "a1.md", "aaa", "filename").await;
+        insert_doc(&conn, "a2.md", "aaa", "filename").await;
+
+        let db_path = dir.path().join("enzyme.db");
+        let ro_conn = open_read_only_conn(&db_path).await.unwrap();
+        let result = collect_duplicate_sets(&ro_conn).await.unwrap();
+
+        assert_eq!(result.sets.len(), 2);
+        // Both have count=2; tiebreak by first path: "a1.md" < "z1.md"
+        assert_eq!(result.sets[0].paths[0], "a1.md");
+        assert_eq!(result.sets[1].paths[0], "z1.md");
+    }
+
+    // ---------------------------------------------------------------------------
+    // folder_date_coverage tests
+    // ---------------------------------------------------------------------------
+
     #[test]
-    fn determinism_byte_identical() {
+    fn folder_date_coverage_dated_fraction_math() {
+        // misc/ has 6 docs: 4 filename, 1 frontmatter, 1 filesystem
+        // dated = 5, fraction = 5/6 ≈ 0.833
+        let db_docs: Vec<(String, String)> = vec![
+            ("misc/a.md".to_string(), "filename".to_string()),
+            ("misc/b.md".to_string(), "filename".to_string()),
+            ("misc/c.md".to_string(), "filename".to_string()),
+            ("misc/d.md".to_string(), "filename".to_string()),
+            ("misc/e.md".to_string(), "frontmatter".to_string()),
+            ("misc/f.md".to_string(), "filesystem".to_string()),
+        ];
+        let coverage = collect_folder_date_coverage(&db_docs, 6, 5);
+        assert_eq!(coverage.folders.len(), 1);
+        let f = &coverage.folders[0];
+        assert_eq!(f.folder, "misc/");
+        assert_eq!(f.doc_count, 6);
+        assert_eq!(f.created_source.frontmatter, 1);
+        assert_eq!(f.created_source.filename, 4);
+        assert_eq!(f.created_source.filesystem, 1);
+        // dated_fraction = 5/6
+        let frac: f64 = f.dated_fraction.parse().unwrap();
+        assert!((frac - 5.0 / 6.0).abs() < 0.001, "fraction was {frac}");
+    }
+
+    #[test]
+    fn folder_date_coverage_min_size_filter() {
+        // stuff/ has 5 docs (meets min), small/ has 4 (excluded)
+        let mut db_docs: Vec<(String, String)> = Vec::new();
+        for i in 0..5 {
+            db_docs.push((format!("stuff/s{i}.md"), "filename".to_string()));
+        }
+        for i in 0..4 {
+            db_docs.push((format!("small/x{i}.md"), "filename".to_string()));
+        }
+        let coverage = collect_folder_date_coverage(&db_docs, 9, 5);
+        assert_eq!(coverage.folders.len(), 1);
+        assert_eq!(coverage.folders[0].folder, "stuff/");
+    }
+
+    #[test]
+    fn folder_date_coverage_sorted_by_count_desc() {
+        // stuff/ has 10 docs, misc/ has 5 docs → stuff/ first
+        let mut db_docs: Vec<(String, String)> = Vec::new();
+        for i in 0..10 {
+            db_docs.push((format!("stuff/s{i}.md"), "filename".to_string()));
+        }
+        for i in 0..5 {
+            db_docs.push((format!("misc/m{i}.md"), "frontmatter".to_string()));
+        }
+        let coverage = collect_folder_date_coverage(&db_docs, 15, 5);
+        assert_eq!(coverage.folders.len(), 2);
+        assert_eq!(coverage.folders[0].folder, "stuff/");
+        assert_eq!(coverage.folders[0].doc_count, 10);
+        assert_eq!(coverage.folders[1].folder, "misc/");
+        assert_eq!(coverage.folders[1].doc_count, 5);
+    }
+
+    #[test]
+    fn folder_date_coverage_vault_share_percent() {
+        let mut db_docs: Vec<(String, String)> = Vec::new();
+        for i in 0..5 {
+            db_docs.push((format!("logs/l{i}.md"), "filename".to_string()));
+        }
+        // 5 docs total, logs/ has all 5 → 100%
+        let coverage = collect_folder_date_coverage(&db_docs, 5, 5);
+        assert_eq!(coverage.folders[0].vault_share_percent, "100.0");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Determinism byte-identity (including new sections)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn determinism_byte_identical() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
+
+        // Write files that exercise multiple sections
         fs::write(root.join("a.md"), "---\ntitle: A\ncreated: 2024-01-01\n---\nbody").unwrap();
         fs::write(root.join("b.md"), "---\ntitle: [bad\n---\nbody").unwrap();
         fs::write(root.join("c.json"), "{}").unwrap();
 
-        let md_files = vec![PathBuf::from("a.md"), PathBuf::from("b.md")];
+        let conn = make_test_db(root).await;
+        insert_doc(&conn, "a.md", "hash_a", "frontmatter").await;
+        insert_doc(&conn, "b.md", "hash_dup", "filesystem").await;
+
         let db_docs = vec![
             ("a.md".to_string(), "frontmatter".to_string()),
             ("b.md".to_string(), "filesystem".to_string()),
         ];
         let db_source_refs: std::collections::BTreeSet<String> =
             db_docs.iter().map(|(sr, _)| sr.clone()).collect();
+
+        let md_files = vec![PathBuf::from("a.md"), PathBuf::from("b.md")];
 
         let processor = DocumentProcessor::new(root.to_path_buf());
         let mut db_hashes = std::collections::HashMap::new();
@@ -1038,27 +1499,42 @@ mod tests {
 
         let needing: Vec<(String, i64)> = Vec::new();
 
-        let build_report = || -> DoctorReport {
-            let coverage = collect_coverage(root, &md_files, 2).unwrap();
-            let absent = collect_absent(&md_files, &db_source_refs);
-            let anomalies = collect_frontmatter(root, &md_files, &db_docs).unwrap();
-            let undated = collect_undated(&db_docs);
-            let embedding = collect_embedding(&needing, Some(1024), 2);
-            let stale = collect_stale(root, &md_files, &db_source_refs, &db_hashes).unwrap();
-            DoctorReport {
-                vault: root.to_string_lossy().to_string(),
-                database: root.join(".enzyme/enzyme.db").to_string_lossy().to_string(),
-                coverage,
-                md_files_absent_from_db: absent,
-                frontmatter_anomalies: anomalies,
-                undated_docs: undated,
-                embedding,
-                stale_index: stale,
+        let db_path = root.join("enzyme.db");
+        let build_report = || {
+            let db_docs = db_docs.clone();
+            let db_source_refs = db_source_refs.clone();
+            let md_files = md_files.clone();
+            let db_hashes = db_hashes.clone();
+            let needing = needing.clone();
+            let root = root.to_path_buf();
+            let db_path = db_path.clone();
+            async move {
+                let coverage = collect_coverage(&root, &md_files, 2).unwrap();
+                let absent = collect_absent(&md_files, &db_source_refs);
+                let anomalies = collect_frontmatter(&root, &md_files, &db_docs).unwrap();
+                let undated = collect_undated(&db_docs);
+                let embedding = collect_embedding(&needing, Some(1024), 2);
+                let stale = collect_stale(&root, &md_files, &db_source_refs, &db_hashes).unwrap();
+                let ro_conn = open_read_only_conn(&db_path).await.unwrap();
+                let dup_sets = collect_duplicate_sets(&ro_conn).await.unwrap();
+                let folder_date = collect_folder_date_coverage(&db_docs, 2, 5);
+                DoctorReport {
+                    vault: root.to_string_lossy().to_string(),
+                    database: root.join(".enzyme/enzyme.db").to_string_lossy().to_string(),
+                    coverage,
+                    md_files_absent_from_db: absent,
+                    frontmatter_anomalies: anomalies,
+                    undated_docs: undated,
+                    embedding,
+                    stale_index: stale,
+                    duplicate_sets: dup_sets,
+                    folder_date_coverage: folder_date,
+                }
             }
         };
 
-        let r1 = build_report();
-        let r2 = build_report();
+        let r1 = build_report().await;
+        let r2 = build_report().await;
 
         let json1 = serde_json::to_string_pretty(&r1).unwrap();
         let json2 = serde_json::to_string_pretty(&r2).unwrap();
