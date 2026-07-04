@@ -394,7 +394,9 @@ mod tests {
         let vault = PathBuf::from("/Users/alice/vault");
         let paths = EnzymePaths::with_overrides(&vault, None).unwrap();
         // Non-FUSE: sync_back is a no-op even though vault_db doesn't exist.
-        paths.sync_back().expect("non-FUSE sync_back must be a no-op");
+        paths
+            .sync_back()
+            .expect("non-FUSE sync_back must be a no-op");
         paths.sync_in().expect("non-FUSE sync_in must be a no-op");
     }
 }

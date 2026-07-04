@@ -186,7 +186,9 @@ impl EnzymeMcp {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "Search vault or a target corpus by concept using catalyst-based matching")]
+    #[tool(
+        description = "Search vault or a target corpus by concept using catalyst-based matching"
+    )]
     async fn catalyze(
         &self,
         Parameters(p): Parameters<CatalyzeParams>,

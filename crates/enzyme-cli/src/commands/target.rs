@@ -12,7 +12,7 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::AppliedTarget;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::pipeline::similarity::SimilarityPipeline;
+use enzyme_core::pipeline::similarity::{SimilarityPipeline, catalysts_fingerprint};
 
 use crate::display::{DisplayEvent, InitDisplay};
 
@@ -104,28 +104,74 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
     .ok();
 
     // ── Phase 4: Similarity (spawn_blocking — CPU-bound vector math) ───────
-    tx.send(DisplayEvent::SimilarityStart).ok();
-    let catalyst_count = catalysts.len();
-    let sim_stats = tokio::task::spawn_blocking({
-        let tx_sim = tx.clone();
-        move || {
-            let db = Database::open(&target_db_path)?;
-            let pipeline = SimilarityPipeline::new(&db, service);
-            pipeline.run_with_catalysts(&catalysts, true, |done, total| {
-                tx_sim
-                    .send(DisplayEvent::SimilarityProgress { done, total })
-                    .ok();
-            })
-        }
-    })
-    .await
-    .context("similarity task panicked")??;
+    //
+    // Warm-path skip: if nothing changed in the target (indexing + embedding
+    // both reported no mutations) AND the catalyst set is identical to the last
+    // run (fingerprint stored in the target DB matches), skip the expensive
+    // delete + recompute cycle entirely.
+    const CATALYST_FINGERPRINT_KEY: &str = "catalyst_fingerprint";
 
-    tx.send(DisplayEvent::SimilarityComplete {
-        catalysts: sim_stats.catalysts_processed,
-        documents: sim_stats.documents_compared,
-    })
-    .ok();
+    let idx_unchanged =
+        idx_stats.files_new == 0 && idx_stats.files_updated == 0 && idx_stats.files_deleted == 0;
+    let emb_unchanged = emb_stats.chunks_embedded == 0 && emb_stats.documents_pruned == 0;
+
+    let current_fingerprint = catalysts_fingerprint(&catalysts);
+    let stored_fingerprint = {
+        let tdb = Database::open(&target_db_path)?;
+        tdb.get_config(CATALYST_FINGERPRINT_KEY)?
+    };
+    let fingerprint_matches = stored_fingerprint.as_deref() == Some(current_fingerprint.as_str());
+
+    let skip_similarity = idx_unchanged && emb_unchanged && fingerprint_matches;
+
+    let catalyst_count = catalysts.len();
+
+    let _sim_stats = if skip_similarity {
+        info!("catalyst similarities up to date; skipping recompute");
+        // Still emit display events so callers see consistent output.
+        tx.send(DisplayEvent::SimilarityStart).ok();
+        tx.send(DisplayEvent::SimilarityComplete {
+            catalysts: catalyst_count,
+            documents: 0,
+        })
+        .ok();
+        // Return a zero-work stats struct.
+        enzyme_core::pipeline::similarity::SimilarityStats {
+            catalysts_processed: catalyst_count,
+            similarities_computed: 0,
+            documents_compared: 0,
+            duration_ms: 0,
+        }
+    } else {
+        tx.send(DisplayEvent::SimilarityStart).ok();
+        let sim_stats = tokio::task::spawn_blocking({
+            let tx_sim = tx.clone();
+            let target_db_path = target_db_path.clone();
+            move || {
+                let db = Database::open(&target_db_path)?;
+                let pipeline = SimilarityPipeline::new(&db, service);
+                pipeline.run_with_catalysts(&catalysts, |done, total| {
+                    tx_sim
+                        .send(DisplayEvent::SimilarityProgress { done, total })
+                        .ok();
+                })
+            }
+        })
+        .await
+        .context("similarity task panicked")??;
+
+        tx.send(DisplayEvent::SimilarityComplete {
+            catalysts: sim_stats.catalysts_processed,
+            documents: sim_stats.documents_compared,
+        })
+        .ok();
+
+        // Persist fingerprint so the next warm run can skip.
+        let tdb = Database::open(&target_db_path)?;
+        tdb.set_config(CATALYST_FINGERPRINT_KEY, &current_fingerprint)?;
+
+        sim_stats
+    };
 
     // ── Record target in source vault for future refreshes ────────────────
     let canonical_target = target_path

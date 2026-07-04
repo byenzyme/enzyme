@@ -9,8 +9,7 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
-const FREE_CONFIG_URL: &str =
-    "https://api.enzyme.garden/enzyme-python/free-config";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/enzyme-python/free-config";
 
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]

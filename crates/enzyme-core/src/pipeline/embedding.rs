@@ -72,18 +72,10 @@ impl<'a> EmbeddingPipeline<'a> {
     }
 
     /// Run embedding with no document cap — embeds all documents in the DB.
-    /// Used by `apply` where the target directory should be fully embedded.
+    /// Used by catalyze target prep where the target directory should be
+    /// fully embedded.
     pub fn run_all(&self, on_progress: impl Fn(EmbeddingProgress)) -> Result<EmbeddingStats> {
         self.run_inner(None, None, on_progress)
-    }
-
-    /// Run embedding only for documents indexed since `since_ms` (epoch millis).
-    pub fn run_since(
-        &self,
-        since_ms: i64,
-        on_progress: impl Fn(EmbeddingProgress),
-    ) -> Result<EmbeddingStats> {
-        self.run_inner(Some(MAX_EMBEDDING_FILES), Some(since_ms), on_progress)
     }
 
     /// Run embedding only for documents indexed since `since_ms`, using the

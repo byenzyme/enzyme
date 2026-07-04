@@ -2,11 +2,34 @@ use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Catalyst, CatalystSimilarity, Embedding};
+
+/// Compute a stable SHA-256 fingerprint over catalyst ids and texts.
+///
+/// Catalysts are sorted by id before hashing so the result is independent of
+/// the order they appear in the slice.  The returned string is a lowercase hex
+/// digest.
+pub fn catalysts_fingerprint(catalysts: &[Catalyst]) -> String {
+    let mut pairs: Vec<(&str, &str)> = catalysts
+        .iter()
+        .map(|c| (c.id.as_str(), c.text.as_str()))
+        .collect();
+    pairs.sort_by_key(|(id, _)| *id);
+
+    let mut hasher = Sha256::new();
+    for (id, text) in &pairs {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(text.as_bytes());
+        hasher.update(b"\x00");
+    }
+    format!("{:x}", hasher.finalize())
+}
 
 pub struct SimilarityPipeline<'a> {
     db: &'a Database,
@@ -28,17 +51,16 @@ impl<'a> SimilarityPipeline<'a> {
     /// Run similarity using catalysts from the local database.
     pub fn run(&self, on_progress: impl Fn(usize, usize)) -> Result<SimilarityStats> {
         let catalysts = self.db.get_all_catalysts()?;
-        self.run_with_catalysts(&catalysts, true, on_progress)
+        self.run_with_catalysts(&catalysts, on_progress)
     }
 
-    /// Run similarity with externally-provided catalysts (e.g. from a source vault via `apply`).
+    /// Run similarity with externally-provided catalysts (e.g. from a source
+    /// vault during catalyze target prep).
     ///
-    /// When `cache_catalyst_embeddings` is true, catalyst embeddings are saved to the
-    /// database for reuse in `catalyze_search`.
+    /// Catalyst embeddings are saved to the database for reuse in `catalyze_search`.
     pub fn run_with_catalysts(
         &self,
         catalysts: &[Catalyst],
-        cache_catalyst_embeddings: bool,
         on_progress: impl Fn(usize, usize),
     ) -> Result<SimilarityStats> {
         let start = Instant::now();
@@ -55,23 +77,19 @@ impl<'a> SimilarityPipeline<'a> {
         let catalyst_ids: Vec<String> = catalysts.iter().map(|c| c.id.clone()).collect();
         self.db
             .delete_catalyst_similarities_for_catalysts(&catalyst_ids)?;
-        if cache_catalyst_embeddings {
-            self.db.prune_catalyst_similarities_except(&catalyst_ids)?;
-        }
+        self.db.prune_catalyst_similarities_except(&catalyst_ids)?;
 
         // Embed all catalyst texts
         let catalyst_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
         let catalyst_vecs = self.service.embed_documents(&catalyst_texts)?;
 
         // Cache catalyst embeddings to DB for fast reuse in catalyze_search
-        if cache_catalyst_embeddings {
-            let entries: Vec<(&str, &[f32])> = catalysts
-                .iter()
-                .zip(catalyst_vecs.iter())
-                .map(|(c, v)| (c.id.as_str(), v.as_slice()))
-                .collect();
-            self.db.upsert_catalyst_embeddings(&entries)?;
-        }
+        let entries: Vec<(&str, &[f32])> = catalysts
+            .iter()
+            .zip(catalyst_vecs.iter())
+            .map(|(c, v)| (c.id.as_str(), v.as_slice()))
+            .collect();
+        self.db.upsert_catalyst_embeddings(&entries)?;
 
         // Load all chunk embeddings from DB
         let chunk_embeddings = self.db.get_all_chunk_embeddings()?;
@@ -143,5 +161,45 @@ impl<'a> SimilarityPipeline<'a> {
             documents_compared,
             duration_ms,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Catalyst;
+    use chrono::Utc;
+
+    fn make_catalyst(id: &str, text: &str) -> Catalyst {
+        Catalyst {
+            id: id.to_string(),
+            text: text.to_string(),
+            entity: String::new(),
+            context: String::new(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic() {
+        let cats = vec![make_catalyst("a", "foo"), make_catalyst("b", "bar")];
+        let fp1 = catalysts_fingerprint(&cats);
+        let fp2 = catalysts_fingerprint(&cats);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_order_insensitive() {
+        let cats1 = vec![make_catalyst("a", "foo"), make_catalyst("b", "bar")];
+        let cats2 = vec![make_catalyst("b", "bar"), make_catalyst("a", "foo")];
+        assert_eq!(catalysts_fingerprint(&cats1), catalysts_fingerprint(&cats2));
+    }
+
+    #[test]
+    fn fingerprint_changes_with_different_text() {
+        let cats1 = vec![make_catalyst("a", "foo")];
+        let cats2 = vec![make_catalyst("a", "bar")];
+        assert_ne!(catalysts_fingerprint(&cats1), catalysts_fingerprint(&cats2));
     }
 }
