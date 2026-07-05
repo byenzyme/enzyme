@@ -219,11 +219,7 @@ fn fmt_fixed(x: f64, decimals: usize) -> String {
 // Collect: coverage (total files + invisible non-md breakdown)
 // ---------------------------------------------------------------------------
 
-fn collect_coverage(
-    vault_path: &Path,
-    md_files: &[PathBuf],
-    docs_in_db: u64,
-) -> Result<Coverage> {
+fn collect_coverage(vault_path: &Path, md_files: &[PathBuf], docs_in_db: u64) -> Result<Coverage> {
     // Reuse the same exclude patterns as FileDiscovery, but with NO include pattern
     // so all file types are counted.
     let vault_canon = vault_path
@@ -618,13 +614,11 @@ async fn collect_duplicate_sets(conn: &Connection) -> Result<DuplicateSets> {
     // sets are already sorted by (count DESC, content_hash ASC) from the SQL ORDER BY.
     // Within equal count, sort by first path ASC as a secondary tiebreak.
     sets.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| {
-                let pa = a.paths.first().map(|s| s.as_str()).unwrap_or("");
-                let pb = b.paths.first().map(|s| s.as_str()).unwrap_or("");
-                pa.cmp(pb)
-            })
+        b.count.cmp(&a.count).then_with(|| {
+            let pa = a.paths.first().map(|s| s.as_str()).unwrap_or("");
+            let pb = b.paths.first().map(|s| s.as_str()).unwrap_or("");
+            pa.cmp(pb)
+        })
     });
 
     Ok(DuplicateSets {
@@ -723,10 +717,7 @@ fn render_human(report: &DoctorReport) -> String {
 
     // Coverage
     out.push_str("coverage\n");
-    out.push_str(&format!(
-        "  total_files: {}\n",
-        report.coverage.total_files
-    ));
+    out.push_str(&format!("  total_files: {}\n", report.coverage.total_files));
     out.push_str(&format!("  md_files: {}\n", report.coverage.md_files));
     out.push_str(&format!("  docs_in_db: {}\n", report.coverage.docs_in_db));
     let inv_total = report.coverage.invisible_files.total;
@@ -802,10 +793,7 @@ fn render_human(report: &DoctorReport) -> String {
     out.push('\n');
 
     // Undated docs
-    out.push_str(&format!(
-        "undated_docs: {}\n",
-        report.undated_docs.len()
-    ));
+    out.push_str(&format!("undated_docs: {}\n", report.undated_docs.len()));
     if !report.undated_docs.is_empty() {
         out.push_str("  cause=date_fell_through_to_filesystem\n");
         let shown = report.undated_docs.len().min(HUMAN_LIST_LIMIT);
@@ -859,7 +847,11 @@ fn render_human(report: &DoctorReport) -> String {
         "  disk_newer_than_db: {}\n",
         report.stale_index.disk_newer_than_db.len()
     ));
-    let shown = report.stale_index.disk_newer_than_db.len().min(HUMAN_LIST_LIMIT);
+    let shown = report
+        .stale_index
+        .disk_newer_than_db
+        .len()
+        .min(HUMAN_LIST_LIMIT);
     for e in &report.stale_index.disk_newer_than_db[..shown] {
         out.push_str(&format!("    {}\n", e.path));
     }
@@ -873,7 +865,11 @@ fn render_human(report: &DoctorReport) -> String {
         "  db_rows_for_deleted_files: {}\n",
         report.stale_index.db_rows_for_deleted_files.len()
     ));
-    let shown = report.stale_index.db_rows_for_deleted_files.len().min(HUMAN_LIST_LIMIT);
+    let shown = report
+        .stale_index
+        .db_rows_for_deleted_files
+        .len()
+        .min(HUMAN_LIST_LIMIT);
     for e in &report.stale_index.db_rows_for_deleted_files[..shown] {
         out.push_str(&format!("    {}\n", e.path));
     }
@@ -905,7 +901,10 @@ fn render_human(report: &DoctorReport) -> String {
                 s.content_hash.clone()
             };
             let paths_str = s.paths.join(", ");
-            out.push_str(&format!("  n={}  hash={}  {}\n", s.count, hash_short, paths_str));
+            out.push_str(&format!(
+                "  n={}  hash={}  {}\n",
+                s.count, hash_short, paths_str
+            ));
         }
         if sets.len() > DUP_LIST_LIMIT {
             out.push_str(&format!(
@@ -1139,9 +1138,7 @@ mod tests {
         let conn = open_read_only_conn(&db_path).await.unwrap();
 
         // Write should fail
-        let result = conn
-            .execute("INSERT INTO test DEFAULT VALUES", ())
-            .await;
+        let result = conn.execute("INSERT INTO test DEFAULT VALUES", ()).await;
         assert!(result.is_err(), "write on read-only conn should fail");
 
         // WAL must still not exist after RO open
@@ -1233,10 +1230,7 @@ mod tests {
         let db_docs = vec![("mismatch.md".to_string(), "filesystem".to_string())];
         let anomalies = collect_frontmatter(root, &md_files, &db_docs).unwrap();
 
-        let entry = anomalies
-            .iter()
-            .find(|a| a.path == "mismatch.md")
-            .unwrap();
+        let entry = anomalies.iter().find(|a| a.path == "mismatch.md").unwrap();
         assert_eq!(entry.cause, "db_date_source_mismatch");
         assert_eq!(entry.frontmatter_created_present, Some(true));
     }
@@ -1284,10 +1278,7 @@ mod tests {
         fs::write(root.join("changed.md"), "new content").unwrap();
         // "deleted.md" is in DB but not on disk
 
-        let md_files = vec![
-            PathBuf::from("changed.md"),
-            PathBuf::from("current.md"),
-        ];
+        let md_files = vec![PathBuf::from("changed.md"), PathBuf::from("current.md")];
 
         // Compute actual hash for current.md
         let processor = DocumentProcessor::new(root.to_path_buf());
@@ -1472,7 +1463,11 @@ mod tests {
         let root = dir.path();
 
         // Write files that exercise multiple sections
-        fs::write(root.join("a.md"), "---\ntitle: A\ncreated: 2024-01-01\n---\nbody").unwrap();
+        fs::write(
+            root.join("a.md"),
+            "---\ntitle: A\ncreated: 2024-01-01\n---\nbody",
+        )
+        .unwrap();
         fs::write(root.join("b.md"), "---\ntitle: [bad\n---\nbody").unwrap();
         fs::write(root.join("c.json"), "{}").unwrap();
 
