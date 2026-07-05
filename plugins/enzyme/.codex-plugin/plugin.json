@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
   "description": "Set up and keep Enzyme fresh for local knowledge vaults",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/jshph"
@@ -14,10 +14,10 @@
   "interface": {
     "displayName": "Enzyme",
     "shortDescription": "Set up semantic memory for your vault",
-    "longDescription": "Enzyme scans a local Markdown or Obsidian vault, confirms the entities and exclusions to persist, initializes the local index, and keeps it fresh while the app runs.",
+    "longDescription": "Enzyme scans a local Markdown or Obsidian vault, confirms the entities and exclusions to persist, initializes the local index, and gives agents explicit retrieval and refresh workflows.",
     "developerName": "Joshua Pham",
     "category": "Productivity",
-    "capabilities": ["Local indexing", "Lifecycle refresh", "Vault setup"],
+    "capabilities": ["Local indexing", "Explicit refresh", "Vault setup"],
     "websiteURL": "https://enzyme.garden",
     "defaultPrompt": [
       "Set up Enzyme for this vault.",

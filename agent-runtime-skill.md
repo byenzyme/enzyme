@@ -16,11 +16,19 @@ Vault path: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory.
 
 For Hermes, this skill is for operational use inside a user's workspace, not for developing Hermes itself. Run Enzyme from the directory where Hermes is launched so the same `AGENTS.md`/`.hermes.md` context and markdown corpus are visible to both.
 
-Prerequisite: the Enzyme CLI binary must already be installed. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
+Prerequisite: check the installed binary first with `enzyme --version`. If the binary is missing, install Enzyme before setup. If Enzyme is installed but old, tell the user you are upgrading Enzyme to the latest release before setup, then run the normal installer path. If the pre-upgrade version is older than `0.5.8`, warn that older Enzyme releases used a different auth/provider contract; after upgrading, ask before clearing stale authentication. Never delete `~/.enzyme/auth.json` or run `enzyme logout` without explicit confirmation. If this skill is loaded, runtime instructions are already available; do not call `enzyme install <runtime>` as part of normal vault setup.
 
 Auth and provider safety: let Enzyme decide when auth is needed. Do not preflight `~/.enzyme/auth.json` or start login before a command asks for it. If an Enzyme command reports that login is required, start device login in the background, read JSONL events from `/tmp/enzyme-login.log`, show the verification URI/code when present, wait for success/error/expiry, then retry the original command. Never ask the user to paste API keys or auth tokens.
 
-Never print API key values. It is safe to inspect only which variables exist, for example with `env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'`. Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of env vars without printing values and pass `--use-env-llm`:
+Never print API key values. During setup, before `enzyme init`, inspect only which LLM env variable names exist:
+
+```bash
+env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'
+```
+
+Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. If `OPENAI_API_KEY` is present, warn that using env credentials intentionally should normally include the complete OpenAI-compatible triple: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. A bare `OPENAI_API_KEY` falls back to OpenAI defaults, which can produce unauthorized/provider-mismatch errors when the key actually belongs to OpenRouter, a local proxy, or another compatible provider. If only model/base-url vars are present without a matching key, treat it as partial env config and do not use it.
+
+Default setup should omit `--use-env-llm` and let Enzyme use hosted bootstrap/auth. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of the needed env var names without printing values and pass `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm
@@ -71,7 +79,7 @@ Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence f
 - the proposed stance for ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
 - 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes;
 - how the demo should show the map-to-connection loop: Enzyme's precomputed questions help the agent recognize active ideas, then source-grounded retrieval places notes beside each other so a useful question appears;
-- any external corpora that could be searched with `enzyme apply`;
+- any external corpora that could be searched with `enzyme catalyze --target`;
 - if the vault would materially benefit, a minimal high-confidence retrieval repair offer before init, with exact scope and user confirmation.
 
 Ask for corrections to that stance before writing config. Do not ask the user to classify the vault up front.
@@ -88,7 +96,7 @@ Use profile overrides only when the posture is clear. Loose examples: people/rel
 
 Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.agents`, `.codex`, `.codex-work`, `.pi`, `.local`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
 
-For persistent `targets = [...]` / `enzyme apply` targets, use raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
+For persistent `targets = [...]` entries, use raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
 
 For voice agents that need an immediate first turn, use:
 
@@ -102,6 +110,8 @@ It returns once seed petri context exists; semantic search becomes available aft
 
 Explain setup/refresh simply when useful: init is the slow compile step that turns the vault into source-grounded questions; refresh is how new notes join that compiled map; normal retrieval is fast because the agent uses those precomputed handles instead of starting from scratch.
 
+Claude/Codex plugin installation does not install Petri or refresh hooks by default. Do not create `.claude/hooks/enzyme-petri.sh`, mutate `.claude/settings.json`, or rely on automatic prompt injection during normal setup. Use `enzyme petri` and `enzyme catalyze` explicitly when context is needed.
+
 What's automatic depends on your runtime:
 
 **Hermes** (hooks handle it):
@@ -114,11 +124,11 @@ What's automatic depends on your runtime:
 **OpenClaw** (skill instructions + config):
 
 - **Session start** — run `enzyme refresh --quiet` (add to AGENTS.md or heartbeat)
-- **First turn / context-dependent turns** — run `enzyme petri --query "user's message"` before responding, unless the plugin already injected petri context
+- **First turn / context-dependent turns** — run `enzyme petri --query "user's message"` before responding
 - **Session end** — write useful markdown notes if the session produced durable memory, then run `enzyme refresh --quiet`
 - **Between sessions** — heartbeat or cron can keep the index fresh for external syncs (see README for config)
 
-In both cases: use petri and catalyze as tools. The difference is whether context injection is automatic (Hermes hooks) or agent-driven (OpenClaw skill instructions).
+In both cases: use petri and catalyze as tools. The difference is whether context injection is automatic in the host runtime (Hermes) or agent-driven from these instructions.
 
 ## First Value Demo
 
@@ -178,18 +188,18 @@ Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect 
 - `enzyme refresh --quiet` re-indexes changed content.
 - Use exact search for names, source titles, distinctive phrases, `#tags`, `[[wikilinks]]`, and literal text.
 - For annotated reference/import vaults, if the user names a title or phrase, find that obvious note first with exact search, then use petri/catalyze to connect it to adjacent material.
+- `enzyme catalyze "query" --target ./target-dir` prepares external content using vault catalysts, then searches it.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
 
-### External references with `enzyme apply`
+### External References
 
-Use `enzyme apply ./target-dir` when the user wants to draw from external material without merging it into the vault: Readwise exports, articles/books, transcripts, research dumps, client docs, code repos, converted PDFs, Discord/Slack exports, or downloaded archives.
+Use `enzyme catalyze "query" --target ./target-dir` when the user wants to draw from external material without merging it into the vault: Readwise exports, articles/books, transcripts, research dumps, client docs, code repos, converted PDFs, Discord/Slack exports, or downloaded archives. Enzyme prepares the target automatically on first use.
 
 ```bash
-enzyme apply ./target-dir
 enzyme catalyze "query" --target ./target-dir
 ```
 
-Apply projects the source vault's catalysts onto the target corpus:
+Target search projects the source vault's catalysts onto the target corpus:
 
 ```text
 source vault catalysts → external target chunks
@@ -202,11 +212,11 @@ enzyme catalyze "query"
 enzyme catalyze "query" --target ./target-dir
 ```
 
-Present it as: "I searched your own notes for the internal thread, then searched the external material through the same conceptual frame." Mention that `apply` may miss themes that exist only in the target and not in the user's vault.
+Present it as: "I searched your own notes for the internal thread, then searched the external material through the same conceptual frame." Mention that target search may miss themes that exist only in the target and not in the user's vault.
 
 ## Writing Notes
 
-Write runtime memory as ordinary markdown observations, not as a separate memory store. The point is to leave sparse, source-linked notes that Enzyme can refresh and retrieve through Petri, Catalyze, and Apply when a durable conclusion, commitment, reframe, or open loop is worth carrying forward.
+Write runtime memory as ordinary markdown observations, not as a separate memory store. The point is to leave sparse, source-linked notes that Enzyme can refresh and retrieve through Petri and Catalyze when a durable conclusion, commitment, reframe, or open loop is worth carrying forward.
 
 The best time to write is near the end of a session or after a meaningful decision, when the durable outcome is clear. Do not interrupt the user's flow to capture routine Q&A.
 

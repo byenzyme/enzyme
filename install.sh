@@ -58,6 +58,16 @@ if [ -f "$tmpdir/config.toml.bak" ]; then
     mv "$tmpdir/config.toml.bak" "$HOME/.enzyme/config.toml"
 fi
 
+# Remove legacy generated embedding model cache. Current Enzyme uses the
+# compiled-in ESE backend, so these files are stale app state, not user data.
+legacy_model_dir="$HOME/.cache/enzyme/models"
+if [ -d "$legacy_model_dir" ] && \
+   { [ -f "$legacy_model_dir/model.safetensors" ] || \
+     [ -f "$legacy_model_dir/tokenizer.json" ] || \
+     [ -f "$legacy_model_dir/config.json" ]; }; then
+    rm -rf "$legacy_model_dir"
+fi
+
 # Clean up legacy enzyme-python installation
 legacy=""
 

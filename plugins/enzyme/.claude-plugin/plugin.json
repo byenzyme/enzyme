@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
   "description": "Set up and keep Enzyme fresh for local knowledge vaults",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/jshph"
@@ -10,6 +10,5 @@
   "repository": "https://github.com/jshph/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
-  "skills": "./skills/",
-  "hooks": "./.claude-plugin/hooks/hooks.json"
+  "skills": "./skills/"
 }
