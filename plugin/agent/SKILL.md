@@ -192,6 +192,7 @@ Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect 
 - `enzyme refresh --quiet` re-indexes changed content.
 - Use exact search for names, source titles, distinctive phrases, `#tags`, `[[wikilinks]]`, and literal text.
 - For annotated reference/import vaults, if the user names a title or phrase, find that obvious note first with exact search, then use petri/catalyze to connect it to adjacent material.
+- `enzyme catalyze "query" --target ./target-dir` prepares external content using vault catalysts, then searches it.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
 
 ### External References
