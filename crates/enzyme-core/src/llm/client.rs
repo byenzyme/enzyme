@@ -1010,15 +1010,19 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
     match fetch_free_config().await {
         Ok(cfg) => {
             write_free_config_cache(cache_path, &cfg);
-            return Ok(cfg);
+            Ok(cfg)
         }
-        Err(e) => {
-            debug!("Failed to fetch free config from server: {}", e);
-        }
+        Err(e) => bail!(hosted_config_unavailable_message(&e)),
     }
+}
 
-    bail!(
-        "No hosted Enzyme LLM config available. Run `enzyme login` and ensure \
+/// Keep the specific hosted failure (insufficient credits, login required,
+/// server unreachable) visible in the single-line error the CLI prints,
+/// since most callers format errors with `{}` and would otherwise show only
+/// a generic message.
+fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
+    format!(
+        "{cause:#}. No hosted Enzyme LLM config available — run `enzyme login` and ensure \
          network access/credits, or pass `--use-env-llm` to intentionally use \
          OPENAI_API_KEY or OPENROUTER_API_KEY."
     )
@@ -1085,6 +1089,16 @@ mod tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         move |key| values.get(key).cloned()
+    }
+
+    #[test]
+    fn hosted_unavailable_message_preserves_specific_cause() {
+        let cause = anyhow::anyhow!(
+            "Insufficient credits (0.0 remaining). Visit app.enzyme.garden/plans to top up."
+        );
+        let msg = hosted_config_unavailable_message(&cause);
+        assert!(msg.contains("Insufficient credits (0.0 remaining)"));
+        assert!(msg.contains("--use-env-llm"));
     }
 
     #[test]
