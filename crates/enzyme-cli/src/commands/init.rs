@@ -31,7 +31,7 @@ use enzyme_core::pipeline::staleness::{
 use super::lock::{acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
-use enzyme_core::config::auth::{AuthToken, require_login};
+use enzyme_core::config::auth::AuthToken;
 
 async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
     if use_env_llm {
@@ -77,6 +77,10 @@ fn byok_active() -> bool {
         .ok()
         .filter(|v| !v.is_empty())
         .is_some()
+}
+
+fn catalyst_generation_planned(entities: &[Entity]) -> bool {
+    !entities.is_empty()
 }
 
 fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
@@ -455,10 +459,6 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    if !use_env_llm && !byok_active() {
-        require_login_for_hosted_init_if_needed(vault_path, &paths)?;
-    }
-    preflight_env_llm(use_env_llm).await?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -484,51 +484,6 @@ pub async fn run_init(
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
 
-    // Resolve API config early (needed for both LLM selection and catalyst generation)
-    let llm_mode = if use_env_llm {
-        LlmCredentialMode::Env
-    } else {
-        LlmCredentialMode::Hosted
-    };
-    let api_config = match resolve_llm_client_for_mode(llm_mode).await {
-        Ok(resolved) => Some(resolved),
-        Err(e) => {
-            if use_env_llm {
-                return Err(e)
-                    .context("--use-env-llm was set but no env LLM config could be resolved");
-            }
-            tracing::warn!("API config resolution failed: {}", e);
-            None
-        }
-    };
-
-    // Free-tier preflight: deduct 3 credits up front so we fail fast on
-    // insufficient balance instead of running embedding + N catalyst calls.
-    // BYOK users pay their own inference and skip this gate.
-    let is_free_tier = api_config.as_ref().map_or(false, |(cfg, _)| {
-        matches!(
-            cfg.provider,
-            enzyme_core::llm::ConfigProvider::ServerFallback
-        )
-    });
-    if is_free_tier {
-        let auth_path = paths.auth_token();
-        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-            let remaining =
-                enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init").await?;
-            if remaining <= 3.0 && !quiet {
-                eprintln!(
-                    "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
-                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                    remaining,
-                    crossterm::style::ResetColor,
-                );
-            }
-        } else {
-            debug!("hosted init has no login token; skipping account credit preflight");
-        }
-    }
-
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     // Run with animated display, then finish it before the interactive prompt.
     let idx_stats = {
@@ -540,17 +495,6 @@ pub async fn run_init(
             InitDisplay::start()
         };
         let tx = idx_display.sender();
-
-        if let Some((ref cfg, _)) = api_config {
-            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::Env) {
-                tx.send(DisplayEvent::ApiConfig {
-                    base_url: cfg.base_url.clone(),
-                    model: cfg.model.clone(),
-                    masked_key: cfg.masked_api_key(),
-                })
-                .ok();
-            }
-        }
 
         tx.send(DisplayEvent::IndexingStart).ok();
         let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
@@ -616,6 +560,71 @@ pub async fn run_init(
         source: sel_result.source.clone(),
     })
     .ok();
+
+    let api_config = if catalyst_generation_planned(&sel_result.entities) {
+        if !use_env_llm && !byok_active() {
+            require_login_for_hosted_init_if_needed(vault_path, &paths)?;
+        }
+
+        let llm_mode = if use_env_llm {
+            LlmCredentialMode::Env
+        } else {
+            LlmCredentialMode::Hosted
+        };
+        let resolved = match resolve_llm_client_for_mode(llm_mode).await {
+            Ok(resolved) => Some(resolved),
+            Err(e) => {
+                if use_env_llm {
+                    return Err(e)
+                        .context("--use-env-llm was set but no env LLM config could be resolved");
+                }
+                tracing::warn!("API config resolution failed: {}", e);
+                None
+            }
+        };
+
+        if let Some((ref cfg, _)) = resolved {
+            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::Env) {
+                tx.send(DisplayEvent::ApiConfig {
+                    base_url: cfg.base_url.clone(),
+                    model: cfg.model.clone(),
+                    masked_key: cfg.masked_api_key(),
+                })
+                .ok();
+            }
+        }
+
+        // Free-tier preflight: deduct 3 credits only when catalyst generation
+        // will run. BYOK users pay their own inference and skip this gate.
+        if resolved.as_ref().map_or(false, |(cfg, _)| {
+            matches!(
+                cfg.provider,
+                enzyme_core::llm::ConfigProvider::ServerFallback
+            )
+        }) {
+            let auth_path = paths.auth_token();
+            if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+                let remaining =
+                    enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init")
+                        .await?;
+                if remaining <= 3.0 && !quiet {
+                    eprintln!(
+                        "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
+                        crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                        remaining,
+                        crossterm::style::ResetColor,
+                    );
+                }
+            } else {
+                debug!("hosted init has no login token; skipping account credit preflight");
+            }
+        }
+
+        resolved
+    } else {
+        debug!("init selected no entities; skipping LLM credential resolution");
+        None
+    };
 
     // ── Step 2b: Build XML context from DB ───────────────────────────────
     let vault_context = {
@@ -1029,12 +1038,6 @@ pub async fn run_refresh(
     min_top_catalysts: Option<usize>,
     use_env_llm: bool,
 ) -> Result<()> {
-    let paths = EnzymePaths::new(vault_path)?;
-    if !use_env_llm {
-        require_login(&paths.auth_token())?;
-    }
-    preflight_env_llm(use_env_llm).await?;
-
     if detached {
         return run_refresh_detached(vault_path, use_env_llm).await;
     }
@@ -1152,7 +1155,7 @@ fn has_index_changes(stats: &IndexingStats) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmbeddingRefreshPlan {
-    Skip,
+    Backlog,
     SinceIndexStart,
 }
 
@@ -1160,7 +1163,7 @@ fn embedding_refresh_plan(has_index_changes: bool) -> EmbeddingRefreshPlan {
     if has_index_changes {
         EmbeddingRefreshPlan::SinceIndexStart
     } else {
-        EmbeddingRefreshPlan::Skip
+        EmbeddingRefreshPlan::Backlog
     }
 }
 
@@ -1178,7 +1181,7 @@ fn refresh_changed_doc_embeddings(
 
     let pipeline = EmbeddingPipeline::new(db, service);
     let result = match embedding_refresh_plan(has_index_changes) {
-        EmbeddingRefreshPlan::Skip => return false,
+        EmbeddingRefreshPlan::Backlog => pipeline.run_with_limit(max_embed, |_| {}),
         EmbeddingRefreshPlan::SinceIndexStart => {
             pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {})
         }
@@ -1827,12 +1830,18 @@ mod tests {
     }
 
     #[test]
-    fn embedding_refresh_skips_when_indexing_has_no_changes() {
-        assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Skip);
+    fn embedding_refresh_checks_backlog_when_indexing_has_no_changes() {
+        assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Backlog);
         assert_eq!(
             embedding_refresh_plan(true),
             EmbeddingRefreshPlan::SinceIndexStart
         );
+    }
+
+    #[test]
+    fn catalyst_credentials_are_needed_only_when_entities_exist() {
+        assert!(!catalyst_generation_planned(&[]));
+        assert!(catalyst_generation_planned(&[entity("alpha")]));
     }
 
     #[test]

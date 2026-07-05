@@ -11,6 +11,8 @@ use crate::models::Timestamp;
 // Constants
 // ---------------------------------------------------------------------------
 
+const EMBEDDING_BACKEND_CONFIG_KEY: &str = "embedding.backend";
+
 /// Maximum number of documents to embed per run (most recent by `created_at`).
 /// Mirrors `MAX_EMBEDDING_FILES` from the Python implementation.
 pub const MAX_EMBEDDING_FILES: usize = 1024;
@@ -96,6 +98,24 @@ impl<'a> EmbeddingPipeline<'a> {
         on_progress: impl Fn(EmbeddingProgress),
     ) -> Result<EmbeddingStats> {
         let start = Instant::now();
+        let mut indexed_since = indexed_since;
+
+        let backend_id = format!(
+            "{}:{}",
+            self.service.backend_name(),
+            self.service.dimension()
+        );
+        let backend_reset = self.db.reset_generated_vector_state_if_backend_changed(
+            EMBEDDING_BACKEND_CONFIG_KEY,
+            &backend_id,
+        )?;
+        if backend_reset {
+            info!(
+                backend = backend_id.as_str(),
+                "reset generated vector state for embedding backend"
+            );
+            indexed_since = None;
+        }
 
         // Step 1: Prune stale chunk embeddings for deleted docs.
         let documents_pruned = self.db.prune_stale_chunk_embeddings()?;
