@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod benchmark;
 pub mod catalyze;
+pub mod doctor;
 pub mod dump_prompts;
 pub mod embed_entries;
 pub mod ingest;

@@ -213,6 +213,13 @@ enum Commands {
         conditions: Vec<String>,
     },
 
+    /// Report vault diagnostic facts (read-only; never writes)
+    Doctor {
+        /// Emit structured JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Dump catalyst prompts to JSONL for training data generation
     DumpPrompts {
         /// Output file path (JSONL)
@@ -443,6 +450,9 @@ async fn main() -> Result<()> {
         }
         Commands::Publish { json } => {
             commands::publish::run_publish(&vault_path, json).await?;
+        }
+        Commands::Doctor { json } => {
+            commands::doctor::run_doctor(&vault_path, json).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
         Commands::Mcp => unreachable!(),
