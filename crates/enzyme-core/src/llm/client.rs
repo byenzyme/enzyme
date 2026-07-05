@@ -290,8 +290,10 @@ struct ChatCompletionRequest {
     messages: Vec<Message>,
     #[serde(flatten)]
     token_limit: CompletionTokenLimit,
-    temperature: f32,
-    top_p: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_k: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +307,77 @@ struct ChatCompletionRequest {
 enum CompletionTokenLimit {
     MaxTokens { max_tokens: u32 },
     MaxCompletionTokens { max_completion_tokens: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    OpenAi,
+    OpenRouter,
+    Anthropic,
+    Gemini,
+    Local,
+    Unknown,
+}
+
+impl ProviderKind {
+    fn detect(base_url: &str) -> Self {
+        let url = base_url.to_lowercase();
+        if url.contains("openrouter.ai") {
+            Self::OpenRouter
+        } else if url.contains("api.openai.com") {
+            Self::OpenAi
+        } else if url.contains("api.anthropic.com") {
+            Self::Anthropic
+        } else if url.contains("generativelanguage.googleapis.com")
+            || url.contains("googleapis.com")
+        {
+            Self::Gemini
+        } else if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
+        {
+            Self::Local
+        } else {
+            Self::Unknown
+        }
+    }
+
+    fn structured_output_support(self) -> StructuredOutputSupport {
+        match self {
+            // OpenRouter normalizes response_format across providers; preserve
+            // existing behavior, including json_schema for catalyst extraction.
+            Self::OpenRouter | Self::OpenAi | Self::Gemini | Self::Local | Self::Unknown => {
+                StructuredOutputSupport::JsonSchema
+            }
+            // Anthropic's OpenAI-compatible endpoint documents response_format
+            // as ignored, so sending it gives callers false confidence.
+            Self::Anthropic => StructuredOutputSupport::None,
+        }
+    }
+
+    fn supports_top_k(self) -> bool {
+        matches!(self, Self::OpenRouter | Self::Local | Self::Unknown)
+    }
+
+    fn should_send_top_p(self, model: &str) -> bool {
+        // OpenRouter accepts and normalizes top_p; keep backward compatibility
+        // even when the routed model is Anthropic.
+        if self == Self::OpenRouter {
+            return true;
+        }
+
+        // Claude 4-family endpoints have model-specific sampling restrictions
+        // around temperature/top_p. Keeping temperature and dropping top_p
+        // preserves Enzyme's caller intent while avoiding provider 400s.
+        if self == Self::Anthropic && is_claude_4_family(model) {
+            return false;
+        }
+
+        true
+    }
+}
+
+fn is_claude_4_family(model: &str) -> bool {
+    let model = model.to_lowercase();
+    model.contains("claude") && (model.contains("-4") || model.contains("opus-4"))
 }
 
 fn completion_token_limit(base_url: &str, model: &str, max_tokens: u32) -> CompletionTokenLimit {
@@ -335,16 +408,33 @@ fn chat_completion_request(
     params: GenerationParams,
     stream: Option<bool>,
 ) -> ChatCompletionRequest {
+    let provider = ProviderKind::detect(base_url);
+    let response_format = if provider.structured_output_support() == StructuredOutputSupport::None {
+        None
+    } else {
+        params.response_format
+    };
+
     ChatCompletionRequest {
         model: model.to_string(),
         messages,
         token_limit: completion_token_limit(base_url, model, params.max_tokens),
-        temperature: params.temperature,
-        top_p: params.top_p,
-        top_k: params.top_k,
-        response_format: params.response_format,
+        temperature: Some(params.temperature),
+        top_p: provider.should_send_top_p(model).then_some(params.top_p),
+        top_k: provider.supports_top_k().then_some(params.top_k).flatten(),
+        response_format,
         stream,
     }
+}
+
+fn chat_completions_url(base_url: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(base_url)
+        .with_context(|| format!("Invalid LLM base URL: {base_url}"))?;
+    let path = url.path().trim_end_matches('/');
+    url.set_path(&format!("{path}/chat/completions"));
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
 }
 
 #[derive(Deserialize)]
@@ -453,7 +543,7 @@ impl LlmClient {
 
     /// Detect structured output support for this client's provider.
     pub fn structured_output_support(&self) -> StructuredOutputSupport {
-        StructuredOutputSupport::detect(&self.base_url)
+        ProviderKind::detect(&self.base_url).structured_output_support()
     }
 
     /// Read the current API key.
@@ -561,7 +651,7 @@ impl LlmClient {
         messages: Vec<Message>,
         params: GenerationParams,
     ) -> Result<String> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = chat_completions_url(&self.base_url)?;
 
         let request_body = chat_completion_request(&self.base_url, model, messages, params, None);
 
@@ -600,7 +690,7 @@ impl LlmClient {
         messages: Vec<Message>,
         params: GenerationParams,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = chat_completions_url(&self.base_url)?;
 
         let request_body =
             chat_completion_request(&self.base_url, model, messages, params, Some(true));
@@ -1046,6 +1136,26 @@ mod tests {
     }
 
     #[test]
+    fn chat_completions_url_trims_trailing_slashes() {
+        assert_eq!(
+            chat_completions_url("https://api.openai.com/v1/").unwrap(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://api.anthropic.com/v1///").unwrap(),
+            "https://api.anthropic.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_preserves_base_path_and_drops_query() {
+        assert_eq!(
+            chat_completions_url("https://example.test/proxy/openai?debug=1#frag").unwrap(),
+            "https://example.test/proxy/openai/chat/completions"
+        );
+    }
+
+    #[test]
     fn openai_requests_use_max_completion_tokens() {
         let request = chat_completion_request(
             OPENAI_DEFAULT_BASE_URL,
@@ -1097,5 +1207,73 @@ mod tests {
         let json = serde_json::to_value(request).unwrap();
         assert_eq!(json["max_tokens"], 123);
         assert!(json.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn anthropic_claude_4_requests_omit_top_p_and_response_format() {
+        let request = chat_completion_request(
+            "https://api.anthropic.com/v1",
+            "claude-sonnet-4-5",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                max_tokens: 123,
+                temperature: 0.4,
+                top_p: 0.8,
+                response_format: Some(ResponseFormat::JsonObject),
+                ..GenerationParams::default()
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+        assert!((json["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+        assert_eq!(json["max_tokens"], 123);
+        assert!(json.get("top_p").is_none());
+        assert!(json.get("response_format").is_none());
+    }
+
+    #[test]
+    fn openrouter_preserves_sampling_and_response_format() {
+        let request = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "anthropic/claude-sonnet-4-5",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                top_p: 0.8,
+                top_k: Some(40),
+                response_format: Some(ResponseFormat::JsonObject),
+                ..GenerationParams::default()
+            },
+            None,
+        );
+
+        let json = serde_json::to_value(request).unwrap();
+        assert!((json["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+        assert!((json["top_p"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(json["top_k"], 40);
+        assert_eq!(json["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn top_k_is_dropped_for_strict_openai_compatible_providers() {
+        for base_url in [
+            OPENAI_DEFAULT_BASE_URL,
+            "https://api.anthropic.com/v1",
+            "https://generativelanguage.googleapis.com/v1beta/openai/",
+        ] {
+            let request = chat_completion_request(
+                base_url,
+                "gpt-4o-mini",
+                vec![Message::text("user", "hello")],
+                GenerationParams {
+                    top_k: Some(40),
+                    ..GenerationParams::default()
+                },
+                None,
+            );
+
+            let json = serde_json::to_value(request).unwrap();
+            assert!(json.get("top_k").is_none());
+        }
     }
 }
