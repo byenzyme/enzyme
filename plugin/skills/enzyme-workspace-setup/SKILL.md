@@ -1,6 +1,6 @@
 ---
 name: enzyme-workspace-setup
-description: Diagnose a Markdown vault read-only against what Enzyme actually indexed, prove value on one real note, then propose only minimal, consented retrieval repairs. Never edits note bodies.
+description: One-time Enzyme workspace setup. Use only for first-time setup of an uninitialized vault, or when retrieval seems broken and the user asks to re-diagnose. Diagnoses read-only against what Enzyme actually indexed, proves value on one real note, then proposes only minimal, consented repairs. Never edits note bodies. Do not use for routine search or retrieval in an already initialized vault.
 allowed-tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 

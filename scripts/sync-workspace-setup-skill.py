@@ -33,6 +33,13 @@ MARGINS_WRAPPER = (
     / "margins-workspace-setup" / "SKILL.md"
 )
 
+# The Claude Code plugin ships the same skill; kept as a byte-identical mirror
+# so the plugin never drifts from the canonical source.
+PLUGIN_VENDORED = (
+    ROOT / "plugin" / "plugins" / "enzyme" / "skills"
+    / "enzyme-workspace-setup" / "SKILL.md"
+)
+
 # §6 content anchors — every string must appear in the canonical skill text.
 CONTENT_ANCHORS = [
     "Never delete `~/.enzyme/auth.json`",
@@ -141,6 +148,19 @@ def check(args: argparse.Namespace) -> None:
             f"  Run: python3 scripts/sync-workspace-setup-skill.py"
         )
 
+    # 1b. Byte-identity: Claude plugin copy == canonical (same repo, always checked).
+    if PLUGIN_VENDORED.exists():
+        if PLUGIN_VENDORED.read_text() != canonical_text:
+            errors.append(
+                f"FAIL byte-identity: {PLUGIN_VENDORED} differs from {CANONICAL}.\n"
+                f"  Run: python3 scripts/sync-workspace-setup-skill.py"
+            )
+    else:
+        errors.append(
+            f"FAIL byte-identity: {PLUGIN_VENDORED} does not exist.\n"
+            f"  Run: python3 scripts/sync-workspace-setup-skill.py"
+        )
+
     # 2. Content anchors: every anchor must appear in the canonical text.
     missing_anchors = [a for a in CONTENT_ANCHORS if a not in canonical_text]
     if missing_anchors:
@@ -191,6 +211,10 @@ def main() -> None:
     if args.check:
         check(args)
         return
+
+    PLUGIN_VENDORED.parent.mkdir(parents=True, exist_ok=True)
+    PLUGIN_VENDORED.write_text(CANONICAL.read_text())
+    print(f"synced {PLUGIN_VENDORED} from {CANONICAL}")
 
     if not ASIDE_ROOT.is_dir():
         raise SystemExit(
