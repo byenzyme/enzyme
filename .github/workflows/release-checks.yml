@@ -1,0 +1,52 @@
+name: Release checks
+
+# Deterministic release integration checks (see docs/release-checks.md).
+# Linux-only by design: macOS and the agentic journeys run locally via
+# `make release-check` / `make release-check-agentic` to avoid the 10x
+# macOS-minute multiplier and agent token spend.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "crates/**"
+      - "plugin/**"
+      - "scripts/**"
+      - "tests/fixtures/**"
+      - "Makefile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release-checks.yml"
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure private git deps
+        run: git config --global url."https://x-access-token:${{ secrets.FLOWER_COMPUTERS_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build enzyme-cli
+        run: cargo build -p enzyme-cli
+
+      - name: Install matrix
+        run: bash scripts/release-checks/10-install-matrix.sh
+
+      - name: Sync contract
+        run: bash scripts/release-checks/20-sync-contract.sh
+
+      # The full tier exercises the loginless hosted bootstrap against
+      # enzyme.garden — the real cold-start path — from a clean environment.
+      - name: Vault lifecycle
+        run: bash scripts/release-checks/30-vault-lifecycle.sh
