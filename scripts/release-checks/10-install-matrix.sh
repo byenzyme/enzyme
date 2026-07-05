@@ -35,9 +35,13 @@ tmp_openclaw=$(mktemp -d)
 HOME="$tmp_home" OPENCLAW_HOME="$tmp_openclaw" "$ENZYME_BIN" -p "$tmp_workspace" install openclaw --source local >/dev/null 2>&1
 check "openclaw: SKILL.md installed" test -f "$tmp_openclaw/skills/enzyme/SKILL.md"
 
-# Codex install path has its own script; run it if present
-if [ -x "$REPO_ROOT/scripts/test_codex_skill_install.sh" ]; then
-  check "codex: skill install script" "$REPO_ROOT/scripts/test_codex_skill_install.sh"
+# Codex install path has its own script; it requires the codex CLI on PATH
+# even in install-only mode, so skip (loudly) where codex is unavailable.
+if command -v codex >/dev/null 2>&1; then
+  check "codex: skill install script" \
+    env ENZYME_BIN="$ENZYME_BIN" "$REPO_ROOT/scripts/test_codex_skill_install.sh"
+else
+  echo "  skip codex: skill install script (codex CLI not on PATH)"
 fi
 
 report "install-matrix"
