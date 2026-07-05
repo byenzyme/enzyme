@@ -1,4 +1,4 @@
-.PHONY: install build-native install-native native-cpu sync-agent-skill check-agent-skill bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native
+.PHONY: install build-native install-native native-cpu sync-agent-skill check-agent-skill sync-workspace-skill check-workspace-skill bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native
 
 # Build release binary and install to cargo bin
 install:
@@ -26,6 +26,14 @@ sync-agent-skill:
 
 check-agent-skill:
 	python3 scripts/sync-agent-runtime-skill.py --check
+
+# Keep the vendored aside workspace-setup skill in sync with the canonical
+# enzyme-rust source at plugin/skills/enzyme-workspace-setup/SKILL.md.
+sync-workspace-skill:
+	python3 scripts/sync-workspace-setup-skill.py
+
+check-workspace-skill:
+	python3 scripts/sync-workspace-setup-skill.py --check
 
 # Microbenchmark ESE encoding and 512-dim cosine loops with portable CPU settings.
 bench-cpu-portable:

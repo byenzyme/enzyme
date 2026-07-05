@@ -12,7 +12,7 @@ The durable promise:
 
 Nothing but additive artifacts is written before the single consent gate: at most one proof note and temporary diagnostic/backup artifacts. A "no" ends cleanly, vault unchanged except for any proof note the user has already seen and accepted.
 
-Speak in terms of what the user sees in their own files, not engine internals. Engine evidence guides you; the user hears it translated. Numbers are fine, internals are not: avoid DB column names, "dated fraction," "embedding budget," "indexed," or "checksum" in user-facing copy. Say what it means: "this note's date is not being read," "the engine stores this twice," "I checked every file came back exactly as it was."
+Speak in terms of what the user sees in their own files, not engine internals. Engine evidence guides you; the user hears it translated. Numbers are fine, internals are not: avoid DB column names, doctor cause tokens, "dated fraction," "embedding budget," "catalyst," "indexed," or "checksum" in user-facing copy. Say what it means: "this note's date is not being read," "the engine stores this twice," "I checked every file came back exactly as it was." Before sending any user-facing message, reread it as the user: rewrite every phrase they could not say back to you in their own words.
 
 ## Inputs
 
