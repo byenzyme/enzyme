@@ -1586,6 +1586,74 @@ impl Database {
         Ok(rows.into_iter().next())
     }
 
+    /// Clear generated vector-derived state when the embedding backend changes.
+    ///
+    /// This preserves user notes, indexed documents, chunks, catalysts, targets,
+    /// and config, but forces document embeddings and catalyst similarities to
+    /// be rebuilt in the current embedding space.
+    pub fn reset_generated_vector_state_if_backend_changed(
+        &self,
+        key: &str,
+        backend_id: &str,
+    ) -> Result<bool> {
+        if self.get_config(key)?.as_deref() == Some(backend_id) {
+            return Ok(false);
+        }
+
+        let has_generated_state = self
+            .query_read(
+                "SELECT EXISTS(SELECT 1 FROM chunk_embeddings)
+                    OR EXISTS(SELECT 1 FROM catalyst_embeddings_packed)
+                    OR EXISTS(SELECT 1 FROM catalyst_similarities)
+                    OR EXISTS(SELECT 1 FROM context_cache)
+                    OR EXISTS(
+                        SELECT 1 FROM docs
+                        WHERE embedded_at IS NOT NULL
+                           OR embedded_content_hash IS NOT NULL
+                    )",
+                vec![],
+                |row| row.get::<i64>(0),
+            )?
+            .into_iter()
+            .next()
+            .unwrap_or(0)
+            != 0;
+
+        let key = key.to_string();
+        let backend_id = backend_id.to_string();
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("failed to begin generated vector reset")?;
+
+            if has_generated_state {
+                tx.execute(
+                    "UPDATE docs SET embedded_at = NULL, embedded_content_hash = NULL",
+                    (),
+                )
+                .await?;
+                tx.execute("DELETE FROM chunk_embeddings", ()).await?;
+                tx.execute("DELETE FROM catalyst_embeddings_packed", ())
+                    .await?;
+                tx.execute("DELETE FROM catalyst_similarities", ()).await?;
+                tx.execute("DELETE FROM context_cache", ()).await?;
+            }
+            tx.execute(
+                "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                vec![Value::Text(key), Value::Text(backend_id)],
+            )
+            .await?;
+
+            tx.commit()
+                .await
+                .context("failed to commit generated vector reset")?;
+            Ok(has_generated_state)
+        })
+    }
+
     // -----------------------------------------------------------------------
     // Applied target operations
     // -----------------------------------------------------------------------

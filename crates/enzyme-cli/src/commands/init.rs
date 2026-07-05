@@ -1155,7 +1155,7 @@ fn has_index_changes(stats: &IndexingStats) -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmbeddingRefreshPlan {
-    Skip,
+    Backlog,
     SinceIndexStart,
 }
 
@@ -1163,7 +1163,7 @@ fn embedding_refresh_plan(has_index_changes: bool) -> EmbeddingRefreshPlan {
     if has_index_changes {
         EmbeddingRefreshPlan::SinceIndexStart
     } else {
-        EmbeddingRefreshPlan::Skip
+        EmbeddingRefreshPlan::Backlog
     }
 }
 
@@ -1181,7 +1181,7 @@ fn refresh_changed_doc_embeddings(
 
     let pipeline = EmbeddingPipeline::new(db, service);
     let result = match embedding_refresh_plan(has_index_changes) {
-        EmbeddingRefreshPlan::Skip => return false,
+        EmbeddingRefreshPlan::Backlog => pipeline.run_with_limit(max_embed, |_| {}),
         EmbeddingRefreshPlan::SinceIndexStart => {
             pipeline.run_since_with_limit(index_start_ms, max_embed, |_| {})
         }
@@ -1830,8 +1830,8 @@ mod tests {
     }
 
     #[test]
-    fn embedding_refresh_skips_when_indexing_has_no_changes() {
-        assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Skip);
+    fn embedding_refresh_checks_backlog_when_indexing_has_no_changes() {
+        assert_eq!(embedding_refresh_plan(false), EmbeddingRefreshPlan::Backlog);
         assert_eq!(
             embedding_refresh_plan(true),
             EmbeddingRefreshPlan::SinceIndexStart

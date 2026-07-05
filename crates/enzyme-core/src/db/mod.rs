@@ -408,6 +408,111 @@ mod tests {
         assert_eq!(val[0], "Renamed Vault");
     }
 
+    #[test]
+    fn test_backend_change_resets_only_generated_vector_state() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+
+        db.set_config("vault_name", "My Vault").unwrap();
+        db.set_config("embedding.backend", "old:384").unwrap();
+        db.execute_write(
+            "INSERT INTO docs
+                (source_ref, title, content, content_hash, created_at, modified_at, indexed_at,
+                 embedded_at, embedded_content_hash)
+             VALUES ('a.md', 'A', 'body', 'h1', ?1, ?1, ?1, ?1, 'h1')",
+            vec![Value::Integer(now)],
+        )
+        .unwrap();
+        let doc_id: i64 = db
+            .query_read(
+                "SELECT id FROM docs WHERE source_ref = 'a.md'",
+                vec![],
+                |row| row.get::<i64>(0),
+            )
+            .unwrap()[0];
+        db.execute_write(
+            "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+             VALUES (?1, 0, 'chunk a', 2, ?2)",
+            vec![Value::Integer(doc_id), Value::Integer(now)],
+        )
+        .unwrap();
+        db.execute_write(
+            "INSERT INTO catalysts (id, text, entity) VALUES ('cat-1', 'topic', 'a')",
+            vec![],
+        )
+        .unwrap();
+        db.upsert_chunk_embeddings(&[("a.md".to_string(), 0, vec![0.1, 0.2])])
+            .unwrap();
+        db.upsert_catalyst_embeddings(&[("cat-1", &[0.3_f32, 0.4_f32])])
+            .unwrap();
+        db.execute_write(
+            "INSERT INTO catalyst_similarities
+                (catalyst_id, catalyst_text, file_path, chunk_index, similarity)
+             VALUES ('cat-1', 'topic', 'a.md', 0, 0.9)",
+            vec![],
+        )
+        .unwrap();
+
+        let changed = db
+            .reset_generated_vector_state_if_backend_changed("embedding.backend", "ese:384")
+            .unwrap();
+
+        assert!(changed);
+        assert_eq!(
+            db.get_config("embedding.backend").unwrap().as_deref(),
+            Some("ese:384")
+        );
+        assert_eq!(
+            db.get_config("vault_name").unwrap().as_deref(),
+            Some("My Vault")
+        );
+        assert_eq!(db.get_document_count().unwrap(), 1);
+        assert_eq!(
+            db.query_read("SELECT COUNT(*) FROM chunks", vec![], |row| {
+                row.get::<i64>(0)
+            })
+            .unwrap()[0],
+            1
+        );
+        assert_eq!(
+            db.query_read("SELECT COUNT(*) FROM catalysts", vec![], |row| {
+                row.get::<i64>(0)
+            })
+            .unwrap()[0],
+            1
+        );
+        let doc = db.get_document_by_path("a.md").unwrap().unwrap();
+        assert_eq!(doc.embedded_at, None);
+        assert_eq!(doc.embedded_content_hash, None);
+        assert!(db.get_all_chunk_embeddings().unwrap().is_empty());
+        assert!(db.get_all_catalyst_embeddings().unwrap().is_empty());
+        assert_eq!(
+            db.query_read(
+                "SELECT COUNT(*) FROM catalyst_similarities",
+                vec![],
+                |row| { row.get::<i64>(0) }
+            )
+            .unwrap()[0],
+            0
+        );
+    }
+
+    #[test]
+    fn test_backend_guard_is_noop_when_metadata_matches() {
+        let db = test_db();
+
+        db.set_config("embedding.backend", "ese:384").unwrap();
+        db.upsert_chunk_embeddings(&[("a.md".to_string(), 0, vec![0.1, 0.2])])
+            .unwrap();
+
+        let changed = db
+            .reset_generated_vector_state_if_backend_changed("embedding.backend", "ese:384")
+            .unwrap();
+
+        assert!(!changed);
+        assert_eq!(db.get_all_chunk_embeddings().unwrap().len(), 1);
+    }
+
     // -- Entities + occurrences -----------------------------------------------
 
     #[test]
