@@ -459,6 +459,9 @@ pub async fn run_init(
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
+    // Local env-var check only — fail an explicit --use-env-llm misconfiguration
+    // before the vault database is reset below.
+    preflight_env_llm(use_env_llm).await?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -1022,7 +1025,11 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
     drop(db);
 
-    run_stale_catalyst_refresh(vault_path, None, false).await?;
+    // Local index/embedding work already succeeded; a catalyst credential or
+    // quota failure should not take down MCP search over existing catalysts.
+    if let Err(e) = run_stale_catalyst_refresh(vault_path, None, false).await {
+        tracing::warn!("catalyst refresh failed; serving existing catalysts: {e:#}");
+    }
     Ok(())
 }
 
@@ -1038,6 +1045,10 @@ pub async fn run_refresh(
     min_top_catalysts: Option<usize>,
     use_env_llm: bool,
 ) -> Result<()> {
+    // Local env-var check only — a misconfigured --use-env-llm should fail
+    // here rather than inside a detached worker whose errors only reach a log.
+    preflight_env_llm(use_env_llm).await?;
+
     if detached {
         return run_refresh_detached(vault_path, use_env_llm).await;
     }
@@ -1336,17 +1347,22 @@ async fn run_stale_catalyst_refresh(
     ) {
         let auth_home = EnzymePaths::enzyme_home()?;
         let auth_path = auth_home.join("auth.json");
-        let token = enzyme_core::config::auth::AuthToken::load(&auth_path)
-            .context("Not logged in. Run `enzyme login` first.")?;
-        let remaining =
-            enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh").await?;
-        if remaining <= 3.0 {
-            eprintln!(
-                "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
-                crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                remaining,
-                crossterm::style::ResetColor,
-            );
+        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+            let remaining =
+                enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh")
+                    .await?;
+            if remaining <= 3.0 {
+                eprintln!(
+                    "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
+                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                    remaining,
+                    crossterm::style::ResetColor,
+                );
+            }
+        } else {
+            // Loginless bootstrap configs are gated server-side; mirror the
+            // init credit preflight instead of hard-failing here.
+            debug!("hosted refresh has no login token; skipping account credit preflight");
         }
     }
 
