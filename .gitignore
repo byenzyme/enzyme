@@ -55,3 +55,4 @@ docs/agent-plugin-test-plan.md
 plugin/bin/enzyme-darwin-arm64
 plugin/bin/enzyme-linux-arm64
 plugin/models/
+.release-check-artifacts/

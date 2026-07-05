@@ -1,4 +1,4 @@
-.PHONY: install build-native install-native native-cpu sync-agent-skill check-agent-skill sync-workspace-skill check-workspace-skill bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native
+.PHONY: install build-native install-native native-cpu sync-agent-skill check-agent-skill sync-workspace-skill check-workspace-skill bench-cpu-portable bench-cpu-native bench-cpu asm-ese-native release-check release-check-agentic snapshot-vault
 
 # Build release binary and install to cargo bin
 install:
@@ -34,6 +34,27 @@ sync-workspace-skill:
 
 check-workspace-skill:
 	python3 scripts/sync-workspace-setup-skill.py --check
+
+# Deterministic release checks: install matrix, sync contract, vault lifecycle.
+# Set ENZYME_TEST_VAULT to a snapshot-vault.sh output to add the real-scale
+# tier; set ENZYME_CHECK_FULL=0 to skip the hosted-bootstrap full-init tier.
+release-check:
+	cargo build -p enzyme-cli
+	bash scripts/release-checks/10-install-matrix.sh
+	bash scripts/release-checks/20-sync-contract.sh
+	bash scripts/release-checks/30-vault-lifecycle.sh
+
+# Agentic release checks: a headless Claude agent does the enzyme.garden
+# cold-start install and a full teardown, graded by deterministic assertions.
+# Uses the local claude subscription; run at release time or nightly.
+release-check-agentic:
+	cargo build -p enzyme-cli
+	bash scripts/release-checks/40-agentic-setup.sh
+
+# Snapshot the real vault's markdown corpus into ~/.enzyme-test-vaults/real
+# (local only; never enters git).
+snapshot-vault:
+	bash scripts/release-checks/snapshot-vault.sh
 
 # Microbenchmark ESE encoding and 512-dim cosine loops with portable CPU settings.
 bench-cpu-portable:

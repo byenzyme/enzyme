@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Runtime install matrix: install the agent integration into isolated HOMEs
+# for each supported runtime and assert the expected files land.
+# Extracted from .agents/skills/release/SKILL.md step 10 so agents, humans,
+# and CI all run the same code.
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+require_bin
+
+echo "install-matrix (binary: $ENZYME_BIN)"
+
+# Claude runtime skill install
+tmp_home=$(isolated_home)
+tmp_workspace=$(mktemp -d)
+HOME="$tmp_home" "$ENZYME_BIN" -p "$tmp_workspace" install claude --source local >/dev/null 2>&1
+check "claude: SKILL.md installed" test -f "$tmp_workspace/.claude/skills/enzyme/SKILL.md"
+check "claude: CLAUDE.md written" test -f "$tmp_workspace/CLAUDE.md"
+
+# Reinstall preserves surrounding CLAUDE.md content (marked-section contract)
+echo "# my own notes" >> "$tmp_workspace/CLAUDE.md"
+HOME="$tmp_home" "$ENZYME_BIN" -p "$tmp_workspace" install claude --source local >/dev/null 2>&1
+check "claude: reinstall preserves user CLAUDE.md content" grep -q "my own notes" "$tmp_workspace/CLAUDE.md"
+
+# Hermes
+tmp_home=$(isolated_home)
+tmp_workspace=$(mktemp -d)
+tmp_hermes=$(mktemp -d)
+HOME="$tmp_home" HERMES_HOME="$tmp_hermes" "$ENZYME_BIN" -p "$tmp_workspace" install hermes --source local >/dev/null 2>&1
+check "hermes: SKILL.md installed" test -f "$tmp_hermes/skills/enzyme/SKILL.md"
+
+# OpenClaw
+tmp_home=$(isolated_home)
+tmp_workspace=$(mktemp -d)
+tmp_openclaw=$(mktemp -d)
+HOME="$tmp_home" OPENCLAW_HOME="$tmp_openclaw" "$ENZYME_BIN" -p "$tmp_workspace" install openclaw --source local >/dev/null 2>&1
+check "openclaw: SKILL.md installed" test -f "$tmp_openclaw/skills/enzyme/SKILL.md"
+
+# Codex install path has its own script; run it if present
+if [ -x "$REPO_ROOT/scripts/test_codex_skill_install.sh" ]; then
+  check "codex: skill install script" "$REPO_ROOT/scripts/test_codex_skill_install.sh"
+fi
+
+report "install-matrix"
