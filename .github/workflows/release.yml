@@ -346,6 +346,16 @@ jobs:
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.claude-plugin/plugin.json
           sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.codex-plugin/plugin.json
 
+          if find plugins/enzyme -path '*hooks*' -print -quit | grep -q .; then
+            echo "Unexpected Claude/Codex hook files in public plugin sync" >&2
+            find plugins/enzyme -path '*hooks*' -print >&2
+            exit 1
+          fi
+          if grep -R '"hooks"' plugins/enzyme/.claude-plugin plugins/enzyme/.codex-plugin; then
+            echo "Unexpected hooks manifest entry in public plugin sync" >&2
+            exit 1
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A

@@ -99,7 +99,7 @@ If no hosted or env key is available, catalyst generation is skipped and the res
 
 ## App Plugins
 
-The curl installer is CLI-only. Claude Code and Codex plugins are app-based installs that add first-time setup help and lifecycle refresh hooks on top of the CLI.
+The curl installer is CLI-only. Claude Code and Codex plugins are app-based installs that add first-time setup help on top of the CLI. They do not install automatic refresh or prompt-injection hooks; agents use `enzyme petri`, `enzyme catalyze`, and `enzyme refresh` explicitly when the task calls for them.
 
 ## Architecture
 
