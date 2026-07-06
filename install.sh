@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install enzyme — local-first knowledge indexing for markdown vaults
-# Usage: curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
+# Usage: curl -fsSL enzyme.garden/install.sh | bash
 
 set -euo pipefail
 
@@ -150,6 +150,13 @@ echo "  enzyme install claude     # Claude Code"
 echo "  enzyme install hermes     # Hermes"
 echo "  enzyme install openclaw   # OpenClaw"
 echo ""
-echo "Then ask your agent: Use Enzyme to inspect and initialize this vault."
+echo "Even if .enzyme already exists, run enzyme install <runtime> from the vault root"
+echo "to install/update the agent instructions for this workspace."
+echo ""
+echo "For Claude/Codex, that command installs an enzyme-workspace-setup skill."
+echo "The agent should read that setup skill before scan/init/petri."
+echo ""
+echo "Then ask your agent: Set up Enzyme for this vault. Read the installed"
+echo "enzyme-workspace-setup skill first, then diagnose what Enzyme actually sees."
 echo ""
 echo "Terminal-only setup: enzyme scan --write-config && enzyme init"

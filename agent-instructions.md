@@ -2,28 +2,19 @@
 
 ## Enzyme Workspace Context
 
-This workspace uses Enzyme for local semantic retrieval over markdown. Run `enzyme` commands from this workspace root.
+This workspace uses Enzyme for local semantic retrieval over markdown. Run `enzyme` commands from this workspace root unless the user gives another vault path.
 
-Use the installed Enzyme skill for operational details. The skill contains the full setup, retrieval, and note-writing workflow. This Enzyme workspace context section keeps only durable presentation rules and workspace defaults so AGENTS.md stays readable.
+The installed skills are the source of truth:
 
-If `.enzyme/enzyme.db` is missing, initialize Enzyme with the skill workflow: confirm the Enzyme CLI is already installed, scan the workspace, audit existing markdown structure, show a setup preview, create/tune `~/.enzyme/config.toml` before init, run `enzyme init --quiet`, then simulate one useful prompt with petri/catalyze.
+- For setup, re-setup, diagnosis, or repair, read the workspace setup skill first:
+  - Claude Code: `.claude/skills/enzyme-workspace-setup/SKILL.md`
+  - Codex / Pi / generic agents: `.agents/skills/enzyme-workspace-setup/SKILL.md`
+- For normal retrieval, refresh, and note-writing after setup, read the installed runtime skill:
+  - Claude Code: `.claude/skills/enzyme/SKILL.md`
+  - Codex / Pi / generic agents: `.agents/skills/enzyme/SKILL.md`
 
-Retrieval defaults:
+Do not treat `.enzyme/`, `AGENTS.md`, `CLAUDE.md`, or installed skill files as proof that setup is complete or healthy. They are evidence to inspect through the setup skill.
 
-- Start broad sessions with `enzyme petri` or `enzyme petri --query "user prompt"` to recognize active/relevant ideas before answering.
-- Use catalyst phrases from petri to compose `enzyme catalyze "query"` searches that activate those ideas as source-grounded connections.
-- Use exact search only for names, tags, wikilinks, and literal text.
-- For external refs, compare `enzyme catalyze "query"` with `enzyme catalyze "query" --target ./target-dir`; Enzyme prepares the target automatically on first use.
-
-Presentation policy:
-
-- Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs, scores, or tool names to the user unless asked.
-- Ground observations with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
-- For exploration, open one specific connection among the user's notes rather than presenting a topic list.
-- For continuity questions, restore prior conclusions, decisions, trajectory, and stopping points before introducing new analysis.
-- For reference/import material, lead with what the user chose to save, bridge to their own notes when possible, and avoid treating imported content as authoritative.
-- Do not lead with metadata. Notice repeated words, time gaps, changed wording, adjacent ideas, practical consequences, or source disagreements. End with one concrete next direction.
-
-Structure policy: do not impose a new memory schema. Treat existing folders, inboxes, daily notes, people/contact pages, tags, wikilinks, and frontmatter dates/entity fields as retrieval signal. Enzyme should free natural capture, not require a parallel agent memory tree. Propose frontmatter, people-page, folder, or external-target changes only with user confirmation.
+If an Enzyme instruction here conflicts with an installed skill, follow the installed skill.
 
 <!-- enzyme:end -->

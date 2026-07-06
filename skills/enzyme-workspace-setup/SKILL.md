@@ -1,6 +1,6 @@
 ---
 name: enzyme-workspace-setup
-description: One-time Enzyme workspace setup. Use only for first-time setup of an uninitialized vault, or when retrieval seems broken and the user asks to re-diagnose. Diagnoses read-only against what Enzyme actually indexed, proves value on one real note, then proposes only minimal, consented repairs. Never edits note bodies. Do not use for routine search or retrieval in an already initialized vault.
+description: Enzyme workspace setup, re-setup, and repair. Use when the user asks to set up Enzyme, diagnose an existing setup, repair retrieval, or clean up an old setup before reinitializing. Existing `.enzyme` files or installed runtime instructions are not proof that setup is complete. Diagnoses read-only against what Enzyme actually indexed, proves value on one real note, then proposes only minimal, consented repairs. Never edits note bodies. Do not use for routine search or retrieval when the user is only asking a question of an already healthy vault.
 allowed-tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 
@@ -24,6 +24,8 @@ The user prompt should provide:
 - Optional existing setup constraints, such as "do not edit before init" or "use my provider key."
 
 Treat the provided path as the workspace root unless the evidence or user says the notes live elsewhere.
+
+Existing setup is not a skip condition. If `.enzyme/`, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/`, or `.claude/skills/` already exist and the user asked for setup, re-setup, diagnosis, or repair, inspect them as evidence of the current state, then continue through the diagnosis flow. Overwrite stale Enzyme runtime instruction sections only by rerunning `enzyme install <runtime>` when the user is trying to update installed instructions; otherwise repair setup state through the diagnosis, config, init, refresh, and proof workflow below.
 
 ## Two Questions Carry The Skill
 
@@ -84,11 +86,23 @@ ENZYME_BIN="${ENZYME_BIN:-enzyme}"
 
 If the binary is missing, stop and explain that Enzyme must be installed or `ENZYME_BIN` must point to a working binary. Do not hunt through the filesystem for unrelated binaries unless the user asks.
 
-Initialize only after the vault path is confirmed:
+Setup/re-setup command path, after the vault path is confirmed:
 
 ```bash
+"$ENZYME_BIN" -p "<vault path>" scan
+# Use scan output plus doctor/DB evidence to diagnose what Enzyme can see.
+
+"$ENZYME_BIN" -p "<vault path>" scan --write-config
+# Read ~/.enzyme/config.toml. Tune only the minimum entity/exclusion/target
+# choices supported by scan/doctor evidence before init.
+
 "$ENZYME_BIN" -p "<vault path>" init --quiet
+"$ENZYME_BIN" -p "<vault path>" petri
+"$ENZYME_BIN" -p "<vault path>" petri --query "<one real setup proof prompt>"
+"$ENZYME_BIN" -p "<vault path>" catalyze "<query composed from the prompt and petri vocabulary>"
 ```
+
+Do not skip `scan --write-config` and config review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
 
 Use `--use-env-llm` only when the user explicitly asks to use their own OpenAI, OpenRouter, or OpenAI-compatible provider and has set the complete provider environment. Do not inspect, print, unset, or rely on API-key environment variables during normal hosted setup.
 
