@@ -83,19 +83,33 @@ HOME="$test_home" CODEX_HOME="$test_codex_home" \
   "$ENZYME_BIN" -p "$workspace" install codex --source local
 
 skill_path="$workspace/.agents/skills/enzyme/SKILL.md"
+setup_skill_path="$workspace/.agents/skills/enzyme-workspace-setup/SKILL.md"
 agents_path="$workspace/AGENTS.md"
 
 test -f "$skill_path"
+test -f "$setup_skill_path"
 test -f "$agents_path"
 grep -q '^name: enzyme$' "$skill_path"
 grep -q 'enzyme scan' "$skill_path"
 grep -q 'do not call `enzyme install <runtime>`' "$skill_path"
+grep -q '^name: enzyme-workspace-setup$' "$setup_skill_path"
+grep -q 'What Does Enzyme Actually See' "$setup_skill_path"
+grep -q 'scan --write-config' "$setup_skill_path"
+grep -q 'config.toml' "$setup_skill_path"
+grep -q 'catalyze' "$setup_skill_path"
 grep -q '<!-- enzyme:start -->' "$agents_path"
 grep -q '<!-- enzyme:end -->' "$agents_path"
+grep -q 'enzyme-workspace-setup/SKILL.md' "$agents_path"
+grep -q '.agents/skills/enzyme/SKILL.md' "$agents_path"
+! grep -q 'scan --write-config' "$agents_path"
+! grep -q 'Retrieval defaults' "$agents_path"
+! grep -q 'Presentation policy' "$agents_path"
+! grep -q 'Structure policy' "$agents_path"
 
 echo "install verification passed"
 echo "workspace: $workspace"
 echo "skill: $skill_path"
+echo "setup skill: $setup_skill_path"
 
 if [[ "$run_codex" -eq 1 ]]; then
   if [[ ! -f "$test_codex_home/auth.json" ]]; then

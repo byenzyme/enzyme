@@ -106,6 +106,12 @@ with the sandbox env) reports an initialized vault for this workspace, then
 print a short report of what you did."
 
 check "cold-start: enzyme binary installed in sandbox" test -x "$shome/.local/bin/enzyme"
+check "cold-start: runtime skill installed" bash -c \
+  "test -f '$ws/.claude/skills/enzyme/SKILL.md' || test -f '$ws/.agents/skills/enzyme/SKILL.md'"
+check "cold-start: workspace setup skill installed" bash -c \
+  "test -f '$ws/.claude/skills/enzyme-workspace-setup/SKILL.md' || test -f '$ws/.agents/skills/enzyme-workspace-setup/SKILL.md'"
+check "cold-start: workspace instructions route setup skill" \
+  grep -q "enzyme-workspace-setup/SKILL.md" "$ws/AGENTS.md"
 check "cold-start: vault db created" test -f "$ws/.enzyme/enzyme.db"
 check "cold-start: status reports initialized vault" \
   env HOME="$shome" ENZYME_HOME="$shome/.enzyme" "$shome/.local/bin/enzyme" -p "$ws" status
@@ -121,22 +127,26 @@ cp -R "$REPO_ROOT/tests/fixtures/canary-vault" "$ws2"
 HOME="$shome2" ENZYME_HOME="$shome2/.enzyme" "$ENZYME_BIN" -p "$ws2" install claude --source local >/dev/null 2>&1
 HOME="$shome2" ENZYME_HOME="$shome2/.enzyme" "$ENZYME_BIN" -p "$ws2" init --stage index --quiet >/dev/null 2>&1
 printf '\n# User notes\nKeep this line: SENTINEL-KEEP-ME\n' >> "$ws2/CLAUDE.md"
+printf '\n# User agent notes\nKeep this line: AGENTS-SENTINEL-KEEP-ME\n' >> "$ws2/AGENTS.md"
 
 run_agent "teardown" "$ws2" "This workspace ($ws2) has an existing Enzyme
-setup: index state under .enzyme/, an enzyme skill under .claude/skills/, and
-an enzyme-managed section in CLAUDE.md delimited by '<!-- enzyme:start -->'
-and '<!-- enzyme:end -->'.
+setup: index state under .enzyme/, Enzyme skills under .claude/skills/, an
+enzyme-managed section in AGENTS.md delimited by '<!-- enzyme:start -->' and
+'<!-- enzyme:end -->', and a CLAUDE.md import of AGENTS.md.
 
 Remove the Enzyme setup completely: delete the index state and the installed
-skill, and remove only the enzyme-managed section from CLAUDE.md. Preserve
-all other user content in CLAUDE.md and the vault notes untouched. Work only
-inside $ws2. Print a short report of what you removed."
+Enzyme skills, remove only the enzyme-managed section from AGENTS.md, and
+remove the Enzyme import from CLAUDE.md only if it is no longer needed.
+Preserve all other user content in AGENTS.md, CLAUDE.md, and the vault notes
+untouched. Work only inside $ws2. Print a short report of what you removed."
 
 check "teardown: .enzyme state removed" bash -c "test ! -e '$ws2/.enzyme'"
-check "teardown: enzyme skill removed" bash -c "test ! -e '$ws2/.claude/skills/enzyme'"
-check "teardown: enzyme section gone from CLAUDE.md" \
-  bash -c "! grep -q 'enzyme:start' '$ws2/CLAUDE.md'"
-check "teardown: user content preserved" grep -q "SENTINEL-KEEP-ME" "$ws2/CLAUDE.md"
+check "teardown: runtime skill removed" bash -c "test ! -e '$ws2/.claude/skills/enzyme'"
+check "teardown: workspace setup skill removed" bash -c "test ! -e '$ws2/.claude/skills/enzyme-workspace-setup'"
+check "teardown: enzyme section gone from AGENTS.md" \
+  bash -c "! grep -q 'enzyme:start' '$ws2/AGENTS.md'"
+check "teardown: AGENTS.md user content preserved" grep -q "AGENTS-SENTINEL-KEEP-ME" "$ws2/AGENTS.md"
+check "teardown: CLAUDE.md user content preserved" grep -q "SENTINEL-KEEP-ME" "$ws2/CLAUDE.md"
 check "teardown: vault notes untouched" \
   test -f "$ws2/projects/heliograph-antenna.md"
 guardrail_check "teardown"

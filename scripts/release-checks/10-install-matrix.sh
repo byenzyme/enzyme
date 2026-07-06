@@ -14,6 +14,8 @@ tmp_home=$(isolated_home)
 tmp_workspace=$(mktemp -d)
 HOME="$tmp_home" "$ENZYME_BIN" -p "$tmp_workspace" install claude --source local >/dev/null 2>&1
 check "claude: SKILL.md installed" test -f "$tmp_workspace/.claude/skills/enzyme/SKILL.md"
+check "claude: workspace setup SKILL.md installed" test -f "$tmp_workspace/.claude/skills/enzyme-workspace-setup/SKILL.md"
+check "claude: setup skill includes scan/config/proof path" grep -q "scan --write-config" "$tmp_workspace/.claude/skills/enzyme-workspace-setup/SKILL.md"
 check "claude: CLAUDE.md written" test -f "$tmp_workspace/CLAUDE.md"
 
 # Reinstall preserves surrounding CLAUDE.md content (marked-section contract)

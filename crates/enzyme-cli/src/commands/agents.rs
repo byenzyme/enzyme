@@ -12,9 +12,12 @@ const INSTRUCTIONS_URL: &str =
     "https://raw.githubusercontent.com/jshph/enzyme/main/agent-instructions.md";
 const SKILL_URL: &str =
     "https://raw.githubusercontent.com/jshph/enzyme/main/agent-runtime-skill.md";
+const WORKSPACE_SETUP_SKILL_URL: &str = "https://raw.githubusercontent.com/jshph/enzyme/main/plugins/enzyme/skills/enzyme-workspace-setup/SKILL.md";
 
 const LOCAL_INSTRUCTIONS: &str = include_str!("../../../../plugin/agent-instructions.md");
 const LOCAL_SKILL: &str = include_str!("../../../../plugin/agent-runtime-skill.md");
+const LOCAL_WORKSPACE_SETUP_SKILL: &str =
+    include_str!("../../../../plugin/skills/enzyme-workspace-setup/SKILL.md");
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum AgentTarget {
@@ -37,6 +40,12 @@ struct LoadedTemplate {
     source: &'static str,
 }
 
+#[derive(Debug)]
+struct InstalledSkill {
+    path: PathBuf,
+    source: &'static str,
+}
+
 pub async fn run_agents_install(
     vault_path: &Path,
     target: AgentTarget,
@@ -44,6 +53,18 @@ pub async fn run_agents_install(
 ) -> Result<()> {
     let instructions = load_template(INSTRUCTIONS_URL, LOCAL_INSTRUCTIONS, source).await?;
     let skill = load_template(SKILL_URL, LOCAL_SKILL, source).await?;
+    let workspace_setup_skill = if matches!(target, AgentTarget::Codex | AgentTarget::Claude) {
+        Some(
+            load_template(
+                WORKSPACE_SETUP_SKILL_URL,
+                LOCAL_WORKSPACE_SETUP_SKILL,
+                source,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let agents_path = write_agents_section(vault_path, target, &instructions.content)?;
     if matches!(target, AgentTarget::Claude) {
@@ -52,17 +73,59 @@ pub async fn run_agents_install(
 
     let mut installed = Vec::new();
     if matches!(target, AgentTarget::Codex) {
-        installed.push(write_skill(vault_path, ".agents", &skill.content)?);
+        installed.push(InstalledSkill {
+            path: write_named_skill(vault_path, ".agents", "enzyme", &skill.content)?,
+            source: skill.source,
+        });
+        installed.push(InstalledSkill {
+            path: write_named_skill(
+                vault_path,
+                ".agents",
+                "enzyme-workspace-setup",
+                &workspace_setup_skill
+                    .as_ref()
+                    .expect("workspace setup skill loaded for codex target")
+                    .content,
+            )?,
+            source: workspace_setup_skill
+                .as_ref()
+                .expect("workspace setup skill loaded for codex target")
+                .source,
+        });
     }
     if matches!(target, AgentTarget::Claude) {
-        installed.push(write_skill(vault_path, ".claude", &skill.content)?);
+        installed.push(InstalledSkill {
+            path: write_named_skill(vault_path, ".claude", "enzyme", &skill.content)?,
+            source: skill.source,
+        });
+        installed.push(InstalledSkill {
+            path: write_named_skill(
+                vault_path,
+                ".claude",
+                "enzyme-workspace-setup",
+                &workspace_setup_skill
+                    .as_ref()
+                    .expect("workspace setup skill loaded for claude target")
+                    .content,
+            )?,
+            source: workspace_setup_skill
+                .as_ref()
+                .expect("workspace setup skill loaded for claude target")
+                .source,
+        });
     }
     if matches!(target, AgentTarget::Hermes) {
         ensure_hermes_instructions(vault_path, &agents_path)?;
-        installed.push(write_hermes_skill(&skill.content)?);
+        installed.push(InstalledSkill {
+            path: write_hermes_skill(&skill.content)?,
+            source: skill.source,
+        });
     }
     if matches!(target, AgentTarget::Openclaw) {
-        installed.push(write_openclaw_skill(&skill.content)?);
+        installed.push(InstalledSkill {
+            path: write_openclaw_skill(&skill.content)?,
+            source: skill.source,
+        });
     }
 
     eprintln!(
@@ -70,11 +133,27 @@ pub async fn run_agents_install(
         agents_path.display(),
         instructions.source
     );
-    for path in installed {
+    for installed_skill in installed {
         eprintln!(
             "Installed skill {} from {} copy.",
-            path.display(),
-            skill.source
+            installed_skill.path.display(),
+            installed_skill.source
+        );
+    }
+    if matches!(target, AgentTarget::Codex) {
+        eprintln!(
+            "Next: read {} before running Enzyme setup commands.",
+            vault_path
+                .join(".agents/skills/enzyme-workspace-setup/SKILL.md")
+                .display()
+        );
+    }
+    if matches!(target, AgentTarget::Claude) {
+        eprintln!(
+            "Next: read {} before running Enzyme setup commands.",
+            vault_path
+                .join(".claude/skills/enzyme-workspace-setup/SKILL.md")
+                .display()
         );
     }
 
@@ -174,8 +253,13 @@ fn remove_marked_section(content: &str) -> String {
     }
 }
 
-fn write_skill(vault_path: &Path, agent_dir: &str, skill: &str) -> Result<PathBuf> {
-    let path = vault_path.join(agent_dir).join("skills").join("enzyme");
+fn write_named_skill(
+    vault_path: &Path,
+    agent_dir: &str,
+    skill_name: &str,
+    skill: &str,
+) -> Result<PathBuf> {
+    let path = vault_path.join(agent_dir).join("skills").join(skill_name);
     fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
     let skill_path = path.join("SKILL.md");
     fs::write(&skill_path, format!("{}\n", skill.trim_end()))
@@ -337,6 +421,11 @@ mod tests {
 
         let content = fs::read_to_string(agents).unwrap();
         assert!(content.contains("## Enzyme Workspace Context"));
+        assert!(content.contains("enzyme-workspace-setup/SKILL.md"));
+        assert!(!content.contains("scan --write-config"));
+        assert!(!content.contains("Retrieval defaults"));
+        assert!(!content.contains("Presentation policy"));
+        assert!(!content.contains("Structure policy"));
         assert!(!content.contains("\nold\n"));
         assert!(content.contains("## Rest"));
         assert_eq!(content.matches(MARKER_START).count(), 1);
@@ -390,10 +479,25 @@ mod tests {
     #[test]
     fn installs_codex_skill() {
         let dir = TempDir::new().unwrap();
-        let path = write_skill(dir.path(), ".agents", LOCAL_SKILL).unwrap();
+        let path = write_named_skill(dir.path(), ".agents", "enzyme", LOCAL_SKILL).unwrap();
         assert_eq!(path, dir.path().join(".agents/skills/enzyme/SKILL.md"));
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("name: enzyme"));
+
+        let setup_path = write_named_skill(
+            dir.path(),
+            ".agents",
+            "enzyme-workspace-setup",
+            LOCAL_WORKSPACE_SETUP_SKILL,
+        )
+        .unwrap();
+        assert_eq!(
+            setup_path,
+            dir.path()
+                .join(".agents/skills/enzyme-workspace-setup/SKILL.md")
+        );
+        let setup_content = fs::read_to_string(setup_path).unwrap();
+        assert!(setup_content.contains("name: enzyme-workspace-setup"));
     }
 
     #[test]
