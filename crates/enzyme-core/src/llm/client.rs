@@ -357,6 +357,10 @@ impl ProviderKind {
         matches!(self, Self::OpenRouter | Self::Local | Self::Unknown)
     }
 
+    fn should_send_temperature(self, model: &str) -> bool {
+        self != Self::Anthropic || !anthropic_model_rejects_sampling_parameters(model)
+    }
+
     fn should_send_top_p(self, model: &str) -> bool {
         // OpenRouter accepts and normalizes top_p; keep backward compatibility
         // even when the routed model is Anthropic.
@@ -364,10 +368,11 @@ impl ProviderKind {
             return true;
         }
 
-        // Claude 4-family endpoints have model-specific sampling restrictions
-        // around temperature/top_p. Keeping temperature and dropping top_p
-        // preserves Enzyme's caller intent while avoiding provider 400s.
-        if self == Self::Anthropic && is_claude_4_family(model) {
+        // Older Claude 4 endpoints reject the temperature/top_p combination,
+        // while newer models reject all non-default sampling parameters.
+        if self == Self::Anthropic
+            && (is_claude_4_family(model) || anthropic_model_rejects_sampling_parameters(model))
+        {
             return false;
         }
 
@@ -378,6 +383,23 @@ impl ProviderKind {
 fn is_claude_4_family(model: &str) -> bool {
     let model = model.to_lowercase();
     model.contains("claude") && (model.contains("-4") || model.contains("opus-4"))
+}
+
+fn anthropic_model_rejects_sampling_parameters(model: &str) -> bool {
+    let model = model.to_lowercase();
+    [
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-sonnet-5",
+        "claude-fable-5",
+    ]
+    .iter()
+    .any(|family| {
+        model == *family
+            || model
+                .strip_prefix(family)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+    })
 }
 
 fn completion_token_limit(base_url: &str, model: &str, max_tokens: u32) -> CompletionTokenLimit {
@@ -419,7 +441,9 @@ fn chat_completion_request(
         model: model.to_string(),
         messages,
         token_limit: completion_token_limit(base_url, model, params.max_tokens),
-        temperature: Some(params.temperature),
+        temperature: provider
+            .should_send_temperature(model)
+            .then_some(params.temperature),
         top_p: provider.should_send_top_p(model).then_some(params.top_p),
         top_k: provider.supports_top_k().then_some(params.top_k).flatten(),
         response_format,
@@ -1224,33 +1248,66 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_claude_4_requests_omit_top_p_and_response_format() {
-        let request = chat_completion_request(
-            "https://api.anthropic.com/v1",
-            "claude-sonnet-4-5",
-            vec![Message::text("user", "hello")],
-            GenerationParams {
-                max_tokens: 123,
-                temperature: 0.4,
-                top_p: 0.8,
-                response_format: Some(ResponseFormat::JsonObject),
-                ..GenerationParams::default()
-            },
-            None,
-        );
+    fn compatible_anthropic_models_keep_temperature() {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"] {
+            let request = chat_completion_request(
+                "https://api.anthropic.com/v1",
+                model,
+                vec![Message::text("user", "hello")],
+                GenerationParams {
+                    max_tokens: 123,
+                    temperature: 0.4,
+                    top_p: 0.8,
+                    response_format: Some(ResponseFormat::JsonObject),
+                    ..GenerationParams::default()
+                },
+                None,
+            );
 
-        let json = serde_json::to_value(request).unwrap();
-        assert!((json["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
-        assert_eq!(json["max_tokens"], 123);
-        assert!(json.get("top_p").is_none());
-        assert!(json.get("response_format").is_none());
+            let json = serde_json::to_value(request).unwrap();
+            assert!((json["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+            assert_eq!(json["max_tokens"], 123);
+            assert!(json.get("top_p").is_none(), "model: {model}");
+            assert!(json.get("response_format").is_none(), "model: {model}");
+        }
+    }
+
+    #[test]
+    fn current_anthropic_models_omit_sampling_parameters() {
+        for model in [
+            "claude-opus-4-7",
+            "claude-opus-4-7-20260601",
+            "claude-opus-4-8",
+            "claude-opus-4-8-20260701",
+            "claude-sonnet-5",
+            "claude-sonnet-5-20260701",
+            "claude-fable-5",
+        ] {
+            let request = chat_completion_request(
+                "https://api.anthropic.com/v1",
+                model,
+                vec![Message::text("user", "hello")],
+                GenerationParams {
+                    temperature: 0.4,
+                    top_p: 0.8,
+                    top_k: Some(40),
+                    ..GenerationParams::default()
+                },
+                None,
+            );
+
+            let json = serde_json::to_value(request).unwrap();
+            assert!(json.get("temperature").is_none(), "model: {model}");
+            assert!(json.get("top_p").is_none(), "model: {model}");
+            assert!(json.get("top_k").is_none(), "model: {model}");
+        }
     }
 
     #[test]
     fn openrouter_preserves_sampling_and_response_format() {
         let request = chat_completion_request(
             DEFAULT_BASE_URL,
-            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-opus-4-8",
             vec![Message::text("user", "hello")],
             GenerationParams {
                 top_p: 0.8,
