@@ -40,24 +40,6 @@ if [ -d "$tmpdir/lib" ]; then
     cp -f "$tmpdir/lib/"* "$INSTALL_DIR/lib/"
 fi
 
-# Clear previous data (models, indices) but preserve auth and config.
-if [ -f "$HOME/.enzyme/auth.json" ]; then
-    cp "$HOME/.enzyme/auth.json" "$tmpdir/auth.json.bak"
-fi
-if [ -f "$HOME/.enzyme/config.toml" ]; then
-    cp "$HOME/.enzyme/config.toml" "$tmpdir/config.toml.bak"
-fi
-rm -rf "$HOME/.enzyme"
-if [ -f "$tmpdir/auth.json.bak" ] || [ -f "$tmpdir/config.toml.bak" ]; then
-    mkdir -p "$HOME/.enzyme"
-fi
-if [ -f "$tmpdir/auth.json.bak" ]; then
-    mv "$tmpdir/auth.json.bak" "$HOME/.enzyme/auth.json"
-fi
-if [ -f "$tmpdir/config.toml.bak" ]; then
-    mv "$tmpdir/config.toml.bak" "$HOME/.enzyme/config.toml"
-fi
-
 # Remove legacy generated embedding model cache. Current Enzyme uses the
 # compiled-in ESE backend, so these files are stale app state, not user data.
 legacy_model_dir="$HOME/.cache/enzyme/models"

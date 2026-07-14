@@ -14,6 +14,10 @@ check "workspace skill mirror in sync" \
   python3 "$REPO_ROOT/scripts/sync-workspace-setup-skill.py" --check
 check "agent runtime skill in sync" \
   python3 "$REPO_ROOT/scripts/sync-agent-runtime-skill.py" --check
+check "source installers in sync" \
+  cmp "$REPO_ROOT/plugin/install.sh" "$REPO_ROOT/plugin/agent/install.sh"
+check "installers preserve existing ~/.enzyme data" \
+  "$REPO_ROOT/scripts/test_installer_safety.sh"
 
 # No lifecycle hook files or hook claims anywhere in the plugin payload
 hooks_found=$(find "$REPO_ROOT/plugin/plugins/enzyme" -name 'hooks.json' | wc -l | tr -d ' ')
