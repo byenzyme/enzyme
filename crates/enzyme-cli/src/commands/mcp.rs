@@ -14,7 +14,7 @@ use rmcp::{tool, tool_handler, tool_router};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::search::context::ContextSearch;
+use enzyme_core::search::context::{ContextSearch, TARGET_PROJECTION_NOT_READY};
 
 use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
@@ -212,8 +212,7 @@ impl EnzymeMcp {
         let service = get_embedding_service(&paths.home).map_err(|e| {
             McpError::internal_error(format!("embedding service failed: {e}"), None)
         })?;
-        let target_db;
-        let search = if let Some(target) = p.target.as_deref() {
+        let response = if let Some(target) = p.target.as_deref() {
             let target_path = PathBuf::from(target);
             if !target_path.is_dir() {
                 return Err(McpError::invalid_params(
@@ -222,21 +221,45 @@ impl EnzymeMcp {
                 ));
             }
             let target_db_path = paths.target_db(&target_path);
-            super::target::prepare_target(&vault_path, &target_path)
-                .await
-                .map_err(|e| {
-                    McpError::internal_error(format!("target preparation failed: {e}"), None)
+            let mut response = None;
+            for _ in 0..4 {
+                super::target::prepare_target(&vault_path, &target_path)
+                    .await
+                    .map_err(|e| {
+                        McpError::internal_error(format!("target preparation failed: {e}"), None)
+                    })?;
+                let target_db = Database::open(&target_db_path).map_err(|e| {
+                    McpError::internal_error(format!("target db open failed: {e}"), None)
                 })?;
-            target_db = Database::open(&target_db_path).map_err(|e| {
-                McpError::internal_error(format!("target db open failed: {e}"), None)
-            })?;
-            ContextSearch::with_target(&db, &target_db, service)
+                match ContextSearch::with_target(&db, &target_db, service)
+                    .catalyze_search(&p.query, limit)
+                {
+                    Ok(result) => {
+                        response = Some(result);
+                        break;
+                    }
+                    Err(error) if error.to_string().contains(TARGET_PROJECTION_NOT_READY) => {
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(McpError::internal_error(
+                            format!("search failed: {error}"),
+                            None,
+                        ));
+                    }
+                }
+            }
+            response.ok_or_else(|| {
+                McpError::internal_error(
+                    "target projection changed repeatedly during preparation",
+                    None,
+                )
+            })?
         } else {
             ContextSearch::new(&db, service)
+                .catalyze_search(&p.query, limit)
+                .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
         };
-        let response = search
-            .catalyze_search(&p.query, limit)
-            .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?;
 
         let text = serde_json::to_string_pretty(&response).map_err(|e| {
             McpError::internal_error(format!("json serialization failed: {e}"), None)

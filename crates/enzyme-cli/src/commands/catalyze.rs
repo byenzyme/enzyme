@@ -7,7 +7,7 @@ use serde_json::json;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::search::context::{CatalyzeResponse, ContextSearch};
+use enzyme_core::search::context::{CatalyzeResponse, ContextSearch, TARGET_PROJECTION_NOT_READY};
 
 pub async fn run_catalyze(
     vault_path: &Path,
@@ -32,19 +32,29 @@ pub async fn run_catalyze(
 
     let service = get_embedding_service(&paths.home)?;
 
-    // When a target is provided, refresh its index before searching it.
-    let target_db;
-    let search = if let Some(target_path) = target {
-        let target_db_path = paths.target_db(target_path);
-        super::target::prepare_target(vault_path, target_path).await?;
-        target_db = Database::open(&target_db_path)?;
-        ContextSearch::with_target(&db, &target_db, service)
-    } else {
-        ContextSearch::new(&db, service)
-    };
-
     let start = Instant::now();
-    let response = search.catalyze_search(query, limit)?;
+    let response = if let Some(target_path) = target {
+        let target_db_path = paths.target_db(target_path);
+        let mut response = None;
+        for _ in 0..4 {
+            super::target::prepare_target(vault_path, target_path).await?;
+            let target_db = Database::open(&target_db_path)?;
+            match ContextSearch::with_target(&db, &target_db, service).catalyze_search(query, limit)
+            {
+                Ok(result) => {
+                    response = Some(result);
+                    break;
+                }
+                Err(error) if error.to_string().contains(TARGET_PROJECTION_NOT_READY) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        response.ok_or_else(|| {
+            anyhow::anyhow!("target projection changed repeatedly during preparation")
+        })?
+    } else {
+        ContextSearch::new(&db, service).catalyze_search(query, limit)?
+    };
     let processing_time = start.elapsed().as_secs_f64();
 
     // Merge response fields with metadata into a single JSON object

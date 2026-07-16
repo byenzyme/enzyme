@@ -5,7 +5,7 @@
 //! links are stored in proper junction tables (`doc_tags`, `doc_links`) rather
 //! than JSON blobs, enabling efficient queries and indexing.
 
-mod connection;
+pub(crate) mod connection;
 mod errors;
 pub mod migrations;
 pub mod repository;
@@ -368,6 +368,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_legacy_database_gains_epoch_state_without_losing_catalysts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                "INSERT INTO catalysts (id,text,entity) VALUES ('legacy','text','entity')",
+                vec![],
+            )
+            .unwrap();
+            db.execute_write("DROP TABLE catalyst_epoch_state", vec![])
+                .unwrap();
+            db.execute_write("DROP TABLE catalyst_epochs", vec![])
+                .unwrap();
+        }
+        let migrated = Database::open(&path).unwrap();
+        assert_eq!(migrated.get_all_catalysts().unwrap()[0].id, "legacy");
+        assert_eq!(migrated.get_epoch_state().unwrap().corpus_generation, 0);
     }
 
     // -- Config table ---------------------------------------------------------

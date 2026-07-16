@@ -51,7 +51,12 @@ impl<'a> SelectionPipeline<'a> {
     pub fn run(&self) -> Result<SelectionResult> {
         let config = EnzymeConfig::load(self.vault_path)?;
 
-        if let Some(ref cfg) = config {
+        self.run_with_config(config.as_ref())
+    }
+
+    /// Run selection against an already-frozen config snapshot.
+    pub fn run_with_config(&self, config: Option<&EnzymeConfig>) -> Result<SelectionResult> {
+        if let Some(cfg) = config {
             if cfg.has_curated_entities() {
                 info!("selecting entities from enzyme-config.yaml");
                 return self.select_from_config(cfg);

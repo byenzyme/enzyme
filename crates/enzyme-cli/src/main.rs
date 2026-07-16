@@ -98,6 +98,10 @@ enum Commands {
         /// Use OPENAI_*/OPENROUTER_* env LLM credentials instead of Enzyme hosted credits.
         #[arg(long)]
         use_env_llm: bool,
+
+        /// Force a complete catalyst rebase epoch now (still built detached).
+        #[arg(long, visible_alias = "force")]
+        full: bool,
     },
 
     /// Search using catalyst-based approximate matching
@@ -377,6 +381,7 @@ async fn main() -> Result<()> {
             quiet,
             min_top_catalysts,
             use_env_llm,
+            full,
         } => {
             commands::init::run_refresh(
                 &vault_path,
@@ -384,6 +389,7 @@ async fn main() -> Result<()> {
                 quiet,
                 min_top_catalysts,
                 use_env_llm,
+                full,
             )
             .await?;
         }

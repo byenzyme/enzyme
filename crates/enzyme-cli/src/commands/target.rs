@@ -17,6 +17,16 @@ use enzyme_core::pipeline::similarity::{SimilarityPipeline, catalysts_fingerprin
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 
 pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()> {
+    for _ in 0..4 {
+        if prepare_target_once(source_path, target_path).await? {
+            return Ok(());
+        }
+        info!("source epoch changed during target preparation; restaging latest epoch");
+    }
+    bail!("source catalyst epoch changed repeatedly during target preparation")
+}
+
+async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<bool> {
     let start = Instant::now();
     info!(?source_path, ?target_path, "preparing catalyze target");
 
@@ -36,6 +46,10 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
         );
     }
     let source_db = Database::open(&source_paths.vault_db)?;
+    let source_epoch = source_db
+        .get_epoch_state()?
+        .active_epoch_id
+        .context("source has no active catalyst epoch")?;
     let catalysts = source_db.get_all_catalysts()?;
     if catalysts.is_empty() {
         bail!(
@@ -46,6 +60,11 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
 
     // Target DB lives in source vault's .enzyme/targets/ directory
     let target_db_path = source_paths.target_db(target_path);
+    let _projection_lock = super::lock::acquire_projection_lock(
+        target_db_path
+            .parent()
+            .context("target database has no parent directory")?,
+    )?;
 
     let display = InitDisplay::start_quiet();
     let tx = display.sender();
@@ -57,6 +76,9 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
 
     tx.send(DisplayEvent::IndexingStart).ok();
     let target_db = Database::open(&target_db_path)?;
+    let recovery_required = target_db.continuous_projection_fence()?.dirty;
+    let projection_token = target_db.begin_continuous_projection()?;
+    let before_embeddings = target_db.get_all_chunk_embeddings()?;
     let indexing = IndexingPipeline::new(&target_db, target_path.to_path_buf());
     let tx_idx = tx.clone();
     let idx_stats = indexing.run(false, |msg| {
@@ -122,7 +144,8 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
     };
     let fingerprint_matches = stored_fingerprint.as_deref() == Some(current_fingerprint.as_str());
 
-    let skip_similarity = idx_unchanged && emb_unchanged && fingerprint_matches;
+    let skip_similarity =
+        !recovery_required && idx_unchanged && emb_unchanged && fingerprint_matches;
 
     let catalyst_count = catalysts.len();
 
@@ -141,6 +164,22 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
             similarities_computed: 0,
             documents_compared: 0,
             duration_ms: 0,
+        }
+    } else if fingerprint_matches && !recovery_required {
+        tx.send(DisplayEvent::SimilarityStart).ok();
+        let after_embeddings = target_db.get_all_chunk_embeddings()?;
+        let incremental = SimilarityPipeline::new(&target_db, service)
+            .maintain_incremental(&before_embeddings, &after_embeddings)?;
+        tx.send(DisplayEvent::SimilarityComplete {
+            catalysts: catalyst_count,
+            documents: idx_stats.files_discovered,
+        })
+        .ok();
+        enzyme_core::pipeline::similarity::SimilarityStats {
+            catalysts_processed: catalyst_count,
+            similarities_computed: incremental.rows_upserted,
+            documents_compared: idx_stats.files_discovered,
+            duration_ms: incremental.duration_ms,
         }
     } else {
         tx.send(DisplayEvent::SimilarityStart).ok();
@@ -178,6 +217,8 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
         .canonicalize()
         .unwrap_or_else(|_| target_path.to_path_buf());
     let source_db = Database::open(&source_paths.vault_db)?;
+    target_db.stage_epoch_projection_from_shadow(&target_db, &source_epoch)?;
+    target_db.finish_continuous_projection(&projection_token)?;
     source_db.upsert_applied_target(&AppliedTarget {
         id: None,
         target_path: canonical_target.to_string_lossy().to_string(),
@@ -187,10 +228,9 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
     })?;
 
     // Persist target to config.toml so it survives DB resets
-    if let Ok(Some(mut config)) = EnzymeConfig::load(source_path) {
-        if let Err(e) = config.add_target(source_path, target_path) {
-            tracing::warn!("failed to persist target to config: {}", e);
-        }
+    let mut config = EnzymeConfig::load(source_path)?.unwrap_or_default();
+    if let Err(e) = config.add_target(source_path, target_path) {
+        tracing::warn!("failed to persist target to config: {}", e);
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -203,5 +243,5 @@ pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()
 
     display.finish();
 
-    Ok(())
+    Ok(source_db.get_epoch_state()?.active_epoch_id.as_deref() == Some(source_epoch.as_str()))
 }

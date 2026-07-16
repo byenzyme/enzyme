@@ -144,6 +144,70 @@ CREATE TABLE IF NOT EXISTS catalyst_embeddings_packed (
     ids     TEXT    NOT NULL,
     vectors BLOB    NOT NULL
 );
+
+-- Catalyst epochs ------------------------------------------------------------
+--
+-- `catalysts`, `catalyst_embeddings_packed`, and `catalyst_similarities` are
+-- the atomically-switched active materialized view.  Complete shadow epochs
+-- are built in frozen database snapshots; these tables durably describe the
+-- active generation and coordinate/coalesce detached builders.
+CREATE TABLE IF NOT EXISTS catalyst_epochs (
+    epoch_id                    TEXT PRIMARY KEY,
+    status                      TEXT NOT NULL,
+    corpus_generation           INTEGER NOT NULL,
+    corpus_fingerprint          TEXT NOT NULL,
+    generation_contract         TEXT NOT NULL,
+    generation_contract_json    TEXT NOT NULL DEFAULT '{}',
+    snapshot_path               TEXT,
+    requested_at_ms             INTEGER NOT NULL,
+    started_at_ms               INTEGER,
+    completed_at_ms             INTEGER,
+    activated_at_ms             INTEGER,
+    failed_at_ms                INTEGER,
+    attempt                     INTEGER NOT NULL DEFAULT 0,
+    next_retry_at_ms            INTEGER,
+    last_error                  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_epochs_status
+    ON catalyst_epochs(status);
+
+CREATE TABLE IF NOT EXISTS catalyst_epoch_state (
+    singleton                   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    corpus_generation           INTEGER NOT NULL DEFAULT 0,
+    corpus_fingerprint          TEXT NOT NULL DEFAULT '',
+    active_epoch_id             TEXT,
+    active_epoch_corpus_generation INTEGER,
+    active_epoch_completed_at_ms INTEGER,
+    active_generation_contract  TEXT,
+    build_epoch_id              TEXT,
+    updated_at_ms               INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO catalyst_epoch_state (singleton) VALUES (1);
+
+-- Epoch-keyed target projections. Configured targets stage these rows before
+-- the source epoch commits; split-DB reads select by the source active epoch,
+-- making source activation the single logical commit point across DB files.
+CREATE TABLE IF NOT EXISTS catalyst_epoch_similarities (
+    epoch_id         TEXT NOT NULL,
+    catalyst_id      TEXT NOT NULL,
+    catalyst_text    TEXT NOT NULL,
+    file_path        TEXT NOT NULL,
+    chunk_index      INTEGER NOT NULL DEFAULT 0,
+    similarity       REAL NOT NULL,
+    chunk_metadata   TEXT DEFAULT '{}',
+    timeline_data    TEXT DEFAULT '{}',
+    created_at       TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (epoch_id, catalyst_id, file_path, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_epoch_similarities_lookup
+    ON catalyst_epoch_similarities(epoch_id, catalyst_id, similarity DESC);
+
+CREATE TABLE IF NOT EXISTS catalyst_epoch_embeddings_packed (
+    epoch_id TEXT PRIMARY KEY,
+    count    INTEGER NOT NULL,
+    ids      TEXT NOT NULL,
+    vectors  BLOB NOT NULL
+);
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
@@ -161,6 +225,10 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "applied_targets",
     "chunk_embeddings",
     "catalyst_embeddings_packed",
+    "catalyst_epochs",
+    "catalyst_epoch_state",
+    "catalyst_epoch_similarities",
+    "catalyst_epoch_embeddings_packed",
 ];
 
 /// All indexes created by the schema (used for validation in tests).
@@ -171,4 +239,6 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_entities_frequency",
     "idx_catalysts_entity",
     "idx_catalysts_context",
+    "idx_catalyst_epochs_status",
+    "idx_epoch_similarities_lookup",
 ];
