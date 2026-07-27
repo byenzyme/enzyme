@@ -10,6 +10,10 @@ use super::schema;
 /// migration (see [`slim_oversized_occurrence_contexts`]).
 const CONTEXT_SLIM_MIGRATION_KEY: &str = "migration.context_slim_v1";
 
+/// Only bother with the one-time post-slim VACUUM when the migration actually
+/// freed enough to matter; below this the I/O outweighs the reclaim.
+const VACUUM_RECLAIM_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Apply all pending migrations on a connection.
 ///
 /// Called during `Database::open` after pragmas are set.
@@ -95,9 +99,27 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
         info!(
             rows_slimmed = oversized_ids.len(),
             approx_bytes_freed = bytes_freed,
-            "context-slim migration: nulled oversized entity_occurrences contexts; \
-             run VACUUM to reclaim disk space"
+            "context-slim migration: nulled oversized entity_occurrences contexts"
         );
+    }
+
+    // One-time reclaim, tied to the same one-time migration: nulling contexts
+    // frees pages for reuse but never shrinks the file, and nothing else in
+    // the lifecycle ever vacuums. Best-effort — a failed VACUUM (e.g. low
+    // disk for the transient copy) must not fail Database::open, and the
+    // migration flag is already set so it won't rescan either way.
+    if bytes_freed >= VACUUM_RECLAIM_THRESHOLD_BYTES {
+        match conn.execute("VACUUM", ()).await {
+            Ok(_) => info!(
+                approx_bytes_freed = bytes_freed,
+                "context-slim migration: vacuumed database to reclaim freed space"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "context-slim migration: VACUUM failed; freed pages will be \
+                 reused by future writes but the file will not shrink"
+            ),
+        }
     }
 
     Ok(())
