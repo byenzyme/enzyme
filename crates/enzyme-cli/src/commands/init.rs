@@ -1717,6 +1717,10 @@ async fn run_refresh_interactive(
             debug!(?reason, "catalysts are stale — running catalyst pipeline");
         }
     }
+    // The local scan+embed work is already committed to the DB, so
+    // collection-derived caches must be invalidated even if the catalyst
+    // refresh below fails or produces nothing.
+    let _ = maybe_bump_collection_cache_epoch(&db, _local.collection_changed())?;
     drop(db);
 
     run_stale_catalyst_refresh(vault_path, min_top_catalysts, use_env_llm).await?;

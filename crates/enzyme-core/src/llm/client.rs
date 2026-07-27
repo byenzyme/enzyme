@@ -12,6 +12,30 @@ pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
 const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/enzyme-python/free-config";
+const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
+
+/// URL of the hosted free-config endpoint.
+///
+/// Overridable via `ENZYME_FREE_CONFIG_URL` so tests can point at a local
+/// mock server; defaults to the production endpoint.
+fn free_config_url() -> String {
+    std::env::var("ENZYME_FREE_CONFIG_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| FREE_CONFIG_URL.to_string())
+}
+
+/// Path of the on-disk free-tier config cache.
+///
+/// Overridable via `ENZYME_API_CACHE_PATH` so tests can run hermetically in
+/// parallel; defaults to `/tmp/enzyme-api-cache`.
+fn api_cache_path() -> std::path::PathBuf {
+    std::env::var("ENZYME_API_CACHE_PATH")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
+}
 
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]
@@ -586,7 +610,7 @@ impl LlmClient {
         match fetch_free_config().await {
             Ok(cfg) => {
                 *self.api_key.write().unwrap() = cfg.api_key.clone();
-                write_free_config_cache(std::path::Path::new("/tmp/enzyme-api-cache"), &cfg);
+                write_free_config_cache(&api_cache_path(), &cfg);
                 true
             }
             Err(e) => {
@@ -818,7 +842,7 @@ impl LlmClient {
 
 /// Delete the cached free-tier config so the next resolve re-fetches.
 fn invalidate_free_config_cache() {
-    let _ = std::fs::remove_file("/tmp/enzyme-api-cache");
+    let _ = std::fs::remove_file(api_cache_path());
 }
 
 /// Write a resolved free-tier config to the cache with a timestamp.
@@ -870,7 +894,8 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
         .build()
         .context("failed to build HTTP client")?;
 
-    debug!("Fetching free config from {}", FREE_CONFIG_URL);
+    let free_config_url = free_config_url();
+    debug!("Fetching free config from {}", free_config_url);
 
     // If the user is logged in, attach auth so the server can gate/charge
     // account credits. First initialization is allowed to be loginless; in
@@ -880,7 +905,7 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
     let auth_path = enzyme_home.join("auth.json");
     let token = crate::config::auth::AuthToken::load(&auth_path).ok();
 
-    let mut req = client.get(FREE_CONFIG_URL);
+    let mut req = client.get(&free_config_url);
     if let Some(token) = &token {
         req = req.header("Authorization", format!("Bearer {}", token.api_key));
     } else {
@@ -994,7 +1019,8 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
 
 async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
     // Reuse cached free-tier config from /tmp if present and not expired.
-    let cache_path = std::path::Path::new("/tmp/enzyme-api-cache");
+    let cache_path = api_cache_path();
+    let cache_path = cache_path.as_path();
     if cache_path.exists() {
         let contents = std::fs::read_to_string(cache_path)
             .with_context(|| format!("Failed to read {}", cache_path.display()))?;
@@ -1057,7 +1083,7 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
 /// Checks (in order):
 /// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
 /// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
-/// 3. `/tmp/enzyme-api-cache`
+/// 3. the on-disk API cache (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`)
 /// 4. Enzyme server free-config endpoint (hosted credits)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     if let Some(config) = resolved_env_config(env_value)? {
