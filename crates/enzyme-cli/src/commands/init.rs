@@ -981,13 +981,6 @@ pub async fn run_init(
             crossterm::style::ResetColor,
         );
         eprintln!();
-        eprintln!(
-            "  {}Publish this vault to access it from Claude anywhere:{}",
-            crossterm::style::SetForegroundColor(crossterm::style::Color::DarkGrey),
-            crossterm::style::ResetColor,
-        );
-        eprintln!("    enzyme publish",);
-        eprintln!();
     }
 
     if quiet || json_progress {

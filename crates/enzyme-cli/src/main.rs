@@ -150,13 +150,6 @@ enum Commands {
     /// Sign out of enzyme.garden
     Logout,
 
-    /// Publish vault index to enzyme.garden for hosted access
-    Publish {
-        /// Emit publish result as JSON on stdout
-        #[arg(long)]
-        json: bool,
-    },
-
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
@@ -447,9 +440,6 @@ async fn main() -> Result<()> {
         } => {
             commands::dump_prompts::run_dump_prompts(&vault_path, &output, min_top_catalysts)
                 .await?;
-        }
-        Commands::Publish { json } => {
-            commands::publish::run_publish(&vault_path, json).await?;
         }
         Commands::Doctor { json } => {
             commands::doctor::run_doctor(&vault_path, json).await?;

@@ -10,7 +10,6 @@ pub mod lock;
 pub mod login;
 pub mod mcp;
 pub mod petri;
-pub mod publish;
 pub mod scan;
 pub mod serve;
 pub mod status;
