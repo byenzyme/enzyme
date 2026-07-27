@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS entity_occurrences (
     effective_date INTEGER,
     date_source    TEXT    DEFAULT 'filesystem'
 );
+CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity ON entity_occurrences(entity_id);
+CREATE INDEX IF NOT EXISTS idx_entity_occurrences_file   ON entity_occurrences(file_path);
 
 -- Catalysts -------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS catalysts (
@@ -171,4 +173,6 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_entities_frequency",
     "idx_catalysts_entity",
     "idx_catalysts_context",
+    "idx_entity_occurrences_entity",
+    "idx_entity_occurrences_file",
 ];

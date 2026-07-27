@@ -9,7 +9,9 @@ use tracing::{info, warn};
 
 use crate::db::Database;
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
-use crate::models::{EntityOccurrence, EntityTrends, EntityType, ROOT_FOLDER_ENTITY};
+use crate::models::{
+    EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
+};
 
 /// Orchestrates the full indexing pipeline:
 /// discover files -> process -> diff against DB -> upsert new/changed ->
@@ -249,11 +251,21 @@ impl<'a> IndexingPipeline<'a> {
                 .map(|fm| fm.links.iter().map(|l| l.as_str()).collect())
                 .unwrap_or_default();
 
-            // Full file body (frontmatter stripped) for document-level entities
-            let full_body: Option<String> = doc
-                .chunks
-                .first()
-                .map(|_| crate::document::strip_frontmatter(&doc.content).to_string());
+            // Full file body (frontmatter stripped) for document-level entities.
+            // Only stored when small enough that the catalyst pipeline's inline
+            // context filter (`INLINE_CONTEXT_MAX_WORDS`) will actually keep it;
+            // larger bodies are always filtered out by that reader, so we store
+            // `None` rather than pay to persist context that's never used. A
+            // truncated snippet is deliberately avoided here: it would newly
+            // pass the reader's word-count filter and change centroid behavior.
+            let full_body: Option<String> = doc.chunks.first().and_then(|_| {
+                let body = crate::document::strip_frontmatter(&doc.content).to_string();
+                if body.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS {
+                    Some(body)
+                } else {
+                    None
+                }
+            });
 
             for tag in &doc.tags {
                 let context = if fm_tags.contains(tag.as_str()) {
@@ -1059,5 +1071,77 @@ mod tests {
             "should contain start of body"
         );
         assert!(ctx.contains("Final notes"), "should contain end of body");
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Oversized frontmatter/folder bodies store None, not a truncated body
+    // -----------------------------------------------------------------------
+    #[test]
+    fn oversized_body_stores_none_context() {
+        use crate::models::INLINE_CONTEXT_MAX_WORDS;
+
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // A body comfortably over the 400-word inline-context threshold.
+        let big_body = "word ".repeat(INLINE_CONTEXT_MAX_WORDS + 100);
+        assert!(big_body.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS);
+
+        write_md(
+            vault.path(),
+            "people/big.md",
+            &format!("---\ntags: [oversized]\npeople: \"[[BigLink]]\"\n---\n{big_body}"),
+        );
+
+        // A small body, well under the threshold, in the same folder so the
+        // folder entity gets one oversized and one small occurrence.
+        write_md(
+            vault.path(),
+            "people/small.md",
+            "---\ntags: [oversized]\npeople: \"[[BigLink]]\"\n---\nA short note.\n",
+        );
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entities = db.get_all_entities().unwrap();
+
+        let tag_entity = entities
+            .iter()
+            .find(|e| e.name == "oversized" && e.entity_type == EntityType::Tag)
+            .expect("oversized tag should exist");
+        let link_entity = entities
+            .iter()
+            .find(|e| e.name == "biglink" && e.entity_type == EntityType::Link)
+            .expect("biglink link should exist");
+        let folder_entity = entities
+            .iter()
+            .find(|e| e.name == "people" && e.entity_type == EntityType::Folder)
+            .expect("people folder entity should exist");
+
+        for entity in [&tag_entity, &link_entity, &folder_entity] {
+            let occs = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
+            assert_eq!(occs.len(), 2, "entity {} should have 2 occurrences", entity.name);
+
+            let big_occ = occs
+                .iter()
+                .find(|o| o.file_path.ends_with("big.md"))
+                .expect("big.md occurrence should exist");
+            assert!(
+                big_occ.context.is_none(),
+                "oversized body context for entity {} should be None, not a truncated snippet",
+                entity.name
+            );
+
+            let small_occ = occs
+                .iter()
+                .find(|o| o.file_path.ends_with("small.md"))
+                .expect("small.md occurrence should exist");
+            assert!(
+                small_occ.context.is_some(),
+                "small body context for entity {} should still be stored",
+                entity.name
+            );
+        }
     }
 }

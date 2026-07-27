@@ -21,7 +21,9 @@ use crate::llm::{
     get_profile, parse_catalyst_response, parse_partial_catalyst_entries,
     streaming_entries_instruction,
 };
-use crate::models::{Catalyst, Embedding, Entity, EntityOccurrence, EntityType};
+use crate::models::{
+    Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
+};
 use crate::pipeline::eras::{
     Era, allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
     sample_contexts_by_era,
@@ -622,10 +624,6 @@ impl<'a> CatalystPipeline<'a> {
         Self { db, llm, embedding }
     }
 
-    /// Maximum word count for an occurrence context to be considered an inline
-    /// lasso extract (vs a full note body from frontmatter).
-    const INLINE_CONTEXT_MAX_WORDS: usize = 400;
-
     fn preload_chunk_selection(&self, entities: &[Entity]) -> Option<ChunkSelectionPreload> {
         let chunk_vectors = match self.db.get_all_chunk_embeddings() {
             Ok(rows) if !rows.is_empty() => rows
@@ -692,7 +690,7 @@ impl<'a> CatalystPipeline<'a> {
                     .into_iter()
                     .filter_map(|occ| {
                         let ctx = occ.context?;
-                        if ctx.split_whitespace().count() < Self::INLINE_CONTEXT_MAX_WORDS {
+                        if ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS {
                             Some(ctx)
                         } else {
                             None

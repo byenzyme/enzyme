@@ -370,6 +370,116 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_context_slim_migration_nulls_oversized_and_short_circuits() {
+        const SLIM_KEY: &str = "migration.context_slim_v1";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_slim.db");
+
+        {
+            // Opening a fresh DB runs the migration against an empty
+            // `entity_occurrences` table, which sets the flag immediately.
+            // Remove it here to simulate a legacy pre-migration database that
+            // already has oversized/normal contexts on disk.
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                &format!("DELETE FROM config WHERE key = '{SLIM_KEY}'"),
+                vec![],
+            )
+            .unwrap();
+
+            db.execute_write(
+                "INSERT INTO entities (id, name, type) VALUES (1, 'test', 'tag')",
+                vec![],
+            )
+            .unwrap();
+
+            let big_context = "word ".repeat(500);
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                 VALUES (1, 'big.md', ?1, 0)",
+                vec![Value::Text(big_context)],
+            )
+            .unwrap();
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                 VALUES (1, 'small.md', 'short text', 0)",
+                vec![],
+            )
+            .unwrap();
+        }
+
+        {
+            // Reopening should find the flag missing, scan, null the oversized
+            // context, and preserve the normal one.
+            let db = Database::open(&path).unwrap();
+
+            let big_ctx: Option<String> = db
+                .query_read(
+                    "SELECT context FROM entity_occurrences WHERE file_path = 'big.md'",
+                    vec![],
+                    |row| row.get::<Option<String>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .flatten();
+            assert!(big_ctx.is_none(), "oversized context should be nulled");
+
+            let small_ctx: Option<String> = db
+                .query_read(
+                    "SELECT context FROM entity_occurrences WHERE file_path = 'small.md'",
+                    vec![],
+                    |row| row.get::<Option<String>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .flatten();
+            assert_eq!(small_ctx.as_deref(), Some("short text"));
+
+            let flag: Vec<String> = db
+                .query_read(
+                    &format!("SELECT value FROM config WHERE key = '{SLIM_KEY}'"),
+                    vec![],
+                    |row| row.get::<String>(0),
+                )
+                .unwrap();
+            assert_eq!(flag.len(), 1, "migration flag should be set after running");
+
+            // Insert another oversized row directly, bypassing the migration
+            // path entirely, to verify the next open short-circuits.
+            let big_context_2 = "word ".repeat(500);
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                 VALUES (1, 'big2.md', ?1, 0)",
+                vec![Value::Text(big_context_2)],
+            )
+            .unwrap();
+        }
+
+        {
+            // Since the flag is already set, this open must not rescan —
+            // the newly inserted oversized row should survive untouched.
+            let db = Database::open(&path).unwrap();
+            let big2_ctx: Option<String> = db
+                .query_read(
+                    "SELECT context FROM entity_occurrences WHERE file_path = 'big2.md'",
+                    vec![],
+                    |row| row.get::<Option<String>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .flatten();
+            assert!(
+                big2_ctx.is_some(),
+                "second open should short-circuit on the config flag and not rescan"
+            );
+        }
+    }
+
     // -- Config table ---------------------------------------------------------
 
     #[test]

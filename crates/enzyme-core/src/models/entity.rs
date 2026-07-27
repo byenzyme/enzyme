@@ -9,6 +9,13 @@ use super::Timestamp;
 /// Config represents this as `folder:.`.
 pub const ROOT_FOLDER_ENTITY: &str = ".";
 
+/// Maximum word count for an occurrence context to be considered an inline
+/// lasso extract (vs. a full note body from frontmatter). Contexts at or
+/// above this threshold are filtered out of centroid/context selection by
+/// readers (see `pipeline::catalysts`), so writers should not bother storing
+/// them (see `pipeline::indexing::collect_entity_entries`).
+pub const INLINE_CONTEXT_MAX_WORDS: usize = 400;
+
 /// The kind of entity extracted from vault documents.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
