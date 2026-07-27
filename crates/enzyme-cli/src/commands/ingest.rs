@@ -6,8 +6,12 @@ use anyhow::{Context, Result};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::document::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
+use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::models::{DateSource, EntityType};
+use enzyme_core::pipeline::embedding::EmbeddingPipeline;
+use enzyme_core::pipeline::epoch::now_ms as epoch_now_ms;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
+use enzyme_core::pipeline::similarity::{IncrementalSimilarityStats, SimilarityPipeline};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -83,16 +87,23 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
     let count = processed.len();
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
-    db.upsert_documents_batch(&processed)?;
-
-    let entity_entries = IndexingPipeline::collect_entity_entries(&processed);
-    let refs: Vec<(&str, &EntityType, &enzyme_core::models::EntityOccurrence)> = entity_entries
-        .iter()
-        .map(|(name, etype, occurrence)| (name.as_str(), etype, occurrence))
-        .collect();
-    if let Err(e) = db.upsert_entities_batch(&refs) {
-        tracing::warn!("entity extraction failed: {}", e);
-    }
+    // Ingest is a document-write surface, so it participates in the same
+    // serialized, crash-recoverable continuous projection as refresh. Mark
+    // dirty before the document commit and clear only after exact top-K is
+    // durable.
+    let service = get_embedding_service(&paths.home)?;
+    let (emb_stats, similarity) = project_ingest_batch(&db, &paths, &processed, service)?;
+    db.reconcile_corpus_generation(epoch_now_ms())?;
+    let contract = super::init::generation_contract(vault_path, &paths, false).await?;
+    db.bootstrap_legacy_epoch(&contract, epoch_now_ms(), false)?;
+    super::init::recover_abandoned_epoch_worker(&db, &paths)?;
+    let schedule = db.schedule_catalyst_epoch(epoch_now_ms(), &contract, false)?;
+    let background_spawned =
+        schedule.launch_needed && super::init::spawn_background_refresh(vault_path, &paths, false);
+    let epoch_state = db.get_epoch_state()?;
+    let epoch_age_ms = epoch_state
+        .active_epoch_completed_at_ms
+        .map(|completed| epoch_now_ms().saturating_sub(completed));
 
     let duration_ms = start.elapsed().as_millis() as u64;
     if quiet {
@@ -101,14 +112,84 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
             serde_json::to_string(&serde_json::json!({
                 "status": "ok",
                 "documents_ingested": count,
+                "embedding": {
+                    "documents_embedded": emb_stats.documents_embedded,
+                    "chunks_embedded": emb_stats.chunks_embedded,
+                    "documents_pruned": emb_stats.documents_pruned,
+                    "documents_skipped": emb_stats.documents_skipped,
+                    "duration_ms": emb_stats.duration_ms,
+                    "encode_ms": emb_stats.encode_ms,
+                },
+                "similarity": similarity,
+                "epoch": {
+                    "active_epoch_id": epoch_state.active_epoch_id,
+                    "age_ms": epoch_age_ms,
+                    "corpus_generation": epoch_state.corpus_generation,
+                    "corpus_changed_since_epoch": epoch_state.active_epoch_corpus_generation
+                        != Some(epoch_state.corpus_generation),
+                    "due": schedule.due,
+                    "scheduled": schedule.scheduled,
+                    "coalesced": schedule.coalesced,
+                },
+                "background_spawned": background_spawned,
                 "duration_ms": duration_ms,
             }))?
         );
     } else {
-        eprintln!("Ingested {} documents in {}ms", count, duration_ms);
+        eprintln!(
+            "Ingested {} documents and refreshed projection in {}ms",
+            count, duration_ms
+        );
     }
 
     Ok(())
+}
+
+fn project_ingest_batch(
+    db: &Database,
+    paths: &EnzymePaths,
+    processed: &[ProcessedDocument],
+    service: &EmbeddingService,
+) -> Result<(
+    enzyme_core::pipeline::embedding::EmbeddingStats,
+    IncrementalSimilarityStats,
+)> {
+    let _projection_lock = super::lock::acquire_projection_lock(
+        paths.vault_db.parent().context("vault DB has no parent")?,
+    )?;
+    let recovery_required = db.continuous_projection_fence()?.dirty;
+    let projection_token = db.begin_continuous_projection()?;
+    let before_embeddings = db.get_all_chunk_embeddings()?;
+    db.upsert_documents_batch(processed)?;
+
+    let entity_entries = IndexingPipeline::collect_entity_entries(processed);
+    let refs: Vec<(&str, &EntityType, &enzyme_core::models::EntityOccurrence)> = entity_entries
+        .iter()
+        .map(|(name, etype, occurrence)| (name.as_str(), etype, occurrence))
+        .collect();
+    if let Err(e) = db.upsert_entities_batch(&refs) {
+        tracing::warn!("entity extraction failed: {}", e);
+    }
+
+    let emb_stats = EmbeddingPipeline::new(db, service).run_all(|_| {})?;
+    let after_embeddings = db.get_all_chunk_embeddings()?;
+    let similarity = if db.get_all_catalysts()?.is_empty() {
+        IncrementalSimilarityStats::default()
+    } else if recovery_required {
+        let full = SimilarityPipeline::new(db, service).run(|_, _| {})?;
+        IncrementalSimilarityStats {
+            candidate_scores: full.similarities_computed,
+            rows_upserted: full.similarities_computed,
+            full_repair: true,
+            duration_ms: full.duration_ms,
+            ..Default::default()
+        }
+    } else {
+        SimilarityPipeline::new(db, service)
+            .maintain_incremental(&before_embeddings, &after_embeddings)?
+    };
+    db.finish_continuous_projection(&projection_token)?;
+    Ok((emb_stats, similarity))
 }
 
 fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<ProcessedDocument> {
@@ -241,6 +322,24 @@ fn push_unique_nonempty(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enzyme_core::embedding::EmbeddingBackend;
+    use enzyme_core::models::Catalyst;
+
+    struct AxisBackend;
+
+    impl EmbeddingBackend for AxisBackend {
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+
+        fn name(&self) -> &str {
+            "ingest-axis-test"
+        }
+    }
 
     fn entry(title: &str) -> IngestEntry {
         IngestEntry {
@@ -287,5 +386,54 @@ mod tests {
             doc.folders,
             vec!["recipes", "recipe/main-dishes", "recipe/weeknight"]
         );
+    }
+
+    #[test]
+    fn ingest_projects_embeddings_and_recovers_interrupted_similarity_commit() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let paths = EnzymePaths::with_overrides(
+            temp.path(),
+            Some(temp.path().join("home").to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.vault_db.parent().unwrap()).unwrap();
+        let db = Database::open(&paths.vault_db).unwrap();
+        db.insert_catalysts(&[Catalyst {
+            id: "cat".into(),
+            text: "question".into(),
+            entity: "entity".into(),
+            context: "default".into(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        db.upsert_catalyst_embeddings(&[("cat", &[1.0_f32, 0.0][..])])
+            .unwrap();
+        let service = EmbeddingService::new(Box::new(AxisBackend));
+        let doc = entry_to_processed_document(entry("Projected"), 1_700_000_000_000).unwrap();
+
+        let (embedding, similarity) =
+            project_ingest_batch(&db, &paths, &[doc.clone()], &service).unwrap();
+        assert!(embedding.chunks_embedded > 0);
+        assert!(similarity.rows_upserted > 0);
+        assert_eq!(
+            db.get_similarities_for_catalyst("cat", 50).unwrap().len(),
+            1
+        );
+
+        // Simulate a process dying after embedding committed but before its
+        // similarity phase. The next ingest has no embedding delta, yet the
+        // durable marker forces a complete exact repair.
+        db.execute_write("DELETE FROM catalyst_similarities", vec![])
+            .unwrap();
+        db.set_config("continuous_projection_fence", "dirty:crashed")
+            .unwrap();
+        let (_, recovered) = project_ingest_batch(&db, &paths, &[doc], &service).unwrap();
+        assert!(recovered.full_repair);
+        assert_eq!(
+            db.get_similarities_for_catalyst("cat", 50).unwrap().len(),
+            1
+        );
+        assert!(!db.continuous_projection_fence().unwrap().dirty);
     }
 }

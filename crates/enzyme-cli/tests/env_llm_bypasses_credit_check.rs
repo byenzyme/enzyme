@@ -4,11 +4,16 @@
 //!
 //! CLAIM UNDER TEST
 //! ----------------
-//! `crates/enzyme-cli/src/commands/init.rs:611` (and the sibling refresh preflight
-//! at `init.rs:1352`) fence the hosted credit deduction behind
-//! `ConfigProvider::ServerFallback`. Under `--use-env-llm` the resolved provider
-//! is `ConfigProvider::Env`, so the claim is that `deduct_credits` is never
-//! reached and the hosted Enzyme API is never consulted for billing at all.
+//! `crates/enzyme-cli/src/commands/init.rs:611` fences `init`'s hosted credit
+//! deduction behind `ConfigProvider::ServerFallback`. Under the current
+//! catalyst-epoch architecture, the *refresh* path's equivalent preflight
+//! lives inside `build_and_activate_epoch` (the detached
+//! `enzyme refresh --detached --quiet` worker spawned by
+//! `run_refresh_interactive`/`run_refresh_fast`), gated the same way. Under
+//! `--use-env-llm` the resolved provider is `ConfigProvider::Env`, so the
+//! claim is that `deduct_credits` is never reached and the hosted Enzyme API
+//! is never consulted for billing at all — whether that work happens inline
+//! (`init`) or inside the background worker (`refresh`).
 //!
 //! These tests hold that claim to account end-to-end: a real `enzyme` subprocess,
 //! a real (fake) OpenAI-compatible LLM that answers successfully, and a real
@@ -23,6 +28,9 @@
 
 mod support;
 
+use support::epoch::{
+    background_refresh_log, build_epoch_id, wait_for_epoch_terminal, WORKER_TERMINAL_TIMEOUT,
+};
 use support::fixture::{CliOutput, VaultFixture};
 use support::mock::{MockEnzymeApi, MockLlm};
 
@@ -150,9 +158,14 @@ fn init_with_env_llm_never_deducts_hosted_credits() {
     );
 }
 
-/// Same claim for the refresh path's separate preflight (`init.rs:1352`).
-/// Refresh is seeded by a preceding `init --use-env-llm` on the same vault, then
-/// a new note is written so there is genuinely stale work to do.
+/// Same claim for the refresh path's separate preflight, which now lives
+/// inside `build_and_activate_epoch` — the detached
+/// `enzyme refresh --detached --quiet` worker that `run_refresh_interactive`
+/// spawns once a catalyst epoch is due (see `crates/enzyme-core/src/pipeline/epoch.rs`).
+/// Catalyst (LLM) work no longer runs inline in `refresh`, so this test must
+/// force the epoch to be due (`--full`; there is no more entity-mention
+/// staleness threshold) and wait for the spawned worker to reach a terminal
+/// status before it can observe whether hosted credits were touched.
 #[test]
 fn refresh_with_env_llm_never_deducts_hosted_credits() {
     let fixture = VaultFixture::new();
@@ -180,16 +193,12 @@ fn refresh_with_env_llm_never_deducts_hosted_credits() {
     // Now arm the 402 and give refresh something to chew on.
     api.set_deduct_always_402(0.0);
     api.set_credit_balance(0.0);
-    // `NEW_MENTIONS_THRESHOLD` in enzyme-core/src/pipeline/staleness.rs is 3, so
-    // an entity goes stale once its doc count grows by 3+. Add 4 notes to the
-    // existing `projects/` entity to guarantee `StalenessResult::Stale` and
-    // therefore reach the refresh credit preflight.
     for i in 0..4 {
         fixture.write_note(
             &format!("projects/new-project-{i}.md"),
             &format!(
-                "# New Project {i}\n\nFresh project material added after init so the \
-                 projects entity crosses the staleness threshold.\n"
+                "# New Project {i}\n\nFresh project material added after init so refresh \
+                 has genuinely new local work to do.\n"
             ),
         );
     }
@@ -197,21 +206,59 @@ fn refresh_with_env_llm_never_deducts_hosted_credits() {
 
     let out = fixture
         .cli()
-        .arg("refresh")
-        .arg("--use-env-llm")
+        .args(["refresh", "--use-env-llm", "--full"])
         .enzyme_api(&api)
         .env_llm(&llm)
         .run();
 
-    let diag = diagnostics("refresh --use-env-llm", &api, &llm, &out);
+    let diag = diagnostics("refresh --use-env-llm --full", &api, &llm, &out);
 
-    // Non-vacuity: refresh must have reached LLM work of its own, otherwise a
-    // zero deduct count says nothing about the refresh preflight.
+    let stdout_json: serde_json::Value = serde_json::from_str(out.stdout.trim())
+        .unwrap_or_else(|e| panic!("refresh did not print parseable JSON on stdout ({e}).{diag}"));
+    assert_eq!(
+        stdout_json["epoch"]["due"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: `--full` did not make the catalyst epoch due.{diag}"
+    );
+    assert_eq!(
+        stdout_json["background_spawned"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: refresh reported background_spawned=false, so no worker ran.{diag}"
+    );
+
+    // Deterministically finish the scheduled epoch. `spawn_background_refresh`
+    // double-forks a worker while this test's own `refresh` process may still
+    // hold its own open SQLite connection to the same file, and the worker's
+    // `Database::open()` can lose a schema-lock race against it and die
+    // immediately (observed empirically). Production self-heals this — a
+    // scheduled-but-unclaimed epoch reports `launch_needed: true` again next
+    // time — so invoke the identical detached-worker subcommand ourselves
+    // once our own `refresh` process has fully exited (no more competing
+    // connection): a no-op if the auto-spawned worker already claimed the
+    // epoch, a reliable retry if it did not.
+    let _ = fixture
+        .cli()
+        .args(["refresh", "--detached", "--quiet", "--use-env-llm"])
+        .enzyme_api(&api)
+        .env_llm(&llm)
+        .run();
+
+    let epoch_id = build_epoch_id(&stdout_json);
+    let db_path = fixture.vault_enzyme_dir().join("enzyme.db");
+    let status = wait_for_epoch_terminal(&db_path, &epoch_id, WORKER_TERMINAL_TIMEOUT);
+    let worker_log = background_refresh_log(&db_path);
+
+    // Non-vacuity: refresh's worker must have reached LLM work of its own,
+    // otherwise a zero deduct count says nothing about the refresh preflight.
+    // (The epoch's own success/failure is not this test's concern — only
+    // whether hosted billing was ever touched while doing the attempt.)
     assert!(
         llm.request_count() > llm_calls_after_init,
-        "TEST IS VACUOUS: `refresh --use-env-llm` issued no LLM requests of its own \
-         (count was {llm_calls_after_init} after init and is {} now), so the refresh \
-         credit preflight at init.rs:1352 was never exercised.{diag}",
+        "TEST IS VACUOUS: `refresh --use-env-llm`'s background worker (epoch {epoch_id}, \
+         ended in status {status:?}) issued no LLM requests of its own (count was \
+         {llm_calls_after_init} after init and is {} now), so the refresh credit \
+         preflight in build_and_activate_epoch was never exercised.{diag}\n\
+         --- background_refresh.log ---\n{worker_log}",
         llm.request_count(),
     );
 
@@ -221,8 +268,9 @@ fn refresh_with_env_llm_never_deducts_hosted_credits() {
         "REGRESSION: `refresh --use-env-llm` consulted hosted credits.\n\
          expected: 0 calls to POST /v1/credits/deduct across init+refresh\n\
          actual:   {} call(s)\n\
-         init.rs:1352 is supposed to fence the refresh credit preflight behind \
-         ConfigProvider::ServerFallback.{diag}",
+         build_and_activate_epoch is supposed to fence the refresh credit preflight \
+         behind ConfigProvider::ServerFallback.{diag}\n\
+         --- background_refresh.log ---\n{worker_log}",
         api.deduct_calls(),
     );
     assert_eq!(

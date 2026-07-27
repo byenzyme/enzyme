@@ -126,6 +126,29 @@ impl Database {
             Ok(results)
         })
     }
+
+    /// Create a transactionally consistent, standalone SQLite snapshot.
+    /// Catalyst epoch builders use this frozen copy so active reads and corpus
+    /// writes can continue against the source database.
+    pub fn snapshot_to(&self, path: impl AsRef<Path>) -> Result<(), DbError> {
+        let path = path.as_ref();
+        if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|e| DbError::Migration(format!("remove old snapshot: {e}")))?;
+        }
+        let quoted = path
+            .to_str()
+            .ok_or_else(|| DbError::Migration("non-UTF8 snapshot path".into()))?
+            .replace('\'', "''");
+        let sql = format!("VACUUM INTO '{quoted}'");
+        block_in_place_sync(async {
+            self.conn
+                .execute_batch(&sql)
+                .await
+                .map(|_| ())
+                .map_err(DbError::Libsql)
+        })
+    }
 }
 
 // -- Pragma helpers -----------------------------------------------------------

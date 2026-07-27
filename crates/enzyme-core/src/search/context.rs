@@ -8,11 +8,156 @@ use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::Embedding;
 
+pub const TARGET_PROJECTION_NOT_READY: &str = "target projection is not ready for active epoch";
+
 /// Structured response from catalyst-based search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalyzeResponse {
     pub results: Vec<CatalyzeResultItem>,
     pub top_contributing_catalysts: Vec<TopCatalyst>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedding::EmbeddingBackend;
+    use crate::models::Catalyst;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ActivatingBackend {
+        db_path: PathBuf,
+        calls: Arc<AtomicUsize>,
+        change_epoch: bool,
+    }
+
+    impl EmbeddingBackend for ActivatingBackend {
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let db = Database::open(&self.db_path)?;
+                let token = db.begin_continuous_projection()?;
+                if self.change_epoch {
+                    db.execute_write(
+                        "UPDATE catalyst_epoch_state SET active_epoch_id='new-epoch' WHERE singleton=1",
+                        vec![],
+                    )?;
+                }
+                db.finish_continuous_projection(&token)?;
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+
+        fn name(&self) -> &str {
+            "activating-test"
+        }
+    }
+
+    #[test]
+    fn catalyst_search_retries_if_epoch_activates_between_reads() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("search.db");
+        let db = Database::open(&db_path).unwrap();
+        db.insert_catalysts(&[Catalyst {
+            id: "cat".into(),
+            text: "question".into(),
+            entity: "entity".into(),
+            context: "default".into(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        db.upsert_catalyst_embeddings(&[("cat", &[1.0_f32, 0.0][..])])
+            .unwrap();
+        db.execute_write(
+            "UPDATE catalyst_epoch_state SET active_epoch_id='old-epoch' WHERE singleton=1",
+            vec![],
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = EmbeddingService::new(Box::new(ActivatingBackend {
+            db_path,
+            calls: calls.clone(),
+            change_epoch: true,
+        }));
+
+        ContextSearch::new(&db, &service)
+            .catalyze_search("query", 5)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn catalyst_search_retries_if_same_epoch_projection_changes_between_reads() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("search.db");
+        let db = Database::open(&db_path).unwrap();
+        db.insert_catalysts(&[Catalyst {
+            id: "cat".into(),
+            text: "question".into(),
+            entity: "entity".into(),
+            context: "default".into(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        db.upsert_catalyst_embeddings(&[("cat", &[1.0_f32, 0.0][..])])
+            .unwrap();
+        db.execute_write(
+            "UPDATE catalyst_epoch_state SET active_epoch_id='same-epoch' WHERE singleton=1",
+            vec![],
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = EmbeddingService::new(Box::new(ActivatingBackend {
+            db_path,
+            calls: calls.clone(),
+            change_epoch: false,
+        }));
+
+        ContextSearch::new(&db, &service)
+            .catalyze_search("query", 5)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn target_search_reports_missing_active_epoch_projection_as_retriable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let db_path = temp.path().join("source.db");
+        let source = Database::open(&db_path).unwrap();
+        let target = Database::open(temp.path().join("target.db")).unwrap();
+        source
+            .insert_catalysts(&[Catalyst {
+                id: "cat".into(),
+                text: "question".into(),
+                entity: "entity".into(),
+                context: "default".into(),
+                generated_at: chrono::Utc::now(),
+                metadata: serde_json::json!({}),
+            }])
+            .unwrap();
+        source
+            .execute_write(
+                "UPDATE catalyst_epoch_state SET active_epoch_id='new-epoch' WHERE singleton=1",
+                vec![],
+            )
+            .unwrap();
+        let service = EmbeddingService::new(Box::new(ActivatingBackend {
+            db_path,
+            calls: Arc::new(AtomicUsize::new(1)),
+            change_epoch: false,
+        }));
+
+        let error = ContextSearch::with_target(&source, &target, &service)
+            .catalyze_search("query", 5)
+            .unwrap_err();
+        assert!(error.to_string().contains(TARGET_PROJECTION_NOT_READY));
+    }
 }
 
 /// A single result from catalyst-based search.
@@ -89,6 +234,39 @@ impl<'a> ContextSearch<'a> {
     /// 4. Aggregate, boost by multi-catalyst and recency, deduplicate, sort
     /// 5. Compute top contributing catalysts with contribution counts
     pub fn catalyze_search(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
+        // Source activation spans several materialized tables. Read an epoch
+        // fence before and after the autocommit reads; if activation landed in
+        // between, discard the mixed attempt and retry against the new epoch.
+        // If activation lands after the final fence, this is a valid old-epoch
+        // snapshot (the read logically preceded activation).
+        for _ in 0..4 {
+            let source_projection_fence = self.db.continuous_projection_fence()?;
+            let result_db = self.target_db.unwrap_or(self.db);
+            let result_projection_fence = result_db.continuous_projection_fence()?;
+            if source_projection_fence.dirty || result_projection_fence.dirty {
+                std::thread::yield_now();
+                continue;
+            }
+            let source_epoch = self.db.get_epoch_state()?.active_epoch_id;
+            let response = self.catalyze_search_at_epoch(query, limit, source_epoch.as_deref())?;
+            if self.db.get_epoch_state()?.active_epoch_id == source_epoch
+                && self.db.continuous_projection_fence()? == source_projection_fence
+                && result_db.continuous_projection_fence()? == result_projection_fence
+            {
+                return Ok(response);
+            }
+        }
+        anyhow::bail!(
+            "catalyst epoch or document projection changed during search; retry the query"
+        )
+    }
+
+    fn catalyze_search_at_epoch(
+        &self,
+        query: &str,
+        limit: usize,
+        source_epoch: Option<&str>,
+    ) -> Result<CatalyzeResponse> {
         let query_vec = self.service.embed_query(query)?;
 
         // Get all catalysts
@@ -102,7 +280,18 @@ impl<'a> ContextSearch<'a> {
 
         // Load cached catalyst embeddings from DB, falling back to re-embedding
         let emb_db = self.target_db.unwrap_or(self.db);
-        let cached = emb_db.get_all_catalyst_embeddings()?;
+        let cached = if self.target_db.is_some() {
+            let epoch_id = source_epoch
+                .ok_or_else(|| anyhow::anyhow!("source has no active catalyst epoch"))?;
+            let cached = emb_db.get_epoch_catalyst_embeddings(epoch_id)?;
+            anyhow::ensure!(
+                !cached.is_empty(),
+                "{TARGET_PROJECTION_NOT_READY}: {epoch_id}"
+            );
+            cached
+        } else {
+            emb_db.get_all_catalyst_embeddings()?
+        };
         let cat_embeddings = if !cached.is_empty() {
             let cache_map: HashMap<&str, &Vec<f32>> =
                 cached.iter().map(|(id, vec)| (id.as_str(), vec)).collect();
@@ -176,8 +365,15 @@ impl<'a> ContextSearch<'a> {
             .iter()
             .map(|(idx, _)| catalysts[*idx].id.as_str())
             .collect();
-        let all_sims =
-            sim_repo.get_similarities_for_catalysts(&top_catalyst_ids, context_per_catalyst)?;
+        let all_sims = if self.target_db.is_some() {
+            sim_repo.get_epoch_similarities_for_catalysts(
+                source_epoch.expect("checked active source epoch"),
+                &top_catalyst_ids,
+                context_per_catalyst,
+            )?
+        } else {
+            sim_repo.get_similarities_for_catalysts(&top_catalyst_ids, context_per_catalyst)?
+        };
 
         let mut sims_by_catalyst: HashMap<&str, Vec<&crate::models::CatalystSimilarity>> =
             HashMap::new();

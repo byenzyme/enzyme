@@ -2,6 +2,7 @@ pub mod catalysts;
 pub mod context;
 pub mod embedding;
 pub mod entity_map;
+pub mod epoch;
 pub mod eras;
 pub mod indexing;
 pub mod profile_assignment;

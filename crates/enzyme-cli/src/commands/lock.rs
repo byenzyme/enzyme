@@ -10,16 +10,9 @@ use fs2::FileExt;
 /// The lock is released when this struct is dropped.
 pub struct RefreshLock {
     _file: File,
-    path: PathBuf,
 }
 
-impl Drop for RefreshLock {
-    fn drop(&mut self) {
-        // Lock is released when File is dropped (fs2 uses flock/LockFileEx).
-        // Clean up the lock file itself.
-        let _ = fs::remove_file(&self.path);
-    }
-}
+pub type ProjectionLock = RefreshLock;
 
 fn lock_path(enzyme_dir: &Path) -> PathBuf {
     enzyme_dir.join("refresh.lock")
@@ -39,7 +32,24 @@ pub fn acquire_refresh_lock(enzyme_dir: &Path) -> Result<RefreshLock> {
     let mut f = file.try_clone()?;
     write!(f, "{}", std::process::id())?;
 
-    Ok(RefreshLock { _file: file, path })
+    // Keep the inode in place. Removing a lock file while another process is
+    // waiting on its open descriptor permits a third process to lock a new
+    // inode concurrently.
+    Ok(RefreshLock { _file: file })
+}
+
+/// Serialize the complete continuous-projection commit. This is deliberately
+/// distinct from `refresh.lock`: an epoch can spend minutes doing LLM work
+/// without blocking document freshness, and takes this lock only to activate.
+pub fn acquire_projection_lock(enzyme_dir: &Path) -> Result<ProjectionLock> {
+    fs::create_dir_all(enzyme_dir).context("failed to create .enzyme directory")?;
+    let path = enzyme_dir.join("projection.lock");
+    let file = File::create(&path).context("failed to create projection.lock")?;
+    file.lock_exclusive()
+        .context("failed to acquire continuous projection lock")?;
+    let mut f = file.try_clone()?;
+    write!(f, "{}", std::process::id())?;
+    Ok(ProjectionLock { _file: file })
 }
 
 /// Non-blocking check: is the refresh lock currently held?

@@ -1,6 +1,7 @@
 //! e2e regression: scan_embed_survives_llm_failure
 //!
-//! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`).
+//! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`,
+//! `support::epoch`).
 //!
 //! CLAIM UNDER TEST
 //! ----------------
@@ -8,9 +9,17 @@
 //! "aborts before scan and embed", leaving newly added notes unindexed and
 //! unembedded.
 //!
-//! The counter-diagnosis is that `init.rs:1704` (`run_local_refresh_work`) runs
-//! the local scan + embed stage *before* the catalyst stage at `init.rs:1722`,
-//! so a total LLM outage must not be able to cost the user their index.
+//! The counter-diagnosis is that `run_local_refresh_work` in init.rs runs the
+//! local scan + embed stage *synchronously*, before a catalyst epoch is even
+//! scheduled, so a total LLM outage must not be able to cost the user their
+//! index. Under the current catalyst-epoch architecture
+//! (`crates/enzyme-core/src/pipeline/epoch.rs`), catalyst (LLM) work never
+//! runs inline at all: it happens only inside a detached
+//! `enzyme refresh --detached --quiet` worker that the interactive/fast
+//! refresh commands spawn *after* local work completes. That makes the
+//! contract even stronger for the interactive path: the foreground command
+//! can now genuinely never fail because of an LLM outage, since it does not
+//! wait for the LLM at all.
 //!
 //! WHAT THIS TEST DOES
 //! -------------------
@@ -23,12 +32,16 @@
 //!    `chunk_embeddings`).
 //!
 //! Both refresh entry points are covered because they take different code paths:
-//!   * `enzyme refresh`          -> `run_refresh_interactive` (catalysts inline)
-//!   * `enzyme refresh --quiet`  -> `run_refresh_fast`        (hook hot path)
+//!   * `enzyme refresh`          -> `run_refresh_interactive` (spawns the catalyst worker)
+//!   * `enzyme refresh --quiet`  -> `run_refresh_fast`        (hook hot path, same spawn)
 //!
-//! The CLI's own exit status is deliberately NOT asserted: the LLM really is
-//! down, so a non-zero exit is a legitimate outcome. What must survive is the
-//! *local* work.
+//! For the interactive test, the CLI's own exit code IS now asserted to be 0:
+//! since catalyst work is fully backgrounded, a total LLM outage cannot affect
+//! the foreground command's exit status at all — that is the whole point of
+//! moving catalyst generation off the interactive path. The background
+//! worker's own outcome (it should reach `catalyst_epochs.status = 'failed'`)
+//! is observed separately by polling durable DB state, since it may still be
+//! running after the foreground process returns.
 
 mod support;
 
@@ -36,6 +49,9 @@ use std::path::Path;
 
 use enzyme_core::db::Database;
 
+use support::epoch::{
+    background_refresh_log, build_epoch_id, wait_for_epoch_terminal, WORKER_TERMINAL_TIMEOUT,
+};
 use support::fixture::{CliOutput, VaultFixture};
 use support::mock::{MockEnzymeApi, MockLlm};
 
@@ -261,8 +277,10 @@ fn assert_local_work_survived(label: &str, scenario: &Scenario, out: &CliOutput)
 // Tests
 // ---------------------------------------------------------------------------
 
-/// `enzyme refresh` — interactive path (`run_refresh_interactive`), which runs
-/// the catalyst pipeline inline in the same process.
+/// `enzyme refresh` — interactive path (`run_refresh_interactive`). Local
+/// scan+embed runs synchronously; catalyst generation is fully backgrounded
+/// (a detached `enzyme refresh --detached --quiet` worker), so the LLM outage
+/// cannot affect the foreground command's exit status at all.
 #[test]
 fn interactive_refresh_indexes_and_embeds_despite_total_llm_failure() {
     let scenario = arrange();
@@ -275,12 +293,74 @@ fn interactive_refresh_indexes_and_embeds_despite_total_llm_failure() {
         .env_llm(&scenario.llm)
         .run();
 
+    // The interactive command's own exit status is now unconditionally
+    // decoupled from catalyst/LLM outcome: it never waits on the LLM at all.
+    // A total outage in the background worker must not make the foreground
+    // `refresh` command itself fail.
+    out.assert_success();
+
+    let stdout_json: serde_json::Value =
+        serde_json::from_str(out.stdout.trim()).unwrap_or_else(|e| {
+            panic!(
+                "refresh did not print parseable JSON on stdout ({e}).{}",
+                diagnostics("interactive refresh", &out, &scenario.llm, &scenario.docs())
+            )
+        });
+    assert_eq!(
+        stdout_json["epoch"]["due"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: refresh did not report the catalyst epoch as due (this is the \
+         first build for this vault, so it should be due for reason 'initial').{}",
+        diagnostics("interactive refresh", &out, &scenario.llm, &scenario.docs())
+    );
+    assert_eq!(
+        stdout_json["background_spawned"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: refresh reported background_spawned=false, so no worker ran \
+         and the LLM-outage scenario was never exercised.{}",
+        diagnostics("interactive refresh", &out, &scenario.llm, &scenario.docs())
+    );
+
+    // Deterministically finish the scheduled epoch. `spawn_background_refresh`
+    // double-forks a worker while this test's own `refresh` process may still
+    // hold its own open SQLite connection to the same file, and the worker's
+    // `Database::open()` can lose a schema-lock race against it and die
+    // immediately (observed empirically). Production self-heals this — a
+    // scheduled-but-unclaimed epoch reports `launch_needed: true` again next
+    // time — so invoke the identical detached-worker subcommand ourselves
+    // once our own `refresh` process has fully exited (no more competing
+    // connection): a no-op if the auto-spawned worker already claimed the
+    // epoch, a reliable retry if it did not.
+    let _ = scenario
+        .fixture
+        .cli()
+        .args(["refresh", "--detached", "--quiet", "--use-env-llm"])
+        .enzyme_api(&scenario.api)
+        .env_llm(&scenario.llm)
+        .run();
+
+    let epoch_id = build_epoch_id(&stdout_json);
+    let db_path = scenario.db_path();
+    let status = wait_for_epoch_terminal(&db_path, &epoch_id, WORKER_TERMINAL_TIMEOUT);
+    let worker_log = background_refresh_log(&db_path);
+
     // Guard against a vacuous pass: if the LLM was never called, the run never
     // reached the failure this test is about.
     assert!(
         scenario.llm.request_count() > 0,
-        "interactive refresh never called the LLM, so the 'LLM failure' scenario \
-         was never exercised and the result proves nothing.{}",
+        "interactive refresh's background worker (epoch {epoch_id}) never called the LLM, \
+         so the 'LLM failure' scenario was never exercised and the result proves nothing.{}\
+         \n--- background_refresh.log ---\n{worker_log}",
+        diagnostics("interactive refresh", &out, &scenario.llm, &scenario.docs())
+    );
+
+    // The background worker must have genuinely failed against the total LLM
+    // outage (not silently succeeded some other way).
+    assert_eq!(
+        status,
+        "failed",
+        "expected the catalyst epoch {epoch_id} to fail against a total LLM outage, but it \
+         ended in status {status:?}.\n--- background_refresh.log ---\n{worker_log}{}",
         diagnostics("interactive refresh", &out, &scenario.llm, &scenario.docs())
     );
 

@@ -1374,6 +1374,74 @@ impl Database {
         Ok(())
     }
 
+    /// Remove persisted top-K rows whose chunk no longer has a current
+    /// embedding, returning only the catalysts whose materialized top-K lost a
+    /// row and therefore require an exact refill.
+    pub fn prune_obsolete_catalyst_similarities(
+        &self,
+    ) -> Result<std::collections::HashSet<String>> {
+        let affected = self.query_read(
+            "SELECT DISTINCT catalyst_id FROM catalyst_similarities cs
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chunk_embeddings ce
+                 WHERE ce.file_path = cs.file_path AND ce.chunk_index = cs.chunk_index
+             )",
+            vec![],
+            |row| row.get::<String>(0),
+        )?;
+        self.execute_write(
+            "DELETE FROM catalyst_similarities
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chunk_embeddings ce
+                 WHERE ce.file_path = catalyst_similarities.file_path
+                   AND ce.chunk_index = catalyst_similarities.chunk_index
+             )",
+            vec![],
+        )?;
+        Ok(affected.into_iter().collect())
+    }
+
+    /// Remove top-K rows for chunks whose vectors were replaced. Deleted
+    /// chunks are handled by `prune_obsolete_catalyst_similarities`.
+    pub fn delete_catalyst_similarities_for_chunks(
+        &self,
+        chunks: &[(String, u32)],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut affected = std::collections::HashSet::new();
+        for (path, index) in chunks {
+            let ids = self.query_read(
+                "SELECT catalyst_id FROM catalyst_similarities
+                 WHERE file_path = ?1 AND chunk_index = ?2",
+                vec![Value::Text(path.clone()), Value::Integer(*index as i64)],
+                |row| row.get::<String>(0),
+            )?;
+            affected.extend(ids);
+            self.execute_write(
+                "DELETE FROM catalyst_similarities
+                 WHERE file_path = ?1 AND chunk_index = ?2",
+                vec![Value::Text(path.clone()), Value::Integer(*index as i64)],
+            )?;
+        }
+        Ok(affected)
+    }
+
+    /// Enforce the persisted per-catalyst top-K with deterministic tie breaks.
+    pub fn trim_catalyst_similarities(&self, catalyst_id: &str, top_k: usize) -> Result<usize> {
+        let count = self.execute_write(
+            "DELETE FROM catalyst_similarities
+             WHERE catalyst_id = ?1 AND id NOT IN (
+                 SELECT id FROM catalyst_similarities WHERE catalyst_id = ?1
+                 ORDER BY similarity DESC, file_path ASC, chunk_index ASC
+                 LIMIT ?2
+             )",
+            vec![
+                Value::Text(catalyst_id.to_string()),
+                Value::Integer(top_k as i64),
+            ],
+        )?;
+        Ok(count)
+    }
+
     /// Get the top similarities for a given catalyst, ordered by similarity descending.
     pub fn get_similarities_for_catalyst(
         &self,
@@ -1895,6 +1963,320 @@ impl Database {
             .zip(vectors_blob.chunks(embedding_dim).map(blob_to_f32_vec))
             .collect();
         Ok(results)
+    }
+
+    pub fn get_epoch_catalyst_embeddings(&self, epoch_id: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        let row = self
+            .query_read(
+                "SELECT ids,vectors FROM catalyst_epoch_embeddings_packed WHERE epoch_id=?1",
+                vec![Value::Text(epoch_id.to_string())],
+                |row| Ok((row.get::<String>(0)?, row.get::<Vec<u8>>(1)?)),
+            )?
+            .into_iter()
+            .next();
+        let Some((ids_json, vectors_blob)) = row else {
+            return Ok(Vec::new());
+        };
+        let ids: Vec<String> = serde_json::from_str(&ids_json)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let bytes_per_vector = vectors_blob.len() / ids.len();
+        Ok(ids
+            .into_iter()
+            .zip(vectors_blob.chunks(bytes_per_vector).map(blob_to_f32_vec))
+            .collect())
+    }
+
+    pub fn get_epoch_similarities_for_catalysts(
+        &self,
+        epoch_id: &str,
+        catalyst_ids: &[&str],
+        per_catalyst_limit: usize,
+    ) -> Result<Vec<CatalystSimilarity>> {
+        if catalyst_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: Vec<String> = (2..=catalyst_ids.len() + 1)
+            .map(|i| format!("?{i}"))
+            .collect();
+        let limit_param = catalyst_ids.len() + 2;
+        let sql = format!(
+            "SELECT rn,catalyst_id,catalyst_text,file_path,chunk_index,similarity,
+                    chunk_metadata,timeline_data,created_at
+             FROM (
+               SELECT *, ROW_NUMBER() OVER (
+                 PARTITION BY catalyst_id ORDER BY similarity DESC,file_path,chunk_index
+               ) rn
+               FROM catalyst_epoch_similarities
+               WHERE epoch_id=?1 AND catalyst_id IN ({})
+             ) WHERE rn <= ?{limit_param}",
+            placeholders.join(",")
+        );
+        let mut params = vec![Value::Text(epoch_id.to_string())];
+        params.extend(catalyst_ids.iter().map(|id| Value::Text((*id).to_string())));
+        params.push(Value::Integer(per_catalyst_limit as i64));
+        Ok(self.query_read(&sql, params, map_catalyst_similarity_row)?)
+    }
+
+    /// Stage a complete target projection under `epoch_id`. These rows remain
+    /// invisible until the source database activates that epoch.
+    pub fn stage_epoch_projection_from_shadow(
+        &self,
+        shadow: &Database,
+        epoch_id: &str,
+    ) -> Result<()> {
+        let similarities = shadow.query_read(
+            "SELECT catalyst_id,catalyst_text,file_path,chunk_index,similarity,
+                    chunk_metadata,timeline_data,created_at FROM catalyst_similarities",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<i64>(3)?,
+                    row.get::<f64>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<String>(7)?,
+                ))
+            },
+        )?;
+        let packed = shadow
+            .query_read(
+                "SELECT count,ids,vectors FROM catalyst_embeddings_packed WHERE id=1",
+                vec![],
+                |row| {
+                    Ok((
+                        row.get::<i64>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<Vec<u8>>(2)?,
+                    ))
+                },
+            )?
+            .into_iter()
+            .next();
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("begin target epoch staging")?;
+            tx.execute(
+                "DELETE FROM catalyst_epoch_similarities WHERE epoch_id=?1",
+                vec![Value::Text(epoch_id.to_string())],
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM catalyst_epoch_embeddings_packed WHERE epoch_id=?1",
+                vec![Value::Text(epoch_id.to_string())],
+            )
+            .await?;
+            if let Some((count, ids, vectors)) = packed {
+                tx.execute(
+                    "INSERT INTO catalyst_epoch_embeddings_packed(epoch_id,count,ids,vectors)
+                     VALUES (?1,?2,?3,?4)",
+                    vec![
+                        Value::Text(epoch_id.to_string()),
+                        Value::Integer(count),
+                        Value::Text(ids),
+                        Value::Blob(vectors),
+                    ],
+                )
+                .await?;
+            }
+            for (cat_id, cat_text, path, index, similarity, metadata, timeline, created_at) in
+                similarities
+            {
+                tx.execute(
+                    "INSERT INTO catalyst_epoch_similarities
+                     (epoch_id,catalyst_id,catalyst_text,file_path,chunk_index,similarity,
+                      chunk_metadata,timeline_data,created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    vec![
+                        Value::Text(epoch_id.to_string()),
+                        Value::Text(cat_id),
+                        Value::Text(cat_text),
+                        Value::Text(path),
+                        Value::Integer(index),
+                        Value::Real(similarity),
+                        Value::Text(metadata),
+                        Value::Text(timeline),
+                        Value::Text(created_at),
+                    ],
+                )
+                .await?;
+            }
+            tx.commit().await.context("commit target epoch staging")?;
+            Ok(())
+        })
+    }
+
+    /// Atomically replace the active catalyst materialized view from a complete
+    /// frozen shadow database and activate its durable epoch record. All data
+    /// is loaded before the transaction begins, so readers observe either the
+    /// complete old view or the complete new view.
+    pub fn activate_epoch_from_shadow(
+        &self,
+        shadow: &Database,
+        epoch_id: &str,
+        completed_at_ms: i64,
+    ) -> Result<()> {
+        let catalysts = shadow.query_read(
+            "SELECT id, text, entity, context, generated_at, metadata FROM catalysts",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                ))
+            },
+        )?;
+        let packed = shadow
+            .query_read(
+                "SELECT count, ids, vectors FROM catalyst_embeddings_packed WHERE id=1",
+                vec![],
+                |row| {
+                    Ok((
+                        row.get::<i64>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<Vec<u8>>(2)?,
+                    ))
+                },
+            )?
+            .into_iter()
+            .next();
+        let catalyst_texts: HashMap<String, String> = catalysts
+            .iter()
+            .map(|(id, text, ..)| (id.clone(), text.clone()))
+            .collect();
+        let (_, packed_ids_json, packed_vectors) = packed
+            .as_ref()
+            .context("shadow epoch is missing catalyst embeddings")?;
+        let packed_ids: Vec<String> = serde_json::from_str(packed_ids_json)?;
+        anyhow::ensure!(
+            packed_ids.len() == catalysts.len() && !packed_vectors.is_empty(),
+            "shadow epoch catalyst embedding set is incomplete"
+        );
+
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .context("begin epoch activation")?;
+            // Catch the completed frozen interpretation up to the exact live
+            // corpus visible under this write transaction. Concurrent document
+            // refresh writers run wholly before or after this commit.
+            let mut chunk_rows = tx
+                .query(
+                    "SELECT file_path,chunk_index,vector FROM chunk_embeddings",
+                    (),
+                )
+                .await?;
+            let mut live_chunks = Vec::new();
+            while let Some(row) = chunk_rows.next().await? {
+                let path = row.get::<String>(0)?;
+                let index = row.get::<i64>(1)?;
+                let blob = row.get::<Vec<u8>>(2)?;
+                live_chunks.push((path, index, blob_to_f32_vec(&blob)));
+            }
+            drop(chunk_rows);
+            let mut live_similarities = Vec::new();
+            if let Some((_, ids_json, vectors_blob)) = &packed {
+                let ids: Vec<String> = serde_json::from_str(ids_json)?;
+                if !ids.is_empty() {
+                    let bytes_per_vector = vectors_blob.len() / ids.len();
+                    for (cat_id, bytes) in ids.iter().zip(vectors_blob.chunks(bytes_per_vector)) {
+                        let cat_vec = blob_to_f32_vec(bytes);
+                        let mut scored: Vec<(f64, &str, i64)> = live_chunks
+                            .iter()
+                            .map(|(path, index, vector)| {
+                                (
+                                    Embedding::cosine_similarity(&cat_vec, vector) as f64,
+                                    path.as_str(),
+                                    *index,
+                                )
+                            })
+                            .collect();
+                        scored.sort_by(|a, b| {
+                            b.0.partial_cmp(&a.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.1.cmp(b.1))
+                                .then_with(|| a.2.cmp(&b.2))
+                        });
+                        scored.truncate(50);
+                        for (similarity, path, index) in scored {
+                            live_similarities.push((
+                                cat_id.clone(),
+                                catalyst_texts.get(cat_id).cloned().unwrap_or_default(),
+                                path.to_string(),
+                                index,
+                                similarity,
+                            ));
+                        }
+                    }
+                }
+            }
+            tx.execute("DELETE FROM catalyst_similarities", ()).await?;
+            tx.execute("DELETE FROM catalyst_embeddings_packed", ())
+                .await?;
+            tx.execute("DELETE FROM catalysts", ()).await?;
+            for (id, text, entity, context, generated_at, metadata) in catalysts {
+                tx.execute(
+                    "INSERT INTO catalysts (id,text,entity,context,generated_at,metadata)
+                     VALUES (?1,?2,?3,?4,?5,?6)",
+                    vec![
+                        Value::Text(id),
+                        Value::Text(text),
+                        Value::Text(entity),
+                        Value::Text(context),
+                        Value::Text(generated_at),
+                        Value::Text(metadata),
+                    ],
+                )
+                .await?;
+            }
+            if let Some((count, ids, vectors)) = packed {
+                tx.execute(
+                    "INSERT INTO catalyst_embeddings_packed (id,count,ids,vectors)
+                     VALUES (1,?1,?2,?3)",
+                    vec![
+                        Value::Integer(count),
+                        Value::Text(ids),
+                        Value::Blob(vectors),
+                    ],
+                )
+                .await?;
+            }
+            for (cat_id, cat_text, path, index, similarity) in live_similarities {
+                tx.execute(
+                    "INSERT INTO catalyst_similarities
+                     (catalyst_id,catalyst_text,file_path,chunk_index,similarity,
+                      chunk_metadata,timeline_data,created_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    vec![
+                        Value::Text(cat_id),
+                        Value::Text(cat_text),
+                        Value::Text(path),
+                        Value::Integer(index),
+                        Value::Real(similarity),
+                        Value::Text("{}".to_string()),
+                        Value::Text("{}".to_string()),
+                        Value::Text(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                    ],
+                )
+                .await?;
+            }
+            Database::mark_epoch_activated_on_tx(&tx, epoch_id, completed_at_ms).await?;
+            tx.commit().await.context("commit epoch activation")?;
+            Ok(())
+        })
     }
 }
 

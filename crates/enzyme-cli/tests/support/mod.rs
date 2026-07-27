@@ -36,5 +36,6 @@
 
 #![allow(dead_code)]
 
+pub mod epoch;
 pub mod fixture;
 pub mod mock;

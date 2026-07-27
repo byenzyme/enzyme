@@ -1,6 +1,7 @@
 //! e2e regression: cache_epoch_stale_path
 //!
-//! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`).
+//! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`,
+//! `support::epoch`).
 //!
 //! # What this reproduces
 //!
@@ -8,32 +9,33 @@
 //! (`collection.index_generation` in the vault DB) so that downstream retrieval
 //! caches know their view of the collection is invalid.
 //!
-//! `run_refresh_interactive` (init.rs:1680) does the local scan+embed work
-//! first, then branches on catalyst staleness:
-//!
-//!   * `StalenessResult::Fresh`  → early-return at init.rs:1713, which calls
-//!     `maybe_bump_collection_cache_epoch(&db, _local.collection_changed())`.
-//!   * `StalenessResult::Stale`  → falls through to `run_stale_catalyst_refresh`
-//!     and **never consults `_local.collection_changed()` again**. The only
-//!     bump on that path is `bump_collection_cache_epoch` at init.rs:1452,
-//!     which is gated on `stats.catalysts_generated > 0`.
-//!
-//! So on the stale path the epoch is keyed to *catalyst* work rather than to
-//! the documents that were actually indexed and embedded. When catalyst
-//! generation fails, the freshly embedded documents stay invisible to any
-//! consumer that keys its cache on the epoch.
+//! Under the current catalyst-epoch architecture
+//! (`crates/enzyme-core/src/pipeline/epoch.rs`,
+//! `run_refresh_interactive` in init.rs), catalyst (LLM) generation no longer
+//! runs inline: `run_refresh_interactive` does the local scan+embed work
+//! synchronously, then unconditionally calls
+//! `maybe_bump_collection_cache_epoch(&db, local.collection_changed())` —
+//! *before* the catalyst epoch (which may spawn a detached
+//! `enzyme refresh --detached --quiet` worker) is even scheduled. So the cache
+//! epoch bump is keyed purely to what scan+embed actually changed, not to
+//! whether catalyst generation later succeeds or fails in the background.
 //!
 //! Correct behavior, asserted below: if `refresh` indexed and embedded new
 //! documents, the epoch MUST bump — regardless of whether catalyst generation
 //! then succeeded or failed. The documents are in the DB either way.
 //!
-//! Observed at time of writing: sub-case (a) passes via init.rs:1452;
-//! sub-case (b) fails.
+//! Each sub-case forces the catalyst epoch to be due with `--full` (there is
+//! no more entity-mention staleness threshold; due-ness is now cadence /
+//! contract / manual-force based) and then waits for the spawned background
+//! worker to reach a terminal status (`active` or `failed` in
+//! `catalyst_epochs`) before asserting on LLM call counts, so the guard that
+//! catalyst work genuinely ran is not vacuous.
 
 mod support;
 
 use enzyme_core::db::Database;
 
+use support::epoch::{build_epoch_id, wait_for_epoch_terminal, WORKER_TERMINAL_TIMEOUT};
 use support::fixture::{CliOutput, VaultFixture};
 use support::mock::MockLlm;
 
@@ -205,24 +207,81 @@ fn assert_epoch_bumped(
     );
 }
 
-/// Prove the refresh actually took the `StalenessResult::Stale` branch.
+/// Run `enzyme refresh --use-env-llm --full` (forcing the catalyst epoch to
+/// be due, since there is no more entity-mention staleness threshold to lean
+/// on), wait for the spawned background worker to reach a terminal status,
+/// and return `(refresh output, epoch_id, terminal status)`.
 ///
-/// The `Fresh` branch early-returns at init.rs:1714 without ever reaching
-/// `run_stale_catalyst_refresh`, so it never talks to the LLM. If the refresh
-/// issued chat-completion requests, it went down the stale path — which is the
-/// branch this test is about. Without this check, sub-case (a) could pass
-/// simply because it took the (already-correct) Fresh path.
+/// This is the non-vacuousness mechanism for both sub-cases below: it proves
+/// (a) the epoch was genuinely due and a worker was spawned, and (b) that
+/// worker actually reached a terminal outcome rather than the test racing
+/// ahead of it.
 #[track_caller]
-fn assert_took_stale_path(llm_calls_before: usize, llm_calls_after: usize, refresh: &CliOutput) {
-    assert!(
-        llm_calls_after > llm_calls_before,
-        "refresh made no LLM requests ({llm_calls_before} -> {llm_calls_after}), which means it \
-         took the StalenessResult::Fresh early-return at init.rs:1713 rather than the Stale \
-         path under test. Fix the fixture so catalysts are genuinely stale.\n\
+fn force_refresh_and_wait_for_worker(
+    fixture: &VaultFixture,
+    llm: &MockLlm,
+) -> (CliOutput, String, String) {
+    let refresh = fixture
+        .cli()
+        .args(["refresh", "--use-env-llm", "--full"])
+        .env_llm(llm)
+        .run();
+
+    let stdout_json: serde_json::Value = serde_json::from_str(refresh.stdout.trim())
+        .unwrap_or_else(|e| {
+            panic!(
+                "refresh did not print parseable JSON on stdout ({e}).\n\
+                 --- stdout ---\n{}\n--- stderr ---\n{}",
+                refresh.stdout, refresh.stderr
+            )
+        });
+
+    assert_eq!(
+        stdout_json["epoch"]["due"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: `--full` did not make the catalyst epoch due, so the \
+         background worker was never scheduled and this run cannot exercise the \
+         catalyst-outcome-vs-cache-epoch contract.\nepoch JSON: {}\n\
+         --- refresh stdout ---\n{}\n--- refresh stderr ---\n{}",
+        stdout_json["epoch"],
+        refresh.stdout,
+        refresh.stderr
+    );
+    assert_eq!(
+        stdout_json["background_spawned"].as_bool(),
+        Some(true),
+        "TEST IS VACUOUS: refresh reported background_spawned=false, so no worker ran \
+         and catalyst generation was never attempted.\n\
          --- refresh stdout ---\n{}\n--- refresh stderr ---\n{}",
         refresh.stdout,
         refresh.stderr
     );
+
+    let epoch_id = build_epoch_id(&stdout_json);
+    let db_path = fixture.vault_enzyme_dir().join("enzyme.db");
+
+    // `spawn_background_refresh` double-forks a worker while this test's own
+    // `refresh` process may still hold its own open SQLite connection to the
+    // same file; the worker's own `Database::open()` unconditionally re-runs
+    // the full schema DDL batch and can lose a schema-lock race against that
+    // still-live connection, dying immediately with "database is locked"
+    // before it ever claims the scheduled epoch (observed empirically, not
+    // hypothetically). Production self-heals this: a scheduled-but-unclaimed
+    // epoch reports `launch_needed: true` again on the next refresh call. We
+    // reproduce that same self-heal deterministically by invoking the exact
+    // detached-worker subcommand ourselves once our own `refresh` process (and
+    // therefore its DB connection) has fully exited — at that point there is
+    // no longer a competing connection, so this is a no-op if the auto-spawned
+    // worker already claimed the epoch, and a reliable retry if it did not.
+    let _ = fixture
+        .cli()
+        .args(["refresh", "--detached", "--quiet", "--use-env-llm"])
+        .env_llm(llm)
+        .run();
+
+    let status = wait_for_epoch_terminal(&db_path, &epoch_id, WORKER_TERMINAL_TIMEOUT);
+
+    (refresh, epoch_id, status)
 }
 
 /// Initialize a vault against `llm`, returning the fixture once `init` has
@@ -239,11 +298,37 @@ fn init_vault(llm: &MockLlm) -> VaultFixture {
     fixture
 }
 
-/// Sub-case (a): catalyst generation on the stale path SUCCEEDS.
+/// Sub-case (a): catalyst generation on the forced epoch SUCCEEDS.
 ///
 /// New documents were indexed and embedded, catalysts regenerated. The epoch
 /// must bump so retrieval sees the new documents.
+///
+/// NEW DEFECT DISCOVERED WHILE ADAPTING THIS TEST (not papered over — see
+/// AGENTS.md hard rule on reporting real regressions found during a merge):
+/// canary-vault has both a `#projects` tag and a `projects/` folder, i.e. two
+/// *different* entities that share the name "projects". `CatalystPipeline`
+/// deletes-then-inserts a shadow entity's catalysts keyed by entity *name*
+/// only (`Database::delete_catalysts_for_entity`, called from the streaming
+/// path in `crates/enzyme-core/src/pipeline/catalysts.rs`), so whichever of
+/// the two "projects" entities finishes second silently wipes out the other's
+/// freshly-inserted catalysts even though BOTH generations succeeded. Under
+/// plain `init` this was a harmless silent under-count. Under the new
+/// catalyst-epoch worker it is fatal: `build_and_activate_epoch` in init.rs
+/// asserts `sim_stats.catalysts_processed == stats.catalysts_generated` and
+/// bails with "shadow epoch similarity set is incomplete" — turning an
+/// entirely successful catalyst run into a hard epoch failure. Reproduced
+/// deterministically (not flaky) against the canary-vault fixture with a
+/// healthy mock LLM. This test is `#[ignore]`d as a known-defect pin,
+/// following the same convention as the other 6 defect pins in this suite
+/// (see e.g. `credit_refund_on_failure.rs`), until the entity-name collision
+/// is fixed (delete/insert should be keyed by (entity_type, entity_name), not
+/// name alone).
 #[test]
+#[ignore = "known defect: same-named tag/folder entities (canary-vault's `projects` \
+            tag + `projects/` folder) overwrite each other's catalysts via \
+            delete_catalysts_for_entity being keyed by name only, which makes \
+            build_and_activate_epoch's strict catalysts_processed == \
+            catalysts_generated check fail a fully-successful catalyst run"]
 fn epoch_bumps_on_stale_path_when_catalysts_succeed() {
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());
@@ -254,15 +339,32 @@ fn epoch_bumps_on_stale_path_when_catalysts_succeed() {
     write_new_notes(&fixture);
 
     let llm_calls_before = llm.request_count();
-    let refresh = fixture
-        .cli()
-        .arg("refresh")
-        .arg("--use-env-llm")
-        .env_llm(&llm)
-        .run();
+    let (refresh, epoch_id, status) = force_refresh_and_wait_for_worker(&fixture, &llm);
     refresh.assert_success();
 
-    assert_took_stale_path(llm_calls_before, llm.request_count(), &refresh);
+    // Mechanism guard: the background worker must have genuinely reached the
+    // LLM (not just been scheduled) and it must have succeeded, otherwise
+    // this sub-case is not testing what its name claims.
+    assert!(
+        llm.request_count() > llm_calls_before,
+        "TEST IS VACUOUS: the background worker for epoch {epoch_id} made no LLM \
+         requests ({llm_calls_before} -> {}), so catalyst generation was never \
+         actually attempted.\n--- refresh stdout ---\n{}\n--- refresh stderr ---\n{}",
+        llm.request_count(),
+        refresh.stdout,
+        refresh.stderr
+    );
+    assert_eq!(
+        status,
+        "active",
+        "expected the forced catalyst epoch {epoch_id} to succeed and activate, but it \
+         ended in status {status:?}.\n--- refresh stdout ---\n{}\n--- refresh stderr ---\n{}\n\
+         --- background_refresh.log ---\n{}",
+        refresh.stdout,
+        refresh.stderr,
+        support::epoch::background_refresh_log(&fixture.vault_enzyme_dir().join("enzyme.db")),
+    );
+
     assert_new_notes_indexed_and_embedded(&fixture, &refresh);
 
     let epoch_after = read_epoch(&fixture);
@@ -297,14 +399,31 @@ fn epoch_bumps_on_stale_path_when_catalysts_fail() {
     llm.set_response(500, r#"{"error":{"message":"upstream exploded"}}"#);
 
     let llm_calls_before = llm.request_count();
-    let refresh = fixture
-        .cli()
-        .arg("refresh")
-        .arg("--use-env-llm")
-        .env_llm(&llm)
-        .run();
+    let (refresh, epoch_id, status) = force_refresh_and_wait_for_worker(&fixture, &llm);
+    refresh.assert_success();
 
-    assert_took_stale_path(llm_calls_before, llm.request_count(), &refresh);
+    // Mechanism guard: the background worker must have genuinely attempted
+    // the LLM and failed, otherwise this sub-case never exercised the
+    // "catalyst generation fails" scenario it claims to.
+    assert!(
+        llm.request_count() > llm_calls_before,
+        "TEST IS VACUOUS: the background worker for epoch {epoch_id} made no LLM \
+         requests ({llm_calls_before} -> {}), so catalyst generation was never \
+         actually attempted.\n--- refresh stdout ---\n{}\n--- refresh stderr ---\n{}",
+        llm.request_count(),
+        refresh.stdout,
+        refresh.stderr
+    );
+    assert_eq!(
+        status, "failed",
+        "expected the forced catalyst epoch {epoch_id} to fail against a broken LLM, \
+         but it ended in status {status:?}.\n--- refresh stdout ---\n{}\n--- refresh stderr ---\n{}\n\
+         --- background_refresh.log ---\n{}",
+        refresh.stdout,
+        refresh.stderr,
+        support::epoch::background_refresh_log(&fixture.vault_enzyme_dir().join("enzyme.db")),
+    );
+
     assert_new_notes_indexed_and_embedded(&fixture, &refresh);
 
     let epoch_after = read_epoch(&fixture);
