@@ -14,9 +14,10 @@ use ignore::overrides::OverrideBuilder;
 /// surface," so the downstream surface gate ([`crate::pipeline::exclusions`])
 /// need only name folders that *are* indexed but must not be catalyzed.
 ///
-/// The defaults below cover tooling/system dirs. Intended (not yet wired): the
-/// user's `exclude` list (`config.excluded_folders`) should also feed this gate
-/// so `exclude` means "leave it alone" (gone), not merely "don't surface."
+/// The defaults below cover tooling/system dirs. The user's `exclude` list
+/// (`config.excluded_folders`) is layered on via [`Self::with_excluded_folders`]
+/// (threaded from [`crate::pipeline::indexing::IndexingPipeline`]), which is what
+/// makes `exclude` mean "leave it alone" (gone), not merely "don't surface."
 pub struct FileDiscovery {
     vault_path: PathBuf,
     include_patterns: Vec<String>,

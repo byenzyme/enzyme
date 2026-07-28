@@ -57,7 +57,7 @@ pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> 
     // Summary view uses the built-in defaults; it is not the catalyst path and
     // does not need the user's config-extended exclusions.
     let materialized =
-        selection_steps::build_shortlist_selection(db, 15, &FolderExclusions::defaults())?;
+        selection_steps::build_catalyst_candidate_selection(db, 15, &FolderExclusions::defaults())?;
     let entity_map = materialized.entity_map;
 
     let mut entities = Vec::new();

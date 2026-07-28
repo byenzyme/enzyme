@@ -7,7 +7,7 @@
 //! - Deduplicating child tags that also appear as standalone entries
 //!
 //! `from_entities` accepts any `&[Entity]` — trending, catalyzed, query-ranked,
-//! or config-selected. `select_shortlist` uses coverage-aware greedy selection;
+//! or config-selected. `select_catalyst_candidates` uses coverage-aware greedy selection;
 //! `from_entities` accepts any pre-selected list.
 
 use std::collections::{HashMap, HashSet};
@@ -95,7 +95,7 @@ const ALL_RECENT_MIN_FREQUENCY: i64 = 10;
 /// it." These are real content the user writes into, but too generic to be a
 /// catalyst topic on their own. Unlike [`FolderExclusions`] (the hard tier, which
 /// drops everywhere), these are demoted only from *automatic* topic-picking here
-/// in `select_shortlist`; the curated path does not apply them, so a user who
+/// in `select_catalyst_candidates`; the curated path does not apply them, so a user who
 /// explicitly names `daily`/`notes` still gets it. That path-dependence *is* the
 /// "curatable middle state" — see `docs/design/attention-and-exclusions.md`.
 const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
@@ -367,7 +367,7 @@ impl EntityMap {
     /// * [`GENERIC_FOLDERS`] / [`EXCLUDED_TAGS`] — the **soft tier**; demoted from
     ///   *automatic* picking here, but honored if the user explicitly curates
     ///   them (the curated path does not apply them).
-    pub fn select_shortlist(
+    pub fn select_catalyst_candidates(
         db: &Database,
         limit: usize,
         folder_exclusions: &FolderExclusions,
@@ -684,7 +684,7 @@ mod tests {
         insert_entity(&db, "topic", "tag", 10);
 
         let selected =
-            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
+            EntityMap::select_catalyst_candidates(&db, 20, &FolderExclusions::defaults()).unwrap();
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].entity_type, EntityType::Folder);
@@ -706,7 +706,7 @@ mod tests {
         insert_entity(&db, "excalidraw", "folder", 2);
 
         let selected =
-            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
+            EntityMap::select_catalyst_candidates(&db, 20, &FolderExclusions::defaults()).unwrap();
 
         let names: HashSet<&str> = selected.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains("projects"), "content folder should surface");
@@ -731,13 +731,13 @@ mod tests {
 
         // Without config: both content folders are eligible.
         let defaults =
-            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
+            EntityMap::select_catalyst_candidates(&db, 20, &FolderExclusions::defaults()).unwrap();
         let default_names: HashSet<&str> = defaults.iter().map(|e| e.name.as_str()).collect();
         assert!(default_names.contains("archive"));
 
         // With `excluded_folders: [archive]`, the user config now filters it here.
         let exclusions = FolderExclusions::with_extra(["archive"]);
-        let selected = EntityMap::select_shortlist(&db, 20, &exclusions).unwrap();
+        let selected = EntityMap::select_catalyst_candidates(&db, 20, &exclusions).unwrap();
         let names: HashSet<&str> = selected.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains("projects"));
         assert!(

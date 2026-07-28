@@ -39,11 +39,11 @@
 //! curatable-middle-state semantic; folding them in here would make a `daily`
 //! folder behave like `.git`.
 //!
-//! Note (intended, not yet wired): the user's `config.excluded_folders` should
-//! also feed the **index gate** so `exclude` means "leave it alone" (gone), not
-//! merely "don't surface." Today it reaches only this surface gate — excluded
-//! folders are still indexed and can leak into retrieval/context. See the
-//! attention-model doc's "behavior change" section.
+//! Note: the user's `config.excluded_folders` also feeds the **index gate**
+//! ([`crate::document::discovery`], via `IndexingPipeline`), so `exclude` means
+//! "leave it alone" (gone) — not merely "don't surface." This surface gate and
+//! the index gate share that list but enforce it independently. The built-in
+//! structural defaults here feed *only* the surface gate (they stay indexed).
 
 use std::collections::HashSet;
 

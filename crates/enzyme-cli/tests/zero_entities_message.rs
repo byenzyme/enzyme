@@ -226,11 +226,11 @@ fn control_same_env_llm_reaches_the_llm_when_entities_exist() {
 /// Repro for the open investigation.
 ///
 /// `SelectionPipeline::run` (selection.rs:52) with no curated config falls
-/// through to `select_shortlist`, which calls
-/// `selection_steps::build_shortlist_selection(db, 20)` — note the limit is the
+/// through to `select_catalyst_candidates`, which calls
+/// `selection_steps::build_catalyst_candidate_selection(db, 20)` — note the limit is the
 /// HARDCODED literal `20` at selection.rs:117, NOT `total_limit`.
 ///
-/// That bottoms out in `EntityMap::select_shortlist` (entity_map.rs:373), whose
+/// That bottoms out in `EntityMap::select_catalyst_candidates` (entity_map.rs:373), whose
 /// greedy loop can only return fewer than `limit` entities when the `candidates`
 /// vector (entity_map.rs:410-430) is empty. `candidates` is built with three
 /// HARDCODED filters:
@@ -276,7 +276,7 @@ fn generic_folder_shape_selects_zero_entities() {
         entities, "[]",
         "SCALING BUG: a 500-file vault indexed cleanly but selection chose ZERO \
          entities, so init silently generated nothing.\n\
-         Cause: EntityMap::select_shortlist (entity_map.rs:373) builds its \
+         Cause: EntityMap::select_catalyst_candidates (entity_map.rs:373) builds its \
          candidate set with hardcoded filters — root folders in GENERIC_FOLDERS \
          (entity_map.rs:108: daily, notes, convos, journal, journals) are \
          dropped, subfolders are dropped for containing '/', and links need \
@@ -286,7 +286,7 @@ fn generic_folder_shape_selects_zero_entities() {
          Note `total_limit = 30` is NOT the gate: it is trending-era config that \
          the init selection path never reads (the old Database::get_trending_entities \
          consumer was removed); selection passes the literal 20 into \
-         build_shortlist_selection.\n\
+         build_catalyst_candidate_selection.\n\
          EXPECTED: at least one entity selected.\n\
          ACTUAL:   entities = {entities}\n\
          --- stdout ---\n{}\n--- stderr ---\n{}",
@@ -371,7 +371,7 @@ fn curated_entities_restore_selection_without_a_new_binary() {
 /// 2,000 notes in an acceptable shape select entities just fine, so the
 /// zero-entity outcome on the reporter's ~19,238-file vault is driven by vault
 /// SHAPE (generic root folders / no tags / no repeated links), not by file
-/// count. Nothing in `select_shortlist` is size-sensitive: there is no cap that
+/// count. Nothing in `select_catalyst_candidates` is size-sensitive: there is no cap that
 /// degrades as the candidate pool grows.
 ///
 /// Expected to PASS today.

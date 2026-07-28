@@ -14,8 +14,8 @@ use crate::pipeline::selection_steps;
 pub enum SelectionSource {
     /// Entities came from `enzyme-config.yaml` catalyzedEntities.
     Config,
-    /// Entities came from coverage-aware shortlist (no config present).
-    Shortlist,
+    /// Entities came from coverage-aware catalyst-candidate selection (no config present).
+    Coverage,
 }
 
 /// Result of entity selection.
@@ -31,7 +31,7 @@ pub struct SelectionResult {
     pub source: SelectionSource,
 }
 
-/// Selects entities for catalyst generation, either from user config or shortlist.
+/// Selects entities for catalyst generation, either from user config or coverage selection.
 pub struct SelectionPipeline<'a> {
     db: &'a Database,
     vault_path: &'a Path,
@@ -47,7 +47,7 @@ impl<'a> SelectionPipeline<'a> {
     /// 1. Try loading `enzyme-config.yaml` — if it has curated entities, use those
     ///    (profiles come from the config).
     /// 2. Otherwise, use the deterministic step pipeline:
-    ///    shortlist -> derive expandable folders -> expand child links
+    ///    catalyst-candidate selection -> derive expandable folders -> expand child links
     ///    -> assign profiles.
     pub fn run(&self) -> Result<SelectionResult> {
         let config = EnzymeConfig::load(self.vault_path)?;
@@ -60,12 +60,13 @@ impl<'a> SelectionPipeline<'a> {
         // Build the surface-gate exclusion set once at the config boundary:
         // enzyme's built-in structural defaults merged with the user's `exclude`
         // list (`config.excluded_folders`). This is the "never a catalyst topic"
-        // hard tier; it now bites on every selection path (shortlist + curated),
-        // not just the curated one. See `docs/design/attention-and-exclusions.md`.
+        // hard tier; it bites on every selection path (coverage + curated), not
+        // just the curated one. See `docs/design/attention-and-exclusions.md`.
         //
-        // Note: this only enforces the *surface* gate. For `exclude` to mean
-        // "leave it alone" (don't index at all), the same list must also feed the
-        // index gate in `document::discovery` — intended, not yet wired.
+        // This enforces the *surface* gate. The same `exclude` list separately
+        // feeds the *index* gate in `document::discovery` (via IndexingPipeline),
+        // so `exclude` also means "don't index" — the two gates share the list
+        // but are enforced independently.
         let exclusions = match config {
             Some(cfg) => FolderExclusions::with_extra(cfg.excluded_folders.iter()),
             None => FolderExclusions::defaults(),
@@ -78,8 +79,8 @@ impl<'a> SelectionPipeline<'a> {
             }
         }
 
-        info!("selecting entities from coverage-aware shortlist");
-        self.select_shortlist(&exclusions)
+        info!("selecting entities from coverage-aware catalyst-candidate selection");
+        self.select_catalyst_candidates(&exclusions)
     }
 
     /// Select entities from user-curated config.
@@ -143,22 +144,22 @@ impl<'a> SelectionPipeline<'a> {
         })
     }
 
-    /// Select entities using coverage-aware shortlist + deterministic profiles.
-    fn select_shortlist(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
-        let materialized = selection_steps::build_shortlist_selection(self.db, 20, exclusions)?;
+    /// Select entities using coverage-aware catalyst-candidate selection + deterministic profiles.
+    fn select_catalyst_candidates(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
+        let materialized = selection_steps::build_catalyst_candidate_selection(self.db, 20, exclusions)?;
 
         info!(
             count = materialized.final_entities.len(),
             profiles = materialized.entity_profiles.len(),
             expandable = materialized.expandable_folders.len(),
-            "selected entities from shortlist"
+            "selected entities from coverage selection"
         );
 
         Ok(SelectionResult {
             entities: materialized.final_entities,
             entity_profiles: materialized.entity_profiles,
             expandable_folders: materialized.expandable_folders,
-            source: SelectionSource::Shortlist,
+            source: SelectionSource::Coverage,
         })
     }
 }
@@ -249,7 +250,7 @@ mod tests {
         let pipeline = SelectionPipeline::new(&db, vault.path());
         let result = pipeline.run().unwrap();
 
-        assert!(matches!(result.source, SelectionSource::Shortlist));
+        assert!(matches!(result.source, SelectionSource::Coverage));
         assert_eq!(result.entities.len(), 3);
 
         restore_env(old);
@@ -463,7 +464,7 @@ mod tests {
         let pipeline = SelectionPipeline::new(&db, vault.path());
         let result = pipeline.run().unwrap();
 
-        assert!(matches!(result.source, SelectionSource::Shortlist));
+        assert!(matches!(result.source, SelectionSource::Coverage));
 
         // The entity list that would be passed to CatalystPipeline
         // should contain the folder AND its children

@@ -32,17 +32,17 @@ pub struct MaterializedSelection {
 }
 
 /// Build the default deterministic selection pipeline:
-/// shortlist -> detect expandable folders -> expand child links -> assign profiles.
+/// catalyst-candidate selection -> detect expandable folders -> expand child links -> assign profiles.
 ///
 /// `folder_exclusions` is the unified structural-exclusion set threaded from the
 /// config boundary (see `docs/design/entity-exclusions-refactor.md`); it is what
-/// makes the user's `config.excluded_folders` bite on the shortlist path.
-pub fn build_shortlist_selection(
+/// makes the user's `config.excluded_folders` bite on the catalyst-candidate path.
+pub fn build_catalyst_candidate_selection(
     db: &Database,
     limit: usize,
     folder_exclusions: &FolderExclusions,
 ) -> Result<MaterializedSelection> {
-    let base_entities = EntityMap::select_shortlist(db, limit, folder_exclusions)?;
+    let base_entities = EntityMap::select_catalyst_candidates(db, limit, folder_exclusions)?;
     let expandable_folders = auto_expandable_folders(db, &base_entities)?;
     let final_entities = expand_with_folder_children(db, &base_entities, &expandable_folders)?;
     let entity_map = EntityMap::from_entities(db, &final_entities)?;

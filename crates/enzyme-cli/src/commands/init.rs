@@ -544,7 +544,7 @@ pub async fn run_init(
     // already has entities, those take precedence and are not overwritten.
     if matches!(
         sel_result.source,
-        enzyme_core::pipeline::selection::SelectionSource::Shortlist
+        enzyme_core::pipeline::selection::SelectionSource::Coverage
     ) {
         let expanded_children: std::collections::HashSet<String> = sel_result
             .expandable_folders
