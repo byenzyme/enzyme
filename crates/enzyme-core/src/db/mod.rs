@@ -29,6 +29,18 @@ mod tests {
         Database::open_in_memory().expect("failed to open in-memory database")
     }
 
+    /// Compare two vectors that may have round-tripped through int8
+    /// quantized embedding storage; exact float equality doesn't hold there.
+    fn assert_vectors_approx_eq(actual: &[f32], expected: &[f32]) {
+        assert_eq!(actual.len(), expected.len(), "vector length mismatch");
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!(
+                (a - e).abs() <= 0.05,
+                "vectors differ beyond quantization tolerance: {actual:?} vs {expected:?}"
+            );
+        }
+    }
+
     // -- Schema creation ------------------------------------------------------
 
     #[test]
@@ -477,6 +489,150 @@ mod tests {
                 big2_ctx.is_some(),
                 "second open should short-circuit on the config flag and not rescan"
             );
+        }
+    }
+
+    #[test]
+    fn test_embedding_int8_migration_converts_legacy_blobs_and_short_circuits() {
+        use crate::embedding::quantize;
+        use crate::models::EMBEDDING_DIMENSION;
+        const EMBED_KEY: &str = "migration.embedding_int8_v1";
+        let dim = EMBEDDING_DIMENSION;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embedding_int8.db");
+
+        let legacy_chunk_vec: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.001) - 0.25).collect();
+        let legacy_chunk_blob: Vec<u8> = legacy_chunk_vec
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+
+        let legacy_cat_vec_a: Vec<f32> = (0..dim).map(|i| i as f32 * 0.0005).collect();
+        let legacy_cat_vec_b: Vec<f32> = (0..dim).map(|i| -(i as f32 * 0.0003)).collect();
+        let legacy_packed_blob: Vec<u8> = legacy_cat_vec_a
+            .iter()
+            .chain(legacy_cat_vec_b.iter())
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
+
+        {
+            // Opening a fresh DB runs the migration against empty tables,
+            // which sets the flag immediately. Remove it here to simulate a
+            // legacy pre-migration database that already has raw f32 blobs
+            // on disk.
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                &format!("DELETE FROM config WHERE key = '{EMBED_KEY}'"),
+                vec![],
+            )
+            .unwrap();
+
+            db.execute_write(
+                "INSERT INTO chunk_embeddings (file_path, chunk_index, vector) VALUES ('a.md', 0, ?1)",
+                vec![Value::Blob(legacy_chunk_blob.clone())],
+            )
+            .unwrap();
+
+            db.execute_write(
+                "INSERT INTO catalyst_embeddings_packed (id, count, ids, vectors) VALUES (1, 2, ?1, ?2)",
+                vec![
+                    Value::Text(serde_json::to_string(&vec!["cat-a", "cat-b"]).unwrap()),
+                    Value::Blob(legacy_packed_blob.clone()),
+                ],
+            )
+            .unwrap();
+        }
+
+        {
+            // Reopening should find the flag missing, rewrite both blobs to
+            // int8_v1, and record completion.
+            let db = Database::open(&path).unwrap();
+
+            let chunk_blob: Vec<u8> = db
+                .query_read(
+                    "SELECT vector FROM chunk_embeddings WHERE file_path='a.md' AND chunk_index=0",
+                    vec![],
+                    |r| r.get::<Vec<u8>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(
+                chunk_blob.len(),
+                dim + 4,
+                "chunk blob should be rewritten to the int8_v1 length"
+            );
+            let decoded = quantize::dequantize_int8(&chunk_blob);
+            assert_vectors_approx_eq(&decoded, &legacy_chunk_vec);
+
+            let packed_blob: Vec<u8> = db
+                .query_read(
+                    "SELECT vectors FROM catalyst_embeddings_packed WHERE id=1",
+                    vec![],
+                    |r| r.get::<Vec<u8>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(
+                packed_blob.len(),
+                2 * 4 + 2 * dim,
+                "packed blob should be rewritten to the int8_v1 length"
+            );
+            let decoded_packed = quantize::dequantize_packed(&packed_blob, 2);
+            assert_vectors_approx_eq(&decoded_packed[0], &legacy_cat_vec_a);
+            assert_vectors_approx_eq(&decoded_packed[1], &legacy_cat_vec_b);
+
+            let format_flag = db.get_config(quantize::VECTOR_FORMAT_CONFIG_KEY).unwrap();
+            assert_eq!(format_flag.as_deref(), Some(quantize::VECTOR_FORMAT_INT8_V1));
+
+            let migration_flag: Vec<String> = db
+                .query_read(
+                    &format!("SELECT value FROM config WHERE key = '{EMBED_KEY}'"),
+                    vec![],
+                    |row| row.get::<String>(0),
+                )
+                .unwrap();
+            assert_eq!(migration_flag.len(), 1, "migration flag should be set after running");
+
+            // Insert another legacy blob directly, bypassing the migration
+            // path entirely, to verify the next open short-circuits.
+            let bypass_vec = vec![9.0f32; dim];
+            let bypass_blob: Vec<u8> = bypass_vec.iter().flat_map(|x| x.to_le_bytes()).collect();
+            db.execute_write(
+                "INSERT INTO chunk_embeddings (file_path, chunk_index, vector) VALUES ('bypass.md', 0, ?1)",
+                vec![Value::Blob(bypass_blob)],
+            )
+            .unwrap();
+        }
+
+        {
+            // Since the flag is already set, this open must not rescan — the
+            // newly inserted legacy blob survives untouched. General readers
+            // must still decode it correctly via defensive length detection.
+            let db = Database::open(&path).unwrap();
+            let bypass_blob: Vec<u8> = db
+                .query_read(
+                    "SELECT vector FROM chunk_embeddings WHERE file_path='bypass.md' AND chunk_index=0",
+                    vec![],
+                    |r| r.get::<Vec<u8>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(
+                bypass_blob.len(),
+                dim * 4,
+                "short-circuited migration must not rescan/rewrite existing rows"
+            );
+
+            let all = db.get_all_chunk_embeddings().unwrap();
+            let bypass_entry = all.iter().find(|(path, _, _)| path == "bypass.md").unwrap();
+            assert_vectors_approx_eq(&bypass_entry.2, &vec![9.0f32; dim]);
         }
     }
 
@@ -1056,8 +1212,15 @@ mod tests {
 
         let embeddings = db.get_all_chunk_embeddings().unwrap();
         assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0], ("a.md".to_string(), 0, vec![1.0, 2.0]));
-        assert_eq!(embeddings[1], ("a.md".to_string(), 1, vec![3.0, 4.0]));
+        // Vectors round-trip through int8 quantized storage, so compare
+        // approximately rather than bit-for-bit (see the `quantize` module's
+        // roundtrip error-bound tests for the precise guarantee).
+        assert_eq!(embeddings[0].0, "a.md");
+        assert_eq!(embeddings[0].1, 0);
+        assert_vectors_approx_eq(&embeddings[0].2, &[1.0, 2.0]);
+        assert_eq!(embeddings[1].0, "a.md");
+        assert_eq!(embeddings[1].1, 1);
+        assert_vectors_approx_eq(&embeddings[1].2, &[3.0, 4.0]);
 
         let doc = db.get_document_by_path("a.md").unwrap().unwrap();
         assert_eq!(doc.embedded_content_hash.as_deref(), Some("h1"));
