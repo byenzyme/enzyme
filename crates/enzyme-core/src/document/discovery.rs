@@ -70,6 +70,33 @@ impl FileDiscovery {
         self
     }
 
+    /// Extend the index-gate excludes with the user's "leave it alone" folders.
+    ///
+    /// This is what makes `config.excluded_folders` mean **don't index** (gone),
+    /// rather than merely "don't surface" — the behavior the attention model
+    /// (`docs/design/attention-and-exclusions.md`) commits to. Each name becomes a
+    /// vault-root-anchored `{name}/**` glob, matching how the built-in defaults are
+    /// written, and is appended to (never replaces) the defaults.
+    ///
+    /// Names are used as typed (filesystem case-sensitive), unlike the lowercased
+    /// entity-level [`crate::pipeline::exclusions::FolderExclusions`]. A `.` (vault
+    /// root) is skipped: "don't surface the root as a topic" is a surface-gate
+    /// concept and must never mean "index nothing."
+    pub fn with_excluded_folders<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for name in names {
+            let trimmed = name.as_ref().trim().trim_matches('/');
+            if trimmed.is_empty() || trimmed == "." {
+                continue;
+            }
+            self.exclude_patterns.push(format!("{trimmed}/**"));
+        }
+        self
+    }
+
     /// Walk the vault directory and return paths relative to the vault root.
     ///
     /// Uses the `ignore` crate, which respects `.gitignore` rules by default.
@@ -168,6 +195,65 @@ mod tests {
         assert!(files.contains(&PathBuf::from("note1.md")));
         assert!(files.contains(&PathBuf::from("subfolder/note2.md")));
         assert!(files.contains(&PathBuf::from("deep/nested/folder/note3.md")));
+    }
+
+    /// The index gate: a user `exclude`d folder is not read at all.
+    #[test]
+    fn excluded_folder_is_not_indexed() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("projects")).unwrap();
+        fs::write(root.join("projects/a.md"), "# a").unwrap();
+        fs::create_dir_all(root.join("archive")).unwrap();
+        fs::write(root.join("archive/old.md"), "# old").unwrap();
+
+        let files = FileDiscovery::new(root.to_path_buf())
+            .with_excluded_folders(["archive"])
+            .discover()
+            .unwrap();
+
+        assert!(files.contains(&PathBuf::from("projects/a.md")));
+        assert!(
+            !files.iter().any(|p| p.starts_with("archive")),
+            "excluded folder must not be indexed, got: {files:?}"
+        );
+    }
+
+    /// Two-gate guard: built-in *structural* folders (surface-gate only) must stay
+    /// indexed. `exclude` feeds the index gate; the structural noise list does not.
+    #[test]
+    fn structural_folders_stay_indexed_by_default() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("templates")).unwrap();
+        fs::write(root.join("templates/t.md"), "# tpl").unwrap();
+        fs::create_dir_all(root.join("excalidraw")).unwrap();
+        fs::write(root.join("excalidraw/d.md"), "# draw").unwrap();
+
+        // No excludes configured: these are indexed (they're only suppressed later,
+        // at the surface gate), even though they're structural noise as topics.
+        let files = FileDiscovery::new(root.to_path_buf()).discover().unwrap();
+
+        assert!(files.contains(&PathBuf::from("templates/t.md")));
+        assert!(files.contains(&PathBuf::from("excalidraw/d.md")));
+    }
+
+    /// `.` (vault root) must never be turned into an index exclusion.
+    #[test]
+    fn root_and_blank_excludes_are_ignored_by_index_gate() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("note.md"), "# n").unwrap();
+
+        let files = FileDiscovery::new(root.to_path_buf())
+            .with_excluded_folders([".", "", "  "])
+            .discover()
+            .unwrap();
+
+        assert!(
+            files.contains(&PathBuf::from("note.md")),
+            "root/blank excludes must not blank the vault, got: {files:?}"
+        );
     }
 
     #[test]

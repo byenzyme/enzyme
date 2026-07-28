@@ -19,6 +19,10 @@ use crate::models::{
 pub struct IndexingPipeline<'a> {
     db: &'a Database,
     vault_path: PathBuf,
+    /// User "leave it alone" folders that must not be indexed (the index gate).
+    /// `None` means "resolve from the vault config at run time"; `Some` is an
+    /// explicit override (used by tests and callers that already hold the list).
+    excluded_folders: Option<Vec<String>>,
 }
 
 /// Summary statistics from an indexing run.
@@ -33,7 +37,33 @@ pub struct IndexingStats {
 
 impl<'a> IndexingPipeline<'a> {
     pub fn new(db: &'a Database, vault_path: PathBuf) -> Self {
-        Self { db, vault_path }
+        Self {
+            db,
+            vault_path,
+            excluded_folders: None,
+        }
+    }
+
+    /// Explicitly set the "leave it alone" folders to exclude from indexing,
+    /// bypassing config resolution. Mainly for tests and callers that already
+    /// hold the list.
+    pub fn with_excluded_folders(mut self, names: Vec<String>) -> Self {
+        self.excluded_folders = Some(names);
+        self
+    }
+
+    /// The folders to exclude from the index gate: the explicit override if set,
+    /// otherwise the vault's persisted `config.excluded_folders`. Any config-load
+    /// error resolves to "no extra excludes" so indexing never fails on a bad or
+    /// absent config.
+    fn resolve_excluded_folders(&self) -> Vec<String> {
+        if let Some(names) = &self.excluded_folders {
+            return names.clone();
+        }
+        match crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path) {
+            Ok(Some(cfg)) => cfg.excluded_folders,
+            _ => Vec::new(),
+        }
     }
 
     /// Execute the indexing pipeline.
@@ -46,9 +76,14 @@ impl<'a> IndexingPipeline<'a> {
     pub fn run(&self, full: bool, on_progress: impl Fn(&str)) -> Result<IndexingStats> {
         let start = Instant::now();
 
-        // Step 1: Discover files
+        // Step 1: Discover files. The user's `exclude` list feeds the index gate
+        // here, so excluded folders are never read (see
+        // `docs/design/attention-and-exclusions.md`). Built-in structural folders
+        // (templates, excalidraw, …) are deliberately NOT excluded here — they
+        // stay indexed and are only suppressed at the surface gate.
         on_progress("Discovering files...");
-        let discovery = FileDiscovery::new(self.vault_path.clone());
+        let discovery = FileDiscovery::new(self.vault_path.clone())
+            .with_excluded_folders(self.resolve_excluded_folders());
         let all_paths = discovery.discover()?;
         let db_doc_count = self.db.get_document_count().unwrap_or(0);
         if all_paths.is_empty() && db_doc_count > 0 {
