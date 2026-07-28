@@ -318,17 +318,12 @@ fn init_vault(llm: &MockLlm) -> VaultFixture {
 /// bails with "shadow epoch similarity set is incomplete" — turning an
 /// entirely successful catalyst run into a hard epoch failure. Reproduced
 /// deterministically (not flaky) against the canary-vault fixture with a
-/// healthy mock LLM. This test is `#[ignore]`d as a known-defect pin,
-/// following the same convention as the other 6 defect pins in this suite
-/// (see e.g. `credit_refund_on_failure.rs`), until the entity-name collision
-/// is fixed (delete/insert should be keyed by (entity_type, entity_name), not
-/// name alone).
+/// healthy mock LLM: same-named tag/folder entities (canary-vault's
+/// `projects` tag + `projects/` folder) used to overwrite each other's
+/// catalysts via a name-only delete, tripping build_and_activate_epoch's
+/// strict catalysts_processed == catalysts_generated check. Fixed by keying
+/// catalyst replacement by (entity_name, entity_type).
 #[test]
-#[ignore = "known defect: same-named tag/folder entities (canary-vault's `projects` \
-            tag + `projects/` folder) overwrite each other's catalysts via \
-            delete_catalysts_for_entity being keyed by name only, which makes \
-            build_and_activate_epoch's strict catalysts_processed == \
-            catalysts_generated check fail a fully-successful catalyst run"]
 fn epoch_bumps_on_stale_path_when_catalysts_succeed() {
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());

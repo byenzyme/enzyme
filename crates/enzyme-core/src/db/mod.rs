@@ -742,6 +742,41 @@ mod tests {
         assert!((sims[0].1 - 0.87).abs() < 1e-6);
     }
 
+    #[test]
+    fn test_delete_catalysts_for_entity_is_type_keyed() {
+        let db = test_db();
+
+        for (id, entity, metadata) in [
+            ("cat-tag", "projects", r#"{"entity_type":"tag"}"#),
+            ("cat-folder", "projects", r#"{"entity_type":"folder"}"#),
+            ("cat-legacy", "projects", "{}"),
+            ("cat-other", "daily", r#"{"entity_type":"tag"}"#),
+        ] {
+            db.execute_write(
+                "INSERT INTO catalysts (id, text, entity, metadata) VALUES (?1, 'q', ?2, ?3)",
+                vec![
+                    Value::Text(id.into()),
+                    Value::Text(entity.into()),
+                    Value::Text(metadata.into()),
+                ],
+            )
+            .unwrap();
+        }
+
+        db.delete_catalysts_for_entity("projects", "tag").unwrap();
+
+        let remaining: Vec<String> = db
+            .query_read(
+                "SELECT id FROM catalysts ORDER BY id",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        // The same-named folder entity's catalysts survive; the tag's own and
+        // the untyped legacy row are replaced; unrelated entities untouched.
+        assert_eq!(remaining, vec!["cat-folder", "cat-other"]);
+    }
+
     // -- Unique constraints ---------------------------------------------------
 
     #[test]

@@ -1376,7 +1376,11 @@ async fn run_refresh_detached(vault_path: &Path, use_env_llm: bool) -> Result<()
         }
     };
 
-    let db = Database::open(&paths.vault_db)?;
+    // The parent refresh that spawned this worker may still hold its own
+    // connection while it finishes reporting; opening reruns the schema DDL
+    // batch, which can lose that lock race and die before claiming the
+    // epoch. Retry briefly instead of giving up the whole build.
+    let db = open_vault_db_with_retry(&paths.vault_db)?;
     let Some(claim) = db.claim_scheduled_epoch(now_ms())? else {
         info!("detached refresh: no scheduled catalyst epoch");
         return Ok(());
@@ -1722,6 +1726,30 @@ async fn refresh_targets(vault_path: &Path) {
 ///
 /// Returns `true` if a background process was spawned, `false` if skipped
 /// (e.g., another refresh is already running).
+/// Open the vault DB, retrying briefly on lock contention.
+///
+/// `Database::open` reruns the idempotent schema batch, which can collide
+/// with another process's open connection (notably the parent refresh that
+/// just spawned this detached worker). The contention window is the tail of
+/// that process's run, so a short bounded retry is enough.
+fn open_vault_db_with_retry(vault_db: &Path) -> Result<Database> {
+    const ATTEMPTS: u32 = 10;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+    let mut last_err = None;
+    for attempt in 0..ATTEMPTS {
+        match Database::open(vault_db) {
+            Ok(db) => return Ok(db),
+            Err(e) if format!("{e:#}").contains("locked") => {
+                debug!(attempt, "vault DB locked, retrying: {e}");
+                last_err = Some(e);
+                std::thread::sleep(BACKOFF);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(last_err.expect("at least one locked attempt").into())
+}
+
 pub(super) fn spawn_background_refresh(
     vault_path: &Path,
     paths: &EnzymePaths,

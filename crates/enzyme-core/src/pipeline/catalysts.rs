@@ -594,17 +594,26 @@ struct EntityResult {
 
 struct PartialCatalystEvent {
     entity_name: String,
+    entity_type: String,
     index: usize,
     catalyst: ParsedCatalyst,
 }
 
-fn catalyst_from_parsed(entity_name: &str, parsed: ParsedCatalyst, provisional: bool) -> Catalyst {
-    let metadata = match (parsed.era_label.as_ref(), provisional) {
+fn catalyst_from_parsed(
+    entity_name: &str,
+    entity_type: &str,
+    parsed: ParsedCatalyst,
+    provisional: bool,
+) -> Catalyst {
+    let mut metadata = match (parsed.era_label.as_ref(), provisional) {
         (Some(era), true) => serde_json::json!({"era": era, "generation_phase": "stream"}),
         (Some(era), false) => serde_json::json!({"era": era}),
         (None, true) => serde_json::json!({"generation_phase": "stream"}),
         (None, false) => serde_json::json!({}),
     };
+    // Disambiguates same-named entities of different types (tag vs folder) so
+    // replacement deletes only this entity's catalysts.
+    metadata["entity_type"] = serde_json::json!(entity_type);
     Catalyst {
         id: Uuid::new_v4().to_string(),
         text: parsed.text,
@@ -1155,6 +1164,7 @@ impl<'a> CatalystPipeline<'a> {
                                                     sent = index + 1;
                                                     let _ = partial_tx.send(PartialCatalystEvent {
                                                         entity_name: entity_name.clone(),
+                                                        entity_type: entity_type.clone(),
                                                         index,
                                                         catalyst,
                                                     });
@@ -1291,24 +1301,31 @@ impl<'a> CatalystPipeline<'a> {
         // Phase 3: Collect results as tasks complete, while applying streamed
         // provisional catalysts on the DB writer thread.
         let mut completed = skipped.len();
-        let mut partial_started_entities: HashSet<String> = HashSet::new();
-        let mut partial_inserted_counts: HashMap<String, usize> = HashMap::new();
+        // Keyed by (name, type): entity names are not unique across types.
+        let mut partial_started_entities: HashSet<(String, String)> = HashSet::new();
+        let mut partial_inserted_counts: HashMap<(String, String), usize> = HashMap::new();
 
         while !join_set.is_empty() {
             let result = tokio::select! {
                 partial = partial_rx.recv() => {
                     if let Some(partial) = partial {
+                        let entity_key =
+                            (partial.entity_name.clone(), partial.entity_type.clone());
                         let inserted = partial_inserted_counts
-                            .entry(partial.entity_name.clone())
+                            .entry(entity_key.clone())
                             .or_insert(0);
                         if partial.index < *inserted {
                             continue;
                         }
-                        if partial_started_entities.insert(partial.entity_name.clone()) {
-                            self.db.delete_catalysts_for_entity(&partial.entity_name)?;
+                        if partial_started_entities.insert(entity_key) {
+                            self.db.delete_catalysts_for_entity(
+                                &partial.entity_name,
+                                &partial.entity_type,
+                            )?;
                         }
                         let catalyst = catalyst_from_parsed(
                             &partial.entity_name,
+                            &partial.entity_type,
                             partial.catalyst,
                             true,
                         );
@@ -1365,8 +1382,10 @@ impl<'a> CatalystPipeline<'a> {
 
                     if let Some(parsed_catalysts) = entity_result.catalysts {
                         // Delete old catalysts and insert new ones
-                        self.db
-                            .delete_catalysts_for_entity(&entity_result.entity_name)?;
+                        self.db.delete_catalysts_for_entity(
+                            &entity_result.entity_name,
+                            &entity_result.entity_type,
+                        )?;
 
                         let catalyst_texts: Vec<String> =
                             parsed_catalysts.iter().map(|c| c.text.clone()).collect();
@@ -1375,7 +1394,14 @@ impl<'a> CatalystPipeline<'a> {
 
                         let catalysts: Vec<Catalyst> = parsed_catalysts
                             .into_iter()
-                            .map(|pc| catalyst_from_parsed(&entity_result.entity_name, pc, false))
+                            .map(|pc| {
+                                catalyst_from_parsed(
+                                    &entity_result.entity_name,
+                                    &entity_result.entity_type,
+                                    pc,
+                                    false,
+                                )
+                            })
                             .collect();
 
                         let count = catalysts.len();

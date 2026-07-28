@@ -1287,11 +1287,23 @@ impl Database {
         }))
     }
 
-    /// Delete all catalysts for a given entity name.
-    pub fn delete_catalysts_for_entity(&self, entity: &str) -> Result<()> {
+    /// Delete all catalysts for a given entity, keyed by (name, type).
+    ///
+    /// Entity names are not unique across types (a `#projects` tag and a
+    /// `projects/` folder are distinct entities), so a name-only delete lets
+    /// same-named entities clobber each other's freshly generated catalysts.
+    /// The type lives in catalyst metadata; rows without one (written before
+    /// the type was stamped) still match so legacy catalysts get replaced.
+    pub fn delete_catalysts_for_entity(&self, entity: &str, entity_type: &str) -> Result<()> {
         self.execute_write(
-            "DELETE FROM catalysts WHERE entity = ?1",
-            vec![Value::Text(entity.to_string())],
+            "DELETE FROM catalysts
+             WHERE entity = ?1
+               AND (json_extract(metadata, '$.entity_type') = ?2
+                    OR json_extract(metadata, '$.entity_type') IS NULL)",
+            vec![
+                Value::Text(entity.to_string()),
+                Value::Text(entity_type.to_string()),
+            ],
         )?;
         Ok(())
     }
