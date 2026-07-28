@@ -689,6 +689,13 @@ impl Database {
 
     /// Get trending entities with guaranteed type diversity.
     /// Structural/tooling folder names that should never be trending candidates.
+    ///
+    /// DEPRECATED (exclusions-refactor): superseded by
+    /// [`crate::pipeline::exclusions::BUILTIN_STRUCTURAL_FOLDERS`], which is the
+    /// canonical union of this list and `entity_map::EXCLUDED_FOLDERS`. Retained
+    /// only as a reference for the migration; no longer read. See
+    /// `docs/design/entity-exclusions-refactor.md`.
+    #[allow(dead_code)]
     const EXCLUDED_FOLDER_NAMES: &'static [&'static str] = &[
         ".claude",
         ".obsidian",
@@ -717,9 +724,21 @@ impl Database {
             }
         };
 
+        // PoC of the unified exclusion source of truth (see
+        // `docs/design/entity-exclusions-refactor.md`). This replaces the
+        // hardcoded `EXCLUDED_FOLDER_NAMES` constant with the shared
+        // `FolderExclusions` set, which normalizes once and — critically —
+        // includes `excalidraw` that this legacy list had drifted away from.
+        //
+        // TODO(exclusions-refactor): thread `&EnzymeConfig` (or a prebuilt
+        // `FolderExclusions`) into this method so user `excluded_folders` are
+        // honored here too, via `FolderExclusions::with_extra(...)`. The
+        // repository layer currently has no config handle; that plumbing is the
+        // migration step tracked in the design doc. Until then we use the
+        // built-in defaults, which already fixes the drift bug.
+        let folder_exclusions = crate::pipeline::exclusions::FolderExclusions::defaults();
         let is_excluded_folder = |e: &Entity| -> bool {
-            e.entity_type == EntityType::Folder
-                && Self::EXCLUDED_FOLDER_NAMES.contains(&e.name.to_lowercase().as_str())
+            e.entity_type == EntityType::Folder && folder_exclusions.is_excluded(&e.name)
         };
 
         // Links referenced in fewer than 3 files are likely document titles, not concepts
