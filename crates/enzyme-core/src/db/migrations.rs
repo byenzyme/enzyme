@@ -29,8 +29,20 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(schema::SCHEMA_SQL)
         .await
         .map_err(DbError::Libsql)?;
-    slim_oversized_occurrence_contexts(conn).await?;
-    migrate_embeddings_to_int8(conn).await?;
+    let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
+    let int8_hint = migrate_embeddings_to_int8(conn).await?;
+    // Reclaim once, after all migrations: each VACUUM rewrites the whole
+    // file, so per-migration reclaims would multiply the one-time I/O cost.
+    // `None` means a migration short-circuited on its completion flag; if
+    // every migration short-circuited there is nothing new to reclaim.
+    if slim_hint.is_some() || int8_hint.is_some() {
+        reclaim_freelist_space(
+            conn,
+            "post-migration",
+            slim_hint.unwrap_or(0) + int8_hint.unwrap_or(0),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -41,7 +53,7 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
 /// would always discard it at read time. This walks existing rows once,
 /// nulls out contexts that are and always were unused, and records
 /// completion in `config` so subsequent opens skip the scan entirely.
-async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbError> {
+async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<Option<u64>, DbError> {
     // Cheap short-circuit: skip the scan entirely once already applied.
     let mut check = conn
         .query(
@@ -51,7 +63,7 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
         .await
         .map_err(DbError::Libsql)?;
     if check.next().await.map_err(DbError::Libsql)?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut rows = conn
@@ -113,13 +125,10 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
         );
     }
 
-    // One-time reclaim, tied to the same one-time migration: nulling contexts
-    // frees pages for reuse but never shrinks the file, and nothing else in
-    // the lifecycle ever vacuums. Keyed on the actual freelist rather than
-    // this run's freed bytes so an earlier interrupted run (UPDATE committed,
-    // flag not yet written → rescan finds nothing oversized) still gets its
-    // reclaim.
-    reclaim_freelist_space(conn, "context-slim").await
+    // Freed context text spans whole overflow pages, so it lands on the
+    // freelist where the shared reclaim pass will see it — no intra-page
+    // hint needed.
+    Ok(Some(0))
 }
 
 /// One-time data migration: rewrite `chunk_embeddings.vector` and the single
@@ -133,7 +142,7 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
 /// dimension, so a run interrupted after some UPDATEs committed but before
 /// the completion flag is written will simply skip the already-converted
 /// rows on the next open and finish the rest.
-async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<(), DbError> {
+async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<Option<u64>, DbError> {
     // Cheap short-circuit: skip the scan entirely once already applied.
     let mut check = conn
         .query(
@@ -143,7 +152,7 @@ async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<(), DbError> {
         .await
         .map_err(DbError::Libsql)?;
     if check.next().await.map_err(DbError::Libsql)?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     drop(check);
 
@@ -258,7 +267,10 @@ async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<(), DbError> {
         );
     }
 
-    reclaim_freelist_space(conn, "embedding-int8").await
+    // Shrinking a blob in place frees space *inside* its page, which never
+    // shows up on the freelist — report the known payload reduction so the
+    // shared reclaim pass sees it.
+    Ok(Some(bytes_before.saturating_sub(bytes_after)))
 }
 
 /// Best-effort reclaim of freed pages via `VACUUM`, shared by one-time
@@ -269,16 +281,25 @@ async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<(), DbError> {
 /// written → rescan finds nothing to do) still gets its reclaim. Failure is
 /// swallowed — a failed VACUUM (e.g. low disk for the transient copy) must
 /// not fail `Database::open`.
-async fn reclaim_freelist_space(conn: &Connection, migration_name: &str) -> Result<(), DbError> {
+async fn reclaim_freelist_space(
+    conn: &Connection,
+    migration_name: &str,
+    intra_page_bytes_freed: u64,
+) -> Result<(), DbError> {
+    // The freelist only counts *fully empty* pages. A migration that shrinks
+    // blobs in place (f32 → int8) frees space inside still-occupied pages,
+    // which VACUUM can repack but the freelist can't see — the caller passes
+    // that known reduction as `intra_page_bytes_freed`.
     let freelist_bytes = {
         let count = query_pragma_u64(conn, "PRAGMA freelist_count").await?;
         let page_size = query_pragma_u64(conn, "PRAGMA page_size").await?;
         count * page_size
     };
-    if freelist_bytes >= VACUUM_RECLAIM_THRESHOLD_BYTES {
+    if freelist_bytes + intra_page_bytes_freed >= VACUUM_RECLAIM_THRESHOLD_BYTES {
         match conn.execute("VACUUM", ()).await {
             Ok(_) => info!(
                 freelist_bytes,
+                intra_page_bytes_freed,
                 migration = migration_name,
                 "vacuumed database to reclaim freed space"
             ),

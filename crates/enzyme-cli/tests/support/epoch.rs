@@ -32,16 +32,23 @@ pub fn wait_for_epoch_terminal(db_path: &Path, epoch_id: &str, timeout: Duration
     let start = Instant::now();
     let mut last_status: Option<String> = None;
     loop {
-        let status = Database::open(db_path)
-            .expect("open vault db while polling epoch status")
-            .query_read(
+        // Opening runs the (write-performing) schema batch and can lose a
+        // lock race against the worker under test; that contention is
+        // transient, so treat locked opens/queries as "try again" rather
+        // than a test failure. The overall timeout still bounds the loop.
+        let status = match Database::open(db_path) {
+            Ok(db) => match db.query_read(
                 "SELECT status FROM catalyst_epochs WHERE epoch_id = ?1",
                 vec![Value::Text(epoch_id.to_string())],
                 |row| row.get::<String>(0),
-            )
-            .expect("query catalyst_epochs")
-            .into_iter()
-            .next();
+            ) {
+                Ok(rows) => rows.into_iter().next(),
+                Err(e) if format!("{e:#}").contains("locked") => None,
+                Err(e) => panic!("query catalyst_epochs: {e:#}"),
+            },
+            Err(e) if format!("{e:#}").contains("locked") => None,
+            Err(e) => panic!("open vault db while polling epoch status: {e:#}"),
+        };
 
         if let Some(status) = &status {
             if status == "active" || status == "failed" {
