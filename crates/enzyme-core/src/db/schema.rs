@@ -138,8 +138,10 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
 );
 
 -- Packed catalyst embeddings: all vectors in a single row to eliminate
--- per-row async overhead on the libsql read path.  count × 384 f32 values
--- stored as little-endian bytes, preceded by a JSON array of catalyst_ids.
+-- per-row async overhead on the libsql read path.  `count` vectors (the
+-- embedding dimension is determined by the active embedding backend, not
+-- fixed by this schema), quantized and stored as described by
+-- `crate::embedding::quantize`, alongside a JSON array of catalyst_ids.
 CREATE TABLE IF NOT EXISTS catalyst_embeddings_packed (
     id      INTEGER PRIMARY KEY DEFAULT 1,
     count   INTEGER NOT NULL,

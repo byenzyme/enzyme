@@ -5,6 +5,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use libsql::Value;
 
 use crate::document::ProcessedDocument;
+use crate::embedding::quantize;
 use crate::models::*;
 
 use super::connection::{Database, block_in_place_sync};
@@ -1818,7 +1819,7 @@ impl Database {
                 .context("failed to begin transaction for upsert_chunk_embeddings")?;
 
             for (file_path, chunk_index, vector) in &embeddings {
-                let blob = f32_vec_to_blob(vector);
+                let blob = quantize::quantize_vector(vector);
                 tx.execute(
                     "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
                      VALUES (?1, ?2, ?3)",
@@ -1863,7 +1864,7 @@ impl Database {
             }
 
             for (file_path, chunk_index, vector) in &embeddings {
-                let blob = f32_vec_to_blob(vector);
+                let blob = quantize::quantize_vector(vector);
                 tx.execute(
                     "INSERT OR REPLACE INTO chunk_embeddings (file_path, chunk_index, vector)
                      VALUES (?1, ?2, ?3)",
@@ -1905,7 +1906,11 @@ impl Database {
                 let file_path: String = row.get::<String>(0)?;
                 let chunk_index: i64 = row.get::<i64>(1)?;
                 let blob: Vec<u8> = row.get::<Vec<u8>>(2)?;
-                Ok((file_path, chunk_index as u32, blob_to_f32_vec(&blob)))
+                Ok((
+                    file_path,
+                    chunk_index as u32,
+                    quantize::decode_vector(&blob, EMBEDDING_DIMENSION),
+                ))
             },
         )?;
         Ok(rows)
@@ -1947,11 +1952,8 @@ impl Database {
         let n = embeddings.len();
         let ids: Vec<String> = embeddings.iter().map(|(id, _)| id.to_string()).collect();
         let ids_json = serde_json::to_string(&ids).context("serialize catalyst ids")?;
-        let dim = embeddings[0].1.len();
-        let mut all_vecs: Vec<u8> = Vec::with_capacity(n * dim * 4);
-        for (_, vector) in embeddings {
-            all_vecs.extend_from_slice(&f32_vec_to_blob(vector));
-        }
+        let all_vecs: Vec<u8> =
+            quantize::quantize_packed(embeddings.iter().map(|(_, vector)| *vector));
 
         block_in_place_sync(async move {
             let tx = self
@@ -1995,15 +1997,12 @@ impl Database {
 
         let ids: Vec<String> =
             serde_json::from_str(&ids_json).context("deserialize catalyst ids")?;
-        let embedding_dim = if ids.is_empty() {
+        if ids.is_empty() {
             return Ok(vec![]);
-        } else {
-            vectors_blob.len() / ids.len()
-        };
-        let results: Vec<(String, Vec<f32>)> = ids
-            .into_iter()
-            .zip(vectors_blob.chunks(embedding_dim).map(blob_to_f32_vec))
-            .collect();
+        }
+        let count = ids.len();
+        let vectors = quantize::decode_packed(&vectors_blob, count, EMBEDDING_DIMENSION);
+        let results: Vec<(String, Vec<f32>)> = ids.into_iter().zip(vectors).collect();
         Ok(results)
     }
 
@@ -2023,11 +2022,9 @@ impl Database {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let bytes_per_vector = vectors_blob.len() / ids.len();
-        Ok(ids
-            .into_iter()
-            .zip(vectors_blob.chunks(bytes_per_vector).map(blob_to_f32_vec))
-            .collect())
+        let count = ids.len();
+        let vectors = quantize::decode_packed(&vectors_blob, count, EMBEDDING_DIMENSION);
+        Ok(ids.into_iter().zip(vectors).collect())
     }
 
     pub fn get_epoch_similarities_for_catalysts(
@@ -2226,21 +2223,21 @@ impl Database {
                 let path = row.get::<String>(0)?;
                 let index = row.get::<i64>(1)?;
                 let blob = row.get::<Vec<u8>>(2)?;
-                live_chunks.push((path, index, blob_to_f32_vec(&blob)));
+                live_chunks.push((path, index, quantize::decode_vector(&blob, EMBEDDING_DIMENSION)));
             }
             drop(chunk_rows);
             let mut live_similarities = Vec::new();
-            if let Some((_, ids_json, vectors_blob)) = &packed {
+            if let Some((count, ids_json, vectors_blob)) = &packed {
                 let ids: Vec<String> = serde_json::from_str(ids_json)?;
                 if !ids.is_empty() {
-                    let bytes_per_vector = vectors_blob.len() / ids.len();
-                    for (cat_id, bytes) in ids.iter().zip(vectors_blob.chunks(bytes_per_vector)) {
-                        let cat_vec = blob_to_f32_vec(bytes);
+                    let cat_vectors =
+                        quantize::decode_packed(vectors_blob, *count as usize, EMBEDDING_DIMENSION);
+                    for (cat_id, cat_vec) in ids.iter().zip(cat_vectors.iter()) {
                         let mut scored: Vec<(f64, &str, i64)> = live_chunks
                             .iter()
                             .map(|(path, index, vector)| {
                                 (
-                                    Embedding::cosine_similarity(&cat_vec, vector) as f64,
+                                    Embedding::cosine_similarity(cat_vec, vector) as f64,
                                     path.as_str(),
                                     *index,
                                 )
@@ -2393,20 +2390,5 @@ fn map_applied_target_row(row: libsql::Row) -> Result<AppliedTarget, libsql::Err
     })
 }
 
-// ---------------------------------------------------------------------------
-// Blob <-> Vec<f32> helpers
-// ---------------------------------------------------------------------------
-
-fn f32_vec_to_blob(v: &[f32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(v.len() * 4);
-    for &x in v {
-        buf.extend_from_slice(&x.to_le_bytes());
-    }
-    buf
-}
-
-fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-        .collect()
-}
+// Blob <-> Vec<f32> encoding lives in `crate::embedding::quantize` (int8_v1,
+// with legacy f32 fallback).

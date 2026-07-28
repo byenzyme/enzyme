@@ -18,6 +18,7 @@ use tracing::info;
 mod backend;
 mod ese_backend;
 mod normalize;
+pub mod quantize;
 #[cfg(feature = "rten")]
 mod rten_backend;
 mod service;
