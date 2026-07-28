@@ -57,7 +57,8 @@ pub async fn run_dump_prompts(
         prompt_context: vault_context.as_deref(),
         model: "dump",
         per_entity_allocations: Some(&allocations),
-        max_context_chars: 0,
+        // Mirror real runs: None → the built-in default budget applies.
+        max_context_chars: None,
         max_samples: 20,
         concurrency: None,
         stream_partial_catalysts: false,
