@@ -1,32 +1,49 @@
-//! Unified folder-exclusion source of truth.
+//! The **surface gate**: which indexed folders never become catalyst topics.
 //!
-//! Historically, "which folders should be excluded" was answered by four
-//! independent lists that drifted out of sync (see
-//! `docs/design/entity-exclusions-refactor.md`):
+//! ## The attention model this belongs to
 //!
-//! * `repository::Database::EXCLUDED_FOLDER_NAMES` (trending path, 9 entries)
-//! * `entity_map::EXCLUDED_FOLDERS` (folding path, 10 entries — had `excalidraw`)
-//! * `entity_map::GENERIC_FOLDERS` (surfacing suppression — a *different* concept)
-//! * `EnzymeConfig::excluded_folders` (user config, only honored in the curated path)
+//! "What does enzyme pay attention to" is one question — *is this a candidate for
+//! catalyst generation?* — enforced at two ordered gates along the pipeline
+//! (`discover → index → embed → [select] → catalyze`). See
+//! [`docs/design/attention-and-exclusions.md`](../../../docs/design/attention-and-exclusions.md)
+//! for the full product narrative and user mental model.
 //!
-//! [`FolderExclusions`] is the single, normalized set that merges the built-in
-//! **structural** defaults with the user's `config.excluded_folders`. It is the
-//! type every *structural* consumer (trending, entity-map folding, curated
-//! selection) should thread through.
+//! 1. **Index gate** — [`crate::document::discovery::FileDiscovery`] glob
+//!    patterns. "Never read this." A folder dropped here produces no documents
+//!    and therefore no entities; it is invisible downstream *for free*.
+//! 2. **Surface gate** — *this module*, plus the `GENERIC_FOLDERS`/`EXCLUDED_TAGS`
+//!    demotions in [`crate::pipeline::entity_map`]. Operates only over entities
+//!    that survived indexing, and decides which become catalyst targets.
 //!
-//! ## Scope of this type
+//! The gates are ordered, not parallel: "never index" strictly implies "never
+//! surface." So this set only needs to name folders that *are* indexed but must
+//! not be catalyzed (`templates`, `excalidraw`, `config`, …). The dotfile/tooling
+//! entries it currently also carries (`.git`, `.obsidian`, …) are belt-and-
+//! suspenders — the index gate already removes them, so a folder entity for them
+//! can never reach this gate. They are kept only as defense-in-depth.
 //!
-//! This type answers exactly one question: **"is this folder structural noise
-//! that should never be treated as a top-level content entity?"** It does NOT
-//! model:
+//! ## What [`FolderExclusions`] is
 //!
-//! * `GENERIC_FOLDERS` (daily/notes/…): those are indexed and selectable, they
-//!   are merely suppressed from being *surfaced as a topic*. That is a
-//!   surfacing/ranking concern, kept deliberately separate here — see the design
-//!   doc's "GENERIC_FOLDERS: merge or separate" decision.
-//! * discovery-level exclusion (skipping indexing entirely): that is a distinct
-//!   layer handled by [`crate::document::discovery::FileDiscovery`] glob
-//!   patterns. See the design doc's "discovery vs selection layering" decision.
+//! The single, normalized set that merges enzyme's built-in **structural**
+//! defaults with the user's `config.excluded_folders`. It answers exactly one
+//! question: **"is this folder structural noise that should never be a catalyst
+//! topic, anywhere — not even if the user explicitly curated it?"** This is the
+//! *hard* tier of the surface gate. It replaced four drifted hand-maintained
+//! lists (see `docs/design/entity-exclusions-refactor.md` for that history).
+//!
+//! It deliberately does NOT model the *soft* tier —
+//! `entity_map::GENERIC_FOLDERS` (daily/notes/…) and `EXCLUDED_TAGS`. Those are
+//! the "know it, but don't feature it" middle state: indexed, usable as context,
+//! and surfaced only if the user explicitly names them — demoted from *automatic*
+//! topic-picking, not dropped. Keeping them separate is what preserves that
+//! curatable-middle-state semantic; folding them in here would make a `daily`
+//! folder behave like `.git`.
+//!
+//! Note (intended, not yet wired): the user's `config.excluded_folders` should
+//! also feed the **index gate** so `exclude` means "leave it alone" (gone), not
+//! merely "don't surface." Today it reaches only this surface gate — excluded
+//! folders are still indexed and can leak into retrieval/context. See the
+//! attention-model doc's "behavior change" section.
 
 use std::collections::HashSet;
 

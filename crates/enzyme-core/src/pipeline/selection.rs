@@ -57,10 +57,15 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Run selection against an already-frozen config snapshot.
     pub fn run_with_config(&self, config: Option<&EnzymeConfig>) -> Result<SelectionResult> {
-        // Build the unified structural-exclusion set once at the config boundary:
-        // built-in defaults merged with the user's `config.excluded_folders`. This
-        // is what makes `excluded_folders` finally bite on every selection path,
-        // not just the curated one (see `docs/design/entity-exclusions-refactor.md`).
+        // Build the surface-gate exclusion set once at the config boundary:
+        // enzyme's built-in structural defaults merged with the user's `exclude`
+        // list (`config.excluded_folders`). This is the "never a catalyst topic"
+        // hard tier; it now bites on every selection path (shortlist + curated),
+        // not just the curated one. See `docs/design/attention-and-exclusions.md`.
+        //
+        // Note: this only enforces the *surface* gate. For `exclude` to mean
+        // "leave it alone" (don't index at all), the same list must also feed the
+        // index gate in `document::discovery` — intended, not yet wired.
         let exclusions = match config {
             Some(cfg) => FolderExclusions::with_extra(cfg.excluded_folders.iter()),
             None => FolderExclusions::defaults(),

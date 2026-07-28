@@ -91,9 +91,20 @@ const CHILD_SIGNIFICANCE_RATIO: f64 = 0.10;
 /// Minimum frequency for an all-recent child to be surfaced even below the ratio.
 const ALL_RECENT_MIN_FREQUENCY: i64 = 10;
 
+/// The **soft tier** of the surface gate for folders: "know it, but don't feature
+/// it." These are real content the user writes into, but too generic to be a
+/// catalyst topic on their own. Unlike [`FolderExclusions`] (the hard tier, which
+/// drops everywhere), these are demoted only from *automatic* topic-picking here
+/// in `select_shortlist`; the curated path does not apply them, so a user who
+/// explicitly names `daily`/`notes` still gets it. That path-dependence *is* the
+/// "curatable middle state" — see `docs/design/attention-and-exclusions.md`.
 const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
 
-/// Tags that correspond to tooling/system concerns, not vault content.
+/// The soft tier of the surface gate for *tags*: tooling/system tag noise demoted
+/// from automatic catalyst-topic selection (same curatable-if-explicit semantic as
+/// [`GENERIC_FOLDERS`]). These names mirror the non-dotfile structural folders
+/// but apply to the tag entity space, which the folder-side [`FolderExclusions`]
+/// does not cover; there is no unified `TagExclusions` yet.
 const EXCLUDED_TAGS: &[&str] = &[
     "excalidraw",
     "templates",
@@ -334,7 +345,13 @@ impl EntityMap {
             .collect()
     }
 
-    /// Coverage-aware greedy entity selection.
+    /// Coverage-aware greedy selection of catalyst-candidate entities.
+    ///
+    /// This is the **surface gate** in the attention model
+    /// (`docs/design/attention-and-exclusions.md`): given every indexed entity,
+    /// pick the set enzyme will generate catalysts about. (Historically named
+    /// "shortlist"; it is not a preview — its output is the generation input. It
+    /// superseded the recency-only "trending" path.)
     ///
     /// Scores entities by a geometric mean of recency and frequency, then picks
     /// greedily with a marginal coverage signal: each pick's score is adjusted
@@ -344,10 +361,12 @@ impl EntityMap {
     /// Structural folding (children into parents, links into folders) is left
     /// to `from_entities`.
     ///
-    /// `folder_exclusions` is the unified structural-exclusion set (built-ins
-    /// merged with the user's `config.excluded_folders`); folders it matches are
-    /// never surfaced as top-level entities. `GENERIC_FOLDERS` and `EXCLUDED_TAGS`
-    /// remain separate concepts (see `docs/design/entity-exclusions-refactor.md`).
+    /// Two tiers of "don't feature this" apply to candidates:
+    /// * `folder_exclusions` — the **hard tier** ([`FolderExclusions`]: built-ins
+    ///   + user `config.excluded_folders`); never a topic, anywhere.
+    /// * [`GENERIC_FOLDERS`] / [`EXCLUDED_TAGS`] — the **soft tier**; demoted from
+    ///   *automatic* picking here, but honored if the user explicitly curates
+    ///   them (the curated path does not apply them).
     pub fn select_shortlist(
         db: &Database,
         limit: usize,

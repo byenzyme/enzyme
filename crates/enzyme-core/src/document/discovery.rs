@@ -6,6 +6,17 @@ use ignore::overrides::OverrideBuilder;
 
 /// Discovers markdown files within a vault directory, respecting include/exclude
 /// patterns and `.gitignore` rules.
+///
+/// This is the **index gate** in the attention model
+/// (`docs/design/attention-and-exclusions.md`): anything excluded here is never
+/// read, so it produces no documents and no entities — invisible to embedding,
+/// search, and catalyst selection alike. "Never index" strictly implies "never
+/// surface," so the downstream surface gate ([`crate::pipeline::exclusions`])
+/// need only name folders that *are* indexed but must not be catalyzed.
+///
+/// The defaults below cover tooling/system dirs. Intended (not yet wired): the
+/// user's `exclude` list (`config.excluded_folders`) should also feed this gate
+/// so `exclude` means "leave it alone" (gone), not merely "don't surface."
 pub struct FileDiscovery {
     vault_path: PathBuf,
     include_patterns: Vec<String>,
