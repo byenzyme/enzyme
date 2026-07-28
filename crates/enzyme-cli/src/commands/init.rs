@@ -97,7 +97,12 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
         return Ok(false);
     }
 
-    let discovered_files = FileDiscovery::new(vault_path.to_path_buf()).discover()?;
+    // Honor `exclude` here too: "indexable files present" must be computed the
+    // same way IndexingPipeline will index, or a vault whose only files live in
+    // excluded folders would be judged non-empty and its DB-only corpus wiped.
+    let discovered_files = FileDiscovery::new(vault_path.to_path_buf())
+        .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path))
+        .discover()?;
     if !discovered_files.is_empty() {
         return Ok(false);
     }

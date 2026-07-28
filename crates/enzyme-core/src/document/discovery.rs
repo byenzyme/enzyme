@@ -4,6 +4,21 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 
+/// Escape glob metacharacters so a user-supplied folder name is matched
+/// literally — both so `exclude: [notes[draft]]` matches that exact folder and
+/// so a pathological name (e.g. an unbalanced `[`) can never produce an invalid
+/// glob that aborts the whole index walk.
+fn escape_glob_meta(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    for ch in name.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Discovers markdown files within a vault directory, respecting include/exclude
 /// patterns and `.gitignore` rules.
 ///
@@ -79,10 +94,13 @@ impl FileDiscovery {
     /// vault-root-anchored `{name}/**` glob, matching how the built-in defaults are
     /// written, and is appended to (never replaces) the defaults.
     ///
-    /// Names are used as typed (filesystem case-sensitive), unlike the lowercased
-    /// entity-level [`crate::pipeline::exclusions::FolderExclusions`]. A `.` (vault
-    /// root) is skipped: "don't surface the root as a topic" is a surface-gate
-    /// concept and must never mean "index nothing."
+    /// Matching is case-insensitive (see [`Self::discover`]), so the index gate
+    /// agrees with the lowercased entity-level surface gate
+    /// ([`crate::pipeline::exclusions::FolderExclusions`]): `exclude: [Archive]`
+    /// excludes an on-disk `archive/` too. Glob metacharacters in a name are
+    /// escaped so it matches literally and a pathological name can never abort the
+    /// index walk. A `.` (vault root) is skipped: "don't surface the root as a
+    /// topic" is a surface-gate concept and must never mean "index nothing."
     pub fn with_excluded_folders<I, S>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -93,7 +111,8 @@ impl FileDiscovery {
             if trimmed.is_empty() || trimmed == "." {
                 continue;
             }
-            self.exclude_patterns.push(format!("{trimmed}/**"));
+            self.exclude_patterns
+                .push(format!("{}/**", escape_glob_meta(trimmed)));
         }
         self
     }
@@ -108,6 +127,11 @@ impl FileDiscovery {
             .with_context(|| format!("vault path does not exist: {:?}", self.vault_path))?;
 
         let mut overrides = OverrideBuilder::new(&vault_path);
+        // Case-insensitive so user `exclude` names match regardless of on-disk
+        // casing and the index gate agrees with the lowercased surface gate.
+        overrides
+            .case_insensitive(true)
+            .context("failed to enable case-insensitive matching")?;
 
         // Add include patterns (whitelisted globs).
         for pattern in &self.include_patterns {
@@ -217,6 +241,55 @@ mod tests {
         assert!(
             !files.iter().any(|p| p.starts_with("archive")),
             "excluded folder must not be indexed, got: {files:?}"
+        );
+    }
+
+    /// The index gate must agree with the lowercased surface gate: an exclude
+    /// entry whose casing differs from the on-disk folder still excludes it.
+    #[test]
+    fn excluded_folder_match_is_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("Archive")).unwrap();
+        fs::write(root.join("Archive/old.md"), "# old").unwrap();
+        fs::write(root.join("keep.md"), "# keep").unwrap();
+
+        let files = FileDiscovery::new(root.to_path_buf())
+            .with_excluded_folders(["archive"]) // lowercase config vs `Archive/` dir
+            .discover()
+            .unwrap();
+
+        assert!(files.contains(&PathBuf::from("keep.md")));
+        assert!(
+            !files.iter().any(|p| p.starts_with("Archive")),
+            "case-mismatched exclude must still exclude, got: {files:?}"
+        );
+    }
+
+    /// A folder name containing glob metacharacters is matched literally and never
+    /// aborts the walk.
+    #[test]
+    fn excluded_folder_with_glob_metachars_is_literal_and_safe() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("notes[draft]")).unwrap();
+        fs::write(root.join("notes[draft]/d.md"), "# d").unwrap();
+        fs::create_dir_all(root.join("notesx")).unwrap();
+        fs::write(root.join("notesx/y.md"), "# y").unwrap();
+
+        // Also feed a pathological unbalanced-class name: must not error the walk.
+        let files = FileDiscovery::new(root.to_path_buf())
+            .with_excluded_folders(["notes[draft]", "bad["])
+            .discover()
+            .expect("pathological exclude name must not abort discovery");
+
+        assert!(
+            !files.iter().any(|p| p.starts_with("notes[draft]")),
+            "literal metachar folder should be excluded, got: {files:?}"
+        );
+        assert!(
+            files.contains(&PathBuf::from("notesx/y.md")),
+            "the class-glob must not over-match a different folder, got: {files:?}"
         );
     }
 

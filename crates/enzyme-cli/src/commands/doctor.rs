@@ -1020,8 +1020,11 @@ pub async fn run_doctor(vault_path: &Path, json: bool) -> Result<()> {
     .await?;
 
     // --- Filesystem discovery ---
-
-    let md_files = FileDiscovery::new(vault_path.to_path_buf()).discover()?;
+    // Honor `exclude` so doctor doesn't report excluded-folder files as
+    // perpetually "not_indexed" (indexing skips them by design).
+    let md_files = FileDiscovery::new(vault_path.to_path_buf())
+        .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path))
+        .discover()?;
 
     // --- Collect each fact category ---
 

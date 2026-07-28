@@ -261,6 +261,19 @@ impl EnzymeConfig {
         Self::load_legacy_yaml(vault_path)
     }
 
+    /// The user's `exclude` folder list for a vault, or empty when there is no
+    /// readable config. This is the single source every file-discovery site uses
+    /// to feed the index gate, so `exclude` is honored consistently (indexing,
+    /// doctor, scan, corpus-preservation checks) rather than only where an
+    /// `IndexingPipeline` happens to run. A load error resolves to empty so
+    /// discovery never fails on a bad/absent config.
+    pub fn excluded_folders_at(vault_path: &Path) -> Vec<String> {
+        match Self::load(vault_path) {
+            Ok(Some(cfg)) => cfg.excluded_folders,
+            _ => Vec::new(),
+        }
+    }
+
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
         let key = canonical_vault_key(vault_path);
         let vault = global

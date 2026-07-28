@@ -216,7 +216,9 @@ struct Metric {
 }
 
 fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
-    let discovery = FileDiscovery::new(vault_path.to_path_buf());
+    // Honor `exclude` so scan metrics/suggestions never count excluded folders.
+    let discovery = FileDiscovery::new(vault_path.to_path_buf())
+        .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path));
     let paths = discovery.discover()?;
     let processor = DocumentProcessor::new(vault_path.to_path_buf());
     Ok(processor

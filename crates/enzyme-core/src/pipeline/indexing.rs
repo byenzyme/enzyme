@@ -60,10 +60,7 @@ impl<'a> IndexingPipeline<'a> {
         if let Some(names) = &self.excluded_folders {
             return names.clone();
         }
-        match crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path) {
-            Ok(Some(cfg)) => cfg.excluded_folders,
-            _ => Vec::new(),
-        }
+        crate::config::enzyme_config::EnzymeConfig::excluded_folders_at(&self.vault_path)
     }
 
     /// Execute the indexing pipeline.

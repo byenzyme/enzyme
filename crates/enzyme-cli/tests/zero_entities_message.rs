@@ -234,8 +234,8 @@ fn control_same_env_llm_reaches_the_llm_when_entities_exist() {
 /// greedy loop can only return fewer than `limit` entities when the `candidates`
 /// vector (entity_map.rs:410-430) is empty. `candidates` is built with three
 /// HARDCODED filters:
-///   * Folder — root-level only, and not in `EXCLUDED_FOLDERS` (entity_map.rs:95)
-///     or `GENERIC_FOLDERS` (entity_map.rs:108 = daily/notes/convos/journal/journals)
+///   * Folder — root-level only, and not excluded by `FolderExclusions`
+///     (pipeline/exclusions.rs) or `GENERIC_FOLDERS` (daily/notes/convos/journal/journals)
 ///   * Tag    — root tags only, not in `EXCLUDED_TAGS` (entity_map.rs:111)
 ///   * Link   — `frequency >= 3`
 ///
