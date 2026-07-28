@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use enzyme_core::db::Database;
+use enzyme_core::pipeline::exclusions::FolderExclusions;
 use enzyme_core::pipeline::selection_steps;
 
 /// A snapshot of vault structure and trending entities, built from the DB.
@@ -53,7 +54,10 @@ fn entity_trend(frequency: i64, recent: i64) -> Trend {
 
 /// Build a vault summary from the DB using EntityMap.
 pub fn build_summary(db: &Database, _vault_path: &Path) -> Result<VaultSummary> {
-    let materialized = selection_steps::build_shortlist_selection(db, 15)?;
+    // Summary view uses the built-in defaults; it is not the catalyst path and
+    // does not need the user's config-extended exclusions.
+    let materialized =
+        selection_steps::build_shortlist_selection(db, 15, &FolderExclusions::defaults())?;
     let entity_map = materialized.entity_map;
 
     let mut entities = Vec::new();
