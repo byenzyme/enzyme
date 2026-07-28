@@ -11,6 +11,7 @@ use crate::db::Database;
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
 use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
+    representative_excerpt,
 };
 
 /// Orchestrates the full indexing pipeline:
@@ -251,19 +252,21 @@ impl<'a> IndexingPipeline<'a> {
                 .map(|fm| fm.links.iter().map(|l| l.as_str()).collect())
                 .unwrap_or_default();
 
-            // Full file body (frontmatter stripped) for document-level entities.
-            // Only stored when small enough that the catalyst pipeline's inline
-            // context filter (`INLINE_CONTEXT_MAX_WORDS`) will actually keep it;
-            // larger bodies are always filtered out by that reader, so we store
-            // `None` rather than pay to persist context that's never used. A
-            // truncated snippet is deliberately avoided here: it would newly
-            // pass the reader's word-count filter and change centroid behavior.
-            let full_body: Option<String> = doc.chunks.first().and_then(|_| {
-                let body = crate::document::strip_frontmatter(&doc.content).to_string();
+            // Context (frontmatter stripped) for document-level entities.
+            // Bodies under the inline-context filter (`INLINE_CONTEXT_MAX_WORDS`)
+            // are stored whole. Larger bodies are stored as a bounded
+            // `representative_excerpt` (first + last words, kept under the
+            // filter): storing the whole body wastes space the reader discards,
+            // but storing `None` drops the note from the entity query centroid
+            // entirely — so we keep a small, representative, chunk-scorable
+            // stand-in instead. The slim/backfill migrations produce the same
+            // excerpt for pre-existing rows.
+            let full_body: Option<String> = doc.chunks.first().map(|_| {
+                let body = crate::document::strip_frontmatter(&doc.content);
                 if body.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS {
-                    Some(body)
+                    body.to_string()
                 } else {
-                    None
+                    representative_excerpt(body)
                 }
             });
 
@@ -1074,17 +1077,24 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 14. Oversized frontmatter/folder bodies store None, not a truncated body
+    // 14. Oversized frontmatter/folder bodies store a bounded representative
+    //     excerpt (first + last words), not the whole body and not None — so
+    //     the note stays in the query centroid while keeping prompts bounded.
     // -----------------------------------------------------------------------
     #[test]
-    fn oversized_body_stores_none_context() {
-        use crate::models::INLINE_CONTEXT_MAX_WORDS;
+    fn oversized_body_stores_bounded_excerpt() {
+        use crate::models::{EXCERPT_MAX_WORDS, INLINE_CONTEXT_MAX_WORDS};
 
         let db = test_db();
         let vault = tempfile::tempdir().unwrap();
 
-        // A body comfortably over the 400-word inline-context threshold.
-        let big_body = "word ".repeat(INLINE_CONTEXT_MAX_WORDS + 100);
+        // A body comfortably over the 400-word inline-context threshold, with
+        // distinct bookends and a middle marker that the excerpt must drop.
+        let big_body = format!(
+            "STARTMARKER {} MIDDLEMARKER {} ENDMARKER",
+            "word ".repeat(300),
+            "word ".repeat(300),
+        );
         assert!(big_body.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS);
 
         write_md(
@@ -1127,10 +1137,35 @@ mod tests {
                 .iter()
                 .find(|o| o.file_path.ends_with("big.md"))
                 .expect("big.md occurrence should exist");
+            let ctx = big_occ.context.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "oversized body for entity {} should store a bounded excerpt, not None",
+                    entity.name
+                )
+            });
+            // Bounded: stays under the inline-context filter so it counts toward
+            // the query centroid.
             assert!(
-                big_occ.context.is_none(),
-                "oversized body context for entity {} should be None, not a truncated snippet",
-                entity.name
+                ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
+                "excerpt for entity {} ({} words) must stay under the filter",
+                entity.name,
+                ctx.split_whitespace().count(),
+            );
+            assert!(
+                ctx.split_whitespace().count() <= EXCERPT_MAX_WORDS + 1,
+                "excerpt for entity {} should be ~EXCERPT_MAX_WORDS words",
+                entity.name,
+            );
+            // Representative: keeps the bookends, drops the middle.
+            assert!(
+                ctx.contains("STARTMARKER") && ctx.contains("ENDMARKER"),
+                "excerpt for entity {} should retain both bookends",
+                entity.name,
+            );
+            assert!(
+                !ctx.contains("MIDDLEMARKER"),
+                "excerpt for entity {} should drop the middle of the body",
+                entity.name,
             );
 
             let small_occ = occs

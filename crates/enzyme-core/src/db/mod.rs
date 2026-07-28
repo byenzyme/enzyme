@@ -383,11 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn test_context_slim_migration_nulls_oversized_and_short_circuits() {
+    fn test_context_slim_migration_excerpts_oversized_and_short_circuits() {
+        use crate::models::INLINE_CONTEXT_MAX_WORDS;
         const SLIM_KEY: &str = "migration.context_slim_v1";
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("context_slim.db");
+
+        // Oversized body with distinct bookends and a middle marker the excerpt
+        // must drop.
+        let big_context = format!(
+            "STARTMARKER {} MIDDLEMARKER {} ENDMARKER",
+            "word ".repeat(300),
+            "word ".repeat(300),
+        );
 
         {
             // Opening a fresh DB runs the migration against an empty
@@ -407,11 +416,10 @@ mod tests {
             )
             .unwrap();
 
-            let big_context = "word ".repeat(500);
             db.execute_write(
                 "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
                  VALUES (1, 'big.md', ?1, 0)",
-                vec![Value::Text(big_context)],
+                vec![Value::Text(big_context.clone())],
             )
             .unwrap();
             db.execute_write(
@@ -423,8 +431,9 @@ mod tests {
         }
 
         {
-            // Reopening should find the flag missing, scan, null the oversized
-            // context, and preserve the normal one.
+            // Reopening should find the flag missing, scan, replace the
+            // oversized context with a bounded excerpt, and preserve the
+            // normal one.
             let db = Database::open(&path).unwrap();
 
             let big_ctx: Option<String> = db
@@ -437,7 +446,19 @@ mod tests {
                 .into_iter()
                 .next()
                 .flatten();
-            assert!(big_ctx.is_none(), "oversized context should be nulled");
+            let big_ctx = big_ctx.expect("oversized context should be replaced by an excerpt");
+            assert!(
+                big_ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
+                "excerpt must stay under the inline-context filter"
+            );
+            assert!(
+                big_ctx.contains("STARTMARKER") && big_ctx.contains("ENDMARKER"),
+                "excerpt should retain both bookends"
+            );
+            assert!(
+                !big_ctx.contains("MIDDLEMARKER"),
+                "excerpt should drop the middle of the body"
+            );
 
             let small_ctx: Option<String> = db
                 .query_read(
@@ -462,18 +483,17 @@ mod tests {
 
             // Insert another oversized row directly, bypassing the migration
             // path entirely, to verify the next open short-circuits.
-            let big_context_2 = "word ".repeat(500);
             db.execute_write(
                 "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
                  VALUES (1, 'big2.md', ?1, 0)",
-                vec![Value::Text(big_context_2)],
+                vec![Value::Text(big_context.clone())],
             )
             .unwrap();
         }
 
         {
             // Since the flag is already set, this open must not rescan —
-            // the newly inserted oversized row should survive untouched.
+            // the newly inserted oversized row should survive at full length.
             let db = Database::open(&path).unwrap();
             let big2_ctx: Option<String> = db
                 .query_read(
@@ -485,10 +505,88 @@ mod tests {
                 .into_iter()
                 .next()
                 .flatten();
+            let big2_ctx = big2_ctx.expect("row should survive the short-circuited open");
             assert!(
-                big2_ctx.is_some(),
-                "second open should short-circuit on the config flag and not rescan"
+                big2_ctx.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS,
+                "second open should short-circuit on the config flag and not re-excerpt"
             );
+        }
+    }
+
+    #[test]
+    fn test_context_excerpt_backfill_restores_nulled_long_notes() {
+        use crate::models::INLINE_CONTEXT_MAX_WORDS;
+        const BACKFILL_KEY: &str = "migration.context_excerpt_backfill_v1";
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_backfill.db");
+
+        let raw_doc = format!(
+            "---\ntags: [big]\n---\nSTARTMARKER {} MIDDLEMARKER {} ENDMARKER",
+            "word ".repeat(300),
+            "word ".repeat(300),
+        );
+
+        {
+            // Simulate a vault that already ran the *original* slim migration:
+            // the doc body is on disk, but the frontmatter-tag occurrence's
+            // context was nulled out. Clear the backfill flag so it runs.
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                &format!("DELETE FROM config WHERE key = '{BACKFILL_KEY}'"),
+                vec![],
+            )
+            .unwrap();
+            db.execute_write(
+                "INSERT INTO entities (id, name, type) VALUES (1, 'big', 'tag')",
+                vec![],
+            )
+            .unwrap();
+            db.execute_write(
+                "INSERT INTO docs \
+                 (source_ref, content, content_hash, created_at, modified_at, indexed_at) \
+                 VALUES ('big.md', ?1, 'h', 0, 0, 0)",
+                vec![Value::Text(raw_doc)],
+            )
+            .unwrap();
+            // Null context — the state the original slim migration left behind.
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                 VALUES (1, 'big.md', NULL, 0)",
+                vec![],
+            )
+            .unwrap();
+        }
+
+        {
+            // Reopening runs the backfill, which reconstructs the bounded
+            // excerpt from the doc body.
+            let db = Database::open(&path).unwrap();
+            let ctx: Option<String> = db
+                .query_read(
+                    "SELECT context FROM entity_occurrences WHERE file_path = 'big.md'",
+                    vec![],
+                    |row| row.get::<Option<String>>(0),
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .flatten();
+            let ctx = ctx.expect("backfill should restore a context from the doc body");
+            assert!(
+                ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
+                "backfilled excerpt must stay under the inline-context filter"
+            );
+            assert!(
+                ctx.contains("STARTMARKER") && ctx.contains("ENDMARKER"),
+                "backfilled excerpt should retain both bookends"
+            );
+            assert!(
+                !ctx.contains("MIDDLEMARKER"),
+                "backfilled excerpt should drop the middle"
+            );
+            // Frontmatter must not leak into the excerpt.
+            assert!(!ctx.contains("tags:"), "frontmatter should be stripped");
         }
     }
 
