@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
+use crate::pipeline::exclusions::FolderExclusions;
 use crate::pipeline::selection_steps;
 
 /// How entities were selected.
@@ -56,19 +57,32 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Run selection against an already-frozen config snapshot.
     pub fn run_with_config(&self, config: Option<&EnzymeConfig>) -> Result<SelectionResult> {
+        // Build the unified structural-exclusion set once at the config boundary:
+        // built-in defaults merged with the user's `config.excluded_folders`. This
+        // is what makes `excluded_folders` finally bite on every selection path,
+        // not just the curated one (see `docs/design/entity-exclusions-refactor.md`).
+        let exclusions = match config {
+            Some(cfg) => FolderExclusions::with_extra(cfg.excluded_folders.iter()),
+            None => FolderExclusions::defaults(),
+        };
+
         if let Some(cfg) = config {
             if cfg.has_curated_entities() {
                 info!("selecting entities from enzyme-config.yaml");
-                return self.select_from_config(cfg);
+                return self.select_from_config(cfg, &exclusions);
             }
         }
 
         info!("selecting entities from coverage-aware shortlist");
-        self.select_shortlist()
+        self.select_shortlist(&exclusions)
     }
 
     /// Select entities from user-curated config.
-    fn select_from_config(&self, config: &EnzymeConfig) -> Result<SelectionResult> {
+    fn select_from_config(
+        &self,
+        config: &EnzymeConfig,
+        exclusions: &FolderExclusions,
+    ) -> Result<SelectionResult> {
         let prefs = config.parse_preferences();
 
         let lookup_pairs: Vec<(&str, crate::models::EntityType)> = prefs
@@ -85,7 +99,14 @@ impl<'a> SelectionPipeline<'a> {
             .map(|e| e.name.clone())
             .collect();
 
-        found.retain(|e| !excluded.contains(&e.name));
+        // Drop entities the user explicitly excluded, and — via the unified
+        // structural set — any folder that should never be surfaced even if the
+        // user accidentally curated it (e.g. `templates`, `excalidraw`).
+        found.retain(|e| {
+            !excluded.contains(&e.name)
+                && !(e.entity_type == crate::models::EntityType::Folder
+                    && exclusions.is_excluded(&e.name))
+        });
 
         let found_names: std::collections::HashSet<String> =
             found.iter().map(|e| e.name.clone()).collect();
@@ -118,8 +139,8 @@ impl<'a> SelectionPipeline<'a> {
     }
 
     /// Select entities using coverage-aware shortlist + deterministic profiles.
-    fn select_shortlist(&self) -> Result<SelectionResult> {
-        let materialized = selection_steps::build_shortlist_selection(self.db, 20)?;
+    fn select_shortlist(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
+        let materialized = selection_steps::build_shortlist_selection(self.db, 20, exclusions)?;
 
         info!(
             count = materialized.final_entities.len(),
@@ -316,6 +337,78 @@ mod tests {
         assert_eq!(prefs.entities.len(), 1);
         assert_eq!(prefs.entities[0].name, "people");
         assert_eq!(prefs.entities[0].entity_type, EntityType::Folder);
+
+        restore_env(old);
+    }
+
+    /// A structural folder the user accidentally curated must be dropped even on
+    /// the curated path, via the unified `FolderExclusions` applied to the
+    /// candidate set (not only the user's own `excluded_names`).
+    #[test]
+    fn curated_selection_drops_structural_folder() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "templates", EntityType::Folder, 50);
+        insert_entity(&db, "people", EntityType::Folder, 40);
+
+        let mut config = EnzymeConfig::default();
+        config
+            .set_auto_selected_entities(
+                vault.path(),
+                vec!["folder:templates".to_string(), "folder:people".to_string()],
+            )
+            .unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        let result = pipeline.run().unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config));
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"people"), "content folder should survive");
+        assert!(
+            !names.contains(&"templates"),
+            "structural folder must be dropped even when curated, got: {names:?}"
+        );
+
+        restore_env(old);
+    }
+
+    /// A user's `config.excluded_folders` should now also filter a folder on the
+    /// curated path's candidate set.
+    #[test]
+    fn curated_selection_honors_config_excluded_folders() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "archive", EntityType::Folder, 50);
+        insert_entity(&db, "people", EntityType::Folder, 40);
+
+        let mut config = EnzymeConfig::default();
+        config.excluded_folders = vec!["archive".to_string()];
+        config
+            .set_auto_selected_entities(
+                vault.path(),
+                vec!["folder:archive".to_string(), "folder:people".to_string()],
+            )
+            .unwrap();
+
+        let pipeline = SelectionPipeline::new(&db, vault.path());
+        // Load the persisted config so excluded_folders round-trips as production would.
+        let loaded = EnzymeConfig::load(vault.path()).unwrap();
+        let result = pipeline.run_with_config(loaded.as_ref()).unwrap();
+
+        assert!(matches!(result.source, SelectionSource::Config));
+        let names: Vec<&str> = result.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"people"));
+        assert!(
+            !names.contains(&"archive"),
+            "user excluded_folders must be honored on the curated path, got: {names:?}"
+        );
 
         restore_env(old);
     }

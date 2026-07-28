@@ -7,7 +7,7 @@
 //! - Deduplicating child tags that also appear as standalone entries
 //!
 //! `from_entities` accepts any `&[Entity]` — trending, catalyzed, query-ranked,
-//! or config-selected. `build` uses coverage-aware greedy selection;
+//! or config-selected. `select_shortlist` uses coverage-aware greedy selection;
 //! `from_entities` accepts any pre-selected list.
 
 use std::collections::{HashMap, HashSet};
@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::db::Database;
 use crate::models::{Entity, EntityType, ROOT_FOLDER_ENTITY};
-use crate::pipeline::selection_steps;
+use crate::pipeline::exclusions::FolderExclusions;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntityKey {
@@ -90,20 +90,6 @@ pub struct FolderGroup {
 const CHILD_SIGNIFICANCE_RATIO: f64 = 0.10;
 /// Minimum frequency for an all-recent child to be surfaced even below the ratio.
 const ALL_RECENT_MIN_FREQUENCY: i64 = 10;
-
-/// Folders that are structural/generic and should not be selected as top-level entities.
-const EXCLUDED_FOLDERS: &[&str] = &[
-    ".claude",
-    ".obsidian",
-    ".enzyme",
-    ".git",
-    ".trash",
-    "templates",
-    "templater",
-    "config",
-    "migrations",
-    "excalidraw",
-];
 
 const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
 
@@ -348,19 +334,6 @@ impl EntityMap {
             .collect()
     }
 
-    /// Build from a coverage-aware shortlist of entities.
-    ///
-    /// Uses marginal file coverage to avoid redundant picks — prefers entities
-    /// that cover distinct parts of the vault over entities that overlap heavily
-    /// with already-selected ones.
-    /// Convenience wrapper over the shared deterministic step pipeline.
-    ///
-    /// This keeps `EntityMap` usable for structural/presentation callers while
-    /// the actual selection/finalization policy lives in `selection_steps`.
-    pub fn build(db: &Database, max_entities: usize) -> Result<Self> {
-        Ok(selection_steps::build_shortlist_selection(db, max_entities)?.entity_map)
-    }
-
     /// Coverage-aware greedy entity selection.
     ///
     /// Scores entities by a geometric mean of recency and frequency, then picks
@@ -370,7 +343,16 @@ impl EntityMap {
     /// Filtering (child tags, subfolders, system folders) happens here.
     /// Structural folding (children into parents, links into folders) is left
     /// to `from_entities`.
-    pub fn select_shortlist(db: &Database, limit: usize) -> Result<Vec<Entity>> {
+    ///
+    /// `folder_exclusions` is the unified structural-exclusion set (built-ins
+    /// merged with the user's `config.excluded_folders`); folders it matches are
+    /// never surfaced as top-level entities. `GENERIC_FOLDERS` and `EXCLUDED_TAGS`
+    /// remain separate concepts (see `docs/design/entity-exclusions-refactor.md`).
+    pub fn select_shortlist(
+        db: &Database,
+        limit: usize,
+        folder_exclusions: &FolderExclusions,
+    ) -> Result<Vec<Entity>> {
         let all = db.get_all_entities()?;
         let entity_file_sets = db.get_entity_file_sets()?;
         let folder_file_sets = db.get_folder_file_sets()?;
@@ -411,7 +393,6 @@ impl EntityMap {
             strength
         };
 
-        let excluded_folders: HashSet<&str> = EXCLUDED_FOLDERS.iter().copied().collect();
         let generic_folders: HashSet<&str> = GENERIC_FOLDERS.iter().copied().collect();
         let excluded_tags: HashSet<&str> = EXCLUDED_TAGS.iter().copied().collect();
 
@@ -422,7 +403,7 @@ impl EntityMap {
                 match e.entity_type {
                     EntityType::Folder => {
                         !e.name.contains('/')
-                            && !excluded_folders.contains(e.name.to_lowercase().as_str())
+                            && !folder_exclusions.is_excluded(&e.name)
                             && !generic_folders.contains(e.name.to_lowercase().as_str())
                             && !e.name.starts_with('.')
                     }
@@ -683,11 +664,67 @@ mod tests {
         insert_entity(&db, ROOT_FOLDER_ENTITY, "folder", 2);
         insert_entity(&db, "topic", "tag", 10);
 
-        let selected = EntityMap::select_shortlist(&db, 20).unwrap();
+        let selected =
+            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].entity_type, EntityType::Folder);
         assert_eq!(selected[0].name, ROOT_FOLDER_ENTITY);
+    }
+
+    /// Regression for the historical drift: `excalidraw` was in the folding
+    /// path's `EXCLUDED_FOLDERS` but not the trending path's list. The unified
+    /// `FolderExclusions::defaults()` must keep it out of the shortlist while a
+    /// normal content folder still surfaces.
+    #[test]
+    fn shortlist_filters_excalidraw_via_unified_defaults() {
+        let db = test_db();
+        insert_doc(&db, "projects/a.md");
+        insert_doc(&db, "projects/b.md");
+        insert_doc(&db, "excalidraw/x.md");
+        insert_doc(&db, "excalidraw/y.md");
+        insert_entity(&db, "projects", "folder", 2);
+        insert_entity(&db, "excalidraw", "folder", 2);
+
+        let selected =
+            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
+
+        let names: HashSet<&str> = selected.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains("projects"), "content folder should surface");
+        assert!(
+            !names.contains("excalidraw"),
+            "excalidraw is structural and must be excluded (drift regression)"
+        );
+    }
+
+    /// The user's `config.excluded_folders` must now bite on the shortlist path,
+    /// not only the curated path. Threading `with_extra` here is the whole point
+    /// of the migration.
+    #[test]
+    fn shortlist_honors_config_excluded_folders() {
+        let db = test_db();
+        insert_doc(&db, "projects/a.md");
+        insert_doc(&db, "projects/b.md");
+        insert_doc(&db, "archive/x.md");
+        insert_doc(&db, "archive/y.md");
+        insert_entity(&db, "projects", "folder", 2);
+        insert_entity(&db, "archive", "folder", 2);
+
+        // Without config: both content folders are eligible.
+        let defaults =
+            EntityMap::select_shortlist(&db, 20, &FolderExclusions::defaults()).unwrap();
+        let default_names: HashSet<&str> = defaults.iter().map(|e| e.name.as_str()).collect();
+        assert!(default_names.contains("archive"));
+
+        // With `excluded_folders: [archive]`, the user config now filters it here.
+        let exclusions = FolderExclusions::with_extra(["archive"]);
+        let selected = EntityMap::select_shortlist(&db, 20, &exclusions).unwrap();
+        let names: HashSet<&str> = selected.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains("projects"));
+        assert!(
+            !names.contains("archive"),
+            "user excluded_folders must be honored on the shortlist path"
+        );
     }
 
     // ── Page entity folding ─────────────────────────────────────────────

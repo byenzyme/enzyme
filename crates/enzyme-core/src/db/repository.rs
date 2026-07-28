@@ -730,12 +730,13 @@ impl Database {
         // `FolderExclusions` set, which normalizes once and — critically —
         // includes `excalidraw` that this legacy list had drifted away from.
         //
-        // TODO(exclusions-refactor): thread `&EnzymeConfig` (or a prebuilt
-        // `FolderExclusions`) into this method so user `excluded_folders` are
-        // honored here too, via `FolderExclusions::with_extra(...)`. The
-        // repository layer currently has no config handle; that plumbing is the
-        // migration step tracked in the design doc. Until then we use the
-        // built-in defaults, which already fixes the drift bug.
+        // TODO(exclusions-refactor): no production callers — this method is only
+        // exercised by `db/mod.rs` tests and is not on the live selection path
+        // (that goes SelectionPipeline -> select_shortlist). Its drift bug is
+        // already fixed by using `FolderExclusions::defaults()` here; assess
+        // deletion in a separate follow-up rather than threading config through a
+        // dead path. Deliberately left using defaults (no config handle) so this
+        // change stays out of the in-flight zero-entities regression work.
         let folder_exclusions = crate::pipeline::exclusions::FolderExclusions::defaults();
         let is_excluded_folder = |e: &Entity| -> bool {
             e.entity_type == EntityType::Folder && folder_exclusions.is_excluded(&e.name)
