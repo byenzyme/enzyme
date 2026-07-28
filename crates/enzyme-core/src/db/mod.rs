@@ -382,21 +382,28 @@ mod tests {
         }
     }
 
+    // Helper: an oversized append-only-log body (frontmatter-stripped), five
+    // bottom-appended dated entries. Newest is 2026-05-01.
+    #[cfg(test)]
+    fn oversized_log_body() -> String {
+        let mut s = String::new();
+        for m in 1..=5 {
+            s.push_str(&format!("## 2026-0{m}-01\nentry {m} {}\n", "word ".repeat(120)));
+        }
+        s
+    }
+
     #[test]
-    fn test_context_slim_migration_excerpts_oversized_and_short_circuits() {
+    fn test_context_slim_migration_logs_keep_excerpt_coherent_nulled() {
         use crate::models::INLINE_CONTEXT_MAX_WORDS;
         const SLIM_KEY: &str = "migration.context_slim_v1";
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("context_slim.db");
 
-        // Oversized body with distinct bookends and a middle marker the excerpt
-        // must drop.
-        let big_context = format!(
-            "STARTMARKER {} MIDDLEMARKER {} ENDMARKER",
-            "word ".repeat(300),
-            "word ".repeat(300),
-        );
+        let log_context = oversized_log_body();
+        // Oversized but NOT a log (no dated headers) → should be nulled.
+        let essay_context = "word ".repeat(600);
 
         {
             // Opening a fresh DB runs the migration against an empty
@@ -418,8 +425,14 @@ mod tests {
 
             db.execute_write(
                 "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
-                 VALUES (1, 'big.md', ?1, 0)",
-                vec![Value::Text(big_context.clone())],
+                 VALUES (1, 'log.md', ?1, 0)",
+                vec![Value::Text(log_context.clone())],
+            )
+            .unwrap();
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                 VALUES (1, 'essay.md', ?1, 0)",
+                vec![Value::Text(essay_context)],
             )
             .unwrap();
             db.execute_write(
@@ -430,47 +443,38 @@ mod tests {
             .unwrap();
         }
 
+        let read_ctx = |db: &Database, file: &str| -> Option<String> {
+            db.query_read(
+                "SELECT context FROM entity_occurrences WHERE file_path = ?1",
+                vec![Value::Text(file.to_string())],
+                |row| row.get::<Option<String>>(0),
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            .flatten()
+        };
+
         {
-            // Reopening should find the flag missing, scan, replace the
-            // oversized context with a bounded excerpt, and preserve the
-            // normal one.
+            // Reopening scans: the log keeps a bounded recency excerpt, the
+            // coherent essay is nulled, and the normal short one is preserved.
             let db = Database::open(&path).unwrap();
 
-            let big_ctx: Option<String> = db
-                .query_read(
-                    "SELECT context FROM entity_occurrences WHERE file_path = 'big.md'",
-                    vec![],
-                    |row| row.get::<Option<String>>(0),
-                )
-                .unwrap()
-                .into_iter()
-                .next()
-                .flatten();
-            let big_ctx = big_ctx.expect("oversized context should be replaced by an excerpt");
+            let log_ctx = read_ctx(&db, "log.md").expect("log should keep a recency excerpt");
             assert!(
-                big_ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
-                "excerpt must stay under the inline-context filter"
+                log_ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
+                "log excerpt must stay under the inline-context filter"
             );
             assert!(
-                big_ctx.contains("STARTMARKER") && big_ctx.contains("ENDMARKER"),
-                "excerpt should retain both bookends"
-            );
-            assert!(
-                !big_ctx.contains("MIDDLEMARKER"),
-                "excerpt should drop the middle of the body"
+                log_ctx.contains("2026-05-01") && !log_ctx.contains("2026-01-01"),
+                "log excerpt should hold the most-recent entry only"
             );
 
-            let small_ctx: Option<String> = db
-                .query_read(
-                    "SELECT context FROM entity_occurrences WHERE file_path = 'small.md'",
-                    vec![],
-                    |row| row.get::<Option<String>>(0),
-                )
-                .unwrap()
-                .into_iter()
-                .next()
-                .flatten();
-            assert_eq!(small_ctx.as_deref(), Some("short text"));
+            assert!(
+                read_ctx(&db, "essay.md").is_none(),
+                "coherent oversized context should be nulled"
+            );
+            assert_eq!(read_ctx(&db, "small.md").as_deref(), Some("short text"));
 
             let flag: Vec<String> = db
                 .query_read(
@@ -481,56 +485,40 @@ mod tests {
                 .unwrap();
             assert_eq!(flag.len(), 1, "migration flag should be set after running");
 
-            // Insert another oversized row directly, bypassing the migration
-            // path entirely, to verify the next open short-circuits.
+            // Insert another oversized log row directly to verify short-circuit.
             db.execute_write(
                 "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
-                 VALUES (1, 'big2.md', ?1, 0)",
-                vec![Value::Text(big_context.clone())],
+                 VALUES (1, 'log2.md', ?1, 0)",
+                vec![Value::Text(log_context.clone())],
             )
             .unwrap();
         }
 
         {
-            // Since the flag is already set, this open must not rescan —
-            // the newly inserted oversized row should survive at full length.
+            // Flag already set → no rescan; the new oversized row survives whole.
             let db = Database::open(&path).unwrap();
-            let big2_ctx: Option<String> = db
-                .query_read(
-                    "SELECT context FROM entity_occurrences WHERE file_path = 'big2.md'",
-                    vec![],
-                    |row| row.get::<Option<String>>(0),
-                )
-                .unwrap()
-                .into_iter()
-                .next()
-                .flatten();
-            let big2_ctx = big2_ctx.expect("row should survive the short-circuited open");
+            let log2_ctx = read_ctx(&db, "log2.md").expect("row should survive short-circuit");
             assert!(
-                big2_ctx.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS,
-                "second open should short-circuit on the config flag and not re-excerpt"
+                log2_ctx.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS,
+                "second open should short-circuit and not re-excerpt"
             );
         }
     }
 
     #[test]
-    fn test_context_excerpt_backfill_restores_nulled_long_notes() {
+    fn test_context_excerpt_backfill_restores_logs_only() {
         use crate::models::INLINE_CONTEXT_MAX_WORDS;
         const BACKFILL_KEY: &str = "migration.context_excerpt_backfill_v1";
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("context_backfill.db");
 
-        let raw_doc = format!(
-            "---\ntags: [big]\n---\nSTARTMARKER {} MIDDLEMARKER {} ENDMARKER",
-            "word ".repeat(300),
-            "word ".repeat(300),
-        );
+        // A log doc (dated headers) and a coherent essay doc, both with their
+        // frontmatter-tag occurrence context nulled by an earlier slim run.
+        let log_doc = format!("---\ntags: [big]\n---\n{}", oversized_log_body());
+        let essay_doc = format!("---\ntags: [big]\n---\n{}", "word ".repeat(600));
 
         {
-            // Simulate a vault that already ran the *original* slim migration:
-            // the doc body is on disk, but the frontmatter-tag occurrence's
-            // context was nulled out. Clear the backfill flag so it runs.
             let db = Database::open(&path).unwrap();
             db.execute_write(
                 &format!("DELETE FROM config WHERE key = '{BACKFILL_KEY}'"),
@@ -542,51 +530,54 @@ mod tests {
                 vec![],
             )
             .unwrap();
-            db.execute_write(
-                "INSERT INTO docs \
-                 (source_ref, content, content_hash, created_at, modified_at, indexed_at) \
-                 VALUES ('big.md', ?1, 'h', 0, 0, 0)",
-                vec![Value::Text(raw_doc)],
-            )
-            .unwrap();
-            // Null context — the state the original slim migration left behind.
-            db.execute_write(
-                "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
-                 VALUES (1, 'big.md', NULL, 0)",
-                vec![],
-            )
-            .unwrap();
+            for (src, content) in [("log.md", log_doc), ("essay.md", essay_doc)] {
+                db.execute_write(
+                    "INSERT INTO docs \
+                     (source_ref, content, content_hash, created_at, modified_at, indexed_at) \
+                     VALUES (?1, ?2, 'h', 0, 0, 0)",
+                    vec![Value::Text(src.to_string()), Value::Text(content)],
+                )
+                .unwrap();
+                db.execute_write(
+                    "INSERT INTO entity_occurrences (entity_id, file_path, context, created_at) \
+                     VALUES (1, ?1, NULL, 0)",
+                    vec![Value::Text(src.to_string())],
+                )
+                .unwrap();
+            }
         }
 
         {
-            // Reopening runs the backfill, which reconstructs the bounded
-            // excerpt from the doc body.
+            // Reopening runs the backfill: the log's context is reconstructed
+            // from its most-recent entry; the coherent essay stays NULL.
             let db = Database::open(&path).unwrap();
-            let ctx: Option<String> = db
-                .query_read(
-                    "SELECT context FROM entity_occurrences WHERE file_path = 'big.md'",
-                    vec![],
+            let read_ctx = |file: &str| -> Option<String> {
+                db.query_read(
+                    "SELECT context FROM entity_occurrences WHERE file_path = ?1",
+                    vec![Value::Text(file.to_string())],
                     |row| row.get::<Option<String>>(0),
                 )
                 .unwrap()
                 .into_iter()
                 .next()
-                .flatten();
-            let ctx = ctx.expect("backfill should restore a context from the doc body");
+                .flatten()
+            };
+
+            let ctx = read_ctx("log.md").expect("backfill should restore a log context");
             assert!(
                 ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
                 "backfilled excerpt must stay under the inline-context filter"
             );
             assert!(
-                ctx.contains("STARTMARKER") && ctx.contains("ENDMARKER"),
-                "backfilled excerpt should retain both bookends"
+                ctx.contains("2026-05-01") && !ctx.contains("2026-01-01"),
+                "backfilled excerpt should hold the most-recent entry"
             );
-            assert!(
-                !ctx.contains("MIDDLEMARKER"),
-                "backfilled excerpt should drop the middle"
-            );
-            // Frontmatter must not leak into the excerpt.
             assert!(!ctx.contains("tags:"), "frontmatter should be stripped");
+
+            assert!(
+                read_ctx("essay.md").is_none(),
+                "coherent long note should stay NULL, not be backfilled"
+            );
         }
     }
 
@@ -1110,6 +1101,7 @@ mod tests {
             folders: vec![],
             chunks: vec!["hello".into(), "world".into()],
             frontmatter: None,
+            is_log: false,
         };
 
         let ids = db.upsert_documents_batch(&[doc]).unwrap();
@@ -1165,6 +1157,7 @@ mod tests {
                 folders: vec![],
                 chunks,
                 frontmatter: None,
+                is_log: false,
             }
         };
 
