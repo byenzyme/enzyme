@@ -785,6 +785,42 @@ impl<'a> CatalystPipeline<'a> {
         })
     }
 
+    /// Fill in NULL occurrence contexts from the source documents.
+    ///
+    /// Only for the chunkless occurrence-context fallback: the inline-centroid
+    /// path must NOT be hydrated, because its `INLINE_CONTEXT_MAX_WORDS`
+    /// filter deliberately treats stored-NULL (formerly oversized) contexts as
+    /// absent.
+    fn hydrate_occurrence_contexts(
+        &self,
+        occurrences: &[EntityOccurrence],
+    ) -> Result<Vec<EntityOccurrence>> {
+        let missing: Vec<String> = occurrences
+            .iter()
+            .filter(|o| o.context.is_none())
+            .map(|o| o.file_path.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if missing.is_empty() {
+            return Ok(occurrences.to_vec());
+        }
+        let contents = self.db.get_doc_contents_for_paths(&missing)?;
+        Ok(occurrences
+            .iter()
+            .map(|occ| {
+                let mut occ = occ.clone();
+                if occ.context.is_none() {
+                    if let Some(body) = contents.get(&occ.file_path) {
+                        occ.context =
+                            Some(crate::document::strip_frontmatter(body).to_string());
+                    }
+                }
+                occ
+            })
+            .collect())
+    }
+
     fn build_chunk_context(
         &self,
         entity: &Entity,
@@ -916,18 +952,24 @@ impl<'a> CatalystPipeline<'a> {
                 .unwrap_or(config.catalysts_per_entity);
 
             let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
-            let selected_context = self
-                .build_chunk_context(
-                    entity,
-                    &occurrences,
-                    &eras,
-                    num_catalysts,
-                    max_samples,
-                    max_context_chars,
-                    chunk_preload.as_ref(),
-                    entity_idx,
-                )?
-                .unwrap_or_else(|| {
+            let selected_context = match self.build_chunk_context(
+                entity,
+                &occurrences,
+                &eras,
+                num_catalysts,
+                max_samples,
+                max_context_chars,
+                chunk_preload.as_ref(),
+                entity_idx,
+            )? {
+                Some(ctx) => ctx,
+                None => {
+                    // Chunkless fallback. Occurrence rows carry NULL contexts
+                    // for long notes (their bodies are no longer duplicated
+                    // into entity_occurrences), so rehydrate from `docs`
+                    // before sampling — otherwise long-note entities would be
+                    // skipped as having no context at all.
+                    let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
                     build_occurrence_context(
                         &eras,
                         &occurrences,
@@ -935,7 +977,8 @@ impl<'a> CatalystPipeline<'a> {
                         max_samples,
                         max_context_chars,
                     )
-                });
+                }
+            };
             let era_context = selected_context.era_context;
             let flat_samples = selected_context.flat_samples;
             let context_samples = &flat_samples;

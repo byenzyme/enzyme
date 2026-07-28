@@ -45,9 +45,10 @@ const EPOCH_KEY: &str = "collection.index_generation";
 
 /// Relative vault paths of the notes added between `init` and `refresh`.
 ///
-/// Four notes tagged `daily`, which is an entity the canary vault already has
-/// catalysts for. Four > `NEW_MENTIONS_THRESHOLD` (3), so catalyst staleness
-/// reports `Stale(EntitiesStale)` — the branch under test.
+/// Four notes tagged `daily`, an entity the canary vault already has
+/// catalysts for, so the refresh has genuinely new corpus content to index
+/// and embed. (Epoch due-ness itself is forced via `--full`; the old
+/// mention-count staleness threshold no longer exists.)
 const NEW_NOTES: &[(&str, &str)] = &[
     (
         "daily/2026-06-01.md",

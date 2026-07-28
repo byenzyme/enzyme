@@ -162,7 +162,10 @@ async fn apply_pragmas(conn: &Connection, wal: bool) -> Result<(), DbError> {
     }
     pragmas.push("PRAGMA foreign_keys = ON".into());
     pragmas.push("PRAGMA synchronous = NORMAL".into());
-    pragmas.push("PRAGMA busy_timeout = 5000".into());
+    // Generous: one-time maintenance inside another process's open (the
+    // context-slim migration + VACUUM takes ~4s at ~300MB and scales with
+    // file size) must stall concurrent opens, not hard-fail them.
+    pragmas.push("PRAGMA busy_timeout = 30000".into());
     pragmas.push("PRAGMA cache_size = -20000".into());
     pragmas.push(format!("PRAGMA mmap_size = {}", 256 * 1024 * 1024));
 

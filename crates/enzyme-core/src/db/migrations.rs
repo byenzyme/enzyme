@@ -105,13 +105,21 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
 
     // One-time reclaim, tied to the same one-time migration: nulling contexts
     // frees pages for reuse but never shrinks the file, and nothing else in
-    // the lifecycle ever vacuums. Best-effort — a failed VACUUM (e.g. low
-    // disk for the transient copy) must not fail Database::open, and the
-    // migration flag is already set so it won't rescan either way.
-    if bytes_freed >= VACUUM_RECLAIM_THRESHOLD_BYTES {
+    // the lifecycle ever vacuums. Keyed on the actual freelist rather than
+    // this run's freed bytes so an earlier interrupted run (UPDATE committed,
+    // flag not yet written → rescan finds nothing oversized) still gets its
+    // reclaim. Best-effort — a failed VACUUM (e.g. low disk for the transient
+    // copy) must not fail Database::open, and the migration flag is already
+    // set so it won't rescan either way.
+    let freelist_bytes = {
+        let count = query_pragma_u64(conn, "PRAGMA freelist_count").await?;
+        let page_size = query_pragma_u64(conn, "PRAGMA page_size").await?;
+        count * page_size
+    };
+    if freelist_bytes >= VACUUM_RECLAIM_THRESHOLD_BYTES {
         match conn.execute("VACUUM", ()).await {
             Ok(_) => info!(
-                approx_bytes_freed = bytes_freed,
+                freelist_bytes,
                 "context-slim migration: vacuumed database to reclaim freed space"
             ),
             Err(e) => tracing::warn!(
@@ -123,4 +131,15 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<(), DbE
     }
 
     Ok(())
+}
+
+async fn query_pragma_u64(conn: &Connection, pragma: &str) -> Result<u64, DbError> {
+    let mut rows = conn.query(pragma, ()).await.map_err(DbError::Libsql)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(DbError::Libsql)?
+        .ok_or_else(|| DbError::Migration(format!("{pragma} returned no rows")))?;
+    let value: i64 = row.get(0).map_err(DbError::Libsql)?;
+    Ok(value.max(0) as u64)
 }

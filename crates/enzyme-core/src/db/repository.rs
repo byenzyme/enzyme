@@ -256,6 +256,36 @@ impl Database {
         })
     }
 
+    /// Fetch document bodies for the given vault paths, keyed by `source_ref`.
+    ///
+    /// Used to rehydrate occurrence contexts that are stored as NULL since the
+    /// context-slim change (oversized bodies are no longer duplicated into
+    /// `entity_occurrences.context`; the canonical copy lives in `docs`).
+    pub fn get_doc_contents_for_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let mut contents = std::collections::HashMap::new();
+        for chunk in paths.chunks(500) {
+            let placeholders = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT source_ref, content FROM docs
+                 WHERE content IS NOT NULL AND source_ref IN ({placeholders})"
+            );
+            let params: Vec<Value> = chunk.iter().map(|p| Value::Text(p.clone())).collect();
+            let rows = self.query_read(&sql, params, |row| {
+                Ok((row.get::<String>(0)?, row.get::<String>(1)?))
+            })?;
+            contents.extend(rows);
+        }
+        Ok(contents)
+    }
+
     /// Retrieve a single document by its `source_ref` (relative vault path).
     pub fn get_document_by_path(&self, source_ref: &str) -> Result<Option<Document>> {
         let rows = self.query_read(

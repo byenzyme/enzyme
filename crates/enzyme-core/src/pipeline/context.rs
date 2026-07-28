@@ -149,8 +149,18 @@ impl<'a> ContextBuilder<'a> {
             let excerpts: Vec<_> = occurrences
                 .iter()
                 .filter_map(|occ| {
-                    let context = occ.context.as_ref()?;
-                    let snippet = truncate_chars(context, max_excerpt_chars);
+                    // Long-note occurrences store NULL context (the body is
+                    // not duplicated into entity_occurrences); excerpt from
+                    // the canonical copy in `docs` instead.
+                    let context: String = match &occ.context {
+                        Some(c) => c.clone(),
+                        None => {
+                            let doc =
+                                self.db.get_document_by_path(&occ.file_path).ok().flatten()?;
+                            crate::document::strip_frontmatter(&doc.content?).to_string()
+                        }
+                    };
+                    let snippet = truncate_chars(&context, max_excerpt_chars);
                     let date = occ.effective_date.map(format_timestamp).unwrap_or_default();
                     Some((occ.file_path.as_str(), date, snippet))
                 })

@@ -237,6 +237,13 @@ impl CliCommand {
         for var in SCRUBBED_ENV {
             cmd.env_remove(var);
         }
+        // Scrubbing alone still leaves the binary's compiled-in production
+        // fallback for the free-config endpoint; point it somewhere
+        // unroutable so no test can ever reach the real service, unless the
+        // test opted into the mock via `enzyme_api`.
+        if !self.envs.contains_key("ENZYME_FREE_CONFIG_URL") {
+            cmd.env("ENZYME_FREE_CONFIG_URL", "http://127.0.0.1:9/free-config");
+        }
         for (key, value) in &self.envs {
             cmd.env(key, value);
         }
