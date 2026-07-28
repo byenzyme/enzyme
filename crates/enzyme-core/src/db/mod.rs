@@ -950,62 +950,6 @@ mod tests {
         assert_eq!(db.get_document_count().unwrap(), 1);
     }
 
-    // -- get_trending_entities ------------------------------------------------
-
-    #[test]
-    fn test_get_trending_entities_type_diversity() {
-        let db = test_db();
-        let now = 1_700_000_000_000i64;
-
-        let types_and_names: Vec<(&str, &str, f64)> = vec![
-            ("tag", "rust", 0.9),
-            ("tag", "python", 0.8),
-            ("tag", "go", 0.7),
-            ("link", "alice", 0.95),
-            ("link", "bob", 0.6),
-            ("folder", "projects", 0.85),
-            ("folder", "archive", 0.3),
-        ];
-
-        for (etype, name, score) in &types_and_names {
-            let trends = serde_json::json!({ "recency_score": score });
-            db.execute_write(
-                "INSERT INTO entities (name, type, frequency, first_seen, last_seen, trends)
-                 VALUES (?1, ?2, 3, ?3, ?3, ?4)",
-                vec![
-                    Value::Text(name.to_string()),
-                    Value::Text(etype.to_string()),
-                    Value::Integer(now),
-                    Value::Text(trends.to_string()),
-                ],
-            )
-            .unwrap();
-        }
-
-        let entities = db.get_trending_entities(2, 1, 1, 5).unwrap();
-        assert_eq!(entities.len(), 5);
-
-        let tags: Vec<&str> = entities
-            .iter()
-            .filter(|e| e.entity_type == crate::models::EntityType::Tag)
-            .map(|e| e.name.as_str())
-            .collect();
-        let links: Vec<&str> = entities
-            .iter()
-            .filter(|e| e.entity_type == crate::models::EntityType::Link)
-            .map(|e| e.name.as_str())
-            .collect();
-        let folders: Vec<&str> = entities
-            .iter()
-            .filter(|e| e.entity_type == crate::models::EntityType::Folder)
-            .map(|e| e.name.as_str())
-            .collect();
-
-        assert!(tags.len() >= 2, "should have at least 2 tags");
-        assert!(links.len() >= 1, "should have at least 1 link");
-        assert!(folders.len() >= 1, "should have at least 1 folder");
-    }
-
     // -- get_documents_needing_embedding --------------------------------------
 
     #[test]

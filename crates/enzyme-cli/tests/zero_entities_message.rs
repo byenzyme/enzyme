@@ -283,10 +283,10 @@ fn generic_folder_shape_selects_zero_entities() {
          frequency >= 3. This vault's folders are all generic and its notes have \
          no tags or repeated wikilinks, so `candidates` is empty and the greedy \
          loop breaks on its first iteration.\n\
-         Note `total_limit = 30` is NOT the gate: it only feeds \
-         Database::get_trending_entities (repository.rs:674) and is never read \
-         by the init selection path, which passes the literal 20 at \
-         selection.rs:117.\n\
+         Note `total_limit = 30` is NOT the gate: it is trending-era config that \
+         the init selection path never reads (the old Database::get_trending_entities \
+         consumer was removed); selection passes the literal 20 into \
+         build_shortlist_selection.\n\
          EXPECTED: at least one entity selected.\n\
          ACTUAL:   entities = {entities}\n\
          --- stdout ---\n{}\n--- stderr ---\n{}",
