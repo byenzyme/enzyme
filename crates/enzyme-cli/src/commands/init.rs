@@ -1565,9 +1565,11 @@ async fn build_and_activate_epoch(
         "catalyst refresh: generation complete"
     );
 
-    // An epoch is complete only if every selected entity succeeded. Degraded
-    // partial output remains a retryable shadow and can never activate.
-    if catalyst_gate.quality != CatalystQuality::Passed {
+    // A total or majority-failed run keeps the active epoch untouched: don't
+    // paper over a broken generation by carrying everything forward and stamping
+    // a fresh epoch (which would falsely reset staleness). Only Passed/Degraded
+    // runs proceed to per-entity gap-filling below.
+    if catalyst_gate.quality == CatalystQuality::Failed {
         let message = catalyst_gate
             .message
             .unwrap_or_else(|| "catalyst refresh failed quality checks".to_string());
@@ -1575,10 +1577,72 @@ async fn build_and_activate_epoch(
         anyhow::bail!("{message}");
     }
 
+    // Carry forward prior catalysts for any selected entity that generated none
+    // this epoch. The shadow began from the frozen snapshot with catalysts wiped,
+    // so we re-populate only the per-entity gaps from the currently-active epoch.
+    // This keeps one flaky entity from either blocking the whole refresh or
+    // dropping that entity to zero coverage. Similarity re-embeds every shadow
+    // catalyst below, so carried-forward rows become first-class members of the
+    // new epoch (their stale `generated_at` marks the provenance).
+    let mut covered: std::collections::HashSet<String> = db
+        .get_all_catalysts()?
+        .into_iter()
+        .map(|c| c.entity)
+        .collect();
+    let mut carried_entities = 0usize;
+    let mut carried_catalysts = 0usize;
+    for entity in &sel_result.entities {
+        if covered.contains(&entity.name) {
+            continue;
+        }
+        let prior = active_db.get_catalysts_for_entity(&entity.name)?;
+        if prior.is_empty() {
+            continue;
+        }
+        carried_entities += 1;
+        carried_catalysts += prior.len();
+        db.insert_catalysts(&prior)?;
+        covered.insert(entity.name.clone());
+        tracing::warn!(
+            entity = %entity.name,
+            count = prior.len(),
+            "refresh stage=catalysts carried forward prior catalysts for entity that generated none"
+        );
+    }
+
+    // After carry-forward, every selected entity must have catalysts. An entity
+    // still uncovered generated nothing and had none to reuse (e.g. newly added
+    // to config), so the shadow is genuinely incomplete and the active epoch is
+    // kept.
+    let uncovered: Vec<&str> = sel_result
+        .entities
+        .iter()
+        .map(|e| e.name.as_str())
+        .filter(|name| !covered.contains(*name))
+        .collect();
+    if !uncovered.is_empty() {
+        let message = format!(
+            "catalyst refresh incomplete: {} entit{} produced no catalysts and had none to carry forward ({})",
+            uncovered.len(),
+            if uncovered.len() == 1 { "y" } else { "ies" },
+            uncovered.join(", ")
+        );
+        tracing::warn!(message = %message, "refresh stage=catalysts status=failed");
+        anyhow::bail!("{message}");
+    }
+    if carried_entities > 0 {
+        tracing::warn!(
+            carried_entities,
+            carried_catalysts,
+            "refresh stage=catalysts status=degraded: activating with carried-forward catalysts"
+        );
+    }
+
     let sim_pipeline = SimilarityPipeline::new(&db, svc);
     let sim_stats = sim_pipeline.run(|_, _| {})?;
+    let shadow_catalyst_count = db.get_all_catalysts()?.len();
     anyhow::ensure!(
-        sim_stats.catalysts_processed == stats.catalysts_generated,
+        sim_stats.catalysts_processed == shadow_catalyst_count,
         "shadow epoch similarity set is incomplete"
     );
 

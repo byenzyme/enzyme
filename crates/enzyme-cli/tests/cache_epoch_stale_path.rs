@@ -39,6 +39,13 @@ use support::epoch::{build_epoch_id, wait_for_epoch_terminal, WORKER_TERMINAL_TI
 use support::fixture::{CliOutput, VaultFixture};
 use support::mock::MockLlm;
 
+/// Both tests in this file spin up a heavy background epoch worker (full index +
+/// embed + catalyst generation) and poll `catalyst_epochs` with a bounded
+/// `WORKER_TERMINAL_TIMEOUT`. Run concurrently they contend for CPU and a worker
+/// can miss that deadline — a timing race, not a logic failure (each outcome is
+/// deterministic). Serialize them so only one heavy worker runs at a time.
+static EPOCH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Historical config key that stores the collection cache epoch
 /// (see `COLLECTION_CACHE_EPOCH_CONFIG_KEY`, init.rs:189).
 const EPOCH_KEY: &str = "collection.index_generation";
@@ -326,6 +333,7 @@ fn init_vault(llm: &MockLlm) -> VaultFixture {
 /// catalyst replacement by (entity_name, entity_type).
 #[test]
 fn epoch_bumps_on_stale_path_when_catalysts_succeed() {
+    let _serial = EPOCH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());
 
@@ -383,6 +391,7 @@ fn epoch_bumps_on_stale_path_when_catalysts_succeed() {
 /// cached view is stale whether or not the LLM cooperated.
 #[test]
 fn epoch_bumps_on_stale_path_when_catalysts_fail() {
+    let _serial = EPOCH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());
 

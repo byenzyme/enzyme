@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use chrono::{Datelike, Utc};
+use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -1174,6 +1174,19 @@ impl<'a> CatalystPipeline<'a> {
                     // 3 attempts with exponential backoff + jitter
                     let max_attempts = 3u32;
                     let mut last_error = String::new();
+                    let name_len = entity_name.len() as u64;
+                    // Exponential backoff between attempts: 2s, 4s + jitter
+                    // (0-500ms). No sleep after the final attempt.
+                    let backoff = |attempt: u32| async move {
+                        if attempt < max_attempts - 1 {
+                            let base_ms = 2000u64 * 2u64.pow(attempt);
+                            let jitter_ms = (name_len * 37) % 500;
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                base_ms + jitter_ms,
+                            ))
+                            .await;
+                        }
+                    };
                     for attempt in 0..max_attempts {
                         let result = if stream_partial_catalysts {
                             let user_prompt = streaming_entries_instruction(&job.user_prompt);
@@ -1237,8 +1250,8 @@ impl<'a> CatalystPipeline<'a> {
                             .await
                         };
 
-                        match result {
-                            Ok(r) => return Ok(r),
+                        let response_text = match result {
+                            Ok(text) => text,
                             Err(e) => {
                                 last_error = e.to_string();
                                 debug!(
@@ -1251,16 +1264,41 @@ impl<'a> CatalystPipeline<'a> {
                                     credits_exhausted.store(true, Ordering::SeqCst);
                                     break;
                                 }
-                                if attempt < max_attempts - 1 {
-                                    // Exponential backoff: 2s, 4s + jitter (0-500ms)
-                                    let base_ms = 2000u64 * 2u64.pow(attempt);
-                                    let jitter_ms = (entity_name.len() as u64 * 37) % 500;
-                                    let delay =
-                                        std::time::Duration::from_millis(base_ms + jitter_ms);
-                                    tokio::time::sleep(delay).await;
-                                }
+                                backoff(attempt).await;
+                                continue;
+                            }
+                        };
+
+                        // Validate the response before accepting it. An empty
+                        // catalyst array or an unparseable body is a
+                        // content-level failure the model often recovers from on
+                        // a retry — unlike a transport error or credit
+                        // exhaustion. Retrying here, rather than treating the
+                        // first bad response as terminal, is what keeps a single
+                        // flaky entity from silently landing at zero catalysts.
+                        match parse_catalyst_response(&response_text) {
+                            Ok(parsed) if !parsed.catalysts.is_empty() => {
+                                return Ok(parsed.catalysts);
+                            }
+                            Ok(_) => {
+                                last_error = "LLM returned empty catalysts array".to_string();
+                                debug!(
+                                    entity_name = entity_name.as_str(),
+                                    attempt, "empty catalysts array; retrying"
+                                );
+                            }
+                            Err(e) => {
+                                last_error = format!("parse error: {e}");
+                                debug!(
+                                    entity_name = entity_name.as_str(),
+                                    attempt,
+                                    response_text = %response_text,
+                                    "failed to parse catalyst response; retrying: {}",
+                                    e
+                                );
                             }
                         }
+                        backoff(attempt).await;
                     }
                     Err(anyhow::anyhow!(
                         "all {} retry attempts failed: {}",
@@ -1270,69 +1308,30 @@ impl<'a> CatalystPipeline<'a> {
                 })
                 .await;
 
-                let response_text = match result {
-                    Ok(Ok(text)) => text,
-                    Ok(Err(e)) => {
-                        return EntityResult {
-                            entity_name,
-                            entity_type,
-                            catalysts: None,
-                            error: Some(e.to_string()),
-                        };
-                    }
+                match result {
+                    Ok(Ok(catalysts)) => EntityResult {
+                        entity_name,
+                        entity_type,
+                        catalysts: Some(catalysts),
+                        error: None,
+                    },
+                    Ok(Err(e)) => EntityResult {
+                        entity_name,
+                        entity_type,
+                        catalysts: None,
+                        error: Some(e.to_string()),
+                    },
                     Err(_) => {
                         debug!(
                             entity_name = entity_name.as_str(),
                             timeout_secs = entity_timeout_secs,
                             "entity timed out"
                         );
-                        return EntityResult {
+                        EntityResult {
                             entity_name,
                             entity_type,
                             catalysts: None,
                             error: Some(format!("timed out after {}s", entity_timeout_secs)),
-                        };
-                    }
-                };
-
-                debug!(
-                    entity_name = entity_name.as_str(),
-                    response_len = response_text.len(),
-                    response_text = %response_text,
-                    "LLM response received"
-                );
-
-                match parse_catalyst_response(&response_text) {
-                    Ok(parsed) if parsed.catalysts.is_empty() => {
-                        debug!(
-                            entity_name = entity_name.as_str(),
-                            "LLM returned empty catalysts array"
-                        );
-                        EntityResult {
-                            entity_name,
-                            entity_type,
-                            catalysts: None,
-                            error: Some("LLM returned empty catalysts array".to_string()),
-                        }
-                    }
-                    Ok(parsed) => EntityResult {
-                        entity_name,
-                        entity_type,
-                        catalysts: Some(parsed.catalysts),
-                        error: None,
-                    },
-                    Err(e) => {
-                        debug!(
-                            entity_name = entity_name.as_str(),
-                            response_text = %response_text,
-                            "failed to parse catalyst response: {}",
-                            e
-                        );
-                        EntityResult {
-                            entity_name,
-                            entity_type,
-                            catalysts: None,
-                            error: Some(format!("parse error: {e}")),
                         }
                     }
                 }
@@ -1487,13 +1486,6 @@ impl<'a> CatalystPipeline<'a> {
     }
 }
 
-/// Calculate per-entity catalyst allocation from 3-month activity.
-///
-/// Bands: 0→min, 1-5→min to base, 6-10→base area, 11-20→base to upper, 20+→up to max
-///
-/// When `min_top_catalysts` is set, the largest entity (by volume) is guaranteed
-/// at least that many catalysts. The base and max are derived accordingly,
-/// matching enzyme-python's `min_top_catalysts` parameter.
 /// Detect 402 / insufficient-credit errors from the LLM client error string.
 /// Used to short-circuit the catalyst pipeline when the free-tier credit gate
 /// or upstream OpenRouter ephemeral key has been exhausted mid-run.
@@ -1506,73 +1498,88 @@ fn is_credits_exhausted_error(err: &str) -> bool {
         || err.contains("Insufficient credits")
 }
 
+/// Absolute lower bound on catalysts for any entity that has material at all.
+/// A safety net for entities that are tiny relative to the largest one, not the
+/// default outcome — most entities scale above this by document count.
+const HARD_MIN_CATALYSTS: usize = 3;
+
+/// Default catalyst budget for the reference entity when a vault does not set
+/// `min_top_catalysts`. Every other entity scales down from here.
+const DEFAULT_TOP_CATALYSTS: usize = 15;
+
+/// Percentile of entity document counts used as the scaling reference. Entities
+/// at or above this percentile all receive the full `top_target`; smaller
+/// entities scale linearly toward the floor. Anchoring on a high percentile
+/// rather than the raw maximum stops a single outlier entity — e.g. a catch-all
+/// `inbox` folder with an order of magnitude more notes than any real topic —
+/// from dragging the whole distribution down to the floor. On small vaults where
+/// every entity is comparable this collapses to "largest entity = reference",
+/// i.e. plain linear-by-document-share.
+const ALLOCATION_ANCHOR_PERCENTILE: usize = 90;
+
+/// Calculate per-entity catalyst allocation from document volume.
+///
+/// Coverage tracks how much material each entity holds (its total occurrence
+/// count, `Entity::frequency`), so entities of similar size receive similar
+/// catalyst budgets. A reference document count is taken at the
+/// [`ALLOCATION_ANCHOR_PERCENTILE`]th percentile; entities at or above it receive
+/// `top_target` (the vault's `min_top_catalysts`, or [`DEFAULT_TOP_CATALYSTS`]
+/// when unset), and every smaller entity scales down linearly by its share of
+/// documents:
+///
+/// ```text
+/// alloc_i = clamp(round(top_target * docs_i / anchor), HARD_MIN, top_target)
+/// ```
+///
+/// This deliberately keys off total document count rather than recent activity:
+/// an entity with half the material of the reference gets roughly half the
+/// catalysts, not a near-floor allocation, so coverage does not fall off a cliff
+/// when entities are comparably sized. The percentile anchor keeps that property
+/// intact on skewed vaults, where scaling against the single largest entity would
+/// otherwise floor every mid-size entity. [`HARD_MIN_CATALYSTS`] only takes effect
+/// for entities that are tiny relative to the reference (or for empty vaults).
 pub fn calculate_allocations(
     entities: &[Entity],
     min_top_catalysts: Option<usize>,
 ) -> HashMap<String, usize> {
-    let min_per_entity: usize = 3;
-    let mut base: usize = 7;
-    let mut max_per_entity: usize = 15;
+    let top_target = min_top_catalysts
+        .unwrap_or(DEFAULT_TOP_CATALYSTS)
+        .max(HARD_MIN_CATALYSTS);
 
-    if let Some(min_top) = min_top_catalysts {
-        base = (min_top * 6 / 10).max(min_per_entity + 1);
-        max_per_entity = max_per_entity.max(min_top);
-    }
+    // Reference document count: the value at the configured percentile (entities
+    // sorted by document count, descending). The top slice sits at or above it
+    // and all receive `top_target`; the rest scale linearly against it.
+    let mut doc_counts: Vec<i64> = entities.iter().map(|e| e.frequency.max(0)).collect();
+    doc_counts.sort_unstable_by(|a, b| b.cmp(a));
+    let docs_max = doc_counts.first().copied().unwrap_or(0);
+    let anchor = if doc_counts.is_empty() {
+        0
+    } else {
+        let idx = (doc_counts.len() * (100 - ALLOCATION_ANCHOR_PERCENTILE) / 100)
+            .min(doc_counts.len() - 1);
+        doc_counts[idx]
+    };
+    // If the percentile lands on an empty entity (a vault dominated by
+    // zero-document entities), fall back to the largest so the few non-empty
+    // entities still scale sensibly instead of all collapsing to the floor.
+    let anchor = if anchor > 0 { anchor } else { docs_max };
 
-    let now = Utc::now();
-    let month_keys: Vec<String> = (0..3)
-        .map(|i| {
-            let y = now.year();
-            let m = now.month() as i32 - i;
-            let (year, month) = if m <= 0 {
-                (y - 1, (m + 12) as u32)
-            } else {
-                (y, m as u32)
-            };
-            format!("{:04}-{:02}", year, month)
-        })
-        .collect();
-
-    let entity_volumes: Vec<(&Entity, i64)> = entities
+    entities
         .iter()
         .map(|e| {
-            let volume: i64 = month_keys
-                .iter()
-                .filter_map(|k| e.trends.timeline_buckets.get(k))
-                .sum();
-            (e, volume)
-        })
-        .collect();
-
-    let mut allocations: HashMap<String, usize> = entity_volumes
-        .iter()
-        .map(|(e, volume)| {
-            let volume = *volume;
-            let alloc = match volume {
-                0 => min_per_entity,
-                1..=5 => min_per_entity + ((volume as usize) * 2) / 5,
-                6..=10 => 5 + ((volume as usize - 5) * 2) / 5,
-                11..=20 => base + ((volume as usize - 10) * 3) / 10,
-                _ => {
-                    let excess = ((volume as usize) - 20).min(20);
-                    10 + (excess * (max_per_entity - 10)) / 20
-                }
+            let docs = e.frequency.max(0);
+            let alloc = if anchor <= 0 {
+                // No entity has any material; fall back to the safety floor.
+                HARD_MIN_CATALYSTS
+            } else {
+                // round(top_target * docs / anchor) with integer arithmetic.
+                let scaled =
+                    (top_target as u64 * docs as u64 + anchor as u64 / 2) / anchor as u64;
+                (scaled as usize).clamp(HARD_MIN_CATALYSTS, top_target)
             };
-            (e.name.clone(), alloc.clamp(min_per_entity, max_per_entity))
+            (e.name.clone(), alloc)
         })
-        .collect();
-
-    // Boost the top entity if it didn't reach min_top_catalysts
-    if let Some(min_top) = min_top_catalysts {
-        if let Some((top_entity, _)) = entity_volumes.iter().max_by_key(|(_, v)| *v) {
-            let current = allocations.get(&top_entity.name).copied().unwrap_or(0);
-            if current < min_top {
-                allocations.insert(top_entity.name.clone(), min_top.min(max_per_entity));
-            }
-        }
-    }
-
-    allocations
+        .collect()
 }
 
 #[cfg(test)]
@@ -1581,18 +1588,20 @@ mod tests {
     use crate::models::{EntityTrends, EntityType};
     use crate::pipeline::eras::Era;
 
-    fn make_entity(name: &str, buckets: HashMap<String, i64>) -> Entity {
+    /// Allocation now keys off document count (`Entity::frequency`); the
+    /// timeline buckets are irrelevant to it.
+    fn make_entity(name: &str, doc_count: i64) -> Entity {
         Entity {
             id: Some(1),
             name: name.to_string(),
             entity_type: EntityType::Tag,
-            frequency: 10,
+            frequency: doc_count,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends {
                 frequency_recent: 0,
                 recency_score: 0.0,
-                timeline_buckets: buckets,
+                timeline_buckets: HashMap::new(),
             },
             metadata: serde_json::json!({}),
         }
@@ -1626,74 +1635,78 @@ mod tests {
     }
 
     #[test]
-    fn test_allocation_zero_volume() {
-        let entities = vec![make_entity("empty", HashMap::new())];
+    fn test_allocation_empty_vault_gets_floor() {
+        // No entity has any material → everyone falls back to the safety floor.
+        let entities = vec![make_entity("empty", 0)];
         let allocs = calculate_allocations(&entities, None);
-        assert_eq!(allocs["empty"], 3);
+        assert_eq!(allocs["empty"], HARD_MIN_CATALYSTS);
     }
 
     #[test]
-    fn test_allocation_low_volume() {
-        let now = Utc::now();
-        let key = format!("{:04}-{:02}", now.year(), now.month());
-        let entities = vec![make_entity("low", HashMap::from([(key, 3)]))];
-        let allocs = calculate_allocations(&entities, None);
-        assert!(allocs["low"] >= 3 && allocs["low"] <= 5);
+    fn test_allocation_single_entity_gets_default_top() {
+        // A lone entity is the largest, so it receives the default top budget.
+        let allocs = calculate_allocations(&[make_entity("solo", 5)], None);
+        assert_eq!(allocs["solo"], DEFAULT_TOP_CATALYSTS);
     }
 
     #[test]
-    fn test_allocation_high_volume() {
-        let now = Utc::now();
-        let key = format!("{:04}-{:02}", now.year(), now.month());
-        let entities = vec![make_entity("high", HashMap::from([(key, 30)]))];
-        let allocs = calculate_allocations(&entities, None);
-        // volume=30, excess=min(10,20)=10, alloc=10+(10*5)/20=12
-        assert!(allocs["high"] >= 10 && allocs["high"] <= 15);
-    }
-
-    #[test]
-    fn test_allocation_medium_volume() {
-        let now = Utc::now();
-        let key = format!("{:04}-{:02}", now.year(), now.month());
-        let entities = vec![make_entity("med", HashMap::from([(key, 15)]))];
-        let allocs = calculate_allocations(&entities, None);
-        assert!(allocs["med"] >= 7 && allocs["med"] <= 10);
-    }
-
-    #[test]
-    fn test_allocation_spans_months() {
-        let now = Utc::now();
-        let k1 = format!("{:04}-{:02}", now.year(), now.month());
-        let prev_month = if now.month() == 1 {
-            12
-        } else {
-            now.month() - 1
-        };
-        let prev_year = if now.month() == 1 {
-            now.year() - 1
-        } else {
-            now.year()
-        };
-        let k2 = format!("{:04}-{:02}", prev_year, prev_month);
-        let entities = vec![make_entity("span", HashMap::from([(k1, 4), (k2, 4)]))];
-        let allocs = calculate_allocations(&entities, None);
-        // 8 total → band 6-10 → 5-7
-        assert!(allocs["span"] >= 5 && allocs["span"] <= 7);
-    }
-
-    #[test]
-    fn test_allocation_min_top_catalysts() {
-        let now = Utc::now();
-        let key = format!("{:04}-{:02}", now.year(), now.month());
+    fn test_allocation_scales_with_doc_count() {
+        // The attune-vault shape: top has 4 docs, others 2 and 1. Coverage should
+        // mirror the document ratio, not collapse to the floor.
         let entities = vec![
-            make_entity("big", HashMap::from([(key.clone(), 50)])),
-            make_entity("small", HashMap::from([(key, 2)])),
+            make_entity("theo", 4),
+            make_entity("rel", 2),
+            make_entity("org", 1),
         ];
-        let allocs = calculate_allocations(&entities, Some(25));
-        // Top entity should be boosted to at least 25
-        assert!(allocs["big"] >= 25);
-        // Small entity should stay low
-        assert!(allocs["small"] <= 5);
+        let allocs = calculate_allocations(&entities, Some(20));
+        assert_eq!(allocs["theo"], 20); // docs_max → top_target
+        assert_eq!(allocs["rel"], 10); // round(20 * 2/4)
+        assert_eq!(allocs["org"], 5); // round(20 * 1/4)
+    }
+
+    #[test]
+    fn test_allocation_anchor_protects_major_entities_from_outlier() {
+        // Power-law vault: one catch-all entity dwarfs the rest. Anchoring on the
+        // 90th percentile (not the max) keeps mid-size entities off the floor —
+        // under plain linear-against-max, the 400-doc topics would collapse to 3.
+        let mut entities = vec![make_entity("inbox", 2000)];
+        for i in 0..9 {
+            entities.push(make_entity(&format!("topic{i}"), 400));
+        }
+        entities.push(make_entity("small", 40));
+        let allocs = calculate_allocations(&entities, None); // top_target = 15
+        assert_eq!(allocs["inbox"], 15); // outlier clamps to the ceiling
+        assert_eq!(allocs["topic0"], 15); // at the anchor → full coverage, not floored
+        assert_eq!(allocs["small"], 3); // genuinely tiny relative to the anchor
+    }
+
+    #[test]
+    fn test_allocation_floor_protects_tiny_entities() {
+        // 1 doc against a 200-doc leader rounds to 0 → clamped up to the floor.
+        let entities = vec![make_entity("giant", 200), make_entity("tiny", 1)];
+        let allocs = calculate_allocations(&entities, Some(20));
+        assert_eq!(allocs["giant"], 20);
+        assert_eq!(allocs["tiny"], HARD_MIN_CATALYSTS);
+    }
+
+    #[test]
+    fn test_allocation_min_top_is_ceiling() {
+        // Equally sized entities all reach min_top; none exceed it.
+        let entities = vec![make_entity("a", 10), make_entity("b", 10)];
+        let allocs = calculate_allocations(&entities, Some(12));
+        assert_eq!(allocs["a"], 12);
+        assert_eq!(allocs["b"], 12);
+    }
+
+    #[test]
+    fn test_allocation_default_top_target_used_when_unset() {
+        // Without min_top, the largest entity gets DEFAULT_TOP_CATALYSTS and the
+        // rest scale from there.
+        let entities = vec![make_entity("big", 10), make_entity("half", 5)];
+        let allocs = calculate_allocations(&entities, None);
+        assert_eq!(allocs["big"], DEFAULT_TOP_CATALYSTS);
+        // round(15 * 5/10) = round(7.5) = 8.
+        assert_eq!(allocs["half"], 8);
     }
 
     #[test]
