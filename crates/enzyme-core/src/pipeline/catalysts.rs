@@ -33,6 +33,13 @@ use crate::pipeline::eras::{
 /// Leaves room for the simplified system prompt (~400 tokens) and output (~500 tokens)
 /// within a 16K per-slot context window.
 const LOCAL_DEFAULT_MAX_CONTEXT_CHARS: usize = 16000;
+/// Default per-entity context char budget for cloud models when unset
+/// (`max_context_chars == None`). ~15K tokens of context per entity request —
+/// generous for a focused catalyst prompt while keeping a single high-frequency
+/// or long-note entity's job far under the model context window. A guardrail,
+/// not a quality knob; mirrors `EnzymeConfig::effective_max_embedding_files`'s
+/// default-on-with-escape-hatch shape (`Some(0)` = explicit unlimited).
+const DEFAULT_MAX_CONTEXT_CHARS: usize = 60000;
 const CHUNK_MMR_TOP_K: usize = 50;
 const CHUNK_MMR_LAMBDA: f32 = 0.5;
 
@@ -99,6 +106,26 @@ fn lasso_truncate(text: &str, max_chars: usize) -> String {
         .unwrap_or(text.len());
 
     format!("{}{marker}{}", &text[..head_end], &text[tail_start..])
+}
+
+/// Resolve the three-valued per-entity context budget to a concrete char count
+/// for the selection helpers (where `0` means unlimited).
+///
+/// - `None` → the built-in default guardrail (`LOCAL_DEFAULT_MAX_CONTEXT_CHARS`
+///   for local models, `DEFAULT_MAX_CONTEXT_CHARS` for cloud),
+/// - `Some(0)` → `0` (explicit unlimited — caller opted out of the guardrail),
+/// - `Some(n)` → `n`.
+fn resolve_context_budget(configured: Option<usize>, is_local: bool) -> usize {
+    match configured {
+        None => {
+            if is_local {
+                LOCAL_DEFAULT_MAX_CONTEXT_CHARS
+            } else {
+                DEFAULT_MAX_CONTEXT_CHARS
+            }
+        }
+        Some(n) => n,
+    }
 }
 
 /// Apply context budget: limit sample count, then truncate total chars via lasso.
@@ -509,9 +536,14 @@ pub struct CatalystConfig<'a> {
     /// Per-entity catalyst count overrides from volume-based allocation.
     pub per_entity_allocations: Option<&'a HashMap<String, usize>>,
     /// Maximum total characters across all context samples per entity.
-    /// When set, samples are truncated (head+tail with lasso compression)
-    /// to fit within this budget. `0` means unlimited (default).
-    pub max_context_chars: usize,
+    /// When a budget applies, samples are truncated (head+tail with lasso
+    /// compression) to fit within it. Three-valued, mirroring
+    /// `EnzymeConfig::effective_max_embedding_files`:
+    /// - `None` → use the built-in default (`DEFAULT_MAX_CONTEXT_CHARS` for
+    ///   cloud, `LOCAL_DEFAULT_MAX_CONTEXT_CHARS` for local models),
+    /// - `Some(0)` → explicit unlimited (no truncation),
+    /// - `Some(n)` → exactly `n` chars.
+    pub max_context_chars: Option<usize>,
     /// Maximum number of context samples per entity (default: 20).
     pub max_samples: usize,
     /// LLM concurrency override. If set, overrides the auto-detected value.
@@ -536,7 +568,7 @@ impl<'a> Default for CatalystConfig<'a> {
             prompt_context: None,
             model: DEFAULT_MODEL,
             per_entity_allocations: None,
-            max_context_chars: 0,
+            max_context_chars: None,
             max_samples: 20,
             concurrency: None,
             stream_partial_catalysts: false,
@@ -910,16 +942,17 @@ impl<'a> CatalystPipeline<'a> {
             build_system_prompt(Some(config.format_key), config.prompt_context)
         };
 
-        // Auto-apply context budget for local models if not explicitly set.
-        let max_context_chars = if config.max_context_chars == 0 && is_local {
+        // Resolve the three-valued context budget to a concrete char count for
+        // the selection helpers (which treat `0` as unlimited). When unset,
+        // default to a model-appropriate guardrail so a single high-frequency
+        // or long-note entity can't blow past the model context window.
+        let max_context_chars = resolve_context_budget(config.max_context_chars, is_local);
+        if config.max_context_chars.is_none() {
             info!(
-                budget = LOCAL_DEFAULT_MAX_CONTEXT_CHARS,
-                "auto-setting context budget for local model"
+                budget = max_context_chars,
+                is_local, "auto-setting default context budget"
             );
-            LOCAL_DEFAULT_MAX_CONTEXT_CHARS
-        } else {
-            config.max_context_chars
-        };
+        }
 
         let max_samples = if is_local && config.max_samples > 10 {
             10 // Cap samples for local models to keep prompts manageable
@@ -1853,5 +1886,81 @@ mod tests {
                  exhaustion, but [{label}] was not: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_context_budget_three_valued() {
+        // Unset → model-appropriate default guardrail.
+        assert_eq!(
+            resolve_context_budget(None, false),
+            DEFAULT_MAX_CONTEXT_CHARS
+        );
+        assert_eq!(
+            resolve_context_budget(None, true),
+            LOCAL_DEFAULT_MAX_CONTEXT_CHARS
+        );
+        // Explicit unlimited escape hatch.
+        assert_eq!(resolve_context_budget(Some(0), false), 0);
+        assert_eq!(resolve_context_budget(Some(0), true), 0);
+        // Explicit override is honored verbatim, local or cloud.
+        assert_eq!(resolve_context_budget(Some(1234), false), 1234);
+        assert_eq!(resolve_context_budget(Some(1234), true), 1234);
+    }
+
+    fn make_occurrence(file_path: &str, context: &str) -> EntityOccurrence {
+        EntityOccurrence {
+            id: None,
+            entity_id: 1,
+            file_path: file_path.to_string(),
+            context: Some(context.to_string()),
+            created_at: 0,
+            effective_date: Some(0),
+            date_source: "test".to_string(),
+        }
+    }
+
+    /// Regression: a single high-frequency entity whose occurrences are long
+    /// notes (each carrying a full body, as the Tier-2 chunkless fallback sees
+    /// after `hydrate_occurrence_contexts`) must not emit an unbounded prompt.
+    /// Before the default guardrail, `max_context_chars == 0` skipped all
+    /// truncation and a single entity job ballooned past the model context
+    /// window (observed 1.1–1.5M tokens vs a ~1M limit).
+    #[test]
+    fn test_long_note_entity_job_bounded_by_default_budget() {
+        // 20 occurrences (the default max_samples), each a ~200K-char body.
+        let body = "word ".repeat(40_000); // ~200K chars, ~40K words
+        let occurrences: Vec<EntityOccurrence> = (0..20)
+            .map(|i| make_occurrence(&format!("note-{i}.md"), &body))
+            .collect();
+        // No eras → the flat-sample path (the one that blew up) is exercised.
+        let eras: Vec<Era> = vec![];
+
+        // Cloud default (config unset → None).
+        let budget = resolve_context_budget(None, false);
+        assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
+
+        let selected = build_occurrence_context(&eras, &occurrences, 7, 20, budget);
+
+        let total: usize = selected.flat_samples.iter().map(|s| s.len()).sum();
+        // `lasso_truncate` emits head + marker + tail per sample, so the
+        // realized total can exceed the raw budget by a few bytes per sample
+        // (marker length + char-boundary rounding). Allow a small slack
+        // proportional to the sample count.
+        let slack = occurrences.len() * 32;
+        assert!(
+            total <= budget + slack,
+            "flat context ({total} chars) must stay within the default budget \
+             ({budget} chars, +{slack} slack); the long-note fallback is unbounded"
+        );
+
+        // Sanity: without the guardrail (explicit unlimited) the same input is
+        // enormous, so the assertion above is actually meaningful.
+        let unbounded = build_occurrence_context(&eras, &occurrences, 7, 20, 0);
+        let unbounded_total: usize = unbounded.flat_samples.iter().map(|s| s.len()).sum();
+        assert!(
+            unbounded_total > budget * 10,
+            "expected the unbounded fallback to vastly exceed the budget, got \
+             {unbounded_total} chars"
+        );
     }
 }

@@ -8,11 +8,18 @@ use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
 
+use super::appendlog::{chunk_append_log, detect_append_log};
 use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
 use super::extract::{ExtractedEntities, extract_entities};
 use super::frontmatter::{Frontmatter, parse_frontmatter, strip_frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
+
+/// Word floor for auto-flagging a body as an append-only log. Below this, the
+/// dominant vault shape is "many short dated files" (topology A), which the
+/// occurrence-date + era machinery already handles and which never hits the
+/// oversized-context paths this flag guards.
+const LOG_AUTODETECT_MIN_WORDS: i64 = 400;
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -38,6 +45,11 @@ pub struct ProcessedDocument {
     /// Content chunks for embedding.
     pub chunks: Vec<String>,
     pub frontmatter: Option<Frontmatter>,
+    /// True when this document is a single-file append-only log (topology B):
+    /// an internal timeline of dated entries under one document date. Drives
+    /// chronological chunking and recency-biased context. Declared via a
+    /// `type:` frontmatter marker, else auto-detected structurally.
+    pub is_log: bool,
 }
 
 /// Orchestrates the full document-processing pipeline:
@@ -119,7 +131,21 @@ impl DocumentProcessor {
         // Readwise detection — used for both chunking and date resolution
         let is_readwise = is_readwise_content(body);
 
-        // Chunks — use Readwise-aware chunking for highlight-based content
+        // Word and char counts (from body, not frontmatter YAML)
+        let word_count = body.split_whitespace().count() as i64;
+        let char_count = body.chars().count() as i64;
+
+        // Append-only-log detection (topology B). A declared `type:` marker is
+        // the source of truth; otherwise auto-detect structurally, gated on a
+        // word floor so short many-file logs (topology A) never flag.
+        let append_log = detect_append_log(body);
+        let is_log = match log_type_override(&frontmatter) {
+            Some(declared) => declared,
+            None => append_log.is_some() && word_count >= LOG_AUTODETECT_MIN_WORDS,
+        };
+
+        // Chunks — Readwise highlights and append-only logs get structure-aware
+        // chunking; everything else uses the generic paragraph chunker.
         let chunks = if is_readwise {
             let highlights = extract_highlights(body);
             if highlights.is_empty() {
@@ -127,13 +153,11 @@ impl DocumentProcessor {
             } else {
                 chunk_readwise_highlights(&highlights, 5, 15)
             }
+        } else if let (true, Some(log)) = (is_log, append_log.as_ref()) {
+            chunk_append_log(body, log, self.chunk_size)
         } else {
             chunk_document(body, self.chunk_size)
         };
-
-        // Word and char counts (from body, not frontmatter YAML)
-        let word_count = body.split_whitespace().count() as i64;
-        let char_count = body.chars().count() as i64;
 
         // Dates
         let (created_at, created_source) =
@@ -157,6 +181,7 @@ impl DocumentProcessor {
             folders,
             chunks,
             frontmatter,
+            is_log,
         })
     }
 
@@ -166,6 +191,22 @@ impl DocumentProcessor {
             .par_iter()
             .map(|path| self.process_file(path))
             .collect()
+    }
+}
+
+/// Read an explicit note-type declaration from frontmatter, if present.
+///
+/// `type: log | journal | diary | daily` → `Some(true)` (force log handling);
+/// `type: note | essay | page | reference` → `Some(false)` (force off, e.g. to
+/// override a structural false positive); anything else → `None` (defer to
+/// auto-detection). This is the per-note surface the workspace-setup skill can
+/// stamp — a body-preserving mutation — since it cannot split the file itself.
+fn log_type_override(frontmatter: &Option<Frontmatter>) -> Option<bool> {
+    let value = frontmatter.as_ref()?.extra.get("type")?.as_str()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "log" | "journal" | "diary" | "daily" => Some(true),
+        "note" | "essay" | "page" | "reference" => Some(false),
+        _ => None,
     }
 }
 

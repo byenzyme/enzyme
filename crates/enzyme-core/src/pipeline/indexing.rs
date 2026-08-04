@@ -8,9 +8,12 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::db::Database;
-use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument};
+use crate::document::{
+    DocumentProcessor, FileDiscovery, ProcessedDocument, detect_append_log, most_recent_entry,
+};
 use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
+    representative_excerpt,
 };
 
 /// Orchestrates the full indexing pipeline:
@@ -283,17 +286,23 @@ impl<'a> IndexingPipeline<'a> {
                 .map(|fm| fm.links.iter().map(|l| l.as_str()).collect())
                 .unwrap_or_default();
 
-            // Full file body (frontmatter stripped) for document-level entities.
-            // Only stored when small enough that the catalyst pipeline's inline
-            // context filter (`INLINE_CONTEXT_MAX_WORDS`) will actually keep it;
-            // larger bodies are always filtered out by that reader, so we store
-            // `None` rather than pay to persist context that's never used. A
-            // truncated snippet is deliberately avoided here: it would newly
-            // pass the reader's word-count filter and change centroid behavior.
+            // Context (frontmatter stripped) for document-level entities
+            // (frontmatter tags/links, folders, root):
+            //   - short body → stored whole (passes the inline-context filter);
+            //   - append-only log → the most-recent entry, bounded — its
+            //     highest-value, chronologically-current slice, which keeps the
+            //     log in the query centroid without dumping the whole timeline;
+            //   - other long note → `None`: the chunk-extractive reader (Tier-1)
+            //     handles it, and a body excerpt would only pollute the link
+            //     centroid, which wants mention-neighborhoods, not arbitrary
+            //     passages.
             let full_body: Option<String> = doc.chunks.first().and_then(|_| {
-                let body = crate::document::strip_frontmatter(&doc.content).to_string();
+                let body = crate::document::strip_frontmatter(&doc.content);
                 if body.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS {
-                    Some(body)
+                    Some(body.to_string())
+                } else if doc.is_log {
+                    detect_append_log(body)
+                        .map(|log| representative_excerpt(&most_recent_entry(body, &log)))
                 } else {
                     None
                 }
@@ -1106,17 +1115,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 14. Oversized frontmatter/folder bodies store None, not a truncated body
+    // 14. A coherent (non-log) oversized body stores NO document-level context:
+    //     Tier-1 chunk selection handles it, and a body excerpt would only
+    //     pollute the link centroid, which wants mention-neighborhoods.
     // -----------------------------------------------------------------------
     #[test]
-    fn oversized_body_stores_none_context() {
+    fn coherent_oversized_body_stores_no_context() {
         use crate::models::INLINE_CONTEXT_MAX_WORDS;
 
         let db = test_db();
         let vault = tempfile::tempdir().unwrap();
 
-        // A body comfortably over the 400-word inline-context threshold.
-        let big_body = "word ".repeat(INLINE_CONTEXT_MAX_WORDS + 100);
+        // Long, but NOT a log: no internal date headers.
+        let big_body = "word ".repeat(600);
         assert!(big_body.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS);
 
         write_md(
@@ -1125,53 +1136,92 @@ mod tests {
             &format!("---\ntags: [oversized]\npeople: \"[[BigLink]]\"\n---\n{big_body}"),
         );
 
-        // A small body, well under the threshold, in the same folder so the
-        // folder entity gets one oversized and one small occurrence.
-        write_md(
-            vault.path(),
-            "people/small.md",
-            "---\ntags: [oversized]\npeople: \"[[BigLink]]\"\n---\nA short note.\n",
-        );
-
         let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
         pipeline.run(true, |_| {}).unwrap();
 
         let entities = db.get_all_entities().unwrap();
-
-        let tag_entity = entities
-            .iter()
-            .find(|e| e.name == "oversized" && e.entity_type == EntityType::Tag)
-            .expect("oversized tag should exist");
-        let link_entity = entities
-            .iter()
-            .find(|e| e.name == "biglink" && e.entity_type == EntityType::Link)
-            .expect("biglink link should exist");
-        let folder_entity = entities
-            .iter()
-            .find(|e| e.name == "people" && e.entity_type == EntityType::Folder)
-            .expect("people folder entity should exist");
-
-        for entity in [&tag_entity, &link_entity, &folder_entity] {
+        for name_type in [
+            ("oversized", EntityType::Tag),
+            ("biglink", EntityType::Link),
+            ("people", EntityType::Folder),
+        ] {
+            let entity = entities
+                .iter()
+                .find(|e| e.name == name_type.0 && e.entity_type == name_type.1)
+                .unwrap_or_else(|| panic!("entity {} should exist", name_type.0));
             let occs = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
-            assert_eq!(occs.len(), 2, "entity {} should have 2 occurrences", entity.name);
-
             let big_occ = occs
                 .iter()
                 .find(|o| o.file_path.ends_with("big.md"))
                 .expect("big.md occurrence should exist");
             assert!(
                 big_occ.context.is_none(),
-                "oversized body context for entity {} should be None, not a truncated snippet",
+                "coherent oversized body for entity {} should store no context",
                 entity.name
             );
+        }
+    }
 
-            let small_occ = occs
+    // -----------------------------------------------------------------------
+    // 15. An append-only log (topology B) stores its most-recent entry as a
+    //     bounded, chunk-scorable context — not None, not the whole timeline.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn append_log_stores_recent_entry_context() {
+        use crate::models::INLINE_CONTEXT_MAX_WORDS;
+
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+
+        // Five bottom-appended dated entries → auto-detected as a log.
+        let mut body = String::new();
+        for m in 1..=5 {
+            body.push_str(&format!("## 2026-0{m}-01\nentry {m} {}\n", "word ".repeat(120)));
+        }
+        assert!(body.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS);
+
+        write_md(
+            vault.path(),
+            "journal/log.md",
+            &format!("---\ntags: [logtag]\npeople: \"[[LogLink]]\"\n---\n{body}"),
+        );
+
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entities = db.get_all_entities().unwrap();
+        for name_type in [
+            ("logtag", EntityType::Tag),
+            ("loglink", EntityType::Link),
+            ("journal", EntityType::Folder),
+        ] {
+            let entity = entities
                 .iter()
-                .find(|o| o.file_path.ends_with("small.md"))
-                .expect("small.md occurrence should exist");
+                .find(|e| e.name == name_type.0 && e.entity_type == name_type.1)
+                .unwrap_or_else(|| panic!("entity {} should exist", name_type.0));
+            let occs = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
+            let occ = occs
+                .iter()
+                .find(|o| o.file_path.ends_with("log.md"))
+                .expect("log.md occurrence should exist");
+            let ctx = occ.context.as_ref().unwrap_or_else(|| {
+                panic!("log context for entity {} should be present", entity.name)
+            });
+            // Bounded, so it stays in the centroid.
             assert!(
-                small_occ.context.is_some(),
-                "small body context for entity {} should still be stored",
+                ctx.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS,
+                "log context for entity {} must stay under the filter",
+                entity.name
+            );
+            // Most recent entry (2026-05-01), not the oldest (2026-01-01).
+            assert!(
+                ctx.contains("2026-05-01"),
+                "log context for entity {} should hold the most recent entry",
+                entity.name
+            );
+            assert!(
+                !ctx.contains("2026-01-01"),
+                "log context for entity {} should drop the oldest entry",
                 entity.name
             );
         }

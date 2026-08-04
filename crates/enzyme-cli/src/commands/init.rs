@@ -733,10 +733,12 @@ pub async fn run_init(
             prompt_context: vault_context.as_deref(),
             model: &resolved.model,
             per_entity_allocations: Some(&allocations),
+            // Three-valued: env unset → None (use built-in default guardrail);
+            // `ENZYME_MAX_CONTEXT_CHARS=0` → Some(0) (explicit unlimited);
+            // `=n` → Some(n).
             max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
                 .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
+                .and_then(|v| v.parse().ok()),
             max_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1248,10 +1250,11 @@ pub(super) async fn generation_contract(
         embedding_dimension: service.dimension(),
         targets,
         selection_config_json,
+        // Three-valued: env unset → None (use built-in default guardrail);
+        // `ENZYME_MAX_CONTEXT_CHARS=0` → Some(0) (explicit unlimited); `=n` → Some(n).
         max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0),
+            .and_then(|v| v.parse().ok()),
         max_context_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
             .ok()
             .and_then(|v| v.parse().ok())

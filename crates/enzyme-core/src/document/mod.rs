@@ -1,3 +1,4 @@
+mod appendlog;
 mod chunking;
 mod datepath;
 mod discovery;
@@ -6,6 +7,7 @@ mod frontmatter;
 mod processor;
 mod readwise;
 
+pub use appendlog::*;
 pub use chunking::*;
 pub use datepath::*;
 pub use discovery::*;

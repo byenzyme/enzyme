@@ -1103,6 +1103,7 @@ mod tests {
             folders: folders.into_iter().map(str::to_string).collect(),
             chunks: Vec::new(),
             frontmatter,
+            is_log: false,
         }
     }
 

@@ -268,6 +268,9 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
         folders,
         chunks,
         frontmatter: None,
+        // Ingested items are externally-structured single units, not user
+        // append-only log files.
+        is_log: false,
     })
 }
 

@@ -41,7 +41,12 @@ pub struct GenerationContract {
     /// Complete merged vault config, used both in the fingerprint and by the
     /// shadow selector so a mid-build config edit cannot leak into the epoch.
     pub selection_config_json: String,
-    pub max_context_chars: usize,
+    /// Per-entity context char budget. Three-valued (see
+    /// [`crate::pipeline::catalysts::CatalystConfig::max_context_chars`]):
+    /// `None` = use built-in default, `Some(0)` = explicit unlimited,
+    /// `Some(n)` = exactly `n`.
+    #[serde(default)]
+    pub max_context_chars: Option<usize>,
     pub max_context_samples: usize,
 }
 
@@ -604,7 +609,7 @@ mod tests {
             embedding_dimension: 3,
             targets: vec![],
             selection_config_json: "{}".into(),
-            max_context_chars: 0,
+            max_context_chars: None,
             max_context_samples: 20,
         }
     }

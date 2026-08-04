@@ -1,8 +1,18 @@
 use libsql::{Connection, Value};
 use tracing::info;
 
+use crate::document::{detect_append_log, most_recent_entry, strip_frontmatter};
 use crate::embedding::quantize;
-use crate::models::{EMBEDDING_DIMENSION, INLINE_CONTEXT_MAX_WORDS};
+use crate::models::{EMBEDDING_DIMENSION, INLINE_CONTEXT_MAX_WORDS, representative_excerpt};
+
+/// A long note's bounded document-level context, mirroring
+/// `pipeline::indexing`: append-only logs keep their most-recent entry; every
+/// other long note stores nothing (Tier-1 chunk selection handles it, and a
+/// body excerpt would only pollute the link centroid). `body` must already be
+/// frontmatter-stripped.
+fn long_note_context(body: &str) -> Option<String> {
+    detect_append_log(body).map(|log| representative_excerpt(&most_recent_entry(body, &log)))
+}
 
 use super::errors::DbError;
 use super::schema;
@@ -10,6 +20,11 @@ use super::schema;
 /// Config key guarding the one-time `entity_occurrences` context slimming
 /// migration (see [`slim_oversized_occurrence_contexts`]).
 const CONTEXT_SLIM_MIGRATION_KEY: &str = "migration.context_slim_v1";
+
+/// Config key guarding the one-time backfill that reconstructs bounded
+/// excerpts for long-note contexts that an earlier slim migration nulled out
+/// (see [`backfill_excerpts_for_slimmed_contexts`]).
+const CONTEXT_EXCERPT_BACKFILL_KEY: &str = "migration.context_excerpt_backfill_v1";
 
 /// Config key guarding the one-time embedding int8 quantization migration
 /// (see [`migrate_embeddings_to_int8`]).
@@ -30,11 +45,14 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         .await
         .map_err(DbError::Libsql)?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
+    backfill_excerpts_for_slimmed_contexts(conn).await?;
     let int8_hint = migrate_embeddings_to_int8(conn).await?;
     // Reclaim once, after all migrations: each VACUUM rewrites the whole
     // file, so per-migration reclaims would multiply the one-time I/O cost.
     // `None` means a migration short-circuited on its completion flag; if
     // every migration short-circuited there is nothing new to reclaim.
+    // (The excerpt backfill only fills NULLs — it frees nothing, so it
+    // contributes no hint.)
     if slim_hint.is_some() || int8_hint.is_some() {
         reclaim_freelist_space(
             conn,
@@ -50,9 +68,11 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
 /// `entity_occurrences.context` for frontmatter tags/links, folders, and the
 /// flat-vault root-folder entity — even when the body was large enough that
 /// the catalyst pipeline's inline-context filter (`INLINE_CONTEXT_MAX_WORDS`)
-/// would always discard it at read time. This walks existing rows once,
-/// nulls out contexts that are and always were unused, and records
-/// completion in `config` so subsequent opens skip the scan entirely.
+/// would always discard it at read time. This walks existing rows once and
+/// replaces each oversized body with its bounded [`long_note_context`] —
+/// matching current indexing: append-only logs keep a recency excerpt, every
+/// other long note is nulled — then records completion in `config` so
+/// subsequent opens skip the scan entirely.
 async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<Option<u64>, DbError> {
     // Cheap short-circuit: skip the scan entirely once already applied.
     let mut check = conn
@@ -74,36 +94,42 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<Option<
         .await
         .map_err(DbError::Libsql)?;
 
-    let mut oversized_ids: Vec<i64> = Vec::new();
+    // (id, replacement) for each oversized context. `None` → set NULL (coherent
+    // long note); `Some(excerpt)` → recency excerpt (append-only log).
+    let mut updates: Vec<(i64, Option<String>)> = Vec::new();
     let mut bytes_freed: u64 = 0;
     while let Some(row) = rows.next().await.map_err(DbError::Libsql)? {
         let id: i64 = row.get(0).map_err(DbError::Libsql)?;
         let context: Option<String> = row.get(1).map_err(DbError::Libsql)?;
         if let Some(context) = context {
             if context.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS {
-                bytes_freed += context.len() as u64;
-                oversized_ids.push(id);
+                // The stored context is already the frontmatter-stripped body.
+                let replacement = long_note_context(&context);
+                let kept = replacement.as_ref().map(|s| s.len()).unwrap_or(0);
+                bytes_freed += (context.len() as u64).saturating_sub(kept as u64);
+                updates.push((id, replacement));
             }
         }
     }
     drop(rows);
 
-    if !oversized_ids.is_empty() {
+    if !updates.is_empty() {
+        // Single transaction so the whole slim is atomic: a crash before commit
+        // leaves the original bodies intact, and a crash after commit but before
+        // the flag write simply finds no oversized rows on the next scan (the
+        // replacements are all under the threshold, NULL included).
         let tx = conn.transaction().await.map_err(DbError::Libsql)?;
-        // Batch updates to keep individual statements small; SQLite has no
-        // hard bind-parameter limit concern here since we chunk anyway.
-        for chunk in oversized_ids.chunks(500) {
-            let placeholders = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", i + 1))
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "UPDATE entity_occurrences SET context = NULL WHERE id IN ({placeholders})"
-            );
-            let params: Vec<Value> = chunk.iter().map(|id| Value::Integer(*id)).collect();
-            tx.execute(&sql, params).await.map_err(DbError::Libsql)?;
+        for (id, replacement) in &updates {
+            let value = match replacement {
+                Some(excerpt) => Value::Text(excerpt.clone()),
+                None => Value::Null,
+            };
+            tx.execute(
+                "UPDATE entity_occurrences SET context = ?1 WHERE id = ?2",
+                vec![value, Value::Integer(*id)],
+            )
+            .await
+            .map_err(DbError::Libsql)?;
         }
         tx.commit().await.map_err(DbError::Libsql)?;
     }
@@ -115,13 +141,15 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<Option<
     .await
     .map_err(DbError::Libsql)?;
 
-    if oversized_ids.is_empty() {
+    if updates.is_empty() {
         info!("context-slim migration: no oversized entity_occurrences contexts found");
     } else {
+        let logs_kept = updates.iter().filter(|(_, r)| r.is_some()).count();
         info!(
-            rows_slimmed = oversized_ids.len(),
+            rows_slimmed = updates.len(),
+            logs_kept,
             approx_bytes_freed = bytes_freed,
-            "context-slim migration: nulled oversized entity_occurrences contexts"
+            "context-slim migration: nulled oversized contexts, kept recency excerpts for logs"
         );
     }
 
@@ -129,6 +157,91 @@ async fn slim_oversized_occurrence_contexts(conn: &Connection) -> Result<Option<
     // freelist where the shared reclaim pass will see it — no intra-page
     // hint needed.
     Ok(Some(0))
+}
+
+/// One-time data migration for vaults that ran an earlier context-slim
+/// migration, which stored long-note contexts as either NULL or a symmetric
+/// head+tail excerpt. Only **append-only logs** should carry a document-level
+/// context (a recency excerpt); coherent long notes should stay NULL and rely
+/// on Tier-1 chunk selection. This walks null-context occurrences whose source
+/// doc is still available and, for the ones that are logs, backfills the same
+/// recency excerpt [`long_note_context`] that current indexing produces. It
+/// leaves coherent long notes NULL.
+///
+/// Crash-idempotent: it only ever fills currently-null contexts, so a run
+/// interrupted after some updates committed but before the completion flag is
+/// written simply skips the already-filled rows on the next open.
+async fn backfill_excerpts_for_slimmed_contexts(conn: &Connection) -> Result<(), DbError> {
+    // Cheap short-circuit: skip the scan entirely once already applied.
+    let mut check = conn
+        .query(
+            "SELECT 1 FROM config WHERE key = ?1",
+            vec![Value::Text(CONTEXT_EXCERPT_BACKFILL_KEY.to_string())],
+        )
+        .await
+        .map_err(DbError::Libsql)?;
+    if check.next().await.map_err(DbError::Libsql)?.is_some() {
+        return Ok(());
+    }
+    drop(check);
+
+    // Null contexts joined to their source doc body. Multiple occurrences can
+    // share a file_path (several frontmatter tags/links + folder + root); each
+    // gets the same excerpt for that note.
+    let mut rows = conn
+        .query(
+            "SELECT eo.id, d.content
+             FROM entity_occurrences eo
+             JOIN docs d ON d.source_ref = eo.file_path
+             WHERE eo.context IS NULL AND d.content IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(DbError::Libsql)?;
+
+    // Only append-only logs get a context restored; coherent long notes stay
+    // NULL by design (`long_note_context` returns None for them).
+    let mut updates: Vec<(i64, String)> = Vec::new();
+    while let Some(row) = rows.next().await.map_err(DbError::Libsql)? {
+        let id: i64 = row.get(0).map_err(DbError::Libsql)?;
+        let content: String = row.get(1).map_err(DbError::Libsql)?;
+        let body = strip_frontmatter(&content);
+        if let Some(excerpt) = long_note_context(body) {
+            updates.push((id, excerpt));
+        }
+    }
+    drop(rows);
+
+    if !updates.is_empty() {
+        let tx = conn.transaction().await.map_err(DbError::Libsql)?;
+        for (id, excerpt) in &updates {
+            tx.execute(
+                "UPDATE entity_occurrences SET context = ?1 WHERE id = ?2 AND context IS NULL",
+                vec![Value::Text(excerpt.clone()), Value::Integer(*id)],
+            )
+            .await
+            .map_err(DbError::Libsql)?;
+        }
+        tx.commit().await.map_err(DbError::Libsql)?;
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?1, '1')",
+        vec![Value::Text(CONTEXT_EXCERPT_BACKFILL_KEY.to_string())],
+    )
+    .await
+    .map_err(DbError::Libsql)?;
+
+    if updates.is_empty() {
+        info!("context-excerpt backfill: no null long-note contexts to restore");
+    } else {
+        info!(
+            rows_backfilled = updates.len(),
+            "context-excerpt backfill: restored bounded excerpts for slimmed long notes"
+        );
+    }
+
+    Ok(())
 }
 
 /// One-time data migration: rewrite `chunk_embeddings.vector` and the single
