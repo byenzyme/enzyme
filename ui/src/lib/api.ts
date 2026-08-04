@@ -98,6 +98,19 @@ export async function preview(
   return data.results ?? [];
 }
 
+/// Derive a safe markdown filename from a free-form query string.
+/// Mirrors `filename_from_query` in `crates/enzyme-api/src/routes/notes.rs`.
+function filenameFromQuery(query: string): string {
+  const cleaned = query
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 96)
+    .trim();
+  return `${cleaned || "Exploration"}.md`;
+}
+
 export async function saveSynthesisNote(
   query: string,
   markdown: string
@@ -105,7 +118,10 @@ export async function saveSynthesisNote(
   const res = await fetch(`${BASE}/notes/save`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, markdown }),
+    body: JSON.stringify({
+      filename: filenameFromQuery(query),
+      content: markdown,
+    }),
   });
   return res.json();
 }
