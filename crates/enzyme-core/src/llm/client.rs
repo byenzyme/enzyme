@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -352,6 +353,21 @@ struct ChatCompletionRequest {
     stream: Option<bool>,
 }
 
+impl ChatCompletionRequest {
+    /// Whether any sampling parameter would be serialized on this request.
+    fn has_sampling_parameters(&self) -> bool {
+        self.temperature.is_some() || self.top_p.is_some() || self.top_k.is_some()
+    }
+
+    /// Remove all sampling parameters (temperature, top_p, top_k) so the
+    /// rebuilt request cannot trigger a sampling-parameter rejection again.
+    fn strip_sampling_parameters(&mut self) {
+        self.temperature = None;
+        self.top_p = None;
+        self.top_k = None;
+    }
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 enum CompletionTokenLimit {
@@ -455,6 +471,63 @@ fn anthropic_model_rejects_sampling_parameters(model: &str) -> bool {
     })
 }
 
+/// Process-wide memo of `(base_url, model)` pairs observed to reject sampling
+/// parameters at runtime (HTTP 400 mentioning temperature/top_p/top_k).
+///
+/// The hardcoded `anthropic_model_rejects_sampling_parameters` list above is an
+/// optimization that avoids a wasted request for known models; this memo is the
+/// reactive fallback that keeps generation working when a brand-new model id is
+/// missing from the list. Once a rejection is observed, every subsequent
+/// request in the same process omits sampling parameters up front — one wasted
+/// request per run, not per call.
+fn sampling_rejections() -> &'static Mutex<HashSet<(String, String)>> {
+    static REJECTIONS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    REJECTIONS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn sampling_rejection_memoized(base_url: &str, model: &str) -> bool {
+    sampling_rejections()
+        .lock()
+        .unwrap()
+        .contains(&(base_url.to_string(), model.to_string()))
+}
+
+fn memoize_sampling_rejection(base_url: &str, model: &str) {
+    sampling_rejections()
+        .lock()
+        .unwrap()
+        .insert((base_url.to_string(), model.to_string()));
+}
+
+/// Whether an LLM API error body indicates the provider rejected a sampling
+/// parameter (temperature/top_p/top_k).
+///
+/// Deliberately conservative but format-tolerant: the status must be exactly
+/// 400 (a 402 is billing, a 401 is auth — never a parameter rejection), and
+/// the body must mention one of the sampling parameter names. Provider
+/// phrasing varies ("`temperature` is deprecated for this model", "top_p is
+/// not supported", ...) so we do not pin the exact message.
+fn is_sampling_parameter_rejection(status: u16, body: &str) -> bool {
+    if status != 400 {
+        return false;
+    }
+    let body = body.to_lowercase();
+    ["temperature", "top_p", "top_k"]
+        .iter()
+        .any(|param| body.contains(param))
+}
+
+/// Whether a failed completion should be retried once with all sampling
+/// parameters omitted. Requires that the request actually INCLUDED at least
+/// one sampling parameter — a sampling-free request that 400s propagates
+/// normally, so the retry can never loop.
+fn should_retry_without_sampling(request: &ChatCompletionRequest, error: &anyhow::Error) -> bool {
+    request.has_sampling_parameters()
+        && error
+            .downcast_ref::<LlmApiError>()
+            .is_some_and(|api_err| is_sampling_parameter_rejection(api_err.status, &api_err.body))
+}
+
 fn completion_token_limit(base_url: &str, model: &str, max_tokens: u32) -> CompletionTokenLimit {
     if requires_max_completion_tokens(base_url, model) {
         CompletionTokenLimit::MaxCompletionTokens {
@@ -490,7 +563,7 @@ fn chat_completion_request(
         params.response_format
     };
 
-    ChatCompletionRequest {
+    let mut request = ChatCompletionRequest {
         model: model.to_string(),
         messages,
         token_limit: completion_token_limit(base_url, model, params.max_tokens),
@@ -501,7 +574,15 @@ fn chat_completion_request(
         top_k: provider.supports_top_k().then_some(params.top_k).flatten(),
         response_format,
         stream,
+    };
+
+    // A previous request in this process observed a sampling-parameter
+    // rejection from this (base_url, model) — omit them up front.
+    if request.has_sampling_parameters() && sampling_rejection_memoized(base_url, model) {
+        request.strip_sampling_parameters();
     }
+
+    request
 }
 
 fn chat_completions_url(base_url: &str) -> Result<String> {
@@ -734,7 +815,8 @@ impl LlmClient {
     ) -> Result<String> {
         let url = chat_completions_url(&self.base_url)?;
 
-        let request_body = chat_completion_request(&self.base_url, model, messages, params, None);
+        let mut request_body =
+            chat_completion_request(&self.base_url, model, messages, params, None);
 
         debug!(
             "Sending chat completion request to {} with model {}",
@@ -757,6 +839,20 @@ impl LlmClient {
                     Err(e)
                 }
             }
+            Err(e) if should_retry_without_sampling(&request_body, &e) => {
+                // The provider rejected a sampling parameter this model no
+                // longer accepts (a model id missing from the hardcoded omit
+                // list). Retry once with all sampling parameters removed and
+                // remember the outcome so subsequent calls omit them up front.
+                warn!(
+                    model,
+                    "provider rejected sampling parameters; retrying without them: {e}"
+                );
+                memoize_sampling_rejection(&self.base_url, model);
+                request_body.strip_sampling_parameters();
+                self.send_chat_completion(&url, &api_key, &request_body)
+                    .await
+            }
             Err(e) => Err(e),
         }
     }
@@ -773,7 +869,7 @@ impl LlmClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let url = chat_completions_url(&self.base_url)?;
 
-        let request_body =
+        let mut request_body =
             chat_completion_request(&self.base_url, model, messages, params, Some(true));
 
         debug!(
@@ -802,11 +898,46 @@ impl LlmClient {
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             warn!("LLM API returned error status {}: {}", status, error_body);
-            return Err(LlmApiError {
-                status: status.as_u16(),
-                body: error_body,
+
+            if request_body.has_sampling_parameters()
+                && is_sampling_parameter_rejection(status.as_u16(), &error_body)
+            {
+                // Same reactive fallback as the non-streaming path: rebuild
+                // the request with all sampling parameters omitted, retry
+                // once, and memoize so subsequent calls omit them up front.
+                warn!(
+                    model,
+                    "provider rejected sampling parameters; retrying stream without them"
+                );
+                memoize_sampling_rejection(&self.base_url, model);
+                request_body.strip_sampling_parameters();
+                response = self
+                    .send_streaming_request(&url, &self.current_api_key(), &request_body)
+                    .await?;
+
+                let retry_status = response.status();
+                if !retry_status.is_success() {
+                    let retry_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Failed to read error body".to_string());
+                    warn!(
+                        "LLM API returned error status {} on sampling-free retry: {}",
+                        retry_status, retry_body
+                    );
+                    return Err(LlmApiError {
+                        status: retry_status.as_u16(),
+                        body: retry_body,
+                    }
+                    .into());
+                }
+            } else {
+                return Err(LlmApiError {
+                    status: status.as_u16(),
+                    body: error_body,
+                }
+                .into());
             }
-            .into());
         }
 
         let byte_stream = response.bytes_stream();
@@ -1438,6 +1569,165 @@ mod tests {
         assert!((json["top_p"].as_f64().unwrap() - 0.8).abs() < 1e-6);
         assert_eq!(json["top_k"], 40);
         assert_eq!(json["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn sampling_rejection_detection_accepts_provider_phrasing_variants() {
+        // Anthropic's exact wording varies by model generation; any 400 that
+        // mentions a sampling parameter name qualifies.
+        for body in [
+            r#"{"error":{"type":"invalid_request_error","message":"temperature is deprecated for this model"}}"#,
+            r#"{"error":{"type":"invalid_request_error","message":"`top_p` is not supported by this model"}}"#,
+            r#"{"error":{"type":"invalid_request_error","message":"top_k may not be set"}}"#,
+            "Temperature is not supported on this endpoint",
+        ] {
+            assert!(is_sampling_parameter_rejection(400, body), "body: {body}");
+        }
+    }
+
+    #[test]
+    fn sampling_rejection_detection_rejects_non_matches() {
+        // 402 is billing, never a parameter rejection — even if the body
+        // happens to mention temperature.
+        assert!(!is_sampling_parameter_rejection(
+            402,
+            r#"{"error":{"message":"temperature is deprecated for this model"}}"#
+        ));
+        // A 400 about a different parameter must propagate unchanged.
+        assert!(!is_sampling_parameter_rejection(
+            400,
+            r#"{"error":{"type":"invalid_request_error","message":"max_tokens: value too large"}}"#
+        ));
+        assert!(!is_sampling_parameter_rejection(400, "malformed JSON body"));
+        // 5xx errors are transient server failures, not parameter rejections.
+        assert!(!is_sampling_parameter_rejection(
+            500,
+            "temperature service unavailable"
+        ));
+    }
+
+    #[test]
+    fn strip_sampling_parameters_removes_all_three_and_nothing_else() {
+        let mut request = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "anthropic/claude-opus-4-8",
+            vec![Message::text("user", "hello")],
+            GenerationParams {
+                max_tokens: 123,
+                top_k: Some(40),
+                response_format: Some(ResponseFormat::JsonObject),
+                ..GenerationParams::default()
+            },
+            None,
+        );
+        assert!(request.has_sampling_parameters());
+
+        request.strip_sampling_parameters();
+        assert!(!request.has_sampling_parameters());
+
+        let json = serde_json::to_value(request).unwrap();
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("top_p").is_none());
+        assert!(json.get("top_k").is_none());
+        // Everything else survives the rebuild.
+        assert_eq!(json["max_tokens"], 123);
+        assert_eq!(json["response_format"]["type"], "json_object");
+        assert_eq!(json["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn retry_eligibility_requires_sampling_params_and_typed_400() {
+        let with_sampling = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "anthropic/claude-next-9",
+            vec![Message::text("user", "hello")],
+            GenerationParams::default(),
+            None,
+        );
+        let sampling_400 = anyhow::Error::from(LlmApiError {
+            status: 400,
+            body: r#"{"error":{"type":"invalid_request_error","message":"temperature is deprecated for this model"}}"#.to_string(),
+        });
+        assert!(should_retry_without_sampling(&with_sampling, &sampling_400));
+
+        // A request that already omitted all sampling params must never be
+        // retried — this is the no-infinite-retry guarantee.
+        let mut sampling_free = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "anthropic/claude-next-9",
+            vec![Message::text("user", "hello")],
+            GenerationParams::default(),
+            None,
+        );
+        sampling_free.strip_sampling_parameters();
+        assert!(!should_retry_without_sampling(&sampling_free, &sampling_400));
+
+        // Untyped errors (transport failures etc.) are never retried here.
+        let untyped = anyhow::anyhow!("temperature 400 mentioned in a non-API error");
+        assert!(!should_retry_without_sampling(&with_sampling, &untyped));
+
+        // Typed non-400s are never retried here.
+        let billing_402 = anyhow::Error::from(LlmApiError {
+            status: 402,
+            body: "temperature aside, you are out of credits".to_string(),
+        });
+        assert!(!should_retry_without_sampling(&with_sampling, &billing_402));
+    }
+
+    /// Once a rejection is memoized for a (base_url, model) pair, requests
+    /// built for that pair omit sampling parameters up front, while other
+    /// models on the same base URL are unaffected.
+    ///
+    /// Uses a base URL unique to this test: the memo is process-global and
+    /// tests run in parallel.
+    #[test]
+    fn memoized_rejection_strips_sampling_parameters_up_front() {
+        let base_url = "https://memo-isolated.test/v1";
+        let params = || GenerationParams {
+            top_k: Some(40),
+            ..GenerationParams::default()
+        };
+
+        // Before memoization: sampling params are sent (Unknown provider).
+        let before = chat_completion_request(
+            base_url,
+            "claude-next-9",
+            vec![Message::text("user", "hello")],
+            params(),
+            None,
+        );
+        let json = serde_json::to_value(before).unwrap();
+        assert!(json.get("temperature").is_some());
+        assert!(json.get("top_p").is_some());
+        assert!(json.get("top_k").is_some());
+
+        memoize_sampling_rejection(base_url, "claude-next-9");
+        assert!(sampling_rejection_memoized(base_url, "claude-next-9"));
+
+        // After memoization: all sampling params omitted up front.
+        let after = chat_completion_request(
+            base_url,
+            "claude-next-9",
+            vec![Message::text("user", "hello")],
+            params(),
+            None,
+        );
+        let json = serde_json::to_value(after).unwrap();
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("top_p").is_none());
+        assert!(json.get("top_k").is_none());
+        assert_eq!(json["max_tokens"], 8192);
+
+        // A different model on the same base URL is unaffected.
+        let other = chat_completion_request(
+            base_url,
+            "some-other-model",
+            vec![Message::text("user", "hello")],
+            params(),
+            None,
+        );
+        let json = serde_json::to_value(other).unwrap();
+        assert!(json.get("temperature").is_some());
     }
 
     #[test]
