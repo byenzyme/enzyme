@@ -10,6 +10,13 @@ use crate::models::{EMBEDDING_DIMENSION, INLINE_CONTEXT_MAX_WORDS, representativ
 /// other long note stores nothing (Tier-1 chunk selection handles it, and a
 /// body excerpt would only pollute the link centroid). `body` must already be
 /// frontmatter-stripped.
+///
+/// Unlike the live pipeline — which threads the structure resolved once at
+/// process time through `ProcessedDocument::append_log` — this migration only
+/// has stored bodies, so it re-runs detection here by necessity. That also
+/// means it cannot see `type:` frontmatter overrides; a forced-on log whose
+/// dates the detector cannot parse simply keeps a `None` context, matching the
+/// pipeline's degraded semantics for that case.
 fn long_note_context(body: &str) -> Option<String> {
     detect_append_log(body).map(|log| representative_excerpt(&most_recent_entry(body, &log)))
 }
@@ -326,7 +333,8 @@ async fn migrate_embeddings_to_int8(conn: &Connection) -> Result<Option<u64>, Db
     let packed_update = if let Some(row) = packed_rows.next().await.map_err(DbError::Libsql)? {
         let count: i64 = row.get(0).map_err(DbError::Libsql)?;
         let vectors_blob: Vec<u8> = row.get(1).map_err(DbError::Libsql)?;
-        if count > 0 && !quantize::is_int8_v1_packed_len(vectors_blob.len(), count as usize, expected_dim)
+        if count > 0
+            && !quantize::is_int8_v1_packed_len(vectors_blob.len(), count as usize, expected_dim)
         {
             let decoded = quantize::decode_packed(&vectors_blob, count as usize, expected_dim);
             let refs: Vec<&[f32]> = decoded.iter().map(|v| v.as_slice()).collect();

@@ -8,9 +8,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::db::Database;
-use crate::document::{
-    DocumentProcessor, FileDiscovery, ProcessedDocument, detect_append_log, most_recent_entry,
-};
+use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument, most_recent_entry};
 use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
     representative_excerpt,
@@ -300,11 +298,13 @@ impl<'a> IndexingPipeline<'a> {
                 let body = crate::document::strip_frontmatter(&doc.content);
                 if body.split_whitespace().count() < INLINE_CONTEXT_MAX_WORDS {
                     Some(body.to_string())
-                } else if doc.is_log {
-                    detect_append_log(body)
-                        .map(|log| representative_excerpt(&most_recent_entry(body, &log)))
                 } else {
-                    None
+                    // Log structure was resolved once at process time; a
+                    // forced-on log with no detectable entries stays `None`
+                    // here by design (see `ProcessedDocument::append_log`).
+                    doc.append_log
+                        .as_ref()
+                        .map(|log| representative_excerpt(&most_recent_entry(body, log)))
                 }
             });
 
@@ -1176,7 +1176,10 @@ mod tests {
         // Five bottom-appended dated entries → auto-detected as a log.
         let mut body = String::new();
         for m in 1..=5 {
-            body.push_str(&format!("## 2026-0{m}-01\nentry {m} {}\n", "word ".repeat(120)));
+            body.push_str(&format!(
+                "## 2026-0{m}-01\nentry {m} {}\n",
+                "word ".repeat(120)
+            ));
         }
         assert!(body.split_whitespace().count() >= INLINE_CONTEXT_MAX_WORDS);
 

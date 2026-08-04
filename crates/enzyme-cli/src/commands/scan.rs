@@ -1104,6 +1104,7 @@ mod tests {
             chunks: Vec::new(),
             frontmatter,
             is_log: false,
+            append_log: None,
         }
     }
 

@@ -188,6 +188,62 @@ fn try_split_month_day(s: &str, sep: char, year: i32) -> Option<DateTime<Utc>> {
     Some(naive_date_to_utc(date))
 }
 
+/// Resolve a month token to its 1-based month number. Accepts full names
+/// ("July"), the standard 3-letter abbreviations ("Jul"), "Sept", and an
+/// optional trailing period ("Jul."), case-insensitively. The match is on the
+/// whole token — "Julia" is not July — so callers can feed arbitrary leading
+/// words without false hits.
+///
+/// Shared between path-based date extraction and append-log header parsing
+/// (`super::appendlog`) so both speak the same month vocabulary.
+pub(crate) fn month_from_token(token: &str) -> Option<u32> {
+    let t = token.trim_end_matches('.').to_ascii_lowercase();
+    if t.len() < 3 {
+        return None;
+    }
+    for (i, &name) in MONTHS.iter().enumerate() {
+        if t == name || t == name[..3] || (name == "september" && t == "sept") {
+            return Some((i + 1) as u32);
+        }
+    }
+    None
+}
+
+/// Parse a leading 4-digit year in the plausible range. Rejects longer digit
+/// runs (`20261` is not a year) and out-of-range values. Shared with
+/// append-log header parsing.
+pub(crate) fn parse_leading_year(s: &str) -> Option<i32> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if end != 4 {
+        return None;
+    }
+    let year: i32 = s[..4].parse().ok()?;
+    (1900..=2100).contains(&year).then_some(year)
+}
+
+/// Parse ` Day, Year` or ` Day Year` after a month name, as a plain date.
+/// The core of filename strategy 4, shared with append-log header parsing.
+pub(crate) fn parse_day_comma_year(after: &str, month: u32) -> Option<NaiveDate> {
+    let trimmed = after.trim_start();
+    // Extract day digits
+    let day_end = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    if day_end == 0 {
+        return None;
+    }
+    let day: u32 = trimmed[..day_end].parse().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Skip optional comma and whitespace, then take the year.
+    let rest = trimmed[day_end..].trim_start_matches(',').trim_start();
+    let year = parse_leading_year(rest)?;
+
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
 /// Strategy 4: month name in filename. Handles:
 ///   - "March 15, 2024 standup" → 2024-03-15
 ///   - "January 2024"           → 2024-01-01
@@ -212,51 +268,12 @@ fn parse_month_name_in_filename(stem: &str) -> Option<DateTime<Utc>> {
 
 /// Parse ` Day, Year` or ` Day Year` after a month name.
 fn parse_month_day_year(after: &str, month: u32) -> Option<DateTime<Utc>> {
-    let trimmed = after.trim_start();
-    // Extract day digits
-    let day_end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    if day_end == 0 {
-        return None;
-    }
-    let day: u32 = trimmed[..day_end].parse().ok()?;
-    if !(1..=31).contains(&day) {
-        return None;
-    }
-
-    // Skip optional comma and whitespace
-    let rest = trimmed[day_end..].trim_start_matches(',').trim_start();
-    // Extract year
-    let year_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    if year_end < 4 {
-        return None;
-    }
-    let year: i32 = rest[..year_end].parse().ok()?;
-    if !(1900..=2100).contains(&year) {
-        return None;
-    }
-
-    let date = NaiveDate::from_ymd_opt(year, month, day)?;
-    Some(naive_date_to_utc(date))
+    parse_day_comma_year(after, month).map(naive_date_to_utc)
 }
 
 /// Parse ` Year` after a month name (day defaults to 1).
 fn parse_month_year(after: &str, month: u32) -> Option<DateTime<Utc>> {
-    let trimmed = after.trim_start();
-    let year_end = trimmed
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    if year_end < 4 {
-        return None;
-    }
-    let year: i32 = trimmed[..year_end].parse().ok()?;
-    if !(1900..=2100).contains(&year) {
-        return None;
-    }
-
+    let year = parse_leading_year(after.trim_start())?;
     let date = NaiveDate::from_ymd_opt(year, month, 1)?;
     Some(naive_date_to_utc(date))
 }

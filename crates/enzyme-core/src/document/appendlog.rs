@@ -18,9 +18,12 @@
 use chrono::NaiveDate;
 
 use super::chunking::chunk_document;
+use super::datepath::{month_from_token, parse_day_comma_year, parse_leading_year};
 
 /// Minimum number of internal date headers before a body is considered a log.
-const MIN_LOG_ENTRIES: usize = 3;
+/// Also the auto-detect bar for entries with real bodies (see
+/// [`entries_with_body`] and the processor's auto-flag gate).
+pub const MIN_LOG_ENTRIES: usize = 3;
 
 /// Fraction of adjacent entry-pairs that must agree on a direction for the body
 /// to count as append-only (rather than scattered incidental dates).
@@ -51,13 +54,32 @@ pub struct AppendLog {
     pub entries: Vec<LogEntry>,
 }
 
-/// Parse a leading `YYYY-MM-DD` / `YYYY/MM/DD` date from a header-ish line,
-/// after stripping Markdown heading/list/quote/wikilink markers. High precision:
-/// only fires when the date is the line's leading token.
+/// Parse a leading date from a header-ish line, after stripping Markdown
+/// heading/list/quote/wikilink markers. High precision: only fires when the
+/// date is the line's leading token — dates cited mid-sentence never match.
+/// Recognised forms, tried in order:
+///
+/// - `YYYY-MM-DD` / `YYYY/MM/DD` (ISO-ish)
+/// - `MM/DD/YYYY` / `MM-DD-YYYY` (US ordering assumed; a first component > 12
+///   cannot be a month and flips the reading to day-first, e.g. `28/07/2026`)
+/// - `July 28, 2026` / `Jul 28 2026` (month name, full or abbreviated, comma
+///   optional)
+/// - `28 July 2026` (day-first with month name)
+///
+/// Month vocabulary and day/year parsing are shared with [`super::datepath`]
+/// so header dates and file-path dates agree on what counts as a date.
 fn parse_header_date(line: &str) -> Option<NaiveDate> {
     let s = line
         .trim_start()
         .trim_start_matches(|c| matches!(c, '#' | '-' | '*' | '>' | '[' | '_' | ' ' | '\t'));
+    parse_iso_header(s)
+        .or_else(|| parse_numeric_mdy(s))
+        .or_else(|| parse_month_name_header(s))
+        .or_else(|| parse_day_month_year(s))
+}
+
+/// `YYYY-MM-DD` / `YYYY/MM/DD` at the head of the (marker-stripped) line.
+fn parse_iso_header(s: &str) -> Option<NaiveDate> {
     let b = s.as_bytes();
     if b.len() < 10 {
         return None;
@@ -76,6 +98,51 @@ fn parse_header_date(line: &str) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(year, month, day)
 }
 
+/// Leading run of 1..=`max` ASCII digits → (value, rest after the digits).
+fn take_digits(s: &str, max: usize) -> Option<(u32, &str)> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if end == 0 || end > max {
+        return None;
+    }
+    Some((s[..end].parse().ok()?, &s[end..]))
+}
+
+/// `MM/DD/YYYY` or `MM-DD-YYYY` (matching separators) at the head of the line.
+/// US ordering is assumed; when the first component exceeds 12 — so it cannot
+/// be a month — the pair is read day-first instead (`28/07/2026`).
+fn parse_numeric_mdy(s: &str) -> Option<NaiveDate> {
+    let (a, rest) = take_digits(s, 2)?;
+    let sep = rest.chars().next()?;
+    if sep != '/' && sep != '-' {
+        return None;
+    }
+    let (b, rest) = take_digits(&rest[1..], 2)?;
+    let rest = rest.strip_prefix(sep)?;
+    let year = parse_leading_year(rest)?;
+    let (month, day) = if a <= 12 { (a, b) } else { (b, a) };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// `July 28, 2026` / `Jul 28 2026`: month token first, then day and year.
+fn parse_month_name_header(s: &str) -> Option<NaiveDate> {
+    let token_end = s.find(char::is_whitespace).unwrap_or(s.len());
+    let month = month_from_token(&s[..token_end])?;
+    parse_day_comma_year(&s[token_end..], month)
+}
+
+/// `28 July 2026`: day first, then month name, then year.
+fn parse_day_month_year(s: &str) -> Option<NaiveDate> {
+    let (day, rest) = take_digits(s, 2)?;
+    if !(1..=31).contains(&day) || !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let month = month_from_token(&rest[..token_end])?;
+    let year = parse_leading_year(rest[token_end..].trim_start_matches([' ', '\t', ',']))?;
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
 /// Detect whether `body` (frontmatter already stripped) is an append-only log.
 ///
 /// Returns `None` unless the body carries at least [`MIN_LOG_ENTRIES`] internal
@@ -85,7 +152,10 @@ pub fn detect_append_log(body: &str) -> Option<AppendLog> {
     let mut offset = 0usize;
     for line in body.split_inclusive('\n') {
         if let Some(date) = parse_header_date(line) {
-            entries.push(LogEntry { date, start: offset });
+            entries.push(LogEntry {
+                date,
+                start: offset,
+            });
         }
         offset += line.len();
     }
@@ -127,6 +197,27 @@ fn entry_span(body: &str, log: &AppendLog, i: usize) -> (usize, usize) {
         .map(|e| e.start)
         .unwrap_or(body.len());
     (start, end)
+}
+
+/// Number of entries carrying a non-empty body: real content on the lines
+/// below the dated header line.
+///
+/// This is the structural discriminator between a journal and a stub note
+/// that merely *lists* dates — a page of `[[2026-07-27]]` backlinks or a bare
+/// dated scaffold parses as N monotonic headers, but every "entry" is a single
+/// line with nothing under it. A real append-only log writes prose beneath its
+/// date headers. Callers (the processor's auto-flag gate) require
+/// [`MIN_LOG_ENTRIES`] such entries before flagging without an explicit
+/// `type:` declaration.
+pub fn entries_with_body(body: &str, log: &AppendLog) -> usize {
+    (0..log.entries.len())
+        .filter(|&i| {
+            let (start, end) = entry_span(body, log, i);
+            body[start..end]
+                .split_once('\n')
+                .is_some_and(|(_, below)| !below.trim().is_empty())
+        })
+        .count()
 }
 
 /// Chunk an append-only log into chronological, entry-aligned chunks.
@@ -183,7 +274,10 @@ mod tests {
 
     #[test]
     fn detects_bottom_append_log() {
-        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"], 20);
+        let body = log_body(
+            &["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01"],
+            20,
+        );
         let log = detect_append_log(&body).expect("should detect a log");
         assert_eq!(log.direction, LogDirection::OldestFirst);
         assert_eq!(log.entries.len(), 4);
@@ -191,7 +285,10 @@ mod tests {
 
     #[test]
     fn detects_top_append_reverse_chronological() {
-        let body = log_body(&["2026-04-01", "2026-03-01", "2026-02-01", "2026-01-01"], 20);
+        let body = log_body(
+            &["2026-04-01", "2026-03-01", "2026-02-01", "2026-01-01"],
+            20,
+        );
         let log = detect_append_log(&body).expect("should detect a reverse log");
         assert_eq!(log.direction, LogDirection::NewestFirst);
     }
@@ -225,6 +322,133 @@ mod tests {
         assert!(parse_header_date("### 2026-07-28").is_some());
         assert!(parse_header_date("plain prose 2026-07-28 mid-line").is_none());
         assert!(parse_header_date("## 2026-13-40 bad date").is_none());
+    }
+
+    // --- Multi-format header dates ---
+
+    #[test]
+    fn header_date_parses_full_month_name_with_comma() {
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_header_date("## July 28, 2026"), Some(expect));
+        assert_eq!(
+            parse_header_date("## [[July 28, 2026]] standup"),
+            Some(expect)
+        );
+    }
+
+    #[test]
+    fn header_date_parses_abbreviated_month_no_comma() {
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_header_date("### Jul 28 2026"), Some(expect));
+        assert_eq!(parse_header_date("- Jul. 28 2026 notes"), Some(expect));
+        assert_eq!(
+            parse_header_date("## Sept 3 2026"),
+            NaiveDate::from_ymd_opt(2026, 9, 3)
+        );
+    }
+
+    #[test]
+    fn header_date_parses_numeric_us_order() {
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_header_date("## 07/28/2026"), Some(expect));
+        assert_eq!(parse_header_date("## 7/28/2026"), Some(expect));
+        assert_eq!(parse_header_date("## 07-28-2026"), Some(expect));
+    }
+
+    #[test]
+    fn header_date_numeric_day_first_when_month_impossible() {
+        // First component > 12 cannot be a month → read day-first.
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_header_date("## 28/07/2026"), Some(expect));
+        assert_eq!(parse_header_date("## 28-07-2026"), Some(expect));
+        // Both components > 12 is not a date at all.
+        assert!(parse_header_date("## 28/28/2026").is_none());
+    }
+
+    #[test]
+    fn header_date_parses_day_month_year() {
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_header_date("## 28 July 2026"), Some(expect));
+        assert_eq!(parse_header_date("## 28 Jul 2026 retro"), Some(expect));
+    }
+
+    #[test]
+    fn header_date_rejects_near_misses() {
+        // A month-ish word that is not a month.
+        assert!(parse_header_date("## Julia 28, 2026").is_none());
+        // Month name without a day+year is a heading, not a dated entry.
+        assert!(parse_header_date("## March meeting notes").is_none());
+        assert!(parse_header_date("## July 2026 planning").is_none());
+        // Mid-line dates never fire.
+        assert!(parse_header_date("we shipped on July 28, 2026").is_none());
+        assert!(parse_header_date("ratio was 7/28/2026 units").is_none());
+        // Numeric forms need a real 4-digit year.
+        assert!(parse_header_date("## 7/28/26").is_none());
+        assert!(parse_header_date("## 12-3456").is_none());
+        // Mixed separators are not a date.
+        assert!(parse_header_date("## 07/28-2026").is_none());
+    }
+
+    #[test]
+    fn detects_log_with_month_name_headers() {
+        let filler = "word ".repeat(20);
+        let body = ["July 26, 2026", "July 27, 2026", "July 28, 2026"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        let log = detect_append_log(&body).expect("month-name log should detect");
+        assert_eq!(log.direction, LogDirection::OldestFirst);
+        assert_eq!(log.entries.len(), 3);
+    }
+
+    #[test]
+    fn detects_log_with_mixed_date_formats() {
+        // A journal whose author drifted between conventions still reads as
+        // one monotonic timeline.
+        let filler = "word ".repeat(20);
+        let body = ["2026-07-25", "July 26, 2026", "07/27/2026", "28 Jul 2026"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        let log = detect_append_log(&body).expect("mixed-format log should detect");
+        assert_eq!(log.direction, LogDirection::OldestFirst);
+        assert_eq!(log.entries.len(), 4);
+    }
+
+    #[test]
+    fn mixed_formats_still_reject_non_monotonic() {
+        // New formats widen recall; the monotonic gate still holds precision.
+        let filler = "word ".repeat(20);
+        let body = ["July 28, 2026", "2026-01-05", "07/04/2026", "2 Feb 2026"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        assert!(detect_append_log(&body).is_none());
+    }
+
+    // --- Non-empty-body gate ---
+
+    #[test]
+    fn entries_with_body_counts_real_entries() {
+        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 10);
+        let log = detect_append_log(&body).unwrap();
+        assert_eq!(entries_with_body(&body, &log), 3);
+    }
+
+    #[test]
+    fn entries_with_body_is_zero_for_dated_line_list() {
+        // A stub note listing dated backlinks parses as headers, but every
+        // "entry" is a single line with nothing under it.
+        let body = "# Days\n\n- [[2026-07-25]]\n- [[2026-07-26]]\n- [[2026-07-27]]\n";
+        let log = detect_append_log(body).expect("structure alone still parses");
+        assert_eq!(entries_with_body(body, &log), 0);
+    }
+
+    #[test]
+    fn entries_with_body_ignores_blank_only_entries() {
+        let body = "## 2026-01-01\n\n## 2026-02-01\nreal prose here\n## 2026-03-01\n\n\n";
+        let log = detect_append_log(body).unwrap();
+        assert_eq!(entries_with_body(body, &log), 1);
     }
 
     #[test]
