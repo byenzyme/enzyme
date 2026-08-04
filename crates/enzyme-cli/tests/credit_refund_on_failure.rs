@@ -7,13 +7,10 @@
 //! every completion with HTTP 402. Catalyst generation therefore produces
 //! nothing.
 //!
-//! CORRECT BEHAVIOR (what this test asserts): the user's net credit change
-//! across such a run is ZERO. Credits taken up front must be given back when
-//! the work they paid for produced no catalysts.
-//!
-//! ACTUAL BEHAVIOR (the bug, unfixed): `deduct_credits` fires *before* any LLM
-//! work (`init.rs:611` and `init.rs:1352`) and there is no refund path on any
-//! failure branch, so the run bills 3.0 credits for zero catalysts.
+//! CONTRACT (deduct-after-success): the user's net credit change across such a
+//! run is ZERO. `init` deducts the 3.0 hosted credits only AFTER generation
+//! and only when `catalysts_generated > 0`, so a run that produced nothing
+//! never calls `/v1/credits/deduct` at all — no refund endpoint is needed.
 
 mod support;
 
@@ -87,8 +84,7 @@ fn diagnostics(api: &MockEnzymeApi, llm: &MockLlm, out: &CliOutput) -> String {
 }
 
 #[test]
-#[ignore = "known defect: hosted credits are not refunded when catalyst generation produces nothing"]
-fn hosted_init_refunds_credits_when_catalyst_generation_produces_nothing() {
+fn hosted_init_nets_zero_credits_when_catalyst_generation_produces_nothing() {
     let fixture = VaultFixture::new();
 
     // Fake LLM: reachable, authenticates fine, but 402s every completion.
@@ -135,15 +131,21 @@ fn hosted_init_refunds_credits_when_catalyst_generation_produces_nothing() {
          but the run reported {generated}\n{diag}"
     );
 
-    // The bug. Correct behavior: a run that generated nothing costs nothing.
+    // The contract: a run that generated nothing costs nothing. Under
+    // deduct-after-success the deduct endpoint is never even consulted.
     assert_eq!(
         billed,
         0.0,
         "CREDIT LEAK: hosted init generated {generated} catalysts but billed the \
-         user {billed} credits with no refund. Expected a net credit change of 0.0 \
-         across a run that produced nothing — credits deducted up front \
-         (init.rs:611 / init.rs:1352) must be refunded when catalyst generation \
-         fails. Observed {} deduct call(s) and no compensating refund.\n{diag}",
+         user {billed} credits. Expected a net credit change of 0.0 across a run \
+         that produced nothing (deduct-after-success). Observed {} deduct \
+         call(s).\n{diag}",
         api.deduct_calls(),
+    );
+    assert_eq!(
+        api.deduct_calls(),
+        0,
+        "deduct-after-success: a hosted run that produced nothing must never call \
+         POST /v1/credits/deduct at all.\n{diag}"
     );
 }

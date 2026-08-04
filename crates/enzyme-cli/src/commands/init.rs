@@ -572,6 +572,10 @@ pub async fn run_init(
     })
     .ok();
 
+    // Kept when hosted credential resolution fails, so the skip diagnostic can
+    // distinguish a reachable server's structured 402 (credits exhausted) from
+    // a genuine network/parse failure.
+    let mut hosted_resolve_error: Option<anyhow::Error> = None;
     let api_config = if catalyst_generation_planned(&sel_result.entities) {
         if !use_env_llm && !byok_active() {
             require_login_for_hosted_init_if_needed(vault_path, &paths)?;
@@ -590,6 +594,7 @@ pub async fn run_init(
                         .context("--use-env-llm was set but no env LLM config could be resolved");
                 }
                 tracing::warn!("API config resolution failed: {}", e);
+                hosted_resolve_error = Some(e);
                 None
             }
         };
@@ -605,32 +610,9 @@ pub async fn run_init(
             }
         }
 
-        // Free-tier preflight: deduct 3 credits only when catalyst generation
-        // will run. BYOK users pay their own inference and skip this gate.
-        if resolved.as_ref().map_or(false, |(cfg, _)| {
-            matches!(
-                cfg.provider,
-                enzyme_core::llm::ConfigProvider::ServerFallback
-            )
-        }) {
-            let auth_path = paths.auth_token();
-            if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-                let remaining =
-                    enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init")
-                        .await?;
-                if remaining <= 3.0 && !quiet {
-                    eprintln!(
-                        "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
-                        crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                        remaining,
-                        crossterm::style::ResetColor,
-                    );
-                }
-            } else {
-                debug!("hosted init has no login token; skipping account credit preflight");
-            }
-        }
-
+        // The 3-credit hosted deduction happens AFTER generation succeeds (see
+        // below): a run that produces no catalysts must net zero credits, and
+        // no refund endpoint exists to compensate an up-front charge.
         resolved
     } else {
         debug!("init selected no entities; skipping LLM credential resolution");
@@ -824,9 +806,46 @@ pub async fn run_init(
         })
         .ok();
 
+        // Post-success deduction: hosted runs are billed 3 credits only after
+        // generation actually produced catalysts (defer-until-success — no
+        // refund endpoint exists, so nothing may be charged up front). BYOK
+        // (`ConfigProvider::Env`) pays its own inference and is never billed.
+        if stats.catalysts_generated > 0
+            && matches!(
+                resolved.provider,
+                enzyme_core::llm::ConfigProvider::ServerFallback
+            )
+        {
+            let auth_path = paths.auth_token();
+            if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+                let remaining =
+                    enzyme_core::config::credits::deduct_credits(&token.api_key, 3.0, "init")
+                        .await?;
+                if remaining <= 3.0 && !quiet {
+                    eprintln!(
+                        "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
+                        crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                        remaining,
+                        crossterm::style::ResetColor,
+                    );
+                }
+            } else {
+                debug!("hosted init has no login token; skipping account credit deduction");
+            }
+        }
+
         Some(stats)
     } else {
-        let msg = "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string();
+        // A structured 402 from the hosted free-config fetch means the server
+        // was reachable and refused for credits — say so (this is the one
+        // place top-up guidance belongs). Anything else keeps the catch-all.
+        let msg = match hosted_resolve_error
+            .as_ref()
+            .and_then(|e| e.downcast_ref::<enzyme_core::llm::EnzymeCreditsExhausted>())
+        {
+            Some(credits_err) => format!("{credits_err}. Skipping catalyst generation."),
+            None => "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string(),
+        };
         tx.send(DisplayEvent::ApiSkipped(msg.clone())).ok();
         warnings.push(msg);
         None
@@ -1501,33 +1520,6 @@ async fn build_and_activate_epoch(
         "embedding backend changed after epoch scheduling"
     );
 
-    // Free-tier preflight: deduct 1 credit up front. Bail before LLM work
-    // if balance is insufficient. BYOK users skip this gate.
-    if matches!(
-        &api_config.provider,
-        enzyme_core::llm::ConfigProvider::ServerFallback
-    ) {
-        let auth_home = EnzymePaths::enzyme_home()?;
-        let auth_path = auth_home.join("auth.json");
-        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
-            let remaining =
-                enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh")
-                    .await?;
-            if remaining <= 3.0 {
-                eprintln!(
-                    "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
-                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
-                    remaining,
-                    crossterm::style::ResetColor,
-                );
-            }
-        } else {
-            // Loginless bootstrap configs are gated server-side; mirror the
-            // init credit preflight instead of hard-failing here.
-            debug!("hosted refresh has no login token; skipping account credit preflight");
-        }
-    }
-
     let cat_pipeline = CatalystPipeline::new(&db, &llm, Some(svc));
 
     let vault_context = {
@@ -1575,6 +1567,36 @@ async fn build_and_activate_epoch(
             .unwrap_or_else(|| "catalyst refresh failed quality checks".to_string());
         tracing::warn!(message = %message, "refresh stage=catalysts status=failed");
         anyhow::bail!("{message}");
+    }
+
+    // Post-success deduction: bill the 1-credit hosted refresh only after
+    // generation produced catalysts (defer-until-success; a refresh that
+    // generated nothing must net zero credits). BYOK refreshes skip billing.
+    if stats.catalysts_generated > 0
+        && matches!(
+            &api_config.provider,
+            enzyme_core::llm::ConfigProvider::ServerFallback
+        )
+    {
+        let auth_home = EnzymePaths::enzyme_home()?;
+        let auth_path = auth_home.join("auth.json");
+        if let Ok(token) = enzyme_core::config::auth::AuthToken::load(&auth_path) {
+            let remaining =
+                enzyme_core::config::credits::deduct_credits(&token.api_key, 1.0, "refresh")
+                    .await?;
+            if remaining <= 3.0 {
+                eprintln!(
+                    "  {}{:.1} credits remaining — visit app.enzyme.garden/plans{}",
+                    crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow),
+                    remaining,
+                    crossterm::style::ResetColor,
+                );
+            }
+        } else {
+            // Loginless bootstrap configs are gated server-side; mirror the
+            // init credit handling instead of hard-failing here.
+            debug!("hosted refresh has no login token; skipping account credit deduction");
+        }
     }
 
     // Carry forward prior catalysts for any selected entity that generated none

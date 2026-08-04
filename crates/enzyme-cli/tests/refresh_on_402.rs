@@ -10,26 +10,18 @@
 //! calls `try_refresh_key`, which invalidates the free-config cache, re-fetches
 //! a brand new key, and replays the request with it.
 //!
-//! That recovery is gated on HTTP **401 only** — `client.rs:693` (buffered) and
-//! `client.rs:732` (streaming) both test `status == 401`. Providers also retire
-//! an exhausted lease with **402**, and a 402 means exactly the same thing from
-//! the client's point of view: *this lease is dead, go get another one*. The
-//! correct behavior is therefore identical for both statuses.
+//! That recovery is deliberately gated on HTTP **401 only**. A **402** on a
+//! completion is handled by a different, agreed policy: it trips the catalyst
+//! pipeline's payment-required circuit breaker (typed on `LlmApiError.status
+//! == 402`), which stops generation with a MODE-NEUTRAL provider-capacity
+//! message. Billing errors can only come from billing endpoints (free-config
+//! and `/v1/credits/deduct`), so the completion 402 must never surface a
+//! hosted top-up directive — and reminting is not attempted, because hammering
+//! a 402ing provider mid-run is exactly what the breaker exists to prevent.
 //!
-//! Both tests below drive the real `enzyme init` binary against a mock Enzyme
-//! API and a mock LLM, and assert the same three observable consequences of a
-//! refresh:
-//!
-//!   1. the free-config endpoint is hit a second time (the re-mint),
-//!   2. the replayed LLM request carries the *new* key, and
-//!   3. the run is not aborted by the dead lease.
-//!
-//! `refresh_on_401_remints_the_key` is the control: it proves the harness is
-//! wired correctly and that these assertions do fire when refresh works. Any
-//! delta between the two tests is the bug and nothing else.
-//!
-//! EXPECTED RESULT: 401 test passes, 402 test FAILS. The 402 test is red on
-//! purpose — it reproduces an unfixed bug. Do not weaken it.
+//! `refresh_on_401_remints_the_key` pins the 401 recovery (free-config hit a
+//! second time, replayed request carries the new key, no run-ending error).
+//! `completion_402_stops_generation_without_hosted_blame` pins the 402 policy.
 
 mod support;
 
@@ -204,16 +196,12 @@ fn refresh_on_401_remints_the_key() {
     assert_lease_was_reminted(&scenario, "401");
 }
 
-/// REGRESSION (expected RED). A 402 from the LLM means the same thing as a 401 —
-/// the ephemeral lease is spent — and must recover the same way.
-///
-/// `client.rs:693` / `client.rs:732` gate `try_refresh_key` on 401 only, so the
-/// spent lease is reused until the 300s `FREE_CONFIG_CACHE_TTL_SECS` lapses,
-/// and the raw 402 escapes into `is_credits_exhausted_error`, killing the run
-/// with a hosted-billing message the user cannot act on.
+/// POLICY. A 402 from the LLM completion trips the payment-required breaker:
+/// generation stops with the mode-neutral capacity message. No hosted-billing
+/// blame may surface — the account's credits were never consulted by this
+/// failure — and the run must not be silently reported as a success.
 #[test]
-#[ignore = "known defect: a 402 during generation never remints the hosted key lease"]
-fn refresh_on_402_remints_the_key() {
+fn completion_402_stops_generation_without_hosted_blame() {
     let scenario = run_expired_lease_scenario(
         402,
         &serde_json::json!({
@@ -221,6 +209,26 @@ fn refresh_on_402_remints_the_key() {
         })
         .to_string(),
     );
+    let diag = diagnostics(&scenario);
 
-    assert_lease_was_reminted(&scenario, "402");
+    // Sanity: the hosted path really leased a key and hit the 402ing LLM.
+    assert!(
+        scenario.api.free_config_calls() >= 1 && scenario.llm.request_count() >= 1,
+        "scenario never reached the LLM, so the 402 policy was never \
+         exercised.\n{diag}"
+    );
+
+    // The breaker's neutral verdict: the status is named, generation stops,
+    // and no top-up directive appears.
+    assert!(
+        scenario.output.contains("402")
+            && scenario.output.contains("stopping catalyst generation"),
+        "expected the completion 402 to stop generation with the neutral \
+         provider-capacity message.\n{diag}"
+    );
+    assert!(
+        !scenario.output.contains("app.enzyme.garden/plans"),
+        "a completion 402 is not a billing-endpoint error and must never \
+         surface the hosted top-up directive.\n{diag}"
+    );
 }

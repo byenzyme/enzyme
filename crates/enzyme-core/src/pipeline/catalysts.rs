@@ -16,7 +16,7 @@ use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
-    GenerationParams, LlmClient, Message, ParsedCatalyst, build_local_user_prompt,
+    GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst, build_local_user_prompt,
     build_system_prompt, build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema,
     get_profile, parse_catalyst_response, parse_partial_catalyst_entries,
     streaming_entries_instruction,
@@ -1157,7 +1157,7 @@ impl<'a> CatalystPipeline<'a> {
                         entity_name,
                         entity_type,
                         catalysts: None,
-                        error: Some("skipped: credits exhausted".to_string()),
+                        error: Some("skipped: provider payment-required (402)".to_string()),
                     };
                 }
 
@@ -1258,9 +1258,9 @@ impl<'a> CatalystPipeline<'a> {
                                     entity_name = entity_name.as_str(),
                                     attempt, "LLM call failed: {}", e
                                 );
-                                // Don't retry on credit exhaustion — backoff
+                                // Don't retry on a provider 402 — backoff
                                 // would just delay the inevitable failure.
-                                if is_credits_exhausted_error(&last_error) {
+                                if is_payment_required_error(&e) {
                                     credits_exhausted.store(true, Ordering::SeqCst);
                                     break;
                                 }
@@ -1382,16 +1382,19 @@ impl<'a> CatalystPipeline<'a> {
             let Some(result) = result else {
                 continue;
             };
-            // Short-circuit the rest of the run on credit exhaustion. Whatever
+            // Short-circuit the rest of the run on a provider 402. Whatever
             // tripped the flag has already been collected as an EntityResult
             // error; aborting here prevents N more entities from each retrying
-            // and accumulating identical 402s.
+            // and accumulating identical 402s. The message is deliberately
+            // mode-neutral: a completions 402 is a provider/pool condition,
+            // not an Enzyme-account billing verdict, so no top-up language.
             if credits_exhausted.load(Ordering::SeqCst) {
                 join_set.abort_all();
                 stats.duration_ms = start.elapsed().as_millis() as u64;
                 bail!(
-                    "Insufficient credits — catalyst generation aborted. \
-                     Visit app.enzyme.garden/plans to top up."
+                    "LLM provider returned 402 Payment Required; stopping catalyst \
+                     generation. If you are using hosted Enzyme, capacity may be \
+                     temporarily exhausted — try again later or run with --use-env-llm."
                 );
             }
             match result {
@@ -1486,16 +1489,18 @@ impl<'a> CatalystPipeline<'a> {
     }
 }
 
-/// Detect 402 / insufficient-credit errors from the LLM client error string.
-/// Used to short-circuit the catalyst pipeline when the free-tier credit gate
-/// or upstream OpenRouter ephemeral key has been exhausted mid-run.
-fn is_credits_exhausted_error(err: &str) -> bool {
-    // Match the HTTP 402 status line or its reason phrase, not the digits
-    // "402" anywhere — they appear incidentally in request ids, token counts,
-    // quota values, and model names.
-    err.contains("status 402 ")
-        || err.contains("Payment Required")
-        || err.contains("Insufficient credits")
+/// Detect a payment-required condition from a completions call. Fires ONLY on
+/// a typed [`LlmApiError`] with HTTP status 402 — never on body substrings
+/// (request ids, token counts, and quota values legitimately contain the
+/// digits "402", and phrases like "Insufficient credits" appear in non-402
+/// proxy errors and even in generated text). Used to short-circuit the
+/// catalyst pipeline when the upstream provider key is spent mid-run; it is
+/// deliberately credential-mode-neutral because a completions 402 is a
+/// provider condition in every mode — billing errors only come from billing
+/// endpoints.
+fn is_payment_required_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<LlmApiError>()
+        .is_some_and(|api| api.status == 402)
 }
 
 /// Absolute lower bound on catalysts for any entity that has material at all.
@@ -1770,88 +1775,121 @@ mod tests {
         );
     }
 
-    /// Regression: `is_credits_exhausted_error` must classify a *payment
-    /// required* condition, not merely spot the digits "402" anywhere in a raw
-    /// provider error string.
+    /// Build a typed LLM error the way `send_chat_completion` does, wrapped in
+    /// `anyhow` as the pipeline sees it.
+    fn typed_llm_error(status: u16, body: &str) -> anyhow::Error {
+        LlmApiError {
+            status,
+            body: body.to_string(),
+        }
+        .into()
+    }
+
+    /// Regression: the 402 circuit breaker must classify on the typed HTTP
+    /// status, not on substrings of the raw provider error.
     ///
-    /// Every string below is a realistic upstream error in which "402" appears
-    /// incidentally — inside a request id, a token count, a quota value, a
-    /// latency figure, or a model name. Misclassifying any of them aborts the
-    /// whole catalyst run and tells the user to top up Enzyme credits, which is
-    /// wrong in every case and doubly wrong under BYOK / `--use-env-llm`.
-    ///
-    /// Expected result: RED — the current implementation is
-    /// `err.contains("402") || err.contains("Insufficient credits")`.
+    /// Every case below is a realistic upstream error in which "402" (or the
+    /// phrase "Insufficient credits") appears incidentally — inside a request
+    /// id, a token count, a quota value, a latency figure, a model name, or a
+    /// garbled proxy body. None has status 402, so none may trip the breaker.
     #[test]
-    fn incidental_402_substrings_are_not_credit_exhaustion() {
-        let incidental: &[(&str, &str)] = &[
+    fn incidental_402_substrings_are_not_payment_required() {
+        let incidental: &[(&str, u16, &str)] = &[
             (
                 "google quota value",
-                r#"LLM API returned status 429 Too Many Requests: {"error":{"code":429,"message":"Resource exhausted: quota_limit_value 4029 for quota metric 'generate_requests_per_model_per_day'","status":"RESOURCE_EXHAUSTED"}}"#,
+                429,
+                r#"{"error":{"code":429,"message":"Resource exhausted: quota_limit_value 4029 for quota metric 'generate_requests_per_model_per_day'","status":"RESOURCE_EXHAUSTED"}}"#,
             ),
             (
                 "request id",
-                r#"LLM API returned status 500 Internal Server Error: {"error":{"message":"internal error","request_id":"req_c4025b7f91"}}"#,
+                500,
+                r#"{"error":{"message":"internal error","request_id":"req_c4025b7f91"}}"#,
             ),
             (
                 "token count",
-                r#"LLM API returned status 400 Bad Request: {"error":{"message":"This model's maximum context length is 8192 tokens, however you requested 9402 tokens"}}"#,
+                400,
+                r#"{"error":{"message":"This model's maximum context length is 8192 tokens, however you requested 9402 tokens"}}"#,
             ),
             (
                 "latency / timing figure",
-                "LLM API returned status 504 Gateway Timeout: upstream did not respond within 4028ms",
+                504,
+                "upstream did not respond within 4028ms",
             ),
             (
                 "model name containing 402",
-                r#"LLM API returned status 404 Not Found: {"error":{"message":"model 'llama-402b-instruct' does not exist"}}"#,
+                404,
+                r#"{"error":{"message":"model 'llama-402b-instruct' does not exist"}}"#,
             ),
             (
                 "rate limit reset epoch",
-                "LLM API returned status 429 Too Many Requests: rate limit exceeded, retry after 1750014020",
+                429,
+                "rate limit exceeded, retry after 1750014020",
+            ),
+            (
+                "503 body carrying the phrase Insufficient credits",
+                503,
+                r#"{"error":{"code":503,"message":"Upstream provider unavailable. Insufficient credits could not be verified."}}"#,
             ),
         ];
 
         let mut misclassified = Vec::new();
-        for (label, err) in incidental {
-            if is_credits_exhausted_error(err) {
-                misclassified.push(format!("  [{label}] {err}"));
+        for (label, status, body) in incidental {
+            if is_payment_required_error(&typed_llm_error(*status, body)) {
+                misclassified.push(format!("  [{label}] status {status}: {body}"));
             }
         }
         assert!(
             misclassified.is_empty(),
-            "is_credits_exhausted_error misclassified {} provider error(s) that merely \
-             contain the digits \"402\" incidentally. Each of these aborts the entire \
-             catalyst run with a hosted-billing message:\n{}",
+            "is_payment_required_error misclassified {} provider error(s) whose status \
+             is not 402. Each of these would abort the entire catalyst run:\n{}",
             misclassified.len(),
             misclassified.join("\n"),
         );
     }
 
-    /// The companion positive cases: genuine payment-required errors must still
-    /// be detected, so a fix cannot simply make the predicate always false.
+    /// An untyped error (no `LlmApiError` in the chain) must never trip the
+    /// breaker, whatever its text says — the old substring classifier fired on
+    /// exactly this shape.
     #[test]
-    fn genuine_payment_required_errors_are_credit_exhaustion() {
+    fn untyped_errors_are_never_payment_required() {
+        for text in [
+            "Insufficient credits for this operation",
+            "LLM API returned status 402 Payment Required: legacy stringified error",
+        ] {
+            assert!(
+                !is_payment_required_error(&anyhow::anyhow!("{text}")),
+                "an untyped error must not be classified by its text: {text}"
+            );
+        }
+    }
+
+    /// The companion positive cases: genuine HTTP 402s must still be detected,
+    /// so a fix cannot simply make the predicate always false. The body is
+    /// irrelevant — only the status decides.
+    #[test]
+    fn genuine_402_status_is_payment_required() {
         let genuine: &[(&str, &str)] = &[
             (
-                "http 402 status line",
-                r#"LLM API returned status 402 Payment Required: {"error":{"message":"Insufficient credits"}}"#,
-            ),
-            (
                 "openrouter insufficient credits",
-                r#"LLM API returned status 402 Payment Required: {"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}"#,
+                r#"{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/credits"}}"#,
             ),
+            ("empty body", ""),
             (
-                "enzyme hosted credit gate",
-                "Insufficient credits for this operation",
+                "body without any billing language",
+                r#"{"error":{"message":"lease spent"}}"#,
             ),
         ];
 
-        for (label, err) in genuine {
+        for (label, body) in genuine {
             assert!(
-                is_credits_exhausted_error(err),
-                "expected a genuine payment-required error to be detected as credit \
-                 exhaustion, but [{label}] was not: {err}"
+                is_payment_required_error(&typed_llm_error(402, body)),
+                "expected a genuine HTTP 402 to be detected as payment-required, \
+                 but [{label}] was not: {body}"
             );
         }
+        // ...and it must survive context wrapping, since callers may add context
+        // between the client and the pipeline.
+        let wrapped = typed_llm_error(402, "{}").context("while generating catalysts");
+        assert!(is_payment_required_error(&wrapped));
     }
 }

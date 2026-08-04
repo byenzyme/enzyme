@@ -152,6 +152,72 @@ impl VaultFixture {
         std::fs::write(self.api_cache_path(), body.to_string()).expect("write api cache");
     }
 
+    /// Write an arbitrary raw JSON string as the free-config cache. The escape
+    /// hatch for injecting additive/renamed/broken cache shapes that
+    /// [`seed_api_cache`](Self::seed_api_cache) cannot express.
+    pub fn seed_api_cache_raw(&self, json: &str) {
+        std::fs::write(self.api_cache_path(), json).expect("write api cache raw");
+    }
+
+    /// Co-located-skew (R3) GOOD case: a cache that carries the 3 core fields +
+    /// `cached_at` PLUS additive/future fields a newer co-located CLI might
+    /// write. The current CLI's non-lenient read (client.rs:1001) must still
+    /// parse it (`CachedFreeConfig` has no `deny_unknown_fields`).
+    pub fn seed_api_cache_with_extra(
+        &self,
+        api_key: &str,
+        base_url: &str,
+        model: &str,
+        age_secs: u64,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let body = serde_json::json!({
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "cached_at": now.saturating_sub(age_secs),
+            // Additive fields a future co-located CLI might persist:
+            "provider": "openrouter-free",
+            "expires_at": now + 3600,
+            "pool_status": "funded",
+        });
+        std::fs::write(self.api_cache_path(), body.to_string()).expect("write api cache");
+    }
+
+    /// Co-located-skew (R3) BAD case: a cache MISSING a load-bearing core field
+    /// (`model`). The current CLI's non-lenient read
+    /// (`serde_json::from_str::<CachedFreeConfig>(..)?` at client.rs:1001)
+    /// PROPAGATES the parse error rather than gracefully re-fetching, so an old
+    /// CLI sharing this cache with a newer one that dropped/renamed a field
+    /// ERRORS. Use to prove that regression is caught.
+    pub fn seed_api_cache_missing_field(&self, api_key: &str, base_url: &str, age_secs: u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Intentionally omits `model`.
+        let body = serde_json::json!({
+            "api_key": api_key,
+            "base_url": base_url,
+            "cached_at": now.saturating_sub(age_secs),
+        });
+        std::fs::write(self.api_cache_path(), body.to_string()).expect("write api cache");
+    }
+
+    /// Parsed `cached_at` from the current cache file, if present & parseable.
+    /// A changed value across two runs proves the CLI re-fetched (rewrote the
+    /// cache) rather than reused the seeded entry.
+    pub fn api_cache_cached_at(&self) -> Option<u64> {
+        let raw = std::fs::read_to_string(self.api_cache_path()).ok()?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()?
+            .get("cached_at")?
+            .as_u64()
+    }
+
     /// Start building an `enzyme` subprocess invocation against this fixture.
     ///
     /// Pre-wired: `--vault <vault_path>`, `ENZYME_HOME`, `ENZYME_API_CACHE_PATH`,
@@ -229,6 +295,14 @@ impl CliCommand {
     pub fn vault(mut self, path: impl Into<PathBuf>) -> Self {
         self.vault = path.into();
         self
+    }
+
+    /// Point `ENZYME_API_CACHE_PATH` at an explicit file. Use this to model the
+    /// co-located-CLI skew (R3): drive a second `enzyme` invocation against
+    /// ANOTHER fixture's [`VaultFixture::api_cache_path`] so two CLIs share one
+    /// `/tmp` free-config cache.
+    pub fn api_cache_path(self, path: impl Into<PathBuf>) -> Self {
+        self.env("ENZYME_API_CACHE_PATH", path.into().display().to_string())
     }
 
     /// Run the CLI to completion and capture stdout/stderr/exit code.
