@@ -10,6 +10,7 @@ pub mod lock;
 pub mod login;
 pub mod mcp;
 pub mod petri;
+pub mod refresh_outcome;
 pub mod scan;
 pub mod serve;
 pub mod status;

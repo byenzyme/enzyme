@@ -1413,13 +1413,48 @@ async fn run_refresh_detached(vault_path: &Path, use_env_llm: bool) -> Result<()
         return Ok(());
     };
     let epoch_id = claim.epoch_id.clone();
-    if let Err(error) = build_and_activate_epoch(vault_path, &paths, &db, claim, use_env_llm).await
-    {
-        db.mark_epoch_failed(&epoch_id, now_ms(), &format!("{error:#}"))?;
-        return Err(error);
+    match build_and_activate_epoch(vault_path, &paths, &db, claim, use_env_llm).await {
+        Ok(report) => {
+            // Written on success as well as failure so a stale recorded
+            // failure clears on the next good run. Best-effort: an epoch that
+            // activated must not be reported failed because bookkeeping broke.
+            let outcome = super::refresh_outcome::BackgroundRefreshOutcome::succeeded(
+                report.catalysts_generated,
+                report.carried_forward_catalysts,
+                now_ms(),
+            );
+            if let Err(e) = super::refresh_outcome::record_outcome(&db, &outcome) {
+                tracing::warn!("failed to record background refresh success outcome: {e:#}");
+            }
+        }
+        Err(error) => {
+            // Record the outcome before marking the epoch failed: `enzyme
+            // status` fail-loud visibility must survive even if the epoch
+            // bookkeeping write below errors out.
+            let carried_forward = db.get_all_catalysts().map(|c| c.len()).unwrap_or(0);
+            let outcome = super::refresh_outcome::BackgroundRefreshOutcome::failed(
+                &format!("{error:#}"),
+                carried_forward,
+                now_ms(),
+            );
+            if let Err(e) = super::refresh_outcome::record_outcome(&db, &outcome) {
+                tracing::warn!("failed to record background refresh failure outcome: {e:#}");
+            }
+            db.mark_epoch_failed(&epoch_id, now_ms(), &format!("{error:#}"))?;
+            return Err(error);
+        }
     }
     // Lock released on drop
     Ok(())
+}
+
+/// What a successful background epoch build produced, for the durable
+/// last-outcome record surfaced by `enzyme status`.
+struct EpochBuildReport {
+    catalysts_generated: usize,
+    /// Catalysts re-populated from the previously active epoch for entities
+    /// that generated none this run (per-entity gap fill).
+    carried_forward_catalysts: usize,
 }
 
 async fn build_and_activate_epoch(
@@ -1428,7 +1463,7 @@ async fn build_and_activate_epoch(
     active_db: &Database,
     mut claim: enzyme_core::pipeline::epoch::EpochClaim,
     _use_env_llm: bool,
-) -> Result<()> {
+) -> Result<EpochBuildReport> {
     let contract: GenerationContract = serde_json::from_str(&claim.generation_contract_json)
         .context("decode frozen generation contract")?;
     let epoch_dir = paths.vault_db.parent().unwrap_or(vault_path).join("epochs");
@@ -1767,7 +1802,10 @@ async fn build_and_activate_epoch(
     let _ = bump_collection_cache_epoch(active_db)?;
     info!(epoch_id = %claim.epoch_id, "catalyst shadow epoch activated");
     let _ = api_config; // credential resolution is also the hosted preflight.
-    Ok(())
+    Ok(EpochBuildReport {
+        catalysts_generated: stats.catalysts_generated,
+        carried_forward_catalysts: carried_catalysts,
+    })
 }
 
 /// Refresh all previously prepared targets using the vault's current catalysts.
