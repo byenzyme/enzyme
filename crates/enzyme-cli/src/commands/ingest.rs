@@ -271,6 +271,7 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
         // Ingested items are externally-structured single units, not user
         // append-only log files.
         is_log: false,
+        append_log: None,
     })
 }
 

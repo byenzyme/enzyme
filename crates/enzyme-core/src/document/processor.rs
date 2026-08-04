@@ -8,18 +8,26 @@ use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
 
-use super::appendlog::{chunk_append_log, detect_append_log};
+use super::appendlog::{
+    AppendLog, MIN_LOG_ENTRIES, chunk_append_log, detect_append_log, entries_with_body,
+};
 use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
 use super::extract::{ExtractedEntities, extract_entities};
 use super::frontmatter::{Frontmatter, parse_frontmatter, strip_frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
 
-/// Word floor for auto-flagging a body as an append-only log. Below this, the
-/// dominant vault shape is "many short dated files" (topology A), which the
-/// occurrence-date + era machinery already handles and which never hits the
+/// Word floor for auto-flagging a body as an append-only log.
+///
+/// The primary stub guard is structural: at least [`MIN_LOG_ENTRIES`] entries
+/// must carry a non-empty body (see [`entries_with_body`]) — that is what
+/// actually separates a journal from a note that merely lists dated backlinks
+/// or a bare dated scaffold, whatever its word count. The floor survives only
+/// as a small secondary bound so a three-line scaffold with a word or two
+/// under each date does not flip a note's handling; below it, the dominant
+/// vault shape is "many short dated files" (topology A), which never hits the
 /// oversized-context paths this flag guards.
-const LOG_AUTODETECT_MIN_WORDS: i64 = 400;
+const LOG_AUTODETECT_MIN_WORDS: i64 = 100;
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -50,6 +58,20 @@ pub struct ProcessedDocument {
     /// chronological chunking and recency-biased context. Declared via a
     /// `type:` frontmatter marker, else auto-detected structurally.
     pub is_log: bool,
+    /// The resolved log structure when `is_log` is true — detection runs
+    /// exactly once, at process time, and every downstream consumer (chunking
+    /// here, the indexing pipeline's recency context) reads this field so all
+    /// of them agree on the same entry boundaries. Never re-detect downstream.
+    ///
+    /// `is_log == true` with `append_log == None` is the declared-but-
+    /// undetectable case: the note carries `type: log` but the detector found
+    /// no parseable dated entries. Chosen semantics: the flag is honoured for
+    /// classification, but with no entry boundaries the document degrades
+    /// gracefully — generic paragraph chunking and *no* most-recent-entry
+    /// excerpt — rather than silently pretending entry-aligned handling took
+    /// place. When `is_log` is false this is always `None`, even if the body
+    /// structurally parsed (e.g. a `type: note` override).
+    pub append_log: Option<AppendLog>,
 }
 
 /// Orchestrates the full document-processing pipeline:
@@ -135,14 +157,23 @@ impl DocumentProcessor {
         let word_count = body.split_whitespace().count() as i64;
         let char_count = body.chars().count() as i64;
 
-        // Append-only-log detection (topology B). A declared `type:` marker is
-        // the source of truth; otherwise auto-detect structurally, gated on a
-        // word floor so short many-file logs (topology A) never flag.
-        let append_log = detect_append_log(body);
+        // Append-only-log detection (topology B), computed exactly once here
+        // and threaded downstream via `ProcessedDocument::append_log`. A
+        // declared `type:` marker is the source of truth for the flag;
+        // otherwise auto-detect structurally, requiring MIN_LOG_ENTRIES
+        // entries with real bodies plus a modest word floor so stub notes
+        // that merely list dated lines never flag.
+        let detected = detect_append_log(body);
         let is_log = match log_type_override(&frontmatter) {
             Some(declared) => declared,
-            None => append_log.is_some() && word_count >= LOG_AUTODETECT_MIN_WORDS,
+            None => detected.as_ref().is_some_and(|log| {
+                entries_with_body(body, log) >= MIN_LOG_ENTRIES
+                    && word_count >= LOG_AUTODETECT_MIN_WORDS
+            }),
         };
+        // Resolved structure, aligned with the resolved flag (see the field's
+        // doc comment for the forced-on-but-undetectable semantics).
+        let append_log = if is_log { detected } else { None };
 
         // Chunks — Readwise highlights and append-only logs get structure-aware
         // chunking; everything else uses the generic paragraph chunker.
@@ -153,7 +184,7 @@ impl DocumentProcessor {
             } else {
                 chunk_readwise_highlights(&highlights, 5, 15)
             }
-        } else if let (true, Some(log)) = (is_log, append_log.as_ref()) {
+        } else if let Some(log) = append_log.as_ref() {
             chunk_append_log(body, log, self.chunk_size)
         } else {
             chunk_document(body, self.chunk_size)
@@ -182,6 +213,7 @@ impl DocumentProcessor {
             chunks,
             frontmatter,
             is_log,
+            append_log,
         })
     }
 
@@ -201,6 +233,10 @@ impl DocumentProcessor {
 /// override a structural false positive); anything else → `None` (defer to
 /// auto-detection). This is the per-note surface the workspace-setup skill can
 /// stamp — a body-preserving mutation — since it cannot split the file itself.
+///
+/// A forced-on declaration whose body the detector cannot parse still flips
+/// `is_log`, but yields no entry structure — see
+/// [`ProcessedDocument::append_log`] for the degradation semantics.
 fn log_type_override(frontmatter: &Option<Frontmatter>) -> Option<bool> {
     let value = frontmatter.as_ref()?.extra.get("type")?.as_str()?;
     match value.trim().to_ascii_lowercase().as_str() {
@@ -594,6 +630,170 @@ Another highlight [[2024-01-15]]
         let latest = dates.iter().max().unwrap();
         assert_eq!(earliest.format("%Y-%m-%d").to_string(), "2023-01-01");
         assert_eq!(latest.format("%Y-%m-%d").to_string(), "2024-03-15");
+    }
+
+    // --- Append-only-log resolution (flag + threaded structure) ---
+
+    #[test]
+    fn test_autodetects_log_with_prose_entries() {
+        let (_dir, vault) = create_test_vault();
+        let filler = "word ".repeat(40); // 3 x 40 = 120 words, past the floor
+        let content = ["2026-07-25", "2026-07-26", "2026-07-27"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        fs::write(vault.join("journal.md"), &content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("journal.md"))
+            .unwrap();
+        assert!(doc.is_log);
+        let log = doc
+            .append_log
+            .as_ref()
+            .expect("structure is threaded through");
+        assert_eq!(log.entries.len(), 3);
+        // Entry-aligned chunking used the threaded structure.
+        assert_eq!(doc.chunks.len(), 3);
+    }
+
+    #[test]
+    fn test_autodetects_log_with_month_name_headers() {
+        let (_dir, vault) = create_test_vault();
+        let filler = "word ".repeat(40);
+        let content = ["July 25, 2026", "Jul 26 2026", "27 July 2026"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        fs::write(vault.join("journal.md"), &content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("journal.md"))
+            .unwrap();
+        assert!(doc.is_log, "month-name headers should auto-detect");
+        assert!(doc.append_log.is_some());
+    }
+
+    #[test]
+    fn test_dated_wikilink_list_does_not_flag() {
+        // Regression: a stub note listing dated backlinks has ≥3 monotonic
+        // dated lines and can exceed the word floor, but no entry bodies.
+        let (_dir, vault) = create_test_vault();
+        let mut content = String::from("# Days I worked on this\n\n");
+        for day in 10..40 {
+            content.push_str(&format!(
+                "- [[2026-06-{day}]] touched the parser again that day for a while\n"
+            ));
+        }
+        assert!(content.split_whitespace().count() > 100);
+        fs::write(vault.join("stub.md"), &content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("stub.md"))
+            .unwrap();
+        assert!(!doc.is_log, "dated backlink list must not auto-flag");
+        assert!(doc.append_log.is_none());
+    }
+
+    #[test]
+    fn test_short_dated_checklist_does_not_flag() {
+        // Regression: a tiny dated checklist (real bodies, but far under the
+        // word floor) stays a plain note.
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+## 2026-07-25
+- [ ] call the bank
+
+## 2026-07-26
+- [ ] renew passport
+
+## 2026-07-27
+- [ ] water plants
+";
+        fs::write(vault.join("todos.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("todos.md"))
+            .unwrap();
+        assert!(!doc.is_log, "short dated checklist must not auto-flag");
+        assert!(doc.append_log.is_none());
+    }
+
+    #[test]
+    fn test_type_log_override_on_detectable_body_bypasses_floor() {
+        // A declared log is honoured even below the auto-detect word floor,
+        // and the structure is threaded through for entry-aligned chunking.
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+---
+type: log
+---
+## 2026-07-25
+short one
+
+## 2026-07-26
+short two
+
+## 2026-07-27
+short three
+";
+        fs::write(vault.join("tiny-log.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("tiny-log.md"))
+            .unwrap();
+        assert!(doc.is_log);
+        assert_eq!(doc.append_log.as_ref().unwrap().entries.len(), 3);
+        assert_eq!(doc.chunks.len(), 3);
+    }
+
+    #[test]
+    fn test_type_log_on_undetectable_body_degrades_gracefully() {
+        // Forced on, but the detector finds no dated entries: the flag is
+        // honoured while structure-dependent behavior degrades — paragraph
+        // chunking, `append_log: None` (so downstream stores no recency
+        // excerpt) — instead of silently pretending entries exist.
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+---
+type: log
+---
+Monday — planning session, long discussion.
+
+Wednesday — shipped the thing.
+
+Friday — retro notes without any parseable dates.
+";
+        fs::write(vault.join("undated-log.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("undated-log.md"))
+            .unwrap();
+        assert!(doc.is_log, "the declared flag is honoured");
+        assert!(doc.append_log.is_none(), "no fabricated structure");
+        // Paragraph chunking of a small body → one generic chunk.
+        assert_eq!(doc.chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_type_note_override_suppresses_structure() {
+        let (_dir, vault) = create_test_vault();
+        let filler = "word ".repeat(40);
+        let entries = ["2026-07-25", "2026-07-26", "2026-07-27"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        let content = format!("---\ntype: note\n---\n{entries}");
+        fs::write(vault.join("essay.md"), &content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("essay.md"))
+            .unwrap();
+        assert!(!doc.is_log);
+        assert!(
+            doc.append_log.is_none(),
+            "forced-off notes carry no log structure downstream"
+        );
     }
 
     #[test]

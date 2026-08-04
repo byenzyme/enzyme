@@ -1102,6 +1102,7 @@ mod tests {
             chunks: vec!["hello".into(), "world".into()],
             frontmatter: None,
             is_log: false,
+            append_log: None,
         };
 
         let ids = db.upsert_documents_batch(&[doc]).unwrap();
@@ -1158,6 +1159,7 @@ mod tests {
                 chunks,
                 frontmatter: None,
                 is_log: false,
+                append_log: None,
             }
         };
 
