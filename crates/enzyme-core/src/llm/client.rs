@@ -440,8 +440,11 @@ fn anthropic_model_rejects_sampling_parameters(model: &str) -> bool {
     [
         "claude-opus-4-7",
         "claude-opus-4-8",
+        "claude-opus-5",
         "claude-sonnet-5",
+        "claude-haiku-5",
         "claude-fable-5",
+        "claude-mythos-5",
     ]
     .iter()
     .any(|family| {
@@ -1389,7 +1392,11 @@ mod tests {
             "claude-opus-4-8-20260701",
             "claude-sonnet-5",
             "claude-sonnet-5-20260701",
+            "claude-opus-5",
+            "claude-opus-5-20260801",
+            "claude-haiku-5",
             "claude-fable-5",
+            "claude-mythos-5",
         ] {
             let request = chat_completion_request(
                 "https://api.anthropic.com/v1",
