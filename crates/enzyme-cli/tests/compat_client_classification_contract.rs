@@ -1,61 +1,42 @@
 //! e2e contract suite: compat_client_classification_contract
 //!
-//! Skew axis: **NEW CLI contract (R2)** — the client-side fixes D1 and D2.
 //! Harness: `crates/enzyme-cli/tests/support/` (`support::mock`, `support::fixture`).
 //!
-//! These tests encode the ACCEPTANCE CRITERIA the *new* CLI must satisfy. They
-//! drive the CURRENT CLI binary (`env!("CARGO_BIN_EXE_enzyme")`, i.e. the "old
-//! CLI") as a subprocess against the mock Enzyme API + mock LLM. Several of them
-//! are therefore RED against today's code *by design* — that RED IS the gate.
-//! We NEVER weaken an assertion to get green, and we do not touch production code.
+//! These tests pin the IMPLEMENTED credit/error-handling policy:
+//! **billing errors can only come from billing endpoints.** The only two
+//! billing endpoints are `POST /v1/credits/deduct` and the hosted free-config
+//! fetch. A completions call is never a billing endpoint, so no completion
+//! error — whatever its status or body — may be reported as an Enzyme-account
+//! billing verdict.
 //!
 //! ───────────────────────────────────────────────────────────────────────────
-//! D1 — credit-exhaustion classification must depend on (credential mode + HTTP
-//!      status), not on substrings of the raw provider error.
+//! D1 — classification is typed, status-driven, and mode-neutral.
 //!
-//!   The current classifier is `is_credits_exhausted_error(err: &str)` at
-//!   `crates/enzyme-core/src/pipeline/catalysts.rs`:
+//!   The classifier is `is_payment_required_error(&anyhow::Error)` at
+//!   `crates/enzyme-core/src/pipeline/catalysts.rs`: it downcasts to the typed
+//!   `LlmApiError` and fires ONLY on `status == 402`. Body substrings never
+//!   participate (request ids, token counts, quota values like `4029`, and a
+//!   body phrase like "Insufficient credits" are all inert). A completions 402
+//!   trips the existing `credits_exhausted` short-circuit (stop hammering a
+//!   402ing provider mid-run) and aborts with a MODE-NEUTRAL provider-capacity
+//!   message that carries no hosted-billing language. No credential-mode
+//!   parameter is needed: BYOK runs never call a billing endpoint at all, and
+//!   hosted runs get the same neutral verdict because the 402 came from the
+//!   provider pool, not from the account.
 //!
-//!     err.contains("status 402 ")
-//!       || err.contains("Payment Required")
-//!       || err.contains("Insufficient credits")
+//!   The table this suite pins:
+//!     • 429 body containing "4029"        -> never a billing verdict (any mode)
+//!     • 200 free-text "Insufficient..."   -> never a billing verdict (any mode)
+//!     • genuine completions 402            -> neutral capacity abort (any mode);
+//!                                             never a top-up directive
+//!     • free-config 402                    -> the ONE place top-up guidance
+//!                                             belongs (see the D2-adjacent
+//!                                             control at the bottom)
 //!
-//!   It has already been hardened against the classic "402 inside 4029" trap
-//!   (see the `incidental_429_4029_*` control below, which is GREEN today). Two
-//!   defects remain and define the new-CLI contract:
-//!
-//!     (a) NO credential-mode gate. The function takes only `&str`; the pipeline
-//!         calls it identically for hosted (`ServerFallback`) and BYOK
-//!         (`--use-env-llm`, `ConfigProvider::Env`) runs. Under BYOK, Enzyme
-//!         hosted credits are not involved at all, so NO provider error — not
-//!         even a genuine 402 — is "Enzyme credit exhaustion". The current code
-//!         still launders a BYOK provider 402 into the hosted-billing abort at
-//!         catalysts.rs (`"Insufficient credits — catalyst generation aborted.
-//!         Visit app.enzyme.garden/plans to top up."`).
-//!
-//!     (b) Still substring-based on the body, not on HTTP status. Any provider
-//!         body carrying the free-text phrase "Insufficient credits" (a 5xx, a
-//!         model that generated the words, a proxy error) is classified as
-//!         payment-required regardless of the actual status code.
-//!
-//!   The table the new CLI must satisfy (rows from the scenario brief):
-//!     • 429 body containing "4029"        -> never credit exhaustion (any mode)
-//!     • 200 free-text "Insufficient..."   -> never credit exhaustion (any mode)
-//!     • genuine 402                        -> credit exhaustion ONLY in HOSTED
-//!                                             mode; under --use-env-llm it is a
-//!                                             provider error, never hosted billing
-//!
-//! D2 — a run that generates 0 catalysts must net ZERO credits deducted
-//!      (defer-until-success). Today `init` deducts 3.0 up front
-//!      (`crates/enzyme-cli/src/commands/init.rs`, `ServerFallback` branch)
-//!      with no refund path, so a hosted run that produces nothing still bills
-//!      3.0. RED by design.
-//!
-//! RED-by-design tests are suffixed `_red_by_design` and carry
-//! `#[ignore = "known defect: ..."]` per repo convention so the tracked suite
-//! stays green. Remove the ignore (and amend the hosted-402 control, which pins
-//! the pre-fix message) when landing the D1/D2 fixes; run them explicitly with
-//! `cargo test -p enzyme-cli --test compat_client_classification_contract -- --ignored`.
+//! D2 — deduct-after-success: a run that generates 0 catalysts must net ZERO
+//!      credits. `init` deducts 3.0 only AFTER generation, and only when
+//!      `catalysts_generated > 0` (no refund endpoint exists or is needed).
+//!      A failed hosted run therefore never touches `/v1/credits/deduct`.
 
 mod support;
 
@@ -184,13 +165,15 @@ fn diagnostics(label: &str, api: &MockEnzymeApi, llm: &MockLlm, out: &CliOutput)
 // D1 — classification by (credential mode + HTTP status)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// CONTROL (expected GREEN). HOSTED mode + a genuine HTTP 402 with an
-/// OpenRouter "Insufficient credits" body IS the one cell of the table that
-/// legitimately means Enzyme credit exhaustion. The classifier must fire here,
-/// otherwise a "fix" that just makes the predicate always-false would sail
-/// through. Proves the abort path is genuinely reachable in the correct mode.
+/// CONTROL (expected GREEN). HOSTED mode + a genuine completions HTTP 402 with
+/// an OpenRouter "Insufficient credits" body. Under the implemented policy a
+/// completions 402 is a PROVIDER condition even on the hosted path (the shared
+/// pool is dry / the lease is spent); the account's credits were never the
+/// problem, so no top-up directive may appear. The run must stop with the
+/// neutral capacity abort — proving the 402 breaker genuinely fires — and must
+/// bill nothing (deduct-after-success + 0 catalysts).
 #[test]
-fn hosted_genuine_402_is_credit_exhaustion() {
+fn hosted_genuine_402_stops_generation_without_top_up_blame() {
     let fixture = VaultFixture::new();
     fixture.login("enz-user-key");
 
@@ -212,13 +195,33 @@ fn hosted_genuine_402_is_credit_exhaustion() {
     assert!(api.free_config_calls() > 0, "hosted free-config never used.{diag}");
     assert!(llm.request_count() > 0, "LLM never reached.{diag}");
 
-    // Correct verdict for THIS cell: a genuine hosted 402 IS credit exhaustion,
-    // so the hosted-billing abort is the right thing to surface here.
+    // The 402 breaker must fire and stop generation with the neutral message:
+    // the status is named, capacity is blamed, and BYOK is offered.
     assert!(
-        any_hosted_marker(&out).is_some(),
-        "CLASSIFIER TOO WEAK: a genuine HTTP 402 in HOSTED mode was NOT reported \
-         as credit exhaustion. If this control is red, the D1 negative tests below \
-         prove nothing (the predicate might simply never fire).{diag}"
+        out.contains("402") && out.contains("stopping catalyst generation"),
+        "BREAKER DID NOT FIRE (or lost its message): a genuine completions 402 in \
+         HOSTED mode must stop generation with the neutral provider-capacity \
+         abort. If this control is red, the D1 negative tests below prove \
+         nothing (the breaker might simply never fire).{diag}"
+    );
+    assert!(
+        out.contains("capacity may be temporarily exhausted"),
+        "the abort must attribute the 402 to provider capacity, not billing.{diag}"
+    );
+
+    // ...and it must NOT be laundered into hosted billing: no top-up language,
+    // and no charge for a run that produced nothing.
+    if let Some(marker) = any_hosted_marker(&out) {
+        panic!(
+            "POLICY VIOLATION: a completions 402 (a non-billing endpoint) surfaced \
+             the hosted-billing marker {marker:?}. Billing errors can only come \
+             from billing endpoints; topping up cannot refill the provider pool.{diag}"
+        );
+    }
+    assert_eq!(
+        net_credits_billed(&api),
+        0.0,
+        "a hosted run that produced nothing must net zero credits.{diag}"
     );
 }
 
@@ -258,19 +261,13 @@ fn incidental_429_4029_is_not_hosted_billing() {
     }
 }
 
-/// RED BY DESIGN — the CORE D1 gate (credential-mode gating).
+/// The CORE D1 gate (BYOK isolation).
 ///
 /// Under `--use-env-llm` the user brings their own key; Enzyme hosted credits
 /// are not funding this inference. A genuine provider HTTP 402 is therefore a
-/// PROVIDER error, never "Enzyme credit exhaustion". The new CLI must NOT emit
-/// any hosted-billing message and must NOT touch hosted credits.
-///
-/// Current code: `is_credits_exhausted_error` has no mode parameter, matches the
-/// 402 body, sets `credits_exhausted`, and aborts with the
-/// `app.enzyme.garden/plans` message even under BYOK -> this test FAILS today.
+/// PROVIDER error, never "Enzyme credit exhaustion". The CLI must NOT emit
+/// any hosted-billing message and must NOT touch hosted endpoints at all.
 #[test]
-#[ignore = "known defect: is_credits_exhausted_error has no credential-mode gate; a BYOK \
-            provider 402 is laundered into the hosted top-up abort (catalysts.rs)"]
 fn env_llm_genuine_402_is_not_hosted_billing_red_by_design() {
     let fixture = VaultFixture::new();
     // Logged in on purpose: proves the refusal to bill is a CLASSIFICATION
@@ -320,19 +317,14 @@ fn env_llm_genuine_402_is_not_hosted_billing_red_by_design() {
     );
 }
 
-/// RED BY DESIGN — D1 defect (b): substring, not status.
+/// D1 gate (b): status, not substrings.
 ///
 /// A provider returns HTTP **503** whose body happens to carry the free-text
 /// phrase "Insufficient credits" (a garbled upstream / proxy error). This is not
 /// a payment-required condition — the status is 503 — and under `--use-env-llm`
-/// it could not be Enzyme billing regardless. The new CLI must classify on the
-/// actual HTTP status (+ credential mode), not on the phrase.
-///
-/// Current code: `err.contains("Insufficient credits")` fires on the 503 body
-/// -> hosted-billing abort -> this test FAILS today.
+/// it could not be Enzyme billing regardless. Classification keys on the typed
+/// HTTP status, so the phrase must be inert.
 #[test]
-#[ignore = "known defect: classifier keys on the body substring \"Insufficient credits\", \
-            so a 503 carrying the phrase trips the hosted-billing abort (catalysts.rs)"]
 fn env_llm_insufficient_credits_phrase_non_402_is_not_hosted_billing_red_by_design() {
     let fixture = VaultFixture::new();
     fixture.login("enz-user-key");
@@ -433,19 +425,12 @@ fn benign_200_mentioning_insufficient_credits_still_succeeds() {
 // D2 — defer credit deduction until success (0 catalysts => net 0 credits)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// RED BY DESIGN — the D2 gate.
+/// The D2 gate.
 ///
 /// HOSTED mode. The leased LLM 402s on every completion, so the run generates
-/// zero catalysts. The new CLI must net ZERO credits deducted — either by
-/// deferring the deduction until at least one catalyst is persisted, or by
-/// refunding on failure.
-///
-/// Current code: `init` deducts 3.0 up front (init.rs `ServerFallback` branch)
-/// with no refund path, so a run that produced nothing still bills 3.0
-/// -> this test FAILS today (net billed = 3.0).
+/// zero catalysts. The CLI defers the deduction until success, so a run that
+/// produced nothing never calls `/v1/credits/deduct` at all: net billed 0.0.
 #[test]
-#[ignore = "known defect: init deducts 3.0 before generation with no refund path, so a \
-            hosted run that produces 0 catalysts still bills 3.0 (init.rs ServerFallback branch)"]
 fn hosted_zero_catalysts_nets_zero_credits_red_by_design() {
     let fixture = VaultFixture::new();
     fixture.login("enz-user-key");
@@ -464,10 +449,18 @@ fn hosted_zero_catalysts_nets_zero_credits_red_by_design() {
         .run();
     let diag = diagnostics("hosted 0 catalysts net-zero (RED)", &api, &llm, &out);
 
-    // Non-vacuity: the hosted credit path and the failing LLM both really ran.
+    // Non-vacuity: the hosted path and the failing LLM both really ran.
     assert!(api.free_config_calls() > 0, "hosted path not exercised.{diag}");
     assert!(llm.request_count() > 0, "LLM never reached.{diag}");
-    assert!(api.deduct_calls() > 0, "credit preflight never fired.{diag}");
+    // Deduct-after-success: a failed run must never even consult the deduct
+    // endpoint (there is no up-front charge to compensate any more).
+    assert_eq!(
+        api.deduct_calls(),
+        0,
+        "D2 VIOLATION: a hosted run that produced nothing called \
+         POST /v1/credits/deduct — the deduction must be deferred until at \
+         least one catalyst is persisted.{diag}"
+    );
 
     // The premise: nothing was produced.
     assert_eq!(
@@ -526,5 +519,57 @@ fn env_llm_zero_catalysts_nets_zero_credits() {
         api.deduct_calls(),
         0,
         "BYOK run must never call the deduct endpoint.{diag}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Billing endpoints — where top-up guidance DOES belong
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// CONTROL (expected GREEN). The free-config fetch IS a billing endpoint: a
+/// structured 402 from it means the account's Enzyme credits are genuinely
+/// exhausted, and this is the one place the top-up directive belongs. The CLI
+/// must surface it (with the BYOK escape hatch), must not claim the server was
+/// unreachable, and must not touch the LLM or the deduct endpoint (no lease
+/// was ever minted).
+#[test]
+fn free_config_402_carries_top_up_guidance() {
+    let fixture = VaultFixture::new();
+    fixture.login("enz-broke-user");
+
+    let llm = MockLlm::start();
+    llm.set_ok_content(&catalyst_content()); // healthy, but must never be reached
+
+    let api = MockEnzymeApi::start();
+    api.set_free_config_402_full(0.0); // deployed shape: { error, credits, message }
+
+    let out = fixture
+        .cli()
+        .args(["init", "--json-progress"])
+        .enzyme_api(&api)
+        .run();
+    let diag = diagnostics("free-config 402 top-up (control)", &api, &llm, &out);
+
+    // Non-vacuity: the billing endpoint was really consulted and really refused.
+    assert!(api.free_config_calls() > 0, "free-config never consulted.{diag}");
+    assert_eq!(llm.request_count(), 0, "no lease was minted; the LLM must not be reached.{diag}");
+    assert_eq!(api.deduct_calls(), 0, "nothing to bill for a refused run.{diag}");
+
+    // The billing verdict is CORRECT here, so the top-up directive must appear...
+    assert!(
+        out.contains("app.enzyme.garden/plans"),
+        "a genuine billing-endpoint 402 must carry the top-up directive — this is \
+         the ONE place that language belongs.{diag}"
+    );
+    // ...alongside the BYOK escape hatch...
+    assert!(
+        out.contains("--use-env-llm"),
+        "a hosted credit refusal must offer the BYOK escape hatch.{diag}"
+    );
+    // ...and the reachable server must not be misreported as a network failure.
+    assert!(
+        !out.contains("Enzyme server unreachable"),
+        "a clean 402 from a reachable billing endpoint must never be reported as \
+         the server being unreachable.{diag}"
     );
 }

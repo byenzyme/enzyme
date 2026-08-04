@@ -11,37 +11,32 @@
 //! "newer CLI" is EMULATED by seeding the shared cache file with the exact shape
 //! a future CLI would persist.
 //!
-//! The read path under test is `resolve_hosted_api_config` (client.rs:1020):
+//! The read path under test is `resolve_hosted_api_config` (client.rs):
 //!   * cache exists + parses + `api_key` non-empty + not expired  -> REUSE it,
 //!     do NOT contact the server;
 //!   * cache exists but is expired (age > 300s TTL, or `cached_at == 0`)
 //!     -> re-fetch from the server and rewrite the cache;
-//!   * cache exists but FAILS to parse (`CachedFreeConfig` has no
-//!     `deny_unknown_fields`, but every core field is required)
-//!     -> `serde_json::from_str::<CachedFreeConfig>(..)?` PROPAGATES the error
-//!     (client.rs:1027) — it does NOT gracefully drop the cache and re-fetch.
+//!   * cache exists but FAILS to read/parse -> treat as ABSENT: discard it,
+//!     re-fetch from the server, and overwrite the unusable file.
 //!
 //! What we pin here:
 //!
-//!   (a) ADDITIVE tolerance (must be GREEN): a cache carrying the 3 core fields
-//!       PLUS unknown/future fields a newer co-located CLI persisted must still
-//!       be read and REUSED by the current CLI, with `api_key`/`base_url`/`model`
-//!       threaded through unchanged and NO re-fetch. This is the compliant-new-CLI
-//!       rollout path (R3: additive-only cache changes are safe).
+//!   (a) ADDITIVE tolerance: a cache carrying the 3 core fields PLUS
+//!       unknown/future fields a newer co-located CLI persisted must still be
+//!       read and REUSED, with `api_key`/`base_url`/`model` threaded through
+//!       unchanged and NO re-fetch. This is the compliant-new-CLI rollout path
+//!       (R3: additive-only cache changes are safe).
 //!
-//!   (b) MISSING a core field (documenting + gate): a cache dropping `model`
-//!       makes the current CLI's non-lenient parse propagate. We DOCUMENT that the
-//!       current CLI neither crashes nor self-heals: it does NOT re-fetch, and
-//!       silently skips catalyst generation (mislabeled "server unreachable"). A
-//!       companion `*_red_by_design` (ignored) asserts the SAFE behavior a robust
-//!       CLI should have — gracefully discard the unparseable cache and re-fetch.
-//!       This pins the R3 constraint: a new CLI MUST only ADD `serde(default)`
-//!       fields and MUST NEVER drop/rename a core field, because the old CLI has
-//!       no recovery path if it does.
+//!   (b) MISSING a core field: a cache dropping `model` fails the lenient
+//!       parse, is treated as a cache MISS, and the CLI self-heals by
+//!       re-fetching a fresh lease from the reachable server (drop-and-
+//!       refetch). R3 still forbids a co-located CLI from dropping/renaming a
+//!       core field — that wastes the cache — but doing so is now fail-safe
+//!       rather than fail-silent.
 //!
-//!   (c) TTL (must be GREEN): a fresh parseable cache (age < 300s) is honored
-//!       (reused, no server call); a stale parseable cache (age > 300s) is
-//!       re-fetched and its stale values are NOT used.
+//!   (c) TTL: a fresh parseable cache (age < 300s) is honored (reused, no
+//!       server call); a stale parseable cache (age > 300s) is re-fetched and
+//!       its stale values are NOT used.
 
 mod support;
 
@@ -330,92 +325,16 @@ fn stale_cache_beyond_ttl_is_refetched_not_reused() {
 }
 
 // ===========================================================================
-// (b) MISSING a core field — DOCUMENTING the current fragility (GREEN).
-//     Pins WHY R3 forbids a new CLI from dropping/renaming a core field.
+// (b) MISSING a core field — drop-and-refetch (fail-safe self-heal).
 // ===========================================================================
 
-/// A newer co-located CLI wrote a cache MISSING a load-bearing core field
-/// (`model`). The current CLI's read (`serde_json::from_str::<CachedFreeConfig>`,
-/// client.rs:1027) is non-lenient and propagates the parse error rather than
-/// discarding the cache and re-fetching.
-///
-/// DOCUMENTED current behavior (this test is GREEN and pins it):
-///   * NO recovery: the server free-config endpoint is NEVER re-fetched even
-///     though the server is fully reachable and would hand back a usable lease;
-///   * catalyst generation is silently SKIPPED (no LLM call);
-///   * the run does not crash — it exits "successfully" but generated nothing,
-///     mislabeling the corrupt co-located cache as "server unreachable".
-///
-/// This is the R3 pin: because the old CLI cannot self-heal from an unparseable
-/// cache, a co-located NEW CLI must never drop/rename a core field — additive
-/// `serde(default)` fields only. The SAFE behavior the new CLI should adopt is
-/// asserted in `missing_core_field_cache_should_refetch_red_by_design` below.
+/// A co-located CLI wrote a cache the current CLI cannot parse (dropped the
+/// core `model` field). The CLI treats the unparseable cache as a MISS —
+/// discards it and re-fetches a fresh lease from the reachable server — rather
+/// than propagating the parse error and skipping catalyst generation entirely.
+/// The cache age is fresh (30s), so the parse failure, not the TTL, is what
+/// drives the refetch.
 #[test]
-fn missing_core_field_cache_aborts_without_refetch() {
-    let old_cli = VaultFixture::new();
-    let shared_cache = VaultFixture::empty();
-
-    let api = MockEnzymeApi::start();
-    let llm = MockLlm::start();
-    // Healthy LLM + a valid server lease: if the CLI DID re-fetch (self-heal),
-    // it would reach the LLM. A zero LLM count is therefore meaningful.
-    llm.set_ok_content(&catalyst_content());
-    api.set_free_config("enz-server-would-mint", &llm.base_url(), "server-model");
-
-    // Newer co-located CLI's cache dropped `model`; age is fresh so the TTL is
-    // NOT the reason for any refetch — the parse failure is.
-    shared_cache.seed_api_cache_missing_field("enz-missing-model-key", &llm.base_url(), 30);
-
-    let out = run_old_cli_against_shared_cache(&old_cli, &shared_cache, &api);
-    let diag = diagnostics("missing core field (documenting)", &shared_cache, &api, &llm, &out);
-
-    assert_no_panic(&out, &diag);
-
-    // THE FRAGILITY: the unparseable cache blocks recovery — no re-fetch happens
-    // even though the server is reachable and would mint a usable lease.
-    assert_eq!(
-        api.free_config_calls(),
-        0,
-        "current CLI does NOT re-fetch after an unparseable co-located cache — the \
-         parse error propagates and blocks recovery (client.rs:1027). This is the \
-         R3 fragility the new CLI must not trigger.{diag}"
-    );
-    // Consequently catalyst generation never runs.
-    assert_eq!(
-        llm.request_count(),
-        0,
-        "with the cache unparseable and no re-fetch, no leased key ever reaches the \
-         LLM, so catalyst generation is skipped.{diag}"
-    );
-    // Nothing was charged for a run that produced nothing.
-    assert_eq!(
-        api.deduct_calls(),
-        0,
-        "an unusable/unparseable cache must not deduct credits.{diag}"
-    );
-    // Documented (mis)diagnostic: the corrupt co-located cache is reported as a
-    // server-reachability problem.
-    out.assert_contains("Enzyme server unreachable");
-}
-
-// ===========================================================================
-// RED BY DESIGN — the SAFE behavior a robust CLI should have when it finds an
-// unparseable co-located cache: discard it and re-fetch. FAILS on current CLI.
-// ===========================================================================
-
-/// SAFE behavior (NOT satisfied by the current CLI): encountering a co-located
-/// cache it cannot parse (e.g. a newer CLI dropped/renamed a field), the CLI
-/// should treat the cache as a miss — discard it and re-fetch from the server —
-/// rather than propagate the parse error and skip catalyst generation entirely.
-///
-/// The current CLI does NOT: `serde_json::from_str::<CachedFreeConfig>(..)?`
-/// (client.rs:1027) hard-errors, so this asserts the ideal and is ignored.
-/// Recorded in `red_by_design`. This is the new-CLI robustness gate that would
-/// make the R3 "never drop a core field" constraint fail-safe instead of
-/// fail-silent.
-#[test]
-#[ignore = "red_by_design: current CLI propagates the cache parse error instead of \
-            discarding an unparseable co-located cache and re-fetching (client.rs:1027)"]
 fn missing_core_field_cache_should_refetch_red_by_design() {
     const FRESH_KEY: &str = "enz-fresh-after-bad-cache";
 
@@ -451,5 +370,14 @@ fn missing_core_field_cache_should_refetch_red_by_design() {
     assert!(
         !out.contains("Enzyme server unreachable"),
         "DESIRED: a parse failure of a co-located cache is not a server outage.{diag}"
+    );
+    // The unusable file is overwritten with the freshly fetched lease, so the
+    // next run starts from a healthy cache.
+    assert!(
+        shared_cache
+            .read_api_cache()
+            .map_or(false, |c| c.contains(FRESH_KEY)),
+        "the unusable cache must be overwritten with the fresh server-minted \
+         lease.{diag}"
     );
 }

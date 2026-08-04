@@ -33,10 +33,9 @@
 //! CLI cannot tell and does not care.
 //!
 //! Green tests below prove that tier-blind absorption for both server variants
-//! plus the corrected-refusal branch. One test is RED-BY-DESIGN: it pins the
-//! *correct* diagnostic for a reachable-server corrected 402 (the current CLI
-//! mislabels it "server unreachable"), and is `#[ignore]`d + recorded in
-//! `red_by_design`.
+//! plus the corrected-refusal branch, including the diagnostic for a
+//! reachable-server corrected 402 (reported as a credits/entitlement refusal,
+//! never as "server unreachable").
 
 mod support;
 
@@ -224,8 +223,8 @@ fn cell4_old_server_lapsed_pro_gets_free_lease_and_proceeds() {
     );
     assert!(
         api.deduct_calls() >= 1,
-        "current-server contract: the hosted free-tier preflight deducts credits \
-         (init.rs:611).{diag}"
+        "the hosted run deducts credits after its successful generation \
+         (deduct-after-success).{diag}"
     );
     assert!(
         !out.contains("Insufficient credits"),
@@ -280,7 +279,7 @@ fn cell4_new_server_reconciled_pro_lease_old_cli_proceeds() {
     );
     assert!(
         api.deduct_calls() >= 1,
-        "the old CLI's hosted preflight fires on the ServerFallback path \
+        "the hosted post-success deduct fires on the ServerFallback path \
          regardless of which tier the server granted.{diag}"
     );
     assert!(
@@ -502,27 +501,14 @@ fn cell4_new_server_corrected_refusal_old_cli_bails_sanely() {
 // RED BY DESIGN — the corrected-refusal diagnostic is misleading (init.rs:829).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RED-BY-DESIGN (correct behavior; currently fails). The new server's corrected
-/// entitlement refusal is a *reachable-server* HTTP 402 that states a precise
-/// reason. Yet the current CLI's visible quiet-mode line is the catch-all
-/// `ApiSkipped` string (init.rs:829):
-///
-///   "No API key found and Enzyme server unreachable — skipping catalyst
-///    generation. Set OPENAI_API_KEY or ensure network access."
-///
-/// That mislabels a reachable-server, entitlement-driven 402 as a network /
-/// missing-key failure. Worse in *this* cell: the account still holds stranded
-/// credits (balance > 0), so "server unreachable" is doubly wrong — the server
-/// was reached AND the account has credits. A correct new CLI must report a 402
-/// refusal as an entitlement/credits condition, never as an unreachable server.
-///
-/// Marked `#[ignore]` (the current binary fails it) and recorded in
-/// `red_by_design`. This defines the new-CLI diagnostic gate for cell 4; it is
-/// the same underlying init.rs:829 defect the baseline group documents for
-/// cell 2, exercised here on the stranded-entitlement refusal.
+/// The new server's corrected entitlement refusal is a *reachable-server* HTTP
+/// 402 that states a precise reason. The CLI's typed free-config 402 handling
+/// reports it as a credits/entitlement condition (with top-up + BYOK guidance)
+/// rather than funneling it into the catch-all "Enzyme server unreachable"
+/// line, which is reserved for genuine network / missing-key failures. Same
+/// underlying contract the baseline group pins for cell 2, exercised here on
+/// the stranded-entitlement refusal.
 #[test]
-#[ignore = "red_by_design: current CLI mislabels a reachable-server corrected 402 \
-            (lapsed-pro w/ stranded credits) as 'server unreachable' (init.rs:829)"]
 fn cell4_corrected_refusal_message_should_not_claim_unreachable_red_by_design() {
     let api = MockEnzymeApi::start();
     let llm = MockLlm::start();

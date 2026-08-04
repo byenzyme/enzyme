@@ -37,6 +37,32 @@ fn api_cache_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
 }
 
+/// Typed error for a non-success HTTP response from an LLM completions
+/// endpoint. Downcastable through `anyhow` so callers can classify on the
+/// actual HTTP status (e.g. the catalyst pipeline's 402 circuit breaker)
+/// instead of substring-matching the provider body. The `Display` format stays
+/// close to the historical `bail!` string so log output remains familiar.
+#[derive(Debug, thiserror::Error)]
+#[error("LLM API returned status {status}: {body}")]
+pub struct LlmApiError {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Typed error for an HTTP 402 from the hosted free-config endpoint: the
+/// account's Enzyme credits are exhausted. Billing errors can only come from
+/// billing endpoints (this fetch and `POST /v1/credits/deduct`), never from a
+/// completions call — so this is one of the only places top-up guidance is
+/// correct.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Insufficient Enzyme credits ({credits:.1} remaining) — top up at \
+     app.enzyme.garden/plans or use --use-env-llm"
+)]
+pub struct EnzymeCreditsExhausted {
+    pub credits: f64,
+}
+
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]
 pub enum ConfigProvider {
@@ -646,7 +672,11 @@ impl LlmClient {
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             warn!("LLM API returned error status {}: {}", status, error_body);
-            bail!("LLM API returned status {}: {}", status, error_body);
+            return Err(LlmApiError {
+                status: status.as_u16(),
+                body: error_body,
+            }
+            .into());
         }
 
         let response_body: ChatCompletionResponse = response
@@ -769,7 +799,11 @@ impl LlmClient {
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             warn!("LLM API returned error status {}: {}", status, error_body);
-            bail!("LLM API returned status {}: {}", status, error_body);
+            return Err(LlmApiError {
+                status: status.as_u16(),
+                body: error_body,
+            }
+            .into());
         }
 
         let byte_stream = response.bytes_stream();
@@ -927,10 +961,9 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
     if resp.status().as_u16() == 402 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let credits = body["credits"].as_f64().unwrap_or(0.0);
-        bail!(
-            "Insufficient credits ({:.1} remaining). Visit app.enzyme.garden/plans to top up.",
-            credits
-        );
+        // Typed so callers (e.g. `init`'s skip diagnostic) can distinguish a
+        // reachable server's credit refusal from a genuine network failure.
+        return Err(EnzymeCreditsExhausted { credits }.into());
     }
 
     let resp: FreeConfigResponse = resp
@@ -1022,37 +1055,51 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
     let cache_path = api_cache_path();
     let cache_path = cache_path.as_path();
     if cache_path.exists() {
-        let contents = std::fs::read_to_string(cache_path)
-            .with_context(|| format!("Failed to read {}", cache_path.display()))?;
-        let cached: CachedFreeConfig = serde_json::from_str(&contents)
-            .with_context(|| format!("Failed to parse {}", cache_path.display()))?;
+        // The cache file may be shared with a co-located (possibly newer) CLI.
+        // A file that cannot be read or parsed is treated as ABSENT — fall
+        // through to a fresh fetch, which overwrites the unusable file.
+        // Propagating the parse error would leave no recovery path even though
+        // the server is reachable and can mint a usable lease.
+        let cached: Option<CachedFreeConfig> = std::fs::read_to_string(cache_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str(&contents).ok());
 
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let age_secs = now_secs.saturating_sub(cached.cached_at);
-        let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
+        match cached {
+            Some(cached) => {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let age_secs = now_secs.saturating_sub(cached.cached_at);
+                let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
 
-        if !cached.api_key.is_empty() && !expired {
-            debug!(
-                "Resolved API config from {} (age={}s)",
-                cache_path.display(),
-                age_secs
-            );
-            return Ok(ResolvedConfig {
-                api_key: cached.api_key,
-                base_url: cached.base_url,
-                model: cached.model,
-                provider: ConfigProvider::ServerFallback,
-            });
-        }
+                if !cached.api_key.is_empty() && !expired {
+                    debug!(
+                        "Resolved API config from {} (age={}s)",
+                        cache_path.display(),
+                        age_secs
+                    );
+                    return Ok(ResolvedConfig {
+                        api_key: cached.api_key,
+                        base_url: cached.base_url,
+                        model: cached.model,
+                        provider: ConfigProvider::ServerFallback,
+                    });
+                }
 
-        if expired {
-            debug!(
-                "Cached free-tier config expired (age={}s, ttl={}s), re-fetching",
-                age_secs, FREE_CONFIG_CACHE_TTL_SECS
-            );
+                if expired {
+                    debug!(
+                        "Cached free-tier config expired (age={}s, ttl={}s), re-fetching",
+                        age_secs, FREE_CONFIG_CACHE_TTL_SECS
+                    );
+                }
+            }
+            None => {
+                warn!(
+                    "Unusable API cache at {}; discarding and re-fetching",
+                    cache_path.display()
+                );
+            }
         }
     }
 
@@ -1062,7 +1109,12 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
             write_free_config_cache(cache_path, &cfg);
             Ok(cfg)
         }
-        Err(e) => bail!(hosted_config_unavailable_message(&e)),
+        Err(e) => {
+            // `context` rather than `bail!` so typed causes (e.g.
+            // `EnzymeCreditsExhausted`) remain downcastable by callers.
+            let msg = hosted_config_unavailable_message(&e);
+            Err(e.context(msg))
+        }
     }
 }
 
@@ -1139,6 +1191,36 @@ mod tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         move |key| values.get(key).cloned()
+    }
+
+    /// Pins the `LlmApiError` Display prefix. Any consumer that (as a
+    /// fallback) matches the stringified error must agree with this format;
+    /// the format is owned here and nowhere else.
+    #[test]
+    fn llm_api_error_display_format_is_stable() {
+        let err = LlmApiError {
+            status: 402,
+            body: r#"{"error":{"message":"Insufficient credits"}}"#.to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            r#"LLM API returned status 402: {"error":{"message":"Insufficient credits"}}"#
+        );
+    }
+
+    /// The typed credit-exhaustion error must stay downcastable through the
+    /// context wrapper `resolve_hosted_api_config` adds, since `init` branches
+    /// on it to pick the skip diagnostic.
+    #[test]
+    fn credits_exhausted_survives_context_wrapping() {
+        let err = anyhow::Error::from(EnzymeCreditsExhausted { credits: 0.0 });
+        let wrapped = err.context(hosted_config_unavailable_message(&anyhow::anyhow!("x")));
+        assert!(wrapped.downcast_ref::<EnzymeCreditsExhausted>().is_some());
+        assert!(
+            EnzymeCreditsExhausted { credits: 0.0 }
+                .to_string()
+                .contains("app.enzyme.garden/plans")
+        );
     }
 
     #[test]

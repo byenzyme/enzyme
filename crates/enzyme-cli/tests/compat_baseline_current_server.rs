@@ -20,12 +20,11 @@
 //!   6  env-llm / BYOK                          -> no hosted call at all, no deduct
 //!   7  anonymous bootstrap (unauth first init) -> X-Enzyme-Bootstrap-Id sent, key handed out
 //!
-//! NOTE on the credit deduct: the *current* server contract deducts credits
-//! BEFORE the LLM work (init.rs:611, gated on `ConfigProvider::ServerFallback`).
-//! That deduct-before-success is exactly the D2 bug the planned release fixes,
-//! but on the OLD-CLI x OLD-SERVER baseline it is the observed contract, so the
-//! hosted cells assert that the deduct fires. A test that pins the *fixed*
-//! deferred-deduct behavior belongs to the new-CLI-contract group, not here.
+//! NOTE on the credit deduct: the CLI deducts credits AFTER successful LLM
+//! work (deduct-after-success, gated on `ConfigProvider::ServerFallback` and
+//! `catalysts_generated > 0`). The healthy hosted cells therefore still
+//! observe a deduct — it just fires post-generation. Failed runs never deduct;
+//! that contract is pinned in `compat_client_classification_contract`.
 
 mod support;
 
@@ -164,11 +163,12 @@ fn cell1_free_with_credits_gets_free_lease_and_proceeds() {
         llm.auth_headers().iter().any(|h| h == &bearer(LEASED_KEY)),
         "expected the leased free-tier key {LEASED_KEY:?} to be presented to the LLM.{diag}"
     );
-    // Current-server contract: the hosted free-tier preflight deducts credits.
+    // The hosted free-tier init deducts account credits after the successful
+    // generation (deduct-after-success).
     assert!(
         api.deduct_calls() > 0,
-        "expected the hosted free-tier init to deduct account credits \
-         (current server contract, init.rs:611).{diag}"
+        "expected the hosted free-tier init to deduct account credits after a \
+         successful generation.{diag}"
     );
     // The account is healthy: no billing failure should surface.
     assert!(
@@ -217,8 +217,8 @@ fn cell2_free_credits_zero_refuses_cleanly_and_suggests_env_llm() {
         "a 402 from free-config must abort before any LLM call — there is no key \
          to present.{diag}"
     );
-    // With no ServerFallback config resolved, the credit preflight deduct must
-    // not fire.
+    // With no ServerFallback config resolved (and nothing generated), the
+    // deduct must not fire.
     assert_eq!(
         api.deduct_calls(),
         0,
@@ -430,26 +430,15 @@ fn cell7_anonymous_bootstrap_sends_bootstrap_id_and_gets_key() {
 }
 
 // ---------------------------------------------------------------------------
-// RED BY DESIGN — documents a current-behavior diagnostic bug on cell 2.
+// Cell 2 diagnostic — a reachable-server 402 names the real cause.
 // ---------------------------------------------------------------------------
 
 /// When free-config answers a *clean* 402 (credits=0), the server was plainly
-/// REACHABLE and gave a precise, correct reason. Yet the current CLI's visible
-/// quiet-mode line is the catch-all `ApiSkipped` string at init.rs:829:
-///
-///   "No API key found and Enzyme server unreachable — skipping catalyst
-///    generation. Set OPENAI_API_KEY or ensure network access."
-///
-/// That mislabels a reachable-server credits-exhausted refusal as a network /
-/// missing-key problem. The accurate cause ("Insufficient credits ... top up")
-/// only appears in a `tracing::warn` on stderr, not in the primary line the
-/// user reads. The correct behavior — asserted here and NOT satisfied by the
-/// current CLI — is that a 402 refusal never claims the server was unreachable.
-///
-/// Ignored so the baseline group stays green; it is a bug-documenting / future
-/// new-CLI gate, not a baseline expectation. Recorded in `red_by_design`.
+/// REACHABLE and gave a precise, correct reason. The CLI's visible skip line
+/// must report the credit refusal (with top-up + BYOK guidance) rather than
+/// the catch-all "Enzyme server unreachable" string, which is reserved for
+/// genuine network / missing-key failures.
 #[test]
-#[ignore = "red_by_design: current CLI mislabels a reachable-server 402 as 'server unreachable' (init.rs:829)"]
 fn cell2_credits_zero_message_should_not_claim_unreachable_red_by_design() {
     let fixture = VaultFixture::new();
     fixture.login("k-broke-user");

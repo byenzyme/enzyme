@@ -161,13 +161,12 @@ fn healthy_hosted_init_never_calls_new_endpoints() {
     assert_no_new_cli_endpoints(&api, &diag);
 }
 
-/// The scenario a refund endpoint most plausibly exists FOR: the current CLI
-/// deducts credits up front (init.rs:611, ServerFallback) and THEN the LLM 402s,
-/// so the run pays for catalysts it never gets. A refund-capable new CLI would
-/// POST `/v1/credits/refund` here — the current CLI must not, even though the
-/// deduct already fired and the work failed. This is the strongest R2 proof:
-/// the old CLI has no refund path even in the exact situation that motivates the
-/// new endpoint.
+/// The scenario a refund endpoint would most plausibly exist FOR: a hosted run
+/// whose LLM 402s every completion. Under deduct-after-success there is no
+/// up-front charge to compensate — the failed run never touches
+/// `/v1/credits/deduct` at all — so no refund endpoint is needed, and the CLI
+/// must not call one. This is the strongest R2 proof: the CLI requires nothing
+/// new even in the exact situation that once motivated a refund route.
 #[test]
 fn deduct_then_llm_failure_never_refunds() {
     const LEASED_KEY: &str = "enz-lease-dry";
@@ -192,21 +191,22 @@ fn deduct_then_llm_failure_never_refunds() {
 
     let diag = diagnostics("deduct-then-LLM-402", &api, &llm, &out);
 
-    // Premise 1: the up-front deduct actually fired (so a refund would have
-    // something to give back).
-    assert!(
-        api.deduct_calls() >= 1,
-        "TEST IS VACUOUS: the up-front deduct never fired, so there is no charge a \
-         refund endpoint would compensate — the refund premise does not hold.{diag}"
-    );
-    // Premise 2: the paid-for work actually failed at the LLM.
+    // Premise 1: the work actually failed at the LLM.
     assert!(
         llm.request_count() > 0,
-        "TEST IS VACUOUS: the LLM was never reached, so the paid-for work never \
-         failed and no refund would be warranted.{diag}"
+        "TEST IS VACUOUS: the LLM was never reached, so the failure under test \
+         never happened.{diag}"
+    );
+    // Premise 2 (deduct-after-success): the failed run was never charged, so
+    // there is nothing a refund endpoint could compensate.
+    assert_eq!(
+        api.deduct_calls(),
+        0,
+        "deduct-after-success: a hosted run that produced nothing must never call \
+         POST /v1/credits/deduct.{diag}"
     );
 
-    // The R2 guarantee: no refund call despite the failed, already-billed run.
+    // The R2 guarantee: no refund call — the failed run was never billed.
     assert_no_new_cli_endpoints(&api, &diag);
 
     // And the CLI must not have crashed/panicked on the failure.

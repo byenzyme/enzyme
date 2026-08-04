@@ -12,15 +12,12 @@
 //! ── Cell 5a (OLD server) ────────────────────────────────────────────────────
 //! The deployed server has no pool-headroom check, so free-config still mints a
 //! valid 200 lease. The pool-dry 402 only surfaces later, on the LLM completion.
-//! The current CLI misclassifies that provider/pool 402 as *hosted billing*
-//! exhaustion (`is_credits_exhausted_error`, catalysts.rs:1492 still matches the
-//! literal "Insufficient credits" / "status 402 " that OpenRouter's pool-dry
-//! body carries) and aborts the whole run with a top-up message pointing at
-//! app.enzyme.garden/plans — even though the account's hosted credits were fine
-//! (the deduct preflight succeeded and the balance stayed positive). Topping up
-//! those credits cannot refill the shared pool, so the message is actively
-//! misleading. This documents the current broken behavior; the correct-behavior
-//! assertion is RED-BY-DESIGN (see `pool_dry_old_server_*_red_by_design`).
+//! The CLI's typed 402 breaker stops the run with a mode-neutral
+//! provider-capacity message — never a hosted top-up directive, because a
+//! completions call is not a billing endpoint and the account's credits were
+//! provably fine (deduct-after-success means the failed run billed nothing).
+//! `pool_dry_old_server_must_not_blame_hosted_credits_red_by_design` pins that
+//! contract; the premise test pins the invariants that make it meaningful.
 //!
 //! ── Cell 5b (NEW server) ────────────────────────────────────────────────────
 //! The new server adds a pool-headroom check and CLEANLY REFUSES at free-config
@@ -160,8 +157,8 @@ fn run_pool_dry_old_server(llm: &MockLlm, api: &MockEnzymeApi, vault: &VaultFixt
 /// PREMISE (green). Establishes, with true invariants only, that in 5a the
 /// account's hosted credits are healthy and the failure originates entirely at
 /// the LLM/pool layer. This is what makes any hosted-billing message in the
-/// companion red-by-design test a provable MISATTRIBUTION rather than a correct
-/// report. Asserts nothing about the (buggy) message itself.
+/// companion misattribution test a provable MISATTRIBUTION rather than a
+/// correct report. Asserts nothing about the message itself.
 #[test]
 fn pool_dry_old_server_hosted_credits_are_healthy_and_failure_is_at_the_llm() {
     let api = MockEnzymeApi::start();
@@ -182,41 +179,33 @@ fn pool_dry_old_server_hosted_credits_are_healthy_and_failure_is_at_the_llm() {
         "expected the run to reach the mock LLM (where the pool-dry 402 lives); \
          it never did, so the scenario under test never happened.\n{diag}"
     );
-    // Hosted credits were fine: the preflight deduct fired and SUCCEEDED (the
-    // mock 402s a deduct only when balance < amount; balance is HEALTHY_BALANCE).
-    assert!(
-        api.deduct_calls() >= 1,
-        "expected the hosted preflight to deduct credits (ServerFallback path); \
-         it never did.\n{diag}"
+    // Hosted credits were untouched: deduct-after-success means a run that
+    // produced nothing never bills, so the account balance provably stayed at
+    // HEALTHY_BALANCE — the 402 cannot have come from the account.
+    assert_eq!(
+        api.deduct_calls(),
+        0,
+        "deduct-after-success: a pool-dry run that produced nothing must never \
+         call the deduct endpoint.\n{diag}"
     );
-    let billed = net_credits_billed(&api);
-    assert!(
-        billed > 0.0 && billed < HEALTHY_BALANCE,
-        "expected hosted credits to be charged AND the balance to remain \
-         positive (net billed {billed}, starting balance {HEALTHY_BALANCE}) — \
-         proving the account had ample hosted credit and the 402 came from the \
-         shared pool, not the account.\n{diag}"
+    assert_eq!(
+        net_credits_billed(&api),
+        0.0,
+        "expected zero hosted credits billed for a run that generated nothing \
+         (starting balance {HEALTHY_BALANCE} intact) — proving the account had \
+         ample hosted credit and the 402 came from the shared pool, not the \
+         account.\n{diag}"
     );
 }
 
-/// RED-BY-DESIGN (correct behavior; currently fails). A shared-pool 402 that
-/// surfaces on the LLM completion of a freshly-minted, well-funded hosted lease
-/// must NOT be reported to the user as Enzyme hosted-credit exhaustion. The
-/// account's hosted credits are provably fine (see the premise test), so
-/// directing the user to app.enzyme.garden/plans to "top up" is unactionable and
-/// wrong: topping up hosted credits cannot refill the shared OpenRouter pool.
-///
-/// Planned fix D1 classifies by (credential mode, HTTP status) client-side: a
-/// 402 on a hosted *lease* means "this lease is spent / pool issue" (re-mint or
-/// report a pool/provider error), never "your account is out of credits".
-///
-/// This is marked `#[ignore]` because it asserts the POST-FIX contract and is
-/// red against the current binary.
+/// A shared-pool 402 that surfaces on the LLM completion of a freshly-minted,
+/// well-funded hosted lease must NOT be reported to the user as Enzyme
+/// hosted-credit exhaustion. The account's hosted credits are provably fine
+/// (see the premise test), so directing the user to app.enzyme.garden/plans to
+/// "top up" would be unactionable and wrong: topping up hosted credits cannot
+/// refill the shared OpenRouter pool. The typed 402 breaker instead stops the
+/// run with a mode-neutral provider-capacity message.
 #[test]
-#[ignore = "RED-BY-DESIGN (D1): a shared-pool 402 on a healthy hosted lease is \
-            misreported as hosted-credit exhaustion (app.enzyme.garden/plans). \
-            Correct behavior: never send a user with healthy hosted credits to \
-            top up; attribute the failure to the pool/provider."]
 fn pool_dry_old_server_must_not_blame_hosted_credits_red_by_design() {
     let api = MockEnzymeApi::start();
     let llm = MockLlm::start();
@@ -225,34 +214,34 @@ fn pool_dry_old_server_must_not_blame_hosted_credits_red_by_design() {
     let out = run_pool_dry_old_server(&llm, &api, &vault);
     let diag = diagnostics(&api, &llm, &out);
 
-    // Premise (true today): credits healthy, failure originated at the LLM/pool.
+    // Premise: the failure originated at the LLM/pool, and the account was
+    // never billed (deduct-after-success + 0 catalysts), so its balance is
+    // provably intact.
     assert!(
-        llm.request_count() >= 1 && api.deduct_calls() >= 1,
-        "scenario premise not met (LLM never called or no deduct) — the \
-         misattribution assertion below would be meaningless.\n{diag}"
+        llm.request_count() >= 1,
+        "scenario premise not met (LLM never called) — the misattribution \
+         assertion below would be meaningless.\n{diag}"
     );
     let billed = net_credits_billed(&api);
-    assert!(
-        billed < HEALTHY_BALANCE,
-        "premise: expected hosted balance to remain positive after the preflight \
-         deduct.\n{diag}"
+    assert_eq!(
+        billed, 0.0,
+        "premise: expected zero hosted credits billed for a run that produced \
+         nothing.\n{diag}"
     );
 
-    // THE CORRECT BEHAVIOR (currently violated): the run must not launder the
-    // shared-pool 402 into a hosted-billing top-up directive.
+    // THE CORRECT BEHAVIOR: the run must not launder the shared-pool 402 into
+    // a hosted-billing top-up directive.
     for marker in HOSTED_BILLING_MARKERS {
         assert!(
             !out.contains(marker),
             "MISATTRIBUTED POOL EXHAUSTION: the shared OpenRouter pool was dry, so \
              the leased key 402'd on completion, but the account's hosted credits \
-             were fine (net billed {billed} of {HEALTHY_BALANCE}, balance still \
-             positive). The CLI nonetheless emitted the hosted-billing marker \
-             {marker:?}, sending a well-funded user to top up credits that were \
-             never the problem — and cannot refill the pool.\n\
-             Root cause: is_credits_exhausted_error (catalysts.rs:1492) still \
-             matches the literal \"Insufficient credits\" / \"status 402 \" in \
-             OpenRouter's pool-dry body and is not gated on (credential mode, \
-             HTTP status). Planned fix D1.\n{diag}"
+             were fine (net billed {billed} of {HEALTHY_BALANCE}, balance intact). \
+             The CLI nonetheless emitted the hosted-billing marker {marker:?}, \
+             sending a well-funded user to top up credits that were never the \
+             problem — and cannot refill the pool. Classification must key on the \
+             typed HTTP status of a *billing* endpoint, and a completions call is \
+             not one.\n{diag}"
         );
     }
 }

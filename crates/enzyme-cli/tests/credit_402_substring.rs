@@ -2,29 +2,16 @@
 //!
 //! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`).
 //!
-//! # The bug
+//! # The contract
 //!
-//! `enzyme-core/src/pipeline/catalysts.rs:1433`:
-//!
-//! ```ignore
-//! fn is_credits_exhausted_error(err: &str) -> bool {
-//!     err.contains("402") || err.contains("Insufficient credits")
-//! }
-//! ```
-//!
-//! That is a bare substring match over the *raw provider error string*, which for
-//! a non-2xx LLM response is `"LLM API returned status {status}: {body}"` — i.e.
-//! it embeds the provider's verbatim response body. Any provider body that
-//! happens to contain the three characters `402` anywhere (a request id, a token
-//! count, a quota value like `quota_limit_value 4029`) is misclassified as hosted
-//! credit exhaustion. The check is also not gated on credential mode, so it fires
-//! even under `--use-env-llm`, where the user is bring-your-own-key and Enzyme
-//! hosted credits are not involved at all.
-//!
-//! When it trips, the pipeline sets the global `credits_exhausted` flag
-//! (catalysts.rs:1200), aborts every in-flight entity, and bails with the
-//! hardcoded hosted-billing message at catalysts.rs:1335 naming
-//! `app.enzyme.garden/plans`.
+//! The catalyst pipeline's payment-required breaker
+//! (`is_payment_required_error`, `enzyme-core/src/pipeline/catalysts.rs`)
+//! classifies on the typed `LlmApiError` HTTP status — it fires only on a
+//! genuine 402. Body substrings never participate: a provider body that
+//! happens to contain the three characters `402` anywhere (a request id, a
+//! token count, a quota value like `quota_limit_value 4029`) must stay inert.
+//! And no completion error, in any mode, is ever an Enzyme-account billing
+//! verdict — billing errors can only come from billing endpoints.
 //!
 //! # What this test does
 //!
@@ -38,8 +25,6 @@
 //! must not claim "Insufficient credits", must not send a BYOK user to
 //! `app.enzyme.garden` to top up an account that is not paying for this
 //! inference, and must surface the actual upstream failure.
-//!
-//! # Expected result: RED (bug is unfixed)
 
 mod support;
 
@@ -123,9 +108,8 @@ fn incidental_402_in_provider_error_is_not_reported_as_credit_exhaustion() {
              contains the hosted-billing marker {marker:?}.\n\
              Expected: the failure reported as an upstream provider rate limit.\n\
              Actual:   reported as Enzyme credit exhaustion.\n\
-             Root cause: is_credits_exhausted_error (catalysts.rs:1433) does a bare \
-             `err.contains(\"402\")` against the raw provider body, which matches the \
-             \"402\" inside \"4029\".{diag}"
+             The breaker must classify on the typed HTTP status (LlmApiError), \
+             never on body substrings like the \"402\" inside \"4029\".{diag}"
         );
     }
 
