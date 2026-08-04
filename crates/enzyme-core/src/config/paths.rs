@@ -24,6 +24,41 @@ pub struct EnzymePaths {
     pub vault_db_origin: Option<PathBuf>,
 }
 
+/// Create `dir` (and parents) without ever deleting or replacing a symlink.
+///
+/// Users keep `<vault>/.enzyme` as a symlink to a directory outside the vault
+/// (e.g. to keep a large DB out of iCloud Drive sync). That layout is
+/// supported: all I/O resolves through the link, and Enzyme must never remove
+/// the link or the directory it points to.
+///
+/// `std::fs::create_dir_all` handles a symlink that resolves to an existing
+/// directory, but fails with `AlreadyExists` when the path is a *dangling*
+/// symlink — e.g. after an external tool (or the pre-v0.7.0 installer) removed
+/// the link's target. Repair that case by recreating the missing target
+/// directory through the link instead of failing or touching the link itself.
+pub fn ensure_dir_symlink_aware(dir: &Path) -> std::io::Result<()> {
+    let mut current = dir.to_path_buf();
+    // Follow at most a short chain of symlinks; a cycle or absurd chain falls
+    // through to create_dir_all's own error.
+    for _ in 0..8 {
+        if current.is_dir() {
+            return Ok(());
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current.parent().unwrap_or(Path::new(".")).join(target)
+                };
+            }
+            _ => break,
+        }
+    }
+    std::fs::create_dir_all(&current)
+}
+
 impl EnzymePaths {
     /// Construct paths for the given vault, respecting environment overrides.
     ///
@@ -38,7 +73,7 @@ impl EnzymePaths {
     pub fn from_db_path(db_path: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
+            ensure_dir_symlink_aware(parent)
                 .with_context(|| format!("failed to create directory for DB: {:?}", parent))?;
         }
 
@@ -387,6 +422,35 @@ mod tests {
         let b = EnzymePaths::session_db_path(Path::new("/sessions/x/mnt/vault-two")).unwrap();
         assert_ne!(a, b);
         assert!(a.ends_with("enzyme.db"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_dir_symlink_aware_preserves_link_and_repairs_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("outside-data");
+        let link = root.path().join("vault").join(".enzyme");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Healthy symlinked dir: no-op, link untouched.
+        ensure_dir_symlink_aware(&link).unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(target.is_dir());
+
+        // Dangling symlink (target wiped externally): the target is recreated
+        // THROUGH the link; the link itself is never removed or replaced.
+        std::fs::remove_dir_all(&target).unwrap();
+        ensure_dir_symlink_aware(&link).unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(target.is_dir());
+
+        // Plain directory path still works.
+        let plain = root.path().join("plain/.enzyme");
+        ensure_dir_symlink_aware(&plain).unwrap();
+        assert!(plain.is_dir());
     }
 
     #[test]

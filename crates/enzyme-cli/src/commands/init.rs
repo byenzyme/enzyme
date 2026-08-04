@@ -7,7 +7,7 @@ use serde_json::json;
 use tracing::{debug, info};
 
 use enzyme_core::config::enzyme_config::EnzymeConfig;
-use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::config::paths::{EnzymePaths, ensure_dir_symlink_aware};
 use enzyme_core::db::Database;
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
@@ -282,7 +282,7 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+        ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
     if !should_preserve_db_only_corpus(&paths, vault_path)? {
@@ -338,7 +338,7 @@ pub async fn run_init_voice_ready(
     preflight_env_llm(use_env_llm).await?;
 
     if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+        ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
     let background_spawned =
@@ -473,7 +473,7 @@ pub async fn run_init(
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
-        fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+        ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
     let _detached_lock = if detached {

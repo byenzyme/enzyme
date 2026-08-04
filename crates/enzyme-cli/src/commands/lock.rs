@@ -1,8 +1,9 @@
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use enzyme_core::config::paths::ensure_dir_symlink_aware;
 use fs2::FileExt;
 
 /// RAII guard for the `.enzyme/refresh.lock` file.
@@ -22,7 +23,7 @@ fn lock_path(enzyme_dir: &Path) -> PathBuf {
 ///
 /// Returns `Ok(RefreshLock)` if acquired, or an error if the lock is held.
 pub fn acquire_refresh_lock(enzyme_dir: &Path) -> Result<RefreshLock> {
-    fs::create_dir_all(enzyme_dir).context("failed to create .enzyme directory")?;
+    ensure_dir_symlink_aware(enzyme_dir).context("failed to create .enzyme directory")?;
     let path = lock_path(enzyme_dir);
     let file = File::create(&path).context("failed to create refresh.lock")?;
     file.try_lock_exclusive()
@@ -42,7 +43,7 @@ pub fn acquire_refresh_lock(enzyme_dir: &Path) -> Result<RefreshLock> {
 /// distinct from `refresh.lock`: an epoch can spend minutes doing LLM work
 /// without blocking document freshness, and takes this lock only to activate.
 pub fn acquire_projection_lock(enzyme_dir: &Path) -> Result<ProjectionLock> {
-    fs::create_dir_all(enzyme_dir).context("failed to create .enzyme directory")?;
+    ensure_dir_symlink_aware(enzyme_dir).context("failed to create .enzyme directory")?;
     let path = enzyme_dir.join("projection.lock");
     let file = File::create(&path).context("failed to create projection.lock")?;
     file.lock_exclusive()

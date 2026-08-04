@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::config::paths::{EnzymePaths, ensure_dir_symlink_aware};
 use enzyme_core::db::Database;
 use enzyme_core::document::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
@@ -45,7 +45,7 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
     if let Some(parent) = paths.vault_db.parent() {
-        std::fs::create_dir_all(parent).context("failed to create .enzyme directory")?;
+        ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
     let mut input = String::new();
