@@ -12,6 +12,8 @@ The durable promise:
 
 Nothing but additive artifacts is written before the single consent gate: at most one proof note and temporary diagnostic/backup artifacts. A "no" ends cleanly, vault unchanged except for any proof note the user has already seen and accepted.
 
+The first job of everything you say is revelation, not reassurance: show the user **what Enzyme anchored on in their vault** — the folders, tags, links, and running logs where their thinking accumulates — and **what each anchor makes possible**. A little mechanism is welcome when it makes the value believable ("for each anchor it keeps standing questions drawn from your own words; those are what answer you later"). Name every anchor in the user's vocabulary with their real folder names, counts, and dates, and pair it with a question it newly makes answerable: "it reads `content-drafts` as a timeline now, so your June draft and this morning's entry are different moments — ask what changed between them." Verdicts like "healthy" or "needs repair" are the footnote to this reveal, never the headline.
+
 Speak in terms of what the user sees in their own files, not engine internals. Engine evidence guides you; the user hears it translated. Numbers are fine, internals are not: avoid DB column names, doctor cause tokens, "dated fraction," "embedding budget," "catalyst," "indexed," or "checksum" in user-facing copy. Say what it means: "this note's date is not being read," "the engine stores this twice," "I checked every file came back exactly as it was." Before sending any user-facing message, reread it as the user: rewrite every phrase they could not say back to you in their own words.
 
 ## Inputs
@@ -50,7 +52,7 @@ Mechanism facts:
 - Retrieval compounds when related notes share one home and dedupes by file; scattered notes cannot stack as strongly.
 - Undated notes fall out of time-aware ranking, and only the most-recent slice is embedded; old or undated content can go dark.
 - Frequency and recency rank entities, so a large recent generated/reference/template folder can outrank real notes. Treat authored reference material as real content unless evidence says otherwise.
-- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single long append-only file** — one `journal.md`/`standup.md` that grows by appended dated entries — is different: Enzyme reads it as one note on one date, so its internal timeline collapses and its length pushes it off the precise retrieval path. Detect the second shape structurally: a single long file whose body carries several date headers in mostly one chronological direction (a coherent essay that merely cites dates does not qualify). Enzyme can treat such a file as an internal log only if it is *told*; it cannot split the file for you, because that would edit a body. Enzyme also auto-recognizes this shape per file, so a single verbose dated file sitting inside an otherwise-healthy folder (a long transcript, say) may already be handled as a log with no stamp — expect that rather than be surprised by it.
+- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single file of dated entries** — a `journal.md` that grows by appending, or a generated transcript with day-by-day sections — is different: without recognition Enzyme would read it as one note on one date, collapsing its internal timeline. Enzyme auto-recognizes this shape structurally and broadly: date headers may be ISO (`2026-07-28`), numeric (`07/28/2026`), prose (`July 28, 2026`), or weekday-prefixed (`Monday, July 28, 2026`), in mostly one chronological direction, with at least three entries that have real content beneath their headers (a page that merely *lists* dates, a metrics table, or an essay citing dates does not qualify). Recognized files are read as internal timelines automatically. What recognition looks like to the user: `scan --write-config` records each recognized file as a `log:` line in their settings, next to the folders and tags — a legible ledger of what Enzyme noticed. Removing a line withdraws the file from anchor treatment; adding one promotes a log the detector missed or judged too small. Enzyme never splits or edits the file itself, and never writes recognition into the note's own metadata.
 
 Before you read anything, snapshot the workspace to a unique temporary path with `mktemp`; after diagnosis, re-snapshot and prove byte identity, then clean up both snapshots. Diagnosis that leaves residue was not read-only.
 
@@ -58,7 +60,7 @@ Place every observed cluster in exactly one tier:
 
 1. **Already usable**: structured Markdown, dated notes, existing wikilinks or frontmatter that Enzyme can leverage now.
 2. **Weakly indexable**: real content Enzyme can only partly see, such as missing dates, malformed metadata, thin bodies, or non-Markdown source.
-3. **Would improve retrieval**: content that would compound much better after a small, deterministic move, exclusion, or frontmatter stamp.
+3. **Would improve retrieval**: content that would compound much better after a small, deterministic move, exclusion, date stamp, or settings recording (a `log:` line).
 4. **Can wait**: non-note structure that should not be reorganized for Enzyme, such as source code, raw exports, build outputs, and foreign-domain material.
 
 Raw transcripts and evidence bundles stay put. Never move, edit, or summarize raw JSON, logs, transcripts, or exports during setup. Never bulk-invent `people:` or `tags:` frontmatter from body inference.
@@ -72,9 +74,9 @@ State each invariant, then prove it:
 - **Full backup before first mutation**: create a self-sufficient backup of every affected file before moving or stamping it. A temporary backup workspace is acceptable if it is retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
 - **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
 
-Only moves/renames and frontmatter stamps are allowed, and only from deterministic evidence such as existing metadata, filenames, or exact entity matches. No body rewrites, invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
+Only moves/renames, date-repair frontmatter stamps, and settings edits (`log:` lines, exclusions, targets in Enzyme's config) are allowed, and only from deterministic evidence such as existing metadata, filenames, or exact entity matches. No body rewrites, invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
 
-When a single long append-only file is confirmed (see the two-shapes mechanism fact), the correct, body-preserving remedy is to stamp `type: log` in its frontmatter. That is a normal frontmatter stamp — it switches Enzyme to reading the file as an internal timeline (chronological handling, recency-biased) without touching the body. Stamp it only when the structural evidence is clear and the user consents; a false stamp is reversible by removing the field. The files that most need the stamp are the ones Enzyme's own auto-recognition misses: a short but genuinely recurring log, or one whose entries are headed by prose dates like `July 28, 2026` rather than `2026-07-28` (auto-recognition only catches ISO-dated logs above a length threshold). When you find a real recurring log Enzyme is not already treating as one, stamp it. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
+Log recognition is a **settings edit, never a note edit**. When a single file of dated entries is confirmed (see the two-shapes mechanism fact), the remedy is its `log:` line in Enzyme's config: keep the line `scan --write-config` already recorded, or add one for a real recurring log the detector missed (too few entries, say). Narrate the lines at the gate in the user's terms — "Enzyme recognized these files as running logs and reads each as a timeline; here are their lines, remove any I misread" — and treat removal as a first-class correction, not a failure. Because a false recognition is one deletable line in one settings file, this is the lightest mutation in the skill; it still passes through consent because it changes what Enzyme anchors on. Do not stamp `type:` metadata into the user's files to mark logs — the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their settings, not buried in per-file metadata. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
 
 Never delete a user's file, not even an exact duplicate. If a duplicate must be retired, move it to a backup/retired location with a non-Markdown suffix and record the move so revert restores it.
 
@@ -96,8 +98,11 @@ Setup/re-setup command path, after the vault path is confirmed:
 # Use scan output plus doctor/DB evidence to diagnose what Enzyme can see.
 
 "$ENZYME_BIN" -p "<vault path>" scan --write-config
-# Read ~/.enzyme/config.toml. Tune only the minimum entity/exclusion/target
-# choices supported by scan/doctor evidence before init.
+# Read ~/.enzyme/config.toml. This is the vault's anchor ledger: the entities
+# (folders, tags, links) and any recognized running logs (`log:` lines) that
+# Enzyme will anchor on. Tune only the minimum entity/log/exclusion/target
+# choices supported by scan/doctor evidence before init, and carry the
+# resulting anchors into what you narrate at the gate.
 
 "$ENZYME_BIN" -p "<vault path>" init --quiet
 "$ENZYME_BIN" -p "<vault path>" petri
@@ -119,23 +124,36 @@ Between diagnosis and the gate, you may additively create exactly one new note d
 
 This proof note edits and moves nothing. If there is not enough content for a rich proof note, produce the smallest honest starting point or skip it; never fabricate to fill it.
 
+## Coach The Missing Handles
+
+Some gaps no deterministic mutation can close: the handle Enzyme needs does not exist yet. Nothing recurs by name, dates live nowhere the parser reads, one thread is split across three spellings of a person. The rules above rightly forbid inventing that structure — so for these gaps the honest lever is coaching: change how tomorrow's notes are captured, never what yesterday's say.
+
+Coaching lines use the anchors-reveal grammar in future tense: name the thread in the user's own content, one sentence of why Enzyme cannot grab it, the smallest capture habit that would create the handle, and the question that becomes answerable once it exists. The feel:
+
+- Dates: "Your product thinking is all here, but nothing says *when* — every file claims the day of your laptop migration. Put the date in new filenames and each note becomes a moment that stacks; 'how did my thinking change after the pilot' starts being answerable."
+- Homes: "'Pricing' lives in a dozen notes scattered at the root. I find each mention, but they never accumulate into a place that can be watched. Give the thread one home — a folder, or one running file of dated entries — and it becomes an anchor with its own standing questions."
+- Names: "You write this person three different ways — three thin threads instead of one thick one. I won't rewrite the past, but pick one handle from today and the thread compounds from here."
+- Trapped content: "The decisions from these meetings live in PDFs that can't be read as notes. Three Markdown lines per meeting — date in the title, what was decided — give more than the whole export."
+
+Bounds: coach only where a tier-2 or tier-3 finding exists, offer at most two habits (the two that unlock the most), keep each to two sentences, and never present a habit as a condition of proceeding. Coaching is advice at the close, not a mutation and not a gate item.
+
 ## One Decision
 
-Everything before this changed nothing except any additive proof note. A no ends cleanly with the vault unchanged. Present the gate as one narrated moment the user could read aloud in under a minute:
+Everything before this changed nothing except any additive proof note. A no ends cleanly with the vault unchanged. Present the gate as one narrated moment the user could read aloud in under a minute, opening with the anchors reveal:
 
-1. **What your vault already does well**.
-2. **Where Enzyme cannot leverage it yet, and why**, in plain user-visible terms.
-3. **Exactly what I would move, exclude, or stamp**, with concrete paths and fields.
+1. **What Enzyme anchored on and what that buys you**: the folders, tags, and running logs it grabbed, each named in the user's vocabulary and paired with a question it newly makes answerable.
+2. **Where Enzyme cannot leverage your vault yet, and why**, in plain user-visible terms.
+3. **Exactly what I would move, exclude, or record in your settings**, with concrete paths, lines, and fields.
 4. **The backup promise**, including where the backup/revert package will live for this run.
 5. **The revert story**: "I will check that every affected file comes back exactly as it was."
 
 When the plan mixes work of clearly different weight, offer at most two separately acceptable pieces, such as "just the duplicate cleanup" and "the broader re-file." A partial yes runs only the accepted piece under the same backup contract.
 
-For the healthy-vault branch, replace the repair plan with: **"No restructuring needed; your vault already compounds well."** Show the tier map as confirmation, keep any proof note, and skip the gate.
+For the healthy-vault branch, the anchors reveal **is** the message: show what Enzyme anchored on and the value that flows through each anchor, close with **"No restructuring needed; your vault already compounds well,"** keep any proof note, and skip the gate. A healthy vault deserves the richest reveal, not the shortest one — the user should still leave knowing exactly which of their places Enzyme is watching and what to ask it.
 
 ## Restructure After Consent
 
-Runs only after the single yes. The hard bound is moves/renames within reason plus batch frontmatter edits only. Bodies are never touched.
+Runs only after the single yes. The hard bound is moves/renames within reason, batch date-repair frontmatter edits, and Enzyme settings edits (`log:` lines, exclusions) only. Bodies are never touched, and log recognition never writes to note files at all.
 
 Before the first mutation, write a backup package either to a unique temporary directory or to a visible vault-local directory selected by the product surface. It must contain:
 
@@ -153,4 +171,4 @@ The revert script must:
 - Compare only the user's notes that the repair owns; exclude app-owned state such as `.enzyme/`, `.git/`, product-specific state directories, caches, and the backup package itself.
 - Exit non-zero if any owned note failed to restore.
 
-After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and what small habit would help future capture.
+After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and up to two capture habits from the coaching section that would help the handles you could not create.
