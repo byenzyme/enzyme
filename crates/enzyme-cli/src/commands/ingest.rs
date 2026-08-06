@@ -266,6 +266,7 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
         tags: entry.tags,
         links: entry.links,
         folders,
+        chunk_entry_dates: vec![None; chunks.len()],
         chunks,
         frontmatter: None,
         // Ingested items are externally-structured single units, not user

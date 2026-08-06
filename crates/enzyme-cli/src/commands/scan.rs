@@ -967,6 +967,22 @@ fn suggested_entities(
         push_entity(&mut entities, &mut seen, format!("[[{link}]]"));
     }
 
+    // Single-file append-only logs the engine recognized. Recording them here
+    // is what makes the recognition visible: the user reads the log: lines in
+    // config.toml and curates by adding or removing them. Indexing promotes
+    // exactly the recorded ones to entities. Sorted so write-back is
+    // deterministic regardless of file-discovery order, like every other
+    // suggestion above.
+    let mut log_names: Vec<String> = docs
+        .iter()
+        .filter(|doc| doc.is_log && doc.append_log.is_some())
+        .filter_map(enzyme_core::document::log_entity_name)
+        .collect();
+    log_names.sort();
+    for name in log_names {
+        push_entity(&mut entities, &mut seen, format!("log:{name}"));
+    }
+
     entities
 }
 
@@ -1102,6 +1118,7 @@ mod tests {
             links: links.into_iter().map(str::to_string).collect(),
             folders: folders.into_iter().map(str::to_string).collect(),
             chunks: Vec::new(),
+            chunk_entry_dates: Vec::new(),
             frontmatter,
             is_log: false,
             append_log: None,

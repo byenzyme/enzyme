@@ -24,7 +24,11 @@ const CONFIG_HEADER: &str = "\
 # Each vault gets its own section, keyed by absolute path:
 #
 # [vaults.\"/Users/you/notes\"]
-# entities = [\"folder:projects\", \"[[Design Principles]]\"]
+# entities = [\"folder:projects\", \"[[Design Principles]]\", \"log:journal\"]
+# # log: marks a single file of dated entries (a journal that grows by
+# # appending) as its own entity, so retrieval sees its internal timeline.
+# # `enzyme scan --write-config` records the logs it recognizes here; add or
+# # remove lines to correct it. The name is the file's title or filename stem.
 # # Flat vault fallback: if notes live directly at the vault root, Enzyme may use \"folder:.\"
 # excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
 # targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
@@ -522,6 +526,15 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
         Some(ParsedEntity {
             name,
             entity_type: EntityType::Link,
+        })
+    } else if let Some(log) = trimmed.strip_prefix("log:") {
+        let name = log.trim().to_lowercase();
+        if name.is_empty() {
+            return None;
+        }
+        Some(ParsedEntity {
+            name,
+            entity_type: EntityType::AppendLog,
         })
     } else if let Some(path) = trimmed.strip_prefix("folder:") {
         let name = path.trim().to_lowercase();

@@ -478,7 +478,12 @@ fn build_chunk_candidates(
     chunks
         .into_iter()
         .filter_map(|chunk| {
-            let timestamp = *file_timestamps.get(chunk.file_path.as_str())?;
+            // A chunk cut from a dated append-log entry carries that entry's
+            // date; without it, fall back to the file-level timestamp. This is
+            // what lets one long journal spread across eras instead of
+            // collapsing onto its single document date.
+            let file_timestamp = *file_timestamps.get(chunk.file_path.as_str())?;
+            let timestamp = chunk.entry_date.unwrap_or(file_timestamp);
             let era_index = era_index_for_timestamp(eras, timestamp);
             let vector = chunk_vectors.and_then(|vectors| {
                 vectors
@@ -890,7 +895,10 @@ impl<'a> CatalystPipeline<'a> {
         }
 
         let selected = match entity.entity_type {
-            EntityType::Folder => select_folder_chunks(
+            // A log is a timeline: like a folder, select time-first with
+            // guaranteed per-era representation (its chunks carry per-entry
+            // dates), and don't require embeddings.
+            EntityType::Folder | EntityType::AppendLog => select_folder_chunks(
                 eras,
                 num_catalysts,
                 &candidates,
@@ -1670,6 +1678,49 @@ mod tests {
             relevance,
             vector,
         }
+    }
+
+    #[test]
+    fn test_entry_dated_chunk_overrides_file_timestamp() {
+        // A journal indexed on one date carries chunks from older entries;
+        // the chunk's own entry date must place it in its real era instead of
+        // the file's.
+        let eras = vec![
+            make_era("early", "2026-01", "2026-06", 1),
+            make_era("late", "2026-07", "2026-12", 1),
+        ];
+        let jan = 1_768_262_400_000i64; // 2026-01-13
+        let aug = 1_786_579_200_000i64; // 2026-08-13
+        let occ = EntityOccurrence {
+            id: None,
+            entity_id: 0,
+            file_path: "journal.md".to_string(),
+            context: None,
+            created_at: aug,
+            effective_date: Some(aug),
+            date_source: "content".to_string(),
+        };
+        let chunks = vec![
+            FileChunk {
+                file_path: "journal.md".to_string(),
+                chunk_index: 0,
+                content: "old entry".to_string(),
+                entry_date: Some(jan),
+            },
+            FileChunk {
+                file_path: "journal.md".to_string(),
+                chunk_index: 1,
+                content: "undated".to_string(),
+                entry_date: None,
+            },
+        ];
+
+        let candidates = build_chunk_candidates(chunks, &[occ], &eras, None, None);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].timestamp, jan);
+        assert_eq!(candidates[0].era_index, 0, "dated chunk joins its own era");
+        assert_eq!(candidates[1].timestamp, aug);
+        assert_eq!(candidates[1].era_index, 1, "undated chunk keeps the file's era");
     }
 
     #[test]

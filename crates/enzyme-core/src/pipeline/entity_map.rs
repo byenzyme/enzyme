@@ -62,6 +62,8 @@ pub struct EntityMap {
     pub folders: Vec<FolderGroup>,
     /// Standalone links not subsumed by any folder and not shadowed by a tag.
     pub links: Vec<Entity>,
+    /// Config-declared single-file append-only logs (`log:` entries).
+    pub append_logs: Vec<Entity>,
     /// Total file count in the vault.
     pub file_count: usize,
     /// Structural disposition for each input entity.
@@ -328,10 +330,23 @@ impl EntityMap {
             dispositions.insert(EntityKey::from(entity), EntityDisposition::TopLevel);
         }
 
+        // ── Append-only logs ────────────────────────────────────────────
+        let append_logs: Vec<Entity> = entities
+            .iter()
+            .filter(|e| e.entity_type == EntityType::AppendLog)
+            .copied()
+            .cloned()
+            .collect();
+
+        for entity in &append_logs {
+            dispositions.insert(EntityKey::from(entity), EntityDisposition::TopLevel);
+        }
+
         Ok(EntityMap {
             tags,
             folders,
             links,
+            append_logs,
             file_count,
             dispositions,
         })
@@ -432,6 +447,7 @@ impl EntityMap {
                             && !excluded_tags.contains(e.name.to_lowercase().as_str())
                     }
                     EntityType::Link => !e.name.contains('/') && e.frequency >= 3,
+                    EntityType::AppendLog => true,
                 }
             })
             .collect();
@@ -473,12 +489,17 @@ impl EntityMap {
                     EntityType::Tag => {
                         score += 0.8;
                     }
+                    // A deliberately declared log is high-signal: above a tag,
+                    // just above a folder.
+                    EntityType::AppendLog => {
+                        score += 1.1;
+                    }
                     EntityType::Link => {}
                 }
 
                 // Marginal file coverage
                 let entity_files: HashSet<&String> = match entity.entity_type {
-                    EntityType::Tag | EntityType::Link => entity
+                    EntityType::Tag | EntityType::Link | EntityType::AppendLog => entity
                         .id
                         .and_then(|id| entity_file_sets.get(&id))
                         .map(|s| s.iter().collect())
@@ -510,7 +531,7 @@ impl EntityMap {
 
             // Update coverage
             match winner.entity_type {
-                EntityType::Tag | EntityType::Link => {
+                EntityType::Tag | EntityType::Link | EntityType::AppendLog => {
                     if let Some(id) = winner.id {
                         if let Some(files) = entity_file_sets.get(&id) {
                             covered_files.extend(files.iter().cloned());

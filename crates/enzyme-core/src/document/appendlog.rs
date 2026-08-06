@@ -72,10 +72,30 @@ fn parse_header_date(line: &str) -> Option<NaiveDate> {
     let s = line
         .trim_start()
         .trim_start_matches(|c| matches!(c, '#' | '-' | '*' | '>' | '[' | '_' | ' ' | '\t'));
+    let s = strip_weekday_prefix(s);
     parse_iso_header(s)
         .or_else(|| parse_numeric_mdy(s))
         .or_else(|| parse_month_name_header(s))
         .or_else(|| parse_day_month_year(s))
+}
+
+/// Skip a leading weekday token (`Monday, February 16, 2026`, `Tue 2026-02-17`)
+/// so the standard export/transcript header style parses. Only a recognized
+/// weekday name is skipped — arbitrary leading words still (correctly) block
+/// a date from counting as the line's leading token.
+fn strip_weekday_prefix(s: &str) -> &str {
+    const WEEKDAYS: [&str; 14] = [
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "mon",
+        "tue", "wed", "thu", "fri", "sat", "sun",
+    ];
+    let token_end = s
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(s.len());
+    if WEEKDAYS.contains(&s[..token_end].to_ascii_lowercase().as_str()) {
+        s[token_end..].trim_start_matches([',', ' ', '\t'])
+    } else {
+        s
+    }
 }
 
 /// `YYYY-MM-DD` / `YYYY/MM/DD` at the head of the (marker-stripped) line.
@@ -220,14 +240,31 @@ pub fn entries_with_body(body: &str, log: &AppendLog) -> usize {
         .count()
 }
 
+/// A chunk carrying the date of the log entry it was cut from.
+#[derive(Debug, Clone)]
+pub struct DatedChunk {
+    /// Entry date in milliseconds since epoch (midnight UTC), `None` when the
+    /// chunk came from the generic fallback rather than a dated entry.
+    pub entry_date: Option<i64>,
+    pub content: String,
+}
+
+fn date_millis(date: NaiveDate) -> i64 {
+    date.and_hms_opt(0, 0, 0)
+        .expect("midnight is always valid")
+        .and_utc()
+        .timestamp_millis()
+}
+
 /// Chunk an append-only log into chronological, entry-aligned chunks.
 ///
 /// Each dated entry becomes a chunk (preserving file order in `chunk_index`, so
-/// recency maps to chunk position via [`AppendLog::direction`]). Oversized
-/// entries are split further with the generic chunker; the pre-header preamble
-/// is dropped (typically a title). Falls back to the generic chunker if nothing
-/// usable is produced.
-pub fn chunk_append_log(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<String> {
+/// recency maps to chunk position via [`AppendLog::direction`]) and carries its
+/// entry's date. Oversized entries are split further with the generic chunker,
+/// every piece keeping the entry's date; the pre-header preamble is dropped
+/// (typically a title). Falls back to the generic chunker — undated chunks —
+/// if nothing usable is produced.
+pub fn chunk_append_log_dated(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<DatedChunk> {
     let mut chunks = Vec::new();
     for i in 0..log.entries.len() {
         let (start, end) = entry_span(body, log, i);
@@ -235,16 +272,58 @@ pub fn chunk_append_log(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<S
         if entry.is_empty() {
             continue;
         }
+        let entry_date = Some(date_millis(log.entries[i].date));
         if entry.len() > chunk_size {
-            chunks.extend(chunk_document(entry, chunk_size));
+            chunks.extend(
+                chunk_document(entry, chunk_size)
+                    .into_iter()
+                    .map(|content| DatedChunk {
+                        entry_date,
+                        content,
+                    }),
+            );
         } else {
-            chunks.push(entry.to_string());
+            chunks.push(DatedChunk {
+                entry_date,
+                content: entry.to_string(),
+            });
         }
     }
     if chunks.is_empty() {
-        return chunk_document(body, chunk_size);
+        return chunk_document(body, chunk_size)
+            .into_iter()
+            .map(|content| DatedChunk {
+                entry_date: None,
+                content,
+            })
+            .collect();
     }
     chunks
+}
+
+/// [`chunk_append_log_dated`] without the dates, for callers that only need
+/// the text.
+pub fn chunk_append_log(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<String> {
+    chunk_append_log_dated(body, log, chunk_size)
+        .into_iter()
+        .map(|chunk| chunk.content)
+        .collect()
+}
+
+/// Every dated entry's `(date_millis, text)` in file order. Empty entries
+/// (a dated header with nothing under it) are skipped. This is the
+/// per-entry view used to emit one entity occurrence per log entry.
+pub fn log_entries(body: &str, log: &AppendLog) -> Vec<(i64, String)> {
+    (0..log.entries.len())
+        .filter_map(|i| {
+            let (start, end) = entry_span(body, log, i);
+            let text = body[start..end].trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some((date_millis(log.entries[i].date), text.to_string()))
+        })
+        .collect()
 }
 
 /// The most-recent entry's text, honouring append direction. Used as the bounded
@@ -270,6 +349,77 @@ mod tests {
             .iter()
             .map(|d| format!("## {d}\n{filler}\n"))
             .collect::<String>()
+    }
+
+    #[test]
+    fn weekday_prefixed_headers_detect() {
+        // The standard export/transcript style: `### Monday, February 16, 2026`.
+        let filler = "word ".repeat(30);
+        let body = [
+            "Monday, February 16, 2026",
+            "Tuesday, February 17, 2026",
+            "Sat 2026-02-21",
+        ]
+        .iter()
+        .map(|d| format!("### {d}\n{filler}\n"))
+        .collect::<String>();
+        let log = detect_append_log(&body).expect("weekday-prefixed log should detect");
+        assert_eq!(log.entries.len(), 3);
+        assert_eq!(
+            log.entries[0].date,
+            NaiveDate::from_ymd_opt(2026, 2, 16).unwrap()
+        );
+        assert_eq!(
+            log.entries[2].date,
+            NaiveDate::from_ymd_opt(2026, 2, 21).unwrap()
+        );
+    }
+
+    #[test]
+    fn non_weekday_leading_word_still_blocks() {
+        // A date cited after an arbitrary word is not a header date.
+        let filler = "word ".repeat(30);
+        let body = ["Deadline 2026-02-16", "Deadline 2026-02-17", "Deadline 2026-02-21"]
+            .iter()
+            .map(|d| format!("### {d}\n{filler}\n"))
+            .collect::<String>();
+        assert!(detect_append_log(&body).is_none());
+    }
+
+    #[test]
+    fn dated_chunks_carry_entry_dates() {
+        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 20);
+        let log = detect_append_log(&body).expect("should detect a log");
+        let chunks = chunk_append_log_dated(&body, &log, 2048);
+        assert_eq!(chunks.len(), 3);
+        let expected: Vec<i64> = ["2026-01-01", "2026-02-01", "2026-03-01"]
+            .iter()
+            .map(|d| {
+                NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis()
+            })
+            .collect();
+        for (chunk, want) in chunks.iter().zip(&expected) {
+            assert_eq!(chunk.entry_date, Some(*want));
+        }
+    }
+
+    #[test]
+    fn oversized_entry_subchunks_share_entry_date() {
+        // One entry far above the chunk size splits into several chunks that
+        // must all keep that entry's date.
+        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 200);
+        let log = detect_append_log(&body).expect("should detect a log");
+        let chunks = chunk_append_log_dated(&body, &log, 256);
+        assert!(chunks.len() > 3, "large entries should split");
+        assert!(chunks.iter().all(|c| c.entry_date.is_some()));
+        let distinct: std::collections::HashSet<i64> =
+            chunks.iter().filter_map(|c| c.entry_date).collect();
+        assert_eq!(distinct.len(), 3, "sub-chunks share their entry's date");
     }
 
     #[test]

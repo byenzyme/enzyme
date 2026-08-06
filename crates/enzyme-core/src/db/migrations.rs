@@ -1,7 +1,10 @@
 use libsql::{Connection, Value};
 use tracing::info;
 
-use crate::document::{detect_append_log, most_recent_entry, strip_frontmatter};
+use crate::document::{
+    DEFAULT_CHUNK_SIZE_CHARS, LOG_AUTODETECT_MIN_WORDS, MIN_LOG_ENTRIES, chunk_append_log_dated,
+    detect_append_log, entries_with_body, most_recent_entry, strip_frontmatter,
+};
 use crate::embedding::quantize;
 use crate::models::{EMBEDDING_DIMENSION, INLINE_CONTEXT_MAX_WORDS, representative_excerpt};
 
@@ -37,6 +40,13 @@ const CONTEXT_EXCERPT_BACKFILL_KEY: &str = "migration.context_excerpt_backfill_v
 /// (see [`migrate_embeddings_to_int8`]).
 const EMBEDDING_INT8_MIGRATION_KEY: &str = "migration.embedding_int8_v1";
 
+/// Config key guarding the one-time `chunks.entry_date` backfill for
+/// append-only logs (see [`backfill_chunk_entry_dates`]). v2: rewrites
+/// legacy paragraph-chunked logs instead of skipping on count mismatch.
+/// v3: re-run after weekday-prefixed date headers became parseable, so
+/// transcript-style logs (`### Monday, February 16, 2026`) get entry dates.
+const CHUNK_ENTRY_DATE_BACKFILL_KEY: &str = "migration.chunk_entry_dates_v3";
+
 /// Only bother with the one-time post-migration VACUUM when it actually
 /// freed enough to matter; below this the I/O outweighs the reclaim.
 const VACUUM_RECLAIM_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
@@ -51,6 +61,8 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(schema::SCHEMA_SQL)
         .await
         .map_err(DbError::Libsql)?;
+    ensure_chunk_entry_date_column(conn).await?;
+    backfill_chunk_entry_dates(conn).await?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
     backfill_excerpts_for_slimmed_contexts(conn).await?;
     let int8_hint = migrate_embeddings_to_int8(conn).await?;
@@ -68,6 +80,189 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Add `chunks.entry_date` to databases created before the column existed in
+/// the schema. `CREATE TABLE IF NOT EXISTS` never alters an existing table,
+/// so older vaults need an explicit ALTER; the duplicate-column error from
+/// vaults that already have it is the cheap idempotence check.
+async fn ensure_chunk_entry_date_column(conn: &Connection) -> Result<(), DbError> {
+    match conn
+        .execute("ALTER TABLE chunks ADD COLUMN entry_date INTEGER", ())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(DbError::Libsql(e)),
+    }
+}
+
+/// One-time backfill of `chunks.entry_date` for already-indexed append-only
+/// logs. Unchanged documents never re-chunk (content-hash gate), so without
+/// this pass a long-lived journal would keep NULL entry dates — and a
+/// collapsed timeline in era selection — until its next edit.
+///
+/// Like [`long_note_context`], this only has stored bodies: it re-runs
+/// detection with the same structural gate the processor uses for the
+/// auto-flag (entries with bodies + word floor) and cannot see `type:`
+/// frontmatter overrides. For each qualifying document it re-derives dated
+/// chunks. When the derived count matches the stored count (same chunker,
+/// same content ⇒ same boundaries) it stamps dates by index. When it does
+/// not — the log was indexed before entry-aligned chunking existed — the
+/// stored content is still the source of truth, so the chunks are rewritten
+/// outright and the document's embeddings invalidated (embedding re-queues
+/// off `embedded_content_hash`), rather than leaving the timeline collapsed
+/// until the file next changes.
+async fn backfill_chunk_entry_dates(conn: &Connection) -> Result<(), DbError> {
+    let mut check = conn
+        .query(
+            "SELECT 1 FROM config WHERE key = ?1",
+            vec![Value::Text(CHUNK_ENTRY_DATE_BACKFILL_KEY.to_string())],
+        )
+        .await
+        .map_err(DbError::Libsql)?;
+    if check.next().await.map_err(DbError::Libsql)?.is_some() {
+        return Ok(());
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT d.id, d.source_ref, d.content, COUNT(c.id), MIN(c.created_at)
+             FROM docs d JOIN chunks c ON c.doc_id = d.id
+             WHERE d.content IS NOT NULL
+             GROUP BY d.id",
+            (),
+        )
+        .await
+        .map_err(DbError::Libsql)?;
+
+    // Docs whose derived chunking aligns with what is stored: stamp dates in
+    // place. Docs where it doesn't: rewrite the chunk set.
+    struct Stamp {
+        doc_id: i64,
+        dates: Vec<Option<i64>>,
+    }
+    struct Rewrite {
+        doc_id: i64,
+        source_ref: String,
+        created_at: i64,
+        chunks: Vec<crate::document::DatedChunk>,
+    }
+    let mut stamps: Vec<Stamp> = Vec::new();
+    let mut rewrites: Vec<Rewrite> = Vec::new();
+    while let Some(row) = rows.next().await.map_err(DbError::Libsql)? {
+        let doc_id: i64 = row.get(0).map_err(DbError::Libsql)?;
+        let source_ref: String = row.get(1).map_err(DbError::Libsql)?;
+        let content: String = row.get(2).map_err(DbError::Libsql)?;
+        let stored_count: i64 = row.get(3).map_err(DbError::Libsql)?;
+        let created_at: i64 = row.get(4).map_err(DbError::Libsql)?;
+
+        let body = strip_frontmatter(&content);
+        let Some(log) = detect_append_log(body) else {
+            continue;
+        };
+        if entries_with_body(body, &log) < MIN_LOG_ENTRIES
+            || (body.split_whitespace().count() as i64) < LOG_AUTODETECT_MIN_WORDS
+        {
+            continue;
+        }
+        let dated = chunk_append_log_dated(body, &log, DEFAULT_CHUNK_SIZE_CHARS);
+        if dated.len() as i64 == stored_count {
+            stamps.push(Stamp {
+                doc_id,
+                dates: dated.into_iter().map(|c| c.entry_date).collect(),
+            });
+        } else {
+            rewrites.push(Rewrite {
+                doc_id,
+                source_ref,
+                created_at,
+                chunks: dated,
+            });
+        }
+    }
+    drop(rows);
+
+    if !stamps.is_empty() || !rewrites.is_empty() {
+        let tx = conn.transaction().await.map_err(DbError::Libsql)?;
+        for stamp in &stamps {
+            for (index, entry_date) in stamp.dates.iter().enumerate() {
+                let Some(entry_date) = entry_date else {
+                    continue;
+                };
+                tx.execute(
+                    "UPDATE chunks SET entry_date = ?1 WHERE doc_id = ?2 AND chunk_index = ?3",
+                    vec![
+                        Value::Integer(*entry_date),
+                        Value::Integer(stamp.doc_id),
+                        Value::Integer(index as i64),
+                    ],
+                )
+                .await
+                .map_err(DbError::Libsql)?;
+            }
+        }
+        for rewrite in &rewrites {
+            tx.execute(
+                "DELETE FROM chunks WHERE doc_id = ?1",
+                vec![Value::Integer(rewrite.doc_id)],
+            )
+            .await
+            .map_err(DbError::Libsql)?;
+            for (index, chunk) in rewrite.chunks.iter().enumerate() {
+                let word_count = chunk.content.split_whitespace().count() as i64;
+                tx.execute(
+                    "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at, entry_date)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    vec![
+                        Value::Integer(rewrite.doc_id),
+                        Value::Integer(index as i64),
+                        Value::Text(chunk.content.clone()),
+                        Value::Integer(word_count),
+                        Value::Integer(rewrite.created_at),
+                        chunk.entry_date.map(Value::Integer).unwrap_or(Value::Null),
+                    ],
+                )
+                .await
+                .map_err(DbError::Libsql)?;
+            }
+            // Old per-chunk embeddings no longer line up with the new
+            // boundaries; drop them and re-queue the doc for embedding.
+            // `indexed_at` must move too: incremental refresh windows its
+            // embedding pass on it, and a stale value would leave the doc
+            // re-queued but never picked up.
+            tx.execute(
+                "DELETE FROM chunk_embeddings WHERE file_path = ?1",
+                vec![Value::Text(rewrite.source_ref.clone())],
+            )
+            .await
+            .map_err(DbError::Libsql)?;
+            tx.execute(
+                "UPDATE docs SET embedded_at = NULL, embedded_content_hash = NULL, indexed_at = ?1
+                 WHERE id = ?2",
+                vec![
+                    Value::Integer(chrono::Utc::now().timestamp_millis()),
+                    Value::Integer(rewrite.doc_id),
+                ],
+            )
+            .await
+            .map_err(DbError::Libsql)?;
+        }
+        tx.commit().await.map_err(DbError::Libsql)?;
+        info!(
+            stamped = stamps.len(),
+            rechunked = rewrites.len(),
+            "backfilled chunk entry dates for append-only logs"
+        );
+    }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?1, '1')",
+        vec![Value::Text(CHUNK_ENTRY_DATE_BACKFILL_KEY.to_string())],
+    )
+    .await
+    .map_err(DbError::Libsql)?;
     Ok(())
 }
 

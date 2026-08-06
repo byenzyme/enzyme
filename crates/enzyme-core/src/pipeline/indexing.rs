@@ -24,7 +24,15 @@ pub struct IndexingPipeline<'a> {
     /// `None` means "resolve from the vault config at run time"; `Some` is an
     /// explicit override (used by tests and callers that already hold the list).
     excluded_folders: Option<Vec<String>>,
+    /// Config-declared `log:` entity names. `None` means "resolve from the
+    /// vault config at run time"; `Some` is an explicit override (tests).
+    configured_logs: Option<std::collections::HashSet<String>>,
 }
+
+/// Cap on entity occurrences emitted per config-declared log. Keeps a
+/// years-long daily journal from flooding the occurrence table; the newest
+/// entries are kept, and the drop is logged.
+const MAX_LOG_OCCURRENCES: usize = 1000;
 
 /// Summary statistics from an indexing run.
 pub struct IndexingStats {
@@ -42,7 +50,15 @@ impl<'a> IndexingPipeline<'a> {
             db,
             vault_path,
             excluded_folders: None,
+            configured_logs: None,
         }
+    }
+
+    /// Explicitly set the config-declared log names, bypassing config
+    /// resolution. Mainly for tests.
+    pub fn with_configured_logs(mut self, names: std::collections::HashSet<String>) -> Self {
+        self.configured_logs = Some(names);
+        self
     }
 
     /// Explicitly set the "leave it alone" folders to exclude from indexing,
@@ -229,6 +245,11 @@ impl<'a> IndexingPipeline<'a> {
             self.db.upsert_entities_batch(&refs)?;
         }
 
+        // Step 8b: Reconcile config-declared `log:` entities (replace
+        // semantics, promotion of newly declared logs, removal of undeclared).
+        on_progress("Reconciling log entities...");
+        self.reconcile_log_entities(&processed_docs, &all_paths)?;
+
         // Step 9: Compute trending scores for all entities (bulk fetch)
         on_progress("Computing trending scores...");
         self.compute_trending_scores()?;
@@ -394,6 +415,152 @@ impl<'a> IndexingPipeline<'a> {
         }
 
         entries
+    }
+
+    /// The occurrences a config-declared log contributes: one per dated entry,
+    /// newest `MAX_LOG_OCCURRENCES` kept. Per-entry effective dates are what
+    /// let the era machinery see the file's internal timeline, and frequency
+    /// (= entry count, set by the replace call) makes a busy log rank by its
+    /// real activity.
+    fn log_occurrences_for_doc(doc: &ProcessedDocument) -> Option<(String, Vec<EntityOccurrence>)> {
+        let log = doc.append_log.as_ref()?;
+        let name = crate::document::log_entity_name(doc)?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let body = crate::document::strip_frontmatter(&doc.content);
+        let mut log_entries = crate::document::log_entries(body, log);
+        if log_entries.len() > MAX_LOG_OCCURRENCES {
+            let dropped = log_entries.len() - MAX_LOG_OCCURRENCES;
+            // Keep the newest entries, honouring append direction.
+            match log.direction {
+                crate::document::LogDirection::OldestFirst => {
+                    log_entries.drain(..dropped);
+                }
+                crate::document::LogDirection::NewestFirst => {
+                    log_entries.truncate(MAX_LOG_OCCURRENCES);
+                }
+            }
+            info!(
+                log = name.as_str(),
+                dropped, "capped log entries at newest MAX_LOG_OCCURRENCES"
+            );
+        }
+        let occurrences = log_entries
+            .into_iter()
+            .map(|(entry_date, text)| EntityOccurrence {
+                id: None,
+                entity_id: 0,
+                file_path: doc.source_ref.clone(),
+                context: Some(representative_excerpt(&text)),
+                created_at: now,
+                effective_date: Some(entry_date),
+                date_source: "content".to_string(),
+            })
+            .collect();
+        Some((name, occurrences))
+    }
+
+    /// Reconcile config-declared `log:` entities against the DB. Runs every
+    /// indexing pass:
+    /// - a removed `log:` line deletes its entity and occurrences;
+    /// - a reprocessed log doc replaces its occurrences (never accumulates);
+    /// - a newly added `log:` line promotes its (unchanged, already-indexed)
+    ///   file by processing it directly.
+    fn reconcile_log_entities(
+        &self,
+        processed_docs: &[ProcessedDocument],
+        all_paths: &[PathBuf],
+    ) -> Result<()> {
+        let configured = self.resolve_configured_logs();
+        let removed = self.db.delete_append_log_entities_not_in(&configured)?;
+        if removed > 0 {
+            info!(removed, "removed append-log entities no longer in config");
+        }
+        if configured.is_empty() {
+            return Ok(());
+        }
+
+        let mut handled: std::collections::HashSet<String> = Default::default();
+        for doc in processed_docs {
+            if let Some((name, occurrences)) = Self::log_occurrences_for_doc(doc) {
+                if configured.contains(&name) {
+                    self.db.replace_append_log_entity(&name, &occurrences)?;
+                    handled.insert(name);
+                }
+            }
+        }
+
+        // Configured logs whose files did not change this run: promote only if
+        // the entity does not exist yet (the `log:` line was just added).
+        let existing: std::collections::HashSet<String> = self
+            .db
+            .query_read(
+                "SELECT name FROM entities WHERE type = 'append_log'",
+                vec![],
+                |row| row.get::<String>(0),
+            )?
+            .into_iter()
+            .collect();
+        let processor = DocumentProcessor::new(self.vault_path.clone());
+        for name in &configured {
+            if handled.contains(name) || existing.contains(name) {
+                continue;
+            }
+            let candidate = all_paths.iter().find(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.trim().to_lowercase() == *name)
+            });
+            let Some(path) = candidate else {
+                warn!(
+                    log = name.as_str(),
+                    "configured log matches no vault file by name; leaving unpromoted"
+                );
+                continue;
+            };
+            match processor.process_file(path) {
+                Ok(doc) => {
+                    if let Some((doc_name, occurrences)) = Self::log_occurrences_for_doc(&doc) {
+                        if doc_name == *name {
+                            self.db.replace_append_log_entity(name, &occurrences)?;
+                        } else {
+                            warn!(
+                                log = name.as_str(),
+                                resolves_to = doc_name.as_str(),
+                                "configured log name does not match the file's title; leaving unpromoted"
+                            );
+                        }
+                    } else {
+                        warn!(
+                            log = name.as_str(),
+                            "configured log has no parseable dated entries; leaving unpromoted"
+                        );
+                    }
+                }
+                Err(e) => warn!(log = name.as_str(), error = %e, "failed to process configured log"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Config-declared `log:` entity names, lowercased. Any config-load error
+    /// resolves to "no logs declared" so indexing never fails on a bad or
+    /// absent config.
+    fn resolve_configured_logs(&self) -> std::collections::HashSet<String> {
+        if let Some(names) = &self.configured_logs {
+            return names.clone();
+        }
+        crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path)
+            .ok()
+            .flatten()
+            .map(|cfg| {
+                cfg.parse_preferences()
+                    .entities
+                    .into_iter()
+                    .filter(|e| e.entity_type == EntityType::AppendLog)
+                    .map(|e| e.name)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Extract ~250 words of context around each `#tag` occurrence, returning the
@@ -756,6 +923,107 @@ mod tests {
     // -----------------------------------------------------------------------
     // 6. Entity occurrences accumulate across incremental runs
     // -----------------------------------------------------------------------
+    #[test]
+    fn configured_log_promotes_replaces_and_removes() {
+        let db = test_db();
+        let vault = create_test_vault();
+        let filler = "word ".repeat(40);
+        write_md(
+            vault.path(),
+            "journal.md",
+            &format!("## 2026-01-01\n{filler}\n## 2026-02-01\n{filler}\n## 2026-03-01\n{filler}\n"),
+        );
+
+        let configured: std::collections::HashSet<String> =
+            ["journal".to_string()].into_iter().collect();
+
+        // Promotion: one occurrence per dated entry, frequency = entry count.
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_configured_logs(configured.clone());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let entity = db
+            .get_all_entities()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "journal" && e.entity_type == EntityType::AppendLog)
+            .expect("configured log should be promoted");
+        assert_eq!(entity.frequency, 3);
+        let occs = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
+        assert_eq!(occs.len(), 3);
+        let dates: std::collections::HashSet<i64> =
+            occs.iter().filter_map(|o| o.effective_date).collect();
+        assert_eq!(dates.len(), 3, "each occurrence carries its entry date");
+        assert!(occs.iter().all(|o| o.date_source == "content"));
+
+        // Replace semantics: a full re-run must not accumulate.
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_configured_logs(configured);
+        pipeline.run(true, |_| {}).unwrap();
+        let entity = db
+            .get_all_entities()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "journal" && e.entity_type == EntityType::AppendLog)
+            .unwrap();
+        assert_eq!(entity.frequency, 3, "re-run must not inflate frequency");
+        assert_eq!(
+            db.get_entity_occurrences(entity.id.unwrap()).unwrap().len(),
+            3
+        );
+
+        // Removal: dropping the log: line deletes the entity.
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_configured_logs(Default::default());
+        pipeline.run(false, |_| {}).unwrap();
+        assert!(
+            !db.get_all_entities()
+                .unwrap()
+                .iter()
+                .any(|e| e.entity_type == EntityType::AppendLog),
+            "removed log: line must remove the entity"
+        );
+    }
+
+    #[test]
+    fn newly_configured_log_promotes_without_file_change() {
+        let db = test_db();
+        let vault = create_test_vault();
+        let filler = "word ".repeat(40);
+        write_md(
+            vault.path(),
+            "journal.md",
+            &format!("## 2026-01-01\n{filler}\n## 2026-02-01\n{filler}\n## 2026-03-01\n{filler}\n"),
+        );
+
+        // Index once with no logs configured.
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_configured_logs(Default::default());
+        pipeline.run(true, |_| {}).unwrap();
+        assert!(
+            !db.get_all_entities()
+                .unwrap()
+                .iter()
+                .any(|e| e.entity_type == EntityType::AppendLog)
+        );
+
+        // Add the log: line; the file itself is unchanged, so an incremental
+        // run processes nothing — promotion must still happen.
+        let configured: std::collections::HashSet<String> =
+            ["journal".to_string()].into_iter().collect();
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_configured_logs(configured);
+        let stats = pipeline.run(false, |_| {}).unwrap();
+        assert_eq!(stats.files_new + stats.files_updated, 0);
+        let entity = db
+            .get_all_entities()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == "journal" && e.entity_type == EntityType::AppendLog)
+            .expect("adding a log: line must promote the unchanged file");
+        assert_eq!(entity.frequency, 3);
+    }
+
     #[test]
     fn entity_occurrences_accumulate() {
         let db = test_db();

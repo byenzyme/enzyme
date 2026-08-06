@@ -1100,6 +1100,7 @@ mod tests {
             links: vec!["other-note".into()],
             folders: vec![],
             chunks: vec!["hello".into(), "world".into()],
+            chunk_entry_dates: vec![None, None],
             frontmatter: None,
             is_log: false,
             append_log: None,
@@ -1137,6 +1138,203 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_entry_dates_roundtrip() {
+        let db = test_db();
+        let now = 1_700_000_000_000i64;
+        let jan = 1_767_225_600_000i64; // 2026-01-01T00:00:00Z
+
+        let doc = crate::document::ProcessedDocument {
+            source_ref: "journal.md".into(),
+            title: Some("Journal".into()),
+            content: "log content".into(),
+            content_hash: "hash-log".into(),
+            word_count: 2,
+            char_count: 11,
+            created_at: now,
+            created_source: crate::models::DateSource::Filesystem,
+            modified_at: now,
+            modified_source: crate::models::DateSource::Filesystem,
+            tags: vec![],
+            links: vec![],
+            folders: vec![],
+            chunks: vec!["dated entry".into(), "undated tail".into()],
+            chunk_entry_dates: vec![Some(jan), None],
+            frontmatter: None,
+            is_log: true,
+            append_log: None,
+        };
+        db.upsert_documents_batch(&[doc]).unwrap();
+
+        let chunks = db
+            .get_chunks_for_files(&["journal.md".to_string()])
+            .unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].entry_date, Some(jan));
+        assert_eq!(chunks[1].entry_date, None);
+    }
+
+    #[test]
+    fn test_chunk_entry_date_backfill_on_reopen() {
+        use crate::document::{DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let now = 1_700_000_000_000i64;
+
+        // A body that passes the auto-detect gate: 3 dated entries with real
+        // bodies and >= 100 words total.
+        let filler = "word ".repeat(40);
+        let body = ["2026-01-01", "2026-02-01", "2026-03-01"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        let log = detect_append_log(&body).expect("fixture must detect");
+        let derived = chunk_append_log_dated(&body, &log, DEFAULT_CHUNK_SIZE_CHARS);
+
+        {
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                "INSERT INTO docs (source_ref, content, content_hash, created_at, modified_at, indexed_at)
+                 VALUES ('journal.md', ?1, 'h1', ?2, ?2, ?2)",
+                vec![Value::Text(body.clone()), Value::Integer(now)],
+            )
+            .unwrap();
+            let doc_id: i64 = db
+                .query_read(
+                    "SELECT id FROM docs WHERE source_ref = 'journal.md'",
+                    vec![],
+                    |r| r.get::<i64>(0),
+                )
+                .unwrap()[0];
+            // Chunks stored by an older version: correct boundaries, no dates.
+            for (i, chunk) in derived.iter().enumerate() {
+                db.execute_write(
+                    "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+                     VALUES (?1, ?2, ?3, 1, ?4)",
+                    vec![
+                        Value::Integer(doc_id),
+                        Value::Integer(i as i64),
+                        Value::Text(chunk.content.clone()),
+                        Value::Integer(now),
+                    ],
+                )
+                .unwrap();
+            }
+            db.execute_write(
+                "DELETE FROM config WHERE key = 'migration.chunk_entry_dates_v3'",
+                vec![],
+            )
+            .unwrap();
+        }
+
+        // Reopen: migrations run and should stamp the stored chunks by index.
+        let db = Database::open(&path).unwrap();
+        let chunks = db
+            .get_chunks_for_files(&["journal.md".to_string()])
+            .unwrap();
+        assert_eq!(chunks.len(), derived.len());
+        for (stored, expected) in chunks.iter().zip(&derived) {
+            assert_eq!(stored.entry_date, expected.entry_date);
+            assert!(stored.entry_date.is_some());
+        }
+    }
+
+    #[test]
+    fn test_chunk_entry_date_backfill_rechunks_legacy_logs() {
+        use crate::document::{DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let now = 1_700_000_000_000i64;
+
+        let filler = "word ".repeat(40);
+        let body = ["2026-01-01", "2026-02-01", "2026-03-01"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n"))
+            .collect::<String>();
+        let log = detect_append_log(&body).expect("fixture must detect");
+        let derived = chunk_append_log_dated(&body, &log, DEFAULT_CHUNK_SIZE_CHARS);
+
+        {
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                "INSERT INTO docs (source_ref, content, content_hash, embedded_content_hash, embedded_at, created_at, modified_at, indexed_at)
+                 VALUES ('legacy.md', ?1, 'h1', 'h1', ?2, ?2, ?2, ?2)",
+                vec![Value::Text(body.clone()), Value::Integer(now)],
+            )
+            .unwrap();
+            let doc_id: i64 = db
+                .query_read(
+                    "SELECT id FROM docs WHERE source_ref = 'legacy.md'",
+                    vec![],
+                    |r| r.get::<i64>(0),
+                )
+                .unwrap()[0];
+            // A pre-entry-aligned index: one big paragraph chunk, with an
+            // embedding that would no longer line up after re-chunking.
+            db.execute_write(
+                "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+                 VALUES (?1, 0, ?2, 120, ?3)",
+                vec![
+                    Value::Integer(doc_id),
+                    Value::Text(body.clone()),
+                    Value::Integer(now),
+                ],
+            )
+            .unwrap();
+            db.execute_write(
+                "INSERT INTO chunk_embeddings (file_path, chunk_index, vector)
+                 VALUES ('legacy.md', 0, x'00')",
+                vec![],
+            )
+            .unwrap();
+            db.execute_write(
+                "DELETE FROM config WHERE key = 'migration.chunk_entry_dates_v3'",
+                vec![],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&path).unwrap();
+        let chunks = db
+            .get_chunks_for_files(&["legacy.md".to_string()])
+            .unwrap();
+        assert_eq!(chunks.len(), derived.len(), "legacy chunks were rewritten");
+        for (stored, expected) in chunks.iter().zip(&derived) {
+            assert_eq!(stored.content, expected.content);
+            assert_eq!(stored.entry_date, expected.entry_date);
+        }
+        let stale_embeddings: i64 = db
+            .query_read(
+                "SELECT COUNT(*) FROM chunk_embeddings WHERE file_path = 'legacy.md'",
+                vec![],
+                |r| r.get::<i64>(0),
+            )
+            .unwrap()[0];
+        assert_eq!(stale_embeddings, 0, "stale embeddings dropped");
+        let requeued: i64 = db
+            .query_read(
+                "SELECT COUNT(*) FROM docs WHERE source_ref = 'legacy.md'
+                 AND embedded_content_hash IS NULL AND embedded_at IS NULL",
+                vec![],
+                |r| r.get::<i64>(0),
+            )
+            .unwrap()[0];
+        assert_eq!(requeued, 1, "doc re-queued for embedding");
+        let reindexed: i64 = db
+            .query_read(
+                "SELECT COUNT(*) FROM docs WHERE source_ref = 'legacy.md' AND indexed_at > ?1",
+                vec![Value::Integer(now)],
+                |r| r.get::<i64>(0),
+            )
+            .unwrap()[0];
+        assert_eq!(
+            reindexed, 1,
+            "indexed_at bumped so incremental refresh re-embeds"
+        );
+    }
+
+    #[test]
     fn test_upsert_documents_batch_replaces_existing() {
         let db = test_db();
         let now = 1_700_000_000_000i64;
@@ -1156,6 +1354,7 @@ mod tests {
                 tags,
                 links: vec![],
                 folders: vec![],
+                chunk_entry_dates: vec![None; chunks.len()],
                 chunks,
                 frontmatter: None,
                 is_log: false,

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::models::DateSource;
 
 use super::appendlog::{
-    AppendLog, MIN_LOG_ENTRIES, chunk_append_log, detect_append_log, entries_with_body,
+    AppendLog, MIN_LOG_ENTRIES, chunk_append_log_dated, detect_append_log, entries_with_body,
 };
 use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
@@ -27,7 +27,7 @@ use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise
 /// under each date does not flip a note's handling; below it, the dominant
 /// vault shape is "many short dated files" (topology A), which never hits the
 /// oversized-context paths this flag guards.
-const LOG_AUTODETECT_MIN_WORDS: i64 = 100;
+pub const LOG_AUTODETECT_MIN_WORDS: i64 = 100;
 
 /// A fully processed document ready for indexing.
 #[derive(Debug, Clone)]
@@ -52,6 +52,10 @@ pub struct ProcessedDocument {
     pub folders: Vec<String>,
     /// Content chunks for embedding.
     pub chunks: Vec<String>,
+    /// Per-chunk log-entry dates (millis), aligned index-for-index with
+    /// `chunks`. `Some` only for chunks cut from a dated append-log entry;
+    /// `None` everywhere else. Always the same length as `chunks`.
+    pub chunk_entry_dates: Vec<Option<i64>>,
     pub frontmatter: Option<Frontmatter>,
     /// True when this document is a single-file append-only log (topology B):
     /// an internal timeline of dated entries under one document date. Drives
@@ -176,18 +180,27 @@ impl DocumentProcessor {
         let append_log = if is_log { detected } else { None };
 
         // Chunks — Readwise highlights and append-only logs get structure-aware
-        // chunking; everything else uses the generic paragraph chunker.
-        let chunks = if is_readwise {
+        // chunking; everything else uses the generic paragraph chunker. Log
+        // chunks carry their entry's date so downstream era logic can see the
+        // file's internal timeline instead of one document date.
+        let (chunks, chunk_entry_dates) = if is_readwise {
             let highlights = extract_highlights(body);
-            if highlights.is_empty() {
+            let chunks = if highlights.is_empty() {
                 chunk_document(body, self.chunk_size)
             } else {
                 chunk_readwise_highlights(&highlights, 5, 15)
-            }
+            };
+            let dates = vec![None; chunks.len()];
+            (chunks, dates)
         } else if let Some(log) = append_log.as_ref() {
-            chunk_append_log(body, log, self.chunk_size)
+            let dated = chunk_append_log_dated(body, log, self.chunk_size);
+            let dates = dated.iter().map(|c| c.entry_date).collect();
+            let chunks = dated.into_iter().map(|c| c.content).collect();
+            (chunks, dates)
         } else {
-            chunk_document(body, self.chunk_size)
+            let chunks = chunk_document(body, self.chunk_size);
+            let dates = vec![None; chunks.len()];
+            (chunks, dates)
         };
 
         // Dates
@@ -211,6 +224,7 @@ impl DocumentProcessor {
             links,
             folders,
             chunks,
+            chunk_entry_dates,
             frontmatter,
             is_log,
             append_log,
@@ -224,6 +238,24 @@ impl DocumentProcessor {
             .map(|path| self.process_file(path))
             .collect()
     }
+}
+
+/// The entity name a log document is known by: its title (or filename stem),
+/// lowercased. Both the config `log:` grammar and scan's write-back use this,
+/// so a `log:` entry always matches what indexing would promote.
+pub fn log_entity_name(doc: &ProcessedDocument) -> Option<String> {
+    let name = doc
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            std::path::Path::new(&doc.source_ref)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })?;
+    let normalized = name.trim().to_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 /// Read an explicit note-type declaration from frontmatter, if present.
@@ -745,6 +777,25 @@ short three
         assert!(doc.is_log);
         assert_eq!(doc.append_log.as_ref().unwrap().entries.len(), 3);
         assert_eq!(doc.chunks.len(), 3);
+        assert_eq!(doc.chunk_entry_dates.len(), 3);
+        assert!(
+            doc.chunk_entry_dates.iter().all(Option::is_some),
+            "log chunks must carry their entry dates"
+        );
+    }
+
+    #[test]
+    fn test_non_log_chunk_entry_dates_align_as_none() {
+        let (_dir, vault) = create_test_vault();
+        let content = "Just a normal note.\n\nWith two paragraphs of prose.";
+        fs::write(vault.join("plain.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("plain.md"))
+            .unwrap();
+        assert!(!doc.is_log);
+        assert_eq!(doc.chunk_entry_dates.len(), doc.chunks.len());
+        assert!(doc.chunk_entry_dates.iter().all(Option::is_none));
     }
 
     #[test]

@@ -49,6 +49,8 @@ pub struct FileChunk {
     pub file_path: String,
     pub chunk_index: u32,
     pub content: String,
+    /// Log-entry date (millis) for chunks cut from a dated append-log entry.
+    pub entry_date: Option<i64>,
 }
 
 /// Document and chunks that need embedding.
@@ -88,6 +90,7 @@ fn parse_entity_type(s: &str) -> EntityType {
         "tag" => EntityType::Tag,
         "link" => EntityType::Link,
         "folder" => EntityType::Folder,
+        "append_log" => EntityType::AppendLog,
         _ => EntityType::Tag,
     }
 }
@@ -233,15 +236,23 @@ impl Database {
                 }
                 for (i, chunk_content) in doc.chunks.iter().enumerate() {
                     let word_count = chunk_content.split_whitespace().count() as i64;
+                    let entry_date = doc
+                        .chunk_entry_dates
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .map(Value::Integer)
+                        .unwrap_or(Value::Null);
                     tx.execute(
-                        "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at, entry_date)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         vec![
                             Value::Integer(doc_id),
                             Value::Integer(i as i64),
                             Value::Text(chunk_content.clone()),
                             Value::Integer(word_count),
                             Value::Integer(now),
+                            entry_date,
                         ],
                     )
                     .await?;
@@ -564,6 +575,123 @@ impl Database {
         })
     }
 
+    /// Replace a config-declared append-log entity's occurrences wholesale.
+    ///
+    /// Logs need replace semantics, not the accumulate semantics of
+    /// `upsert_entities_batch`: a log re-emits every entry each time its file
+    /// is reprocessed, so accumulating would duplicate occurrences and
+    /// inflate frequency on every edit. Frequency is set to the occurrence
+    /// count (= entry count), and first/last_seen to the entry-date span, so
+    /// the entity ranks by the log's real activity.
+    pub fn replace_append_log_entity(
+        &self,
+        name: &str,
+        occurrences: &[EntityOccurrence],
+    ) -> Result<()> {
+        let name = name.to_string();
+        let occurrences = occurrences.to_vec();
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for replace_append_log_entity")?;
+
+            let first_seen = occurrences.iter().filter_map(|o| o.effective_date).min();
+            let last_seen = occurrences.iter().filter_map(|o| o.effective_date).max();
+
+            tx.execute(
+                "INSERT OR IGNORE INTO entities (name, type, frequency, first_seen, last_seen)
+                 VALUES (?1, 'append_log', 0, ?2, ?3)",
+                vec![
+                    Value::Text(name.clone()),
+                    opt_val(first_seen),
+                    opt_val(last_seen),
+                ],
+            )
+            .await?;
+            let mut rows = tx
+                .query(
+                    "SELECT id FROM entities WHERE name = ?1 AND type = 'append_log'",
+                    vec![Value::Text(name.clone())],
+                )
+                .await?;
+            let entity_id: i64 = rows
+                .next()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("append_log entity not found after insert"))?
+                .get::<i64>(0)?;
+            drop(rows);
+
+            tx.execute(
+                "DELETE FROM entity_occurrences WHERE entity_id = ?1",
+                vec![Value::Integer(entity_id)],
+            )
+            .await?;
+            tx.execute(
+                "UPDATE entities SET frequency = ?1, first_seen = ?2, last_seen = ?3
+                 WHERE id = ?4",
+                vec![
+                    Value::Integer(occurrences.len() as i64),
+                    opt_val(first_seen),
+                    opt_val(last_seen),
+                    Value::Integer(entity_id),
+                ],
+            )
+            .await?;
+            for occ in &occurrences {
+                tx.execute(
+                    "INSERT INTO entity_occurrences
+                     (entity_id, file_path, context, created_at, effective_date, date_source)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    vec![
+                        Value::Integer(entity_id),
+                        Value::Text(occ.file_path.clone()),
+                        opt_val(occ.context.clone()),
+                        Value::Integer(occ.created_at),
+                        opt_val(occ.effective_date),
+                        Value::Text(occ.date_source.clone()),
+                    ],
+                )
+                .await?;
+            }
+
+            tx.commit()
+                .await
+                .context("failed to commit replace_append_log_entity")?;
+            Ok(())
+        })
+    }
+
+    /// Delete append-log entities (and their occurrences) whose names are not
+    /// in the configured set. Called when a `log:` line is removed from
+    /// config — the entity disappears on the next refresh.
+    pub fn delete_append_log_entities_not_in(
+        &self,
+        keep: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let existing = self.query_read(
+            "SELECT id, name FROM entities WHERE type = 'append_log'",
+            vec![],
+            |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?)),
+        )?;
+        let mut removed = 0;
+        for (id, name) in existing {
+            if !keep.contains(&name) {
+                self.execute_write(
+                    "DELETE FROM entity_occurrences WHERE entity_id = ?1",
+                    vec![Value::Integer(id)],
+                )?;
+                self.execute_write(
+                    "DELETE FROM entities WHERE id = ?1",
+                    vec![Value::Integer(id)],
+                )?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Get all occurrences for a given entity.
     pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
         let rows = self.query_read(
@@ -596,7 +724,7 @@ impl Database {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT d.source_ref, c.chunk_index, c.content
+            "SELECT d.source_ref, c.chunk_index, c.content, c.entry_date
              FROM chunks c
              JOIN docs d ON d.id = c.doc_id
              WHERE d.source_ref IN ({placeholders})
@@ -613,6 +741,7 @@ impl Database {
                 file_path: row.get::<String>(0)?,
                 chunk_index: row.get::<i64>(1)? as u32,
                 content: row.get::<String>(2)?,
+                entry_date: row.get::<Option<i64>>(3)?,
             })
         })?)
     }

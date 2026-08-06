@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     content     TEXT    NOT NULL,
     word_count  INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
+    entry_date  INTEGER,                       -- log-entry date (millis) for chunks cut from a dated append-log entry
     UNIQUE(doc_id, chunk_index)
 );
 
