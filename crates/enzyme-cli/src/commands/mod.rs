@@ -9,6 +9,7 @@ pub mod init;
 pub mod lock;
 pub mod login;
 pub mod mcp;
+pub mod model;
 pub mod petri;
 pub mod refresh_outcome;
 pub mod scan;

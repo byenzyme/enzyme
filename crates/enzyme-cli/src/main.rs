@@ -157,6 +157,12 @@ enum Commands {
     /// Start MCP (Model Context Protocol) server over stdio
     Mcp,
 
+    /// Manage local GGUF models for offline catalyst generation
+    Model {
+        #[command(subcommand)]
+        command: ModelCommands,
+    },
+
     /// Scan vault structure and suggest config without initializing
     Scan {
         /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
@@ -229,6 +235,32 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand)]
+enum ModelCommands {
+    /// Download a model into ~/.enzyme/models (default: catalyst-135m-v3)
+    Install {
+        /// Registry name, or the local name to give a `--url` download
+        name: Option<String>,
+
+        /// Download this GGUF directly instead of a registry entry
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Expected SHA-256 for `--url` downloads
+        #[arg(long)]
+        sha256: Option<String>,
+    },
+
+    /// List installed and available models
+    List,
+
+    /// Remove an installed model
+    Rm {
+        /// Installed model name
+        name: String,
+    },
+}
+
 fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
     let filter = match verbose {
         0 => "warn",
@@ -295,6 +327,16 @@ async fn main() -> Result<()> {
         Commands::Logout => {
             init_tracing(cli.verbose, None);
             return commands::login::run_logout().await;
+        }
+        Commands::Model { command } => {
+            init_tracing(cli.verbose, None);
+            return match command {
+                ModelCommands::Install { name, url, sha256 } => {
+                    commands::model::run_install(name.clone(), url.clone(), sha256.clone()).await
+                }
+                ModelCommands::List => commands::model::run_list(),
+                ModelCommands::Rm { name } => commands::model::run_rm(name),
+            };
         }
         _ => {}
     }
@@ -451,7 +493,7 @@ async fn main() -> Result<()> {
             commands::doctor::run_doctor(&vault_path, json).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
-        Commands::Mcp => unreachable!(),
+        Commands::Mcp | Commands::Model { .. } => unreachable!(),
     }
 
     Ok(())

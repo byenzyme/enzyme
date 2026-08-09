@@ -12,6 +12,7 @@ path = "src/main.rs"
 enzyme-core = { path = "../enzyme-core" }
 reqwest = { workspace = true, features = ["multipart", "stream"] }
 flate2 = "1"
+futures = "0.3"
 enzyme-api = { path = "../enzyme-api" }
 clap = { workspace = true }
 tokio = { workspace = true }
