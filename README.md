@@ -97,6 +97,20 @@ If you intentionally want to bring your own OpenAI/OpenRouter/OpenAI-compatible 
 
 If no hosted or env key is available, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
 
+## Using the local model
+
+Builds that ship with the `local-llm` feature can generate catalysts entirely on-device — no API key, no network:
+
+```bash
+enzyme model install     # ~101 MB fine-tuned SmolLM2 GGUF into ~/.enzyme/models
+enzyme model list        # installed + available, * marks the active model
+enzyme init              # catalysts generated in-process
+```
+
+Once a model is installed it is preferred over hosted credits automatically. Precedence is: an explicit `OPENAI_BASE_URL` / `OPENROUTER_BASE_URL` override → the local model → hosted. Set `ENZYME_LOCAL_ENGINE=0` to ignore an installed model, or `enzyme model rm <name>` to remove it. Concurrency, threads, and the prompt context budget adapt to the machine; `ENZYME_LLM_CONCURRENCY` and `ENZYME_MAX_CONTEXT_CHARS` still override them.
+
+While the fine-tuned weights are hosted on a private release, `enzyme model install` needs `GITHUB_TOKEN` (or `GH_TOKEN`) set; public models will not.
+
 ## App Plugins
 
 The curl installer is CLI-only. Claude Code and Codex plugins are app-based installs that add first-time setup help on top of the CLI. They do not install automatic refresh or prompt-injection hooks; agents use `enzyme petri`, `enzyme catalyze`, and `enzyme refresh` explicitly when the task calls for them.

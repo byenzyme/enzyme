@@ -115,6 +115,7 @@ fn lasso_truncate(text: &str, max_chars: usize) -> String {
 ///   for local models, `DEFAULT_MAX_CONTEXT_CHARS` for cloud),
 /// - `Some(0)` → `0` (explicit unlimited — caller opted out of the guardrail),
 /// - `Some(n)` → `n`.
+///
 /// Local models are additionally clamped to
 /// [`hardware::LOCAL_MAX_CONTEXT_CHARS`], which is what the shipping 8k-token
 /// checkpoint can hold alongside its 512-token completion. `Some(0)` (explicit

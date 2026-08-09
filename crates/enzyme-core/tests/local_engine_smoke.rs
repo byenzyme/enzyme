@@ -57,7 +57,9 @@ fn generates_grammar_valid_catalyst_json() {
     let parsed: serde_json::Value =
         serde_json::from_str(out.trim()).expect("grammar-constrained output must be valid JSON");
     assert!(
-        parsed["catalysts"].as_array().is_some_and(|a| !a.is_empty()),
+        parsed["catalysts"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
         "expected a non-empty catalysts array, got {parsed}"
     );
     assert!(parsed["topicNames"].is_array(), "expected topicNames array");

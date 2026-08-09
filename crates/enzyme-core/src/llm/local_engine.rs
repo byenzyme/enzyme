@@ -61,7 +61,8 @@ impl LocalEngine {
         let started = Instant::now();
         let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
             .with_context(|| format!("failed to load model {}", path.display()))?;
-        let size_mb = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+        let size_mb =
+            std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
         eprintln!("local model {name} ({size_mb:.0} MB)");
         debug!(?path, elapsed = ?started.elapsed(), "loaded local model");
 
@@ -165,7 +166,9 @@ impl LocalEngine {
 
         // Landmine 3: grammars guarantee prefix validity only.
         if !finished {
-            bail!("local generation hit the {max_tokens}-token cap before finishing — output is truncated and unparseable");
+            bail!(
+                "local generation hit the {max_tokens}-token cap before finishing — output is truncated and unparseable"
+            );
         }
         Ok(out)
     }

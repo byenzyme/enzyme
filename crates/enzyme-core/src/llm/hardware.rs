@@ -29,7 +29,10 @@ pub fn physical_cores() -> usize {
                     _ => {}
                 }
             } else if !core_id.is_empty() {
-                cores.push((std::mem::take(&mut physical_id), std::mem::take(&mut core_id)));
+                cores.push((
+                    std::mem::take(&mut physical_id),
+                    std::mem::take(&mut core_id),
+                ));
             }
         }
         if !core_id.is_empty() {

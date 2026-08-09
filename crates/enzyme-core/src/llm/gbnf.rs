@@ -82,9 +82,9 @@ fn convert(schema: &Value, name: &str, rules: &mut Vec<String>) -> Result<String
 
             let mut parts: Vec<String> = Vec::new();
             for (i, key) in required.iter().enumerate() {
-                let prop = properties
-                    .get(*key)
-                    .ok_or_else(|| anyhow::anyhow!("required key '{key}' missing from properties"))?;
+                let prop = properties.get(*key).ok_or_else(|| {
+                    anyhow::anyhow!("required key '{key}' missing from properties")
+                })?;
                 let rule = convert(prop, &format!("{name}-{key}"), rules)?;
                 let sep = if i == 0 { "" } else { r#""," ws "# };
                 parts.push(format!(r#"{sep}"\"{key}\"" ws ":" ws {rule} ws"#));
@@ -104,7 +104,10 @@ mod tests {
     #[test]
     fn converts_the_catalyst_schema() {
         let gbnf = json_schema_to_gbnf(&catalyst_json_schema(false)).unwrap();
-        assert!(gbnf.contains(r#"root ::= "{" ws "\"catalysts\"""#), "{gbnf}");
+        assert!(
+            gbnf.contains(r#"root ::= "{" ws "\"catalysts\"""#),
+            "{gbnf}"
+        );
         assert!(gbnf.contains(r#""\"topicNames\"""#), "{gbnf}");
         assert!(gbnf.contains("ws ::="));
         assert!(gbnf.contains("string ::="));
@@ -120,7 +123,10 @@ mod tests {
     #[test]
     fn arrays_are_length_capped() {
         let gbnf = json_schema_to_gbnf(&catalyst_json_schema(false)).unwrap();
-        assert!(gbnf.contains(&format!("{{0,{}}}", MAX_ARRAY_ITEMS - 1)), "{gbnf}");
+        assert!(
+            gbnf.contains(&format!("{{0,{}}}", MAX_ARRAY_ITEMS - 1)),
+            "{gbnf}"
+        );
     }
 
     #[test]
