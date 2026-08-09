@@ -1,0 +1,88 @@
+//! Hardware-adaptive defaults for local (on-device) catalyst generation.
+//!
+//! Constants come from the 2026-08 local-inference benchmark
+//! (`docs/2026-08-08-local-llm-bundling-recommendation.md`, bench results in
+//! `benchmarks/`): on a 4-weak-core box the throughput knee is at concurrency 1
+//! because generation is prefill-bound at roughly 25:1 prefill:decode, so extra
+//! request slots only steal threads from the prefill that dominates wall time.
+//! Apple Silicon has enough memory bandwidth and core headroom (plus Metal) to
+//! absorb 4 concurrent requests, and an 8+ physical-core desktop absorbs 2.
+
+/// Char cap for the per-entity prompt context on local models.
+///
+/// The shipping checkpoint has an 8,192-token window; at ~3.5 chars/token that
+/// is ~28k chars, and we keep prompt + 512 output tokens comfortably inside it
+/// with a large safety margin for tokenizer variance.
+pub const LOCAL_MAX_CONTEXT_CHARS: usize = 12_000;
+
+/// Physical core count, falling back to logical parallelism.
+pub fn physical_cores() -> usize {
+    #[cfg(target_os = "linux")]
+    if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+        let mut cores: Vec<(String, String)> = Vec::new();
+        let (mut physical_id, mut core_id) = (String::new(), String::new());
+        for line in cpuinfo.lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                match key.trim() {
+                    "physical id" => physical_id = value.trim().to_string(),
+                    "core id" => core_id = value.trim().to_string(),
+                    _ => {}
+                }
+            } else if !core_id.is_empty() {
+                cores.push((std::mem::take(&mut physical_id), std::mem::take(&mut core_id)));
+            }
+        }
+        if !core_id.is_empty() {
+            cores.push((physical_id, core_id));
+        }
+        cores.sort();
+        cores.dedup();
+        if !cores.is_empty() {
+            return cores.len();
+        }
+    }
+
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Threads to hand llama.cpp: one per physical core.
+pub fn default_threads() -> usize {
+    physical_cores().max(1)
+}
+
+/// Default number of in-flight LLM requests for a local model.
+///
+/// `ENZYME_LLM_CONCURRENCY` overrides this at the call site (the CLI already
+/// reads it into `CatalystConfig::concurrency`).
+///
+/// Note: the in-process engine serializes generation behind one lock, so a
+/// value above 1 only helps when the local endpoint is an external server
+/// (`OPENAI_BASE_URL` pointing at llama-server, which can run `--parallel`).
+pub fn default_local_concurrency() -> usize {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        4
+    } else if physical_cores() >= 8 {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_cores_is_at_least_one() {
+        assert!(physical_cores() >= 1);
+        assert!(default_threads() >= 1);
+    }
+
+    #[test]
+    fn concurrency_is_bounded() {
+        let c = default_local_concurrency();
+        assert!((1..=4).contains(&c), "unexpected concurrency {c}");
+    }
+}

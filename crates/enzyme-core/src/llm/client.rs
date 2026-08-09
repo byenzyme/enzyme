@@ -38,6 +38,94 @@ fn api_cache_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
 }
 
+/// Pseudo-scheme marking a `ResolvedConfig` that runs in-process rather than
+/// over HTTP. `local://<model-name>`.
+const LOCAL_BASE_URL_SCHEME: &str = "local://";
+
+/// Resolve a config that points the pipeline at the in-process engine, if one
+/// is available. Always `None` without the `local-llm` feature.
+///
+/// Selection precedence (see the CLI docs): an explicit `OPENAI_BASE_URL` /
+/// `OPENROUTER_BASE_URL` override wins, then the local engine, then hosted.
+/// `ENZYME_LOCAL_ENGINE=0` opts out entirely.
+fn local_model_config() -> Option<ResolvedConfig> {
+    if env_value("OPENAI_BASE_URL").is_some() || env_value("OPENROUTER_BASE_URL").is_some() {
+        return None;
+    }
+    if env_value("ENZYME_LOCAL_ENGINE").is_some_and(|v| v == "0" || v == "false") {
+        return None;
+    }
+    local_model_config_inner()
+}
+
+#[cfg(not(feature = "local-llm"))]
+fn local_model_config_inner() -> Option<ResolvedConfig> {
+    None
+}
+
+#[cfg(feature = "local-llm")]
+fn local_model_config_inner() -> Option<ResolvedConfig> {
+    let (name, _path) = super::model_registry::active()?;
+    Some(ResolvedConfig {
+        api_key: String::new(),
+        base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
+        model: name,
+        provider: ConfigProvider::Env,
+    })
+}
+
+#[cfg(not(feature = "local-llm"))]
+fn local_backend(_base_url: &str) -> Backend {
+    Backend::Http
+}
+
+/// Load (once per process) and bind the in-process engine for a `local://` URL.
+#[cfg(feature = "local-llm")]
+fn local_backend(base_url: &str) -> Backend {
+    use std::sync::Arc;
+    static ENGINE: OnceLock<Option<Arc<super::local_engine::LocalEngine>>> = OnceLock::new();
+
+    let Some(name) = base_url.strip_prefix(LOCAL_BASE_URL_SCHEME) else {
+        return Backend::Http;
+    };
+    let engine = ENGINE.get_or_init(|| {
+        let path = super::model_registry::model_path(name).ok()?;
+        match super::local_engine::LocalEngine::load(
+            &path,
+            name,
+            super::model_registry::context_window(name),
+        ) {
+            Ok(engine) => Some(Arc::new(engine)),
+            Err(e) => {
+                warn!("failed to load local model {name}: {e:#}; falling back to HTTP");
+                None
+            }
+        }
+    });
+    match engine {
+        Some(engine) => Backend::Local(Arc::clone(engine)),
+        None => Backend::Http,
+    }
+}
+
+/// Translate an OpenAI `response_format` into a GBNF grammar for local
+/// decoding. `json_object` has no schema to constrain, so it decodes freely.
+#[cfg(feature = "local-llm")]
+fn grammar_for(response_format: Option<&ResponseFormat>) -> Option<String> {
+    match response_format? {
+        ResponseFormat::JsonSchema { json_schema } => {
+            match super::gbnf::json_schema_to_gbnf(&json_schema.schema) {
+                Ok(grammar) => Some(grammar),
+                Err(e) => {
+                    warn!("could not convert response schema to GBNF, decoding unconstrained: {e:#}");
+                    None
+                }
+            }
+        }
+        ResponseFormat::JsonObject => None,
+    }
+}
+
 /// Typed error for a non-success HTTP response from an LLM completions
 /// endpoint. Downcastable through `anyhow` so callers can classify on the
 /// actual HTTP status (e.g. the catalyst pipeline's 402 circuit breaker)
@@ -325,6 +413,18 @@ impl Default for GenerationParams {
     }
 }
 
+/// Where completions actually run.
+///
+/// `Local` only exists with the `local-llm` feature; without it the enum has a
+/// single variant and every code path below compiles to the HTTP client
+/// unchanged.
+#[derive(Clone)]
+enum Backend {
+    Http,
+    #[cfg(feature = "local-llm")]
+    Local(Arc<super::local_engine::LocalEngine>),
+}
+
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
@@ -333,6 +433,9 @@ pub struct LlmClient {
     /// Whether this client was created from the free-tier server fallback.
     /// When true, 401 errors trigger an automatic key refresh.
     free_tier: bool,
+    /// Only read on the `local-llm` paths; always `Http` otherwise.
+    #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
+    backend: Backend,
 }
 
 #[derive(Serialize)]
@@ -388,7 +491,9 @@ enum ProviderKind {
 impl ProviderKind {
     fn detect(base_url: &str) -> Self {
         let url = base_url.to_lowercase();
-        if url.contains("openrouter.ai") {
+        if url.starts_with(LOCAL_BASE_URL_SCHEME) {
+            Self::Local
+        } else if url.contains("openrouter.ai") {
             Self::OpenRouter
         } else if url.contains("api.openai.com") {
             Self::OpenAi
@@ -655,6 +760,7 @@ impl LlmClient {
             api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: DEFAULT_BASE_URL.to_string(),
             free_tier: false,
+            backend: Backend::Http,
         }
     }
 
@@ -664,17 +770,23 @@ impl LlmClient {
             api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: base_url.to_string(),
             free_tier: false,
+            backend: Backend::Http,
         }
     }
 
     /// Create a client from a resolved config, preserving free-tier status
     /// so that 401 errors can trigger automatic key refresh.
+    ///
+    /// A `local://<model>` base URL binds the in-process engine instead of the
+    /// HTTP client; only [`resolve_api_config`] mints such a config, and only
+    /// when the binary was built with `local-llm`.
     pub fn from_config(config: &ResolvedConfig) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key: Arc::new(RwLock::new(config.api_key.clone())),
             base_url: config.base_url.clone(),
             free_tier: config.is_free_tier(),
+            backend: local_backend(&config.base_url),
         }
     }
 
@@ -688,6 +800,9 @@ impl LlmClient {
     /// True for localhost URLs, or when `ENZYME_LOCAL_MODEL=1` is set
     /// (e.g. a fine-tuned model hosted remotely that uses the compact prompt format).
     pub fn is_local(&self) -> bool {
+        if self.base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
+            return true;
+        }
         if std::env::var("ENZYME_LOCAL_MODEL")
             .ok()
             .filter(|v| v == "1" || v == "true")
@@ -807,12 +922,38 @@ impl LlmClient {
             .context("Failed to send streaming request to LLM API")
     }
 
+    /// Run a completion on the in-process engine (blocking work moved off the
+    /// async runtime).
+    #[cfg(feature = "local-llm")]
+    async fn local_chat_completion(
+        engine: Arc<super::local_engine::LocalEngine>,
+        messages: Vec<Message>,
+        params: GenerationParams,
+    ) -> Result<String> {
+        let grammar = grammar_for(params.response_format.as_ref());
+        tokio::task::spawn_blocking(move || {
+            engine.complete(
+                &messages,
+                grammar.as_deref(),
+                params.max_tokens,
+                params.temperature,
+            )
+        })
+        .await
+        .context("local generation task panicked")?
+    }
+
     pub async fn chat_completion(
         &self,
         model: &str,
         messages: Vec<Message>,
         params: GenerationParams,
     ) -> Result<String> {
+        #[cfg(feature = "local-llm")]
+        if let Backend::Local(engine) = &self.backend {
+            return Self::local_chat_completion(Arc::clone(engine), messages, params).await;
+        }
+
         let url = chat_completions_url(&self.base_url)?;
 
         let mut request_body =
@@ -867,6 +1008,15 @@ impl LlmClient {
         messages: Vec<Message>,
         params: GenerationParams,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        // The in-process engine has no token callback; emit the finished
+        // completion as a single chunk. Partial-catalyst parsing still works,
+        // it just fires once at the end.
+        #[cfg(feature = "local-llm")]
+        if let Backend::Local(engine) = &self.backend {
+            let text = Self::local_chat_completion(Arc::clone(engine), messages, params).await?;
+            return Ok(Box::pin(futures::stream::once(async move { Ok(text) })));
+        }
+
         let url = chat_completions_url(&self.base_url)?;
 
         let mut request_body =
@@ -1267,11 +1417,16 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
 /// Resolve the API key, base URL, and model for LLM requests.
 ///
 /// Checks (in order):
+/// 0. the in-process local engine, when built with `local-llm`, a model is
+///    installed, and no explicit `*_BASE_URL` override is set
 /// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
 /// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
 /// 3. the on-disk API cache (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`)
 /// 4. Enzyme server free-config endpoint (hosted credits)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
+    if let Some(config) = local_model_config() {
+        return Ok(config);
+    }
     if let Some(config) = resolved_env_config(env_value)? {
         return Ok(config);
     }
@@ -1281,7 +1436,12 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
 /// Resolve API configuration in an explicit credential mode.
 pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<ResolvedConfig> {
     match mode {
-        LlmCredentialMode::Hosted => resolve_hosted_api_config().await,
+        LlmCredentialMode::Hosted => match local_model_config() {
+            // An installed local model means the machine can generate offline;
+            // prefer it over spending hosted credits.
+            Some(config) => Ok(config),
+            None => resolve_hosted_api_config().await,
+        },
         LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "No env LLM config found. Set OPENAI_API_KEY or OPENROUTER_API_KEY, \

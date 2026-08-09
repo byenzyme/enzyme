@@ -1,6 +1,10 @@
 mod catalyst_profiles;
 mod catalyst_prompt;
 mod client;
+pub mod gbnf;
+pub mod hardware;
+#[cfg(feature = "local-llm")]
+pub mod local_engine;
 pub mod model_registry;
 pub use catalyst_profiles::*;
 pub use catalyst_prompt::*;

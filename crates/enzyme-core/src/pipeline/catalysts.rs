@@ -19,7 +19,7 @@ use crate::llm::{
     GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst, build_local_user_prompt,
     build_system_prompt, build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema,
     get_profile, parse_catalyst_response, parse_partial_catalyst_entries,
-    streaming_entries_instruction,
+    hardware, streaming_entries_instruction,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -29,10 +29,10 @@ use crate::pipeline::eras::{
     sample_contexts_by_era,
 };
 
-/// Default context char budget for local models (~4K tokens of excerpts).
-/// Leaves room for the simplified system prompt (~400 tokens) and output (~500 tokens)
-/// within a 16K per-slot context window.
-const LOCAL_DEFAULT_MAX_CONTEXT_CHARS: usize = 16000;
+/// Default context char budget for local models. Leaves room for the
+/// simplified system prompt (~400 tokens) and output (~512 tokens) inside the
+/// shipping checkpoint's 8K window — see `llm::hardware`.
+const LOCAL_DEFAULT_MAX_CONTEXT_CHARS: usize = hardware::LOCAL_MAX_CONTEXT_CHARS;
 /// Default per-entity context char budget for cloud models when unset
 /// (`max_context_chars == None`). ~15K tokens of context per entity request —
 /// generous for a focused catalyst prompt while keeping a single high-frequency
@@ -115,8 +115,12 @@ fn lasso_truncate(text: &str, max_chars: usize) -> String {
 ///   for local models, `DEFAULT_MAX_CONTEXT_CHARS` for cloud),
 /// - `Some(0)` → `0` (explicit unlimited — caller opted out of the guardrail),
 /// - `Some(n)` → `n`.
+/// Local models are additionally clamped to
+/// [`hardware::LOCAL_MAX_CONTEXT_CHARS`], which is what the shipping 8k-token
+/// checkpoint can hold alongside its 512-token completion. `Some(0)` (explicit
+/// unlimited) is clamped too — the alternative is a llama.cpp context overflow.
 fn resolve_context_budget(configured: Option<usize>, is_local: bool) -> usize {
-    match configured {
+    let budget = match configured {
         None => {
             if is_local {
                 LOCAL_DEFAULT_MAX_CONTEXT_CHARS
@@ -125,7 +129,24 @@ fn resolve_context_budget(configured: Option<usize>, is_local: bool) -> usize {
             }
         }
         Some(n) => n,
+    };
+
+    if is_local {
+        let capped = if budget == 0 {
+            hardware::LOCAL_MAX_CONTEXT_CHARS
+        } else {
+            budget.min(hardware::LOCAL_MAX_CONTEXT_CHARS)
+        };
+        if capped != budget {
+            warn!(
+                requested = budget,
+                capped, "context budget clamped to the local model's window"
+            );
+        }
+        return capped;
     }
+
+    budget
 }
 
 /// Apply context budget: limit sample count, then truncate total chars via lasso.
@@ -1145,9 +1166,11 @@ impl<'a> CatalystPipeline<'a> {
         // 429s from upstream providers, and use a generous timeout to accommodate
         // retries with exponential backoff.
         let local_model = self.llm.is_local();
-        let concurrency = config
-            .concurrency
-            .unwrap_or(if local_model { 1 } else { 8 });
+        let concurrency = config.concurrency.unwrap_or(if local_model {
+            hardware::default_local_concurrency()
+        } else {
+            8
+        });
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let entity_timeout_secs: u64 = if local_model { 300 } else { 30 };
 
@@ -1954,16 +1977,26 @@ mod tests {
             resolve_context_budget(None, false),
             DEFAULT_MAX_CONTEXT_CHARS
         );
+        // Local defaults are additionally clamped to the model window, which
+        // is tighter than the historical local default.
         assert_eq!(
             resolve_context_budget(None, true),
-            LOCAL_DEFAULT_MAX_CONTEXT_CHARS
+            hardware::LOCAL_MAX_CONTEXT_CHARS
         );
-        // Explicit unlimited escape hatch.
+        // Explicit unlimited escape hatch — cloud only; local cannot opt out
+        // of its window.
         assert_eq!(resolve_context_budget(Some(0), false), 0);
-        assert_eq!(resolve_context_budget(Some(0), true), 0);
-        // Explicit override is honored verbatim, local or cloud.
+        assert_eq!(
+            resolve_context_budget(Some(0), true),
+            hardware::LOCAL_MAX_CONTEXT_CHARS
+        );
+        // Explicit override is honored verbatim up to the local clamp.
         assert_eq!(resolve_context_budget(Some(1234), false), 1234);
         assert_eq!(resolve_context_budget(Some(1234), true), 1234);
+        assert_eq!(
+            resolve_context_budget(Some(999_999), true),
+            hardware::LOCAL_MAX_CONTEXT_CHARS
+        );
     }
 
     fn make_occurrence(file_path: &str, context: &str) -> EntityOccurrence {

@@ -30,6 +30,21 @@ toml = "0.8"
 
 [features]
 rten = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
+# In-process llama.cpp inference. OFF by default: enabling it pulls in
+# llama-cpp-sys-2, which needs cmake + a C/C++ toolchain + libclang.
+local-llm = ["dep:llama-cpp-2", "dep:encoding_rs"]
+
+# Exact pin: llama-cpp-2 does not follow semver (see the 2026-08-08 bundling
+# recommendation); bump deliberately.
+[dependencies.llama-cpp-2]
+version = "=0.1.154"
+optional = true
+default-features = false
+features = ["common"]
+
+[dependencies.encoding_rs]
+version = "0.8"
+optional = true
 
 [dependencies.rten]
 version = "0.24"
