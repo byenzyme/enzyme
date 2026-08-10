@@ -36,13 +36,13 @@ pub const DEFAULT_MODEL: &str = "catalyst-135m-v3";
 /// Blessed models.
 ///
 /// The catalyst champion is currently hosted as a **private** release asset on
-/// `jshph/enzyme-rust` pending the training-data pseudonym sweep; installing it
+/// `useenzyme/enzyme-rust` pending the training-data pseudonym sweep; installing it
 /// needs `GITHUB_TOKEN`/`GH_TOKEN`. Once the weights are cleared for public
-/// hosting this URL moves to a public `jshph/enzyme` release and no token is
+/// hosting this URL moves to a public `useenzyme/enzyme` release and no token is
 /// required.
 pub const REGISTRY: &[ModelEntry] = &[ModelEntry {
     name: DEFAULT_MODEL,
-    url: "https://github.com/jshph/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-smollm135-v3-dpo-8ep-q4_k_m.gguf",
+    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-smollm135-v3-dpo-8ep-q4_k_m.gguf",
     sha256: "c1853769c45470e74992826c78ab4de7d8ca3876da3eb15ee232d761932ba62d",
     size: 105_454_080,
     context_window: 8192,

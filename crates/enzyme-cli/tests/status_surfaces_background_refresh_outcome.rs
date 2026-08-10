@@ -3,7 +3,7 @@
 //! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`,
 //! `support::fixture`, `support::epoch`).
 //!
-//! # What this pins down (jshph/enzyme#11 fail-loud)
+//! # What this pins down (useenzyme/enzyme#11 fail-loud)
 //!
 //! `enzyme refresh` runs catalyst epoch builds in a detached background worker
 //! (`spawn_background_refresh` -> `enzyme refresh --detached --quiet`). On
