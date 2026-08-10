@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::Result;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::db::Database;
 use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument, most_recent_entry};
@@ -249,6 +249,14 @@ impl<'a> IndexingPipeline<'a> {
         // semantics, promotion of newly declared logs, removal of undeclared).
         on_progress("Reconciling log entities...");
         self.reconcile_log_entities(&processed_docs, &all_paths)?;
+
+        // Step 8c: Drop entities whose last occurrence is gone (their notes
+        // were deleted, or an edit removed the tag/link). They have no
+        // material to catalyze and would otherwise linger in selection.
+        let pruned_entities = self.db.prune_entities_without_occurrences()?;
+        if pruned_entities > 0 {
+            debug!(pruned_entities, "pruned entities with no remaining occurrences");
+        }
 
         // Step 9: Compute trending scores for all entities (bulk fetch)
         on_progress("Computing trending scores...");

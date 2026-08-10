@@ -551,7 +551,10 @@ pub async fn run_init(
         tx.send(DisplayEvent::IndexingStart).ok();
         let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
         let tx_idx = tx.clone();
-        let stats = indexing.run(true, |msg| {
+        // Incremental unless forced: on a fresh database every file is new
+        // anyway, so full mode only ever costs a re-read of every note on a
+        // re-init.
+        let stats = indexing.run(force, |msg| {
             tx_idx
                 .send(DisplayEvent::IndexingProgress(msg.to_string()))
                 .ok();

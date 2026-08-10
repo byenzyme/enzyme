@@ -462,7 +462,96 @@ impl Database {
         );
         let params: Vec<Value> = paths.iter().map(|p| Value::Text(p.clone())).collect();
         let count = self.execute_write(&sql, params)?;
+        // `entity_occurrences.file_path` is a plain path, not a foreign key, so
+        // nothing cascades: without this the mentions of a deleted note keep
+        // propping up its entities forever.
+        self.remove_occurrences_for_paths(paths)?;
         Ok(count)
+    }
+
+    /// Forget every entity occurrence recorded for these paths and recompute
+    /// the affected entities' frequency from what remains.
+    ///
+    /// Occurrences accumulate: reprocessing a document re-emits all of its
+    /// mentions, and deleting one leaves them stranded. Both callers reconcile
+    /// through here, so a document's contribution to an entity is always
+    /// exactly what its current content says it is.
+    pub fn remove_occurrences_for_paths(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let paths = paths.to_vec();
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("failed to begin transaction for remove_occurrences_for_paths")?;
+            Database::remove_occurrences_for_paths_on_tx(&tx, &paths).await?;
+            tx.commit()
+                .await
+                .context("failed to commit remove_occurrences_for_paths")?;
+            Ok(())
+        })
+    }
+
+    async fn remove_occurrences_for_paths_on_tx(
+        tx: &libsql::Transaction,
+        paths: &[String],
+    ) -> Result<()> {
+        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{i}")).collect();
+        let list = placeholders.join(", ");
+        let params: Vec<Value> = paths.iter().map(|p| Value::Text(p.clone())).collect();
+
+        let mut rows = tx
+            .query(
+                &format!(
+                    "SELECT DISTINCT entity_id FROM entity_occurrences WHERE file_path IN ({list})"
+                ),
+                params.clone(),
+            )
+            .await?;
+        let mut affected: Vec<i64> = Vec::new();
+        while let Some(row) = rows.next().await? {
+            affected.push(row.get::<i64>(0)?);
+        }
+        drop(rows);
+        if affected.is_empty() {
+            return Ok(());
+        }
+
+        tx.execute(
+            &format!("DELETE FROM entity_occurrences WHERE file_path IN ({list})"),
+            params,
+        )
+        .await?;
+        // Recompute rather than decrement: it is self-correcting for rows that
+        // an older accumulate-only pass already double-counted.
+        for entity_id in affected {
+            tx.execute(
+                "UPDATE entities
+                 SET frequency = (SELECT COUNT(*) FROM entity_occurrences eo
+                                  WHERE eo.entity_id = entities.id)
+                 WHERE id = ?1",
+                vec![Value::Integer(entity_id)],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Delete entities that no longer have a single occurrence.
+    ///
+    /// An entity with no occurrences has no material to catalyze — the
+    /// generation stage already skips it — and would otherwise linger as a
+    /// ghost in selection and ranking after its last note is deleted.
+    pub fn prune_entities_without_occurrences(&self) -> Result<usize> {
+        self.execute_write(
+            "DELETE FROM entities
+             WHERE NOT EXISTS (SELECT 1 FROM entity_occurrences eo WHERE eo.entity_id = entities.id)",
+            vec![],
+        )
+        .map_err(Into::into)
     }
 
     /// Return all `source_ref` values from the docs table.
@@ -511,6 +600,19 @@ impl Database {
                 .transaction()
                 .await
                 .context("failed to begin transaction for upsert_entities_batch")?;
+
+            // Every mention in a reprocessed document is about to be
+            // re-inserted, so drop what that document said last time first.
+            // Otherwise a re-index appends a second copy of every occurrence
+            // and inflates `frequency` — which drives catalyst allocation and
+            // entity ranking — a little more on each run.
+            let batch_paths: Vec<String> = entries
+                .iter()
+                .map(|(_, _, occ)| occ.file_path.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Database::remove_occurrences_for_paths_on_tx(&tx, &batch_paths).await?;
 
             for (name, type_str, occurrence) in &entries {
                 let effective_date = occurrence.effective_date;
