@@ -180,7 +180,10 @@ fn prune_deselected_catalysts(
         pruned += 1;
     }
     if pruned > 0 {
-        debug!(entities = pruned, "pruned catalysts for deselected entities");
+        debug!(
+            entities = pruned,
+            "pruned catalysts for deselected entities"
+        );
     }
     Ok(pruned)
 }

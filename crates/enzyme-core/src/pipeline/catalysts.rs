@@ -2296,7 +2296,10 @@ mod tests {
             ),
         ];
         for (label, hash) in variants {
-            assert_ne!(base, hash, "changing the {label} must change the fingerprint");
+            assert_ne!(
+                base, hash,
+                "changing the {label} must change the fingerprint"
+            );
         }
     }
 
@@ -2351,7 +2354,10 @@ mod tests {
         let (fresh, unchanged) = pipeline.partition_unchanged(jobs, false).unwrap();
         assert_eq!(unchanged, 1);
         assert_eq!(
-            fresh.iter().map(|j| j.entity_name.as_str()).collect::<Vec<_>>(),
+            fresh
+                .iter()
+                .map(|j| j.entity_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["beta", "gamma"]
         );
     }

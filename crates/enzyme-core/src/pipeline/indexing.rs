@@ -255,7 +255,10 @@ impl<'a> IndexingPipeline<'a> {
         // material to catalyze and would otherwise linger in selection.
         let pruned_entities = self.db.prune_entities_without_occurrences()?;
         if pruned_entities > 0 {
-            debug!(pruned_entities, "pruned entities with no remaining occurrences");
+            debug!(
+                pruned_entities,
+                "pruned entities with no remaining occurrences"
+            );
         }
 
         // Step 9: Compute trending scores for all entities (bulk fetch)
