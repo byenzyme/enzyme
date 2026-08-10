@@ -1162,13 +1162,15 @@ impl<'a> CatalystPipeline<'a> {
         }
 
         // Phase 2: Fire LLM calls with bounded concurrency
-        // Remote providers can handle moderate parallelism; local models typically
-        // serve one request at a time. We keep concurrency conservative to avoid
-        // 429s from upstream providers, and use a generous timeout to accommodate
-        // retries with exponential backoff.
+        // Remote providers can handle moderate parallelism; local models are
+        // bounded by the in-process engine's context pool, which reads the same
+        // `hardware::local_concurrency()` value so the two never disagree. We
+        // keep concurrency conservative to avoid 429s from upstream providers,
+        // and use a generous timeout to accommodate retries with exponential
+        // backoff.
         let local_model = self.llm.is_local();
         let concurrency = config.concurrency.unwrap_or(if local_model {
-            hardware::default_local_concurrency()
+            hardware::local_concurrency()
         } else {
             8
         });

@@ -60,9 +60,8 @@ pub fn default_threads() -> usize {
 /// `ENZYME_LLM_CONCURRENCY` overrides this at the call site (the CLI already
 /// reads it into `CatalystConfig::concurrency`).
 ///
-/// Note: the in-process engine serializes generation behind one lock, so a
-/// value above 1 only helps when the local endpoint is an external server
-/// (`OPENAI_BASE_URL` pointing at llama-server, which can run `--parallel`).
+/// The in-process engine keeps a pool of one llama context per in-flight
+/// request (see `llm::local_engine`), so this also caps that pool.
 pub fn default_local_concurrency() -> usize {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         4
@@ -73,6 +72,28 @@ pub fn default_local_concurrency() -> usize {
     }
 }
 
+/// Resolved local concurrency: `ENZYME_LLM_CONCURRENCY` if set and sane,
+/// otherwise [`default_local_concurrency`].
+///
+/// Both the catalyst pipeline's worker count and the in-process engine's
+/// context-pool cap read this, so one knob moves both together.
+pub fn local_concurrency() -> usize {
+    std::env::var("ENZYME_LLM_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_local_concurrency)
+}
+
+/// Decode threads to give each context when `pool_size` contexts may run at
+/// once: split the physical cores between them, never below 2.
+///
+/// Measured on a 4-core box at pool size 2 (135M Q4_K_M, 512-token outputs):
+/// splitting (2+2) beat oversubscribing (4+4) on total wall time, so we split.
+pub fn threads_per_context(pool_size: usize) -> usize {
+    (physical_cores() / pool_size.max(1)).max(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +102,17 @@ mod tests {
     fn physical_cores_is_at_least_one() {
         assert!(physical_cores() >= 1);
         assert!(default_threads() >= 1);
+    }
+
+    #[test]
+    fn threads_per_context_splits_the_cpu_without_starving() {
+        let cores = physical_cores();
+        assert_eq!(threads_per_context(1), cores.max(2));
+        for pool in 1..=8 {
+            let t = threads_per_context(pool);
+            assert!(t >= 2, "pool {pool} got {t} threads");
+            assert!(t <= cores.max(2), "pool {pool} oversubscribes: {t}");
+        }
     }
 
     #[test]
