@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-REPO="jshph/enzyme"
+REPO="useenzyme/enzyme"
 INSTALL_DIR="$HOME/.local/bin"
 
 # Detect platform
