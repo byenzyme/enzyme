@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use chrono::Utc;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -304,7 +305,11 @@ fn mmr_fill(
     });
 
     let seed_count = selected.len();
-    let mut candidate_pool: HashSet<usize> = ranked
+    // Ordered: MMR ties are broken by iteration order, and a HashSet's order
+    // varies per process. Chunk selection has to be reproducible run over run,
+    // or the per-entity context fingerprint would churn and defeat the
+    // incremental skip.
+    let mut candidate_pool: BTreeSet<usize> = ranked
         .iter()
         .copied()
         .filter(|idx| !selected.contains(idx))
@@ -531,6 +536,53 @@ fn build_chunk_candidates(
         .collect()
 }
 
+/// Bumped when the meaning of the fingerprint changes (new inputs folded in,
+/// different canonicalization), so every entity is treated as dirty once after
+/// an upgrade rather than silently keeping catalysts the new inputs disagree
+/// with.
+const CONTEXT_HASH_VERSION: &str = "catalyst-context-v1";
+
+/// Fold one labelled, length-prefixed field into the fingerprint. The label and
+/// explicit length keep concatenation unambiguous, so no combination of field
+/// values can forge another combination's digest.
+fn hash_field(hasher: &mut Sha256, label: &str, value: &[u8]) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(value.len().to_le_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(value);
+    hasher.update(b"\x1e");
+}
+
+/// Fingerprint of everything that determines one entity's generated catalysts.
+///
+/// The resolved prompts already encode the ordered context chunks/eras, the
+/// entity name, its profile, the output format, and the requested catalyst
+/// count — they are literally the bytes sent to the model — so hashing them
+/// covers the context. Model identity and the local/hosted split are folded in
+/// on top, so switching engines or upgrading a checkpoint invalidates every
+/// entity.
+fn context_hash(
+    model: &str,
+    is_local: bool,
+    entity_name: &str,
+    entity_type: &str,
+    num_catalysts: usize,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, "version", CONTEXT_HASH_VERSION.as_bytes());
+    hash_field(&mut hasher, "model", model.as_bytes());
+    hash_field(&mut hasher, "local", &[u8::from(is_local)]);
+    hash_field(&mut hasher, "entity", entity_name.as_bytes());
+    hash_field(&mut hasher, "entity_type", entity_type.as_bytes());
+    hash_field(&mut hasher, "num_catalysts", &num_catalysts.to_le_bytes());
+    hash_field(&mut hasher, "system_prompt", system_prompt.as_bytes());
+    hash_field(&mut hasher, "user_prompt", user_prompt.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 pub struct CatalystPipeline<'a> {
     db: &'a Database,
     llm: &'a LlmClient,
@@ -539,6 +591,9 @@ pub struct CatalystPipeline<'a> {
 
 pub struct CatalystStats {
     pub entities_processed: usize,
+    /// Entities skipped because their stored context fingerprint still matches
+    /// and their catalysts are already in the database.
+    pub entities_unchanged: usize,
     pub catalysts_generated: usize,
     pub errors: Vec<(String, String)>,
     pub duration_ms: u64,
@@ -578,6 +633,9 @@ pub struct CatalystConfig<'a> {
     /// Stream self-contained catalyst records and write complete records before
     /// the full entity response finishes.
     pub stream_partial_catalysts: bool,
+    /// Regenerate every entity even when its stored context fingerprint still
+    /// matches (`--force`).
+    pub force_regenerate: bool,
 }
 
 impl<'a> Default for CatalystConfig<'a> {
@@ -599,6 +657,7 @@ impl<'a> Default for CatalystConfig<'a> {
             max_samples: 20,
             concurrency: None,
             stream_partial_catalysts: false,
+            force_regenerate: false,
         }
     }
 }
@@ -641,12 +700,15 @@ struct EntityJob {
     entity_name: String,
     entity_type: String,
     user_prompt: String,
+    /// Fingerprint of this job's inputs; stored after the catalysts commit.
+    context_hash: String,
 }
 
 /// Result of a single entity's catalyst generation.
 struct EntityResult {
     entity_name: String,
     entity_type: String,
+    context_hash: String,
     catalysts: Option<Vec<ParsedCatalyst>>,
     error: Option<String>,
 }
@@ -1080,10 +1142,22 @@ impl<'a> CatalystPipeline<'a> {
                 "built prompt for entity"
             );
 
+            let entity_type = entity.entity_type.as_str().to_string();
+            let context_hash = context_hash(
+                config.model,
+                is_local,
+                entity_name,
+                &entity_type,
+                num_catalysts,
+                &system_prompt,
+                &user_prompt,
+            );
+
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
-                entity_type: entity.entity_type.as_str().to_string(),
+                entity_type,
                 user_prompt,
+                context_hash,
             });
         }
 
@@ -1131,6 +1205,52 @@ impl<'a> CatalystPipeline<'a> {
         Ok(jobs.len())
     }
 
+    /// Split built jobs into the ones that must be regenerated and a count of
+    /// the ones whose stored fingerprint still matches.
+    ///
+    /// Both conditions must hold to skip: the fingerprint matches *and* the
+    /// entity still has catalysts. A hash without catalysts (rows pruned, a
+    /// partially wiped database, a carried-forward epoch) is treated as dirty.
+    fn partition_unchanged(
+        &self,
+        jobs: Vec<EntityJob>,
+        force: bool,
+    ) -> Result<(Vec<EntityJob>, usize)> {
+        if force {
+            return Ok((jobs, 0));
+        }
+        let stored = self.db.get_catalyst_entity_hashes()?;
+        if stored.is_empty() {
+            return Ok((jobs, 0));
+        }
+        let counts = self.db.get_catalyst_counts_by_entity()?;
+
+        let mut fresh = Vec::with_capacity(jobs.len());
+        let mut unchanged = 0usize;
+        for job in jobs {
+            let key = (job.entity_name.clone(), job.entity_type.clone());
+            let hash_matches = stored.get(&key).is_some_and(|h| *h == job.context_hash);
+            // Legacy rows carry no `entity_type` in their metadata; they count
+            // for the name, mirroring `delete_catalysts_for_entity`.
+            let has_catalysts = counts.get(&key).copied().unwrap_or(0) > 0
+                || counts
+                    .get(&(job.entity_name.clone(), String::new()))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0;
+            if hash_matches && has_catalysts {
+                debug!(
+                    entity_name = job.entity_name.as_str(),
+                    "catalyst context unchanged, skipping"
+                );
+                unchanged += 1;
+            } else {
+                fresh.push(job);
+            }
+        }
+        Ok((fresh, unchanged))
+    }
+
     /// Run catalyst generation for the given pre-selected entities.
     pub async fn run(
         &self,
@@ -1141,6 +1261,7 @@ impl<'a> CatalystPipeline<'a> {
         let start = Instant::now();
         let mut stats = CatalystStats {
             entities_processed: 0,
+            entities_unchanged: 0,
             catalysts_generated: 0,
             errors: Vec::new(),
             duration_ms: 0,
@@ -1151,6 +1272,20 @@ impl<'a> CatalystPipeline<'a> {
         info!(total, "generating catalysts for selected entities");
 
         let (system_prompt, jobs, skipped) = self.build_jobs(entities, config)?;
+
+        // Incremental gate: an entity whose fingerprint still matches AND whose
+        // catalysts are still in the database has nothing new to say, so it
+        // never reaches the model. Hashing is DB-bound and cheap; the LLM call
+        // it avoids is what makes a full local run take tens of minutes.
+        let (jobs, unchanged) = self.partition_unchanged(jobs, config.force_regenerate)?;
+        stats.entities_unchanged = unchanged;
+        if unchanged > 0 {
+            info!(
+                unchanged,
+                regenerating = jobs.len(),
+                "skipping entities with unchanged catalyst context"
+            );
+        }
 
         // Report skipped entities
         for (i, name) in skipped.iter().enumerate() {
@@ -1218,11 +1353,13 @@ impl<'a> CatalystPipeline<'a> {
                 let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
+                let context_hash = job.context_hash.clone();
 
                 if credits_exhausted.load(Ordering::SeqCst) {
                     return EntityResult {
                         entity_name,
                         entity_type,
+                        context_hash,
                         catalysts: None,
                         error: Some("skipped: provider payment-required (402)".to_string()),
                     };
@@ -1379,12 +1516,14 @@ impl<'a> CatalystPipeline<'a> {
                     Ok(Ok(catalysts)) => EntityResult {
                         entity_name,
                         entity_type,
+                        context_hash,
                         catalysts: Some(catalysts),
                         error: None,
                     },
                     Ok(Err(e)) => EntityResult {
                         entity_name,
                         entity_type,
+                        context_hash,
                         catalysts: None,
                         error: Some(e.to_string()),
                     },
@@ -1397,6 +1536,7 @@ impl<'a> CatalystPipeline<'a> {
                         EntityResult {
                             entity_name,
                             entity_type,
+                            context_hash,
                             catalysts: None,
                             error: Some(format!("timed out after {}s", entity_timeout_secs)),
                         }
@@ -1409,7 +1549,7 @@ impl<'a> CatalystPipeline<'a> {
 
         // Phase 3: Collect results as tasks complete, while applying streamed
         // provisional catalysts on the DB writer thread.
-        let mut completed = skipped.len();
+        let mut completed = skipped.len() + stats.entities_unchanged;
         // Keyed by (name, type): entity names are not unique across types.
         let mut partial_started_entities: HashSet<(String, String)> = HashSet::new();
         let mut partial_inserted_counts: HashMap<(String, String), usize> = HashMap::new();
@@ -1518,6 +1658,15 @@ impl<'a> CatalystPipeline<'a> {
 
                         let count = catalysts.len();
                         self.db.insert_catalysts(&catalysts)?;
+                        // Written only now: the fingerprint asserts that the
+                        // catalysts in the database came from these inputs, so
+                        // it must never outrun the rows it describes.
+                        self.db.set_catalyst_entity_hash(
+                            &entity_result.entity_name,
+                            &entity_result.entity_type,
+                            &entity_result.context_hash,
+                            Utc::now().timestamp_millis(),
+                        )?;
                         stats.catalysts_generated += count;
 
                         on_event(CatalystEvent::EntityCompleted {
@@ -2087,5 +2236,182 @@ mod tests {
         // between the client and the pipeline.
         let wrapped = typed_llm_error(402, "{}").context("while generating catalysts");
         assert!(is_payment_required_error(&wrapped));
+    }
+
+    // ---------------------------------------------------------------------
+    // Incremental generation: context fingerprint + skip gate
+    // ---------------------------------------------------------------------
+
+    fn hash_with(user_prompt: &str) -> String {
+        context_hash(
+            "gpt-4o-mini",
+            false,
+            "projects",
+            "folder",
+            7,
+            "system",
+            user_prompt,
+        )
+    }
+
+    #[test]
+    fn context_hash_is_stable_across_calls() {
+        let a = hash_with("chunk one\nchunk two");
+        let b = hash_with("chunk one\nchunk two");
+        assert_eq!(a, b, "same inputs must produce the same fingerprint");
+        assert_eq!(a.len(), 64, "expected a hex sha256 digest");
+    }
+
+    #[test]
+    fn context_hash_changes_with_every_input() {
+        let base = context_hash("model-a", false, "projects", "folder", 7, "system", "ctx");
+        let variants = [
+            (
+                "context chunks",
+                context_hash("model-a", false, "projects", "folder", 7, "system", "ctx2"),
+            ),
+            (
+                "model identity",
+                context_hash("model-b", false, "projects", "folder", 7, "system", "ctx"),
+            ),
+            (
+                "hosted vs local",
+                context_hash("model-a", true, "projects", "folder", 7, "system", "ctx"),
+            ),
+            (
+                "entity name",
+                context_hash("model-a", false, "writing", "folder", 7, "system", "ctx"),
+            ),
+            (
+                "entity type",
+                context_hash("model-a", false, "projects", "tag", 7, "system", "ctx"),
+            ),
+            (
+                "catalyst count",
+                context_hash("model-a", false, "projects", "folder", 8, "system", "ctx"),
+            ),
+            (
+                "system prompt",
+                context_hash("model-a", false, "projects", "folder", 7, "system2", "ctx"),
+            ),
+        ];
+        for (label, hash) in variants {
+            assert_ne!(base, hash, "changing the {label} must change the fingerprint");
+        }
+    }
+
+    /// Field boundaries are length-prefixed, so shifting a character across a
+    /// boundary must not produce the same digest.
+    #[test]
+    fn context_hash_fields_are_unambiguous() {
+        let a = context_hash("model-a", false, "ab", "folder", 7, "system", "ctx");
+        let b = context_hash("model-a", false, "a", "bfolder", 7, "system", "ctx");
+        assert_ne!(a, b);
+    }
+
+    fn job(entity: &str, hash: &str) -> EntityJob {
+        EntityJob {
+            entity_name: entity.to_string(),
+            entity_type: "tag".to_string(),
+            user_prompt: "prompt".to_string(),
+            context_hash: hash.to_string(),
+        }
+    }
+
+    fn stored_catalyst(entity: &str) -> Catalyst {
+        Catalyst {
+            id: format!("cat-{entity}"),
+            text: format!("{entity} catalyst"),
+            entity: entity.to_string(),
+            context: "topic".to_string(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({ "entity_type": "tag" }),
+        }
+    }
+
+    #[test]
+    fn unchanged_entities_are_skipped_and_changed_ones_are_not() {
+        let db = Database::open_in_memory().unwrap();
+        let llm = crate::llm::LlmClient::with_base_url("dummy", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+
+        db.insert_catalysts(&[stored_catalyst("alpha"), stored_catalyst("beta")])
+            .unwrap();
+        db.set_catalyst_entity_hash("alpha", "tag", "hash-alpha", 1)
+            .unwrap();
+        db.set_catalyst_entity_hash("beta", "tag", "hash-beta", 1)
+            .unwrap();
+
+        // alpha unchanged, beta's context moved, gamma never generated.
+        let jobs = vec![
+            job("alpha", "hash-alpha"),
+            job("beta", "hash-beta-new"),
+            job("gamma", "hash-gamma"),
+        ];
+        let (fresh, unchanged) = pipeline.partition_unchanged(jobs, false).unwrap();
+        assert_eq!(unchanged, 1);
+        assert_eq!(
+            fresh.iter().map(|j| j.entity_name.as_str()).collect::<Vec<_>>(),
+            vec!["beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn force_regenerates_everything() {
+        let db = Database::open_in_memory().unwrap();
+        let llm = crate::llm::LlmClient::with_base_url("dummy", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+
+        db.insert_catalysts(&[stored_catalyst("alpha")]).unwrap();
+        db.set_catalyst_entity_hash("alpha", "tag", "hash-alpha", 1)
+            .unwrap();
+
+        let (fresh, unchanged) = pipeline
+            .partition_unchanged(vec![job("alpha", "hash-alpha")], true)
+            .unwrap();
+        assert_eq!(unchanged, 0);
+        assert_eq!(fresh.len(), 1);
+    }
+
+    /// A fingerprint whose catalysts are gone (pruned rows, a half-wiped
+    /// database) must not suppress regeneration — the skip asserts that stored
+    /// catalysts exist, not merely that inputs are unchanged.
+    #[test]
+    fn matching_hash_without_catalysts_is_dirty() {
+        let db = Database::open_in_memory().unwrap();
+        let llm = crate::llm::LlmClient::with_base_url("dummy", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+
+        db.set_catalyst_entity_hash("alpha", "tag", "hash-alpha", 1)
+            .unwrap();
+
+        let (fresh, unchanged) = pipeline
+            .partition_unchanged(vec![job("alpha", "hash-alpha")], false)
+            .unwrap();
+        assert_eq!(unchanged, 0);
+        assert_eq!(fresh.len(), 1);
+    }
+
+    /// Same name, different type: a `#projects` tag must not be skipped
+    /// because a `projects/` folder's fingerprint happens to match.
+    #[test]
+    fn fingerprints_are_keyed_by_entity_type() {
+        let db = Database::open_in_memory().unwrap();
+        let llm = crate::llm::LlmClient::with_base_url("dummy", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+
+        db.insert_catalysts(&[Catalyst {
+            metadata: serde_json::json!({ "entity_type": "folder" }),
+            ..stored_catalyst("projects")
+        }])
+        .unwrap();
+        db.set_catalyst_entity_hash("projects", "folder", "shared-hash", 1)
+            .unwrap();
+
+        let (fresh, unchanged) = pipeline
+            .partition_unchanged(vec![job("projects", "shared-hash")], false)
+            .unwrap();
+        assert_eq!(unchanged, 0, "the tag has no fingerprint of its own");
+        assert_eq!(fresh.len(), 1);
     }
 }

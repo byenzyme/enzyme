@@ -90,6 +90,21 @@ CREATE TABLE IF NOT EXISTS catalysts (
 CREATE INDEX IF NOT EXISTS idx_catalysts_entity  ON catalysts(entity);
 CREATE INDEX IF NOT EXISTS idx_catalysts_context ON catalysts(context);
 
+-- Per-entity catalyst context fingerprints ------------------------------------
+--
+-- One row per (entity, type) whose catalysts were generated successfully. The
+-- hash covers everything that determined the LLM output for that entity — its
+-- resolved prompts, the model, and the requested catalyst count — so a re-run
+-- can skip entities whose inputs are unchanged instead of paying for an LLM
+-- call. Rows are written only after the catalysts they describe are committed.
+CREATE TABLE IF NOT EXISTS catalyst_entity_hashes (
+    entity          TEXT    NOT NULL,
+    entity_type     TEXT    NOT NULL,
+    context_hash    TEXT    NOT NULL,
+    generated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (entity, entity_type)
+);
+
 -- Catalyst similarities (typically in the embeddings database) ----------------
 CREATE TABLE IF NOT EXISTS catalyst_similarities (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,6 +239,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "entities",
     "entity_occurrences",
     "catalysts",
+    "catalyst_entity_hashes",
     "catalyst_similarities",
     "context_cache",
     "config",

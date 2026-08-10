@@ -1361,6 +1361,83 @@ impl Database {
         Ok(())
     }
 
+    /// Per-entity catalyst context fingerprints, keyed by (entity, type).
+    ///
+    /// See `catalyst_entity_hashes` in the schema: a stored hash means the
+    /// catalysts currently in the database for that entity were generated from
+    /// exactly those inputs.
+    pub fn get_catalyst_entity_hashes(&self) -> Result<HashMap<(String, String), String>> {
+        let rows = self.query_read(
+            "SELECT entity, entity_type, context_hash FROM catalyst_entity_hashes",
+            vec![],
+            |row| {
+                Ok((
+                    (row.get::<String>(0)?, row.get::<String>(1)?),
+                    row.get::<String>(2)?,
+                ))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Record the context fingerprint for an entity's freshly stored catalysts.
+    pub fn set_catalyst_entity_hash(
+        &self,
+        entity: &str,
+        entity_type: &str,
+        context_hash: &str,
+        generated_at_ms: i64,
+    ) -> Result<()> {
+        self.execute_write(
+            "INSERT INTO catalyst_entity_hashes
+                 (entity, entity_type, context_hash, generated_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(entity, entity_type) DO UPDATE SET
+                 context_hash = excluded.context_hash,
+                 generated_at_ms = excluded.generated_at_ms",
+            vec![
+                Value::Text(entity.to_string()),
+                Value::Text(entity_type.to_string()),
+                Value::Text(context_hash.to_string()),
+                Value::Integer(generated_at_ms),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop an entity's context fingerprint (its catalysts are gone or stale).
+    pub fn delete_catalyst_entity_hash(&self, entity: &str, entity_type: &str) -> Result<()> {
+        self.execute_write(
+            "DELETE FROM catalyst_entity_hashes WHERE entity = ?1 AND entity_type = ?2",
+            vec![
+                Value::Text(entity.to_string()),
+                Value::Text(entity_type.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Catalyst counts grouped by (entity, type). Rows written before the type
+    /// was stamped into metadata report an empty type, matching
+    /// [`Self::delete_catalysts_for_entity`]'s legacy-tolerant matching.
+    pub fn get_catalyst_counts_by_entity(&self) -> Result<HashMap<(String, String), usize>> {
+        let rows = self.query_read(
+            "SELECT entity,
+                    COALESCE(json_extract(metadata, '$.entity_type'), ''),
+                    COUNT(*)
+             FROM catalysts
+             GROUP BY 1, 2",
+            vec![],
+            |row| {
+                Ok((
+                    (row.get::<String>(0)?, row.get::<String>(1)?),
+                    row.get::<i64>(2)? as usize,
+                ))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// Batch upsert catalyst similarity records.
     pub fn upsert_catalyst_similarities(&self, sims: &[CatalystSimilarity]) -> Result<()> {
         let sims = sims.to_vec();
@@ -2198,6 +2275,22 @@ impl Database {
                 ))
             },
         )?;
+        // The per-entity context fingerprints travel with the catalysts they
+        // describe: without them the next incremental run would see catalysts
+        // with no recorded provenance and regenerate the whole vault.
+        let entity_hashes = shadow.query_read(
+            "SELECT entity, entity_type, context_hash, generated_at_ms
+             FROM catalyst_entity_hashes",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<i64>(3)?,
+                ))
+            },
+        )?;
         let packed = shadow
             .query_read(
                 "SELECT count, ids, vectors FROM catalyst_embeddings_packed WHERE id=1",
@@ -2288,6 +2381,21 @@ impl Database {
             tx.execute("DELETE FROM catalyst_embeddings_packed", ())
                 .await?;
             tx.execute("DELETE FROM catalysts", ()).await?;
+            tx.execute("DELETE FROM catalyst_entity_hashes", ()).await?;
+            for (entity, entity_type, context_hash, generated_at_ms) in entity_hashes {
+                tx.execute(
+                    "INSERT INTO catalyst_entity_hashes
+                     (entity,entity_type,context_hash,generated_at_ms)
+                     VALUES (?1,?2,?3,?4)",
+                    vec![
+                        Value::Text(entity),
+                        Value::Text(entity_type),
+                        Value::Text(context_hash),
+                        Value::Integer(generated_at_ms),
+                    ],
+                )
+                .await?;
+            }
             for (id, text, entity, context, generated_at, metadata) in catalysts {
                 tx.execute(
                     "INSERT INTO catalysts (id,text,entity,context,generated_at,metadata)
