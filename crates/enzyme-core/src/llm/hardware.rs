@@ -88,8 +88,14 @@ pub fn local_concurrency() -> usize {
 /// Decode threads to give each context when `pool_size` contexts may run at
 /// once: split the physical cores between them, never below 2.
 ///
-/// Measured on a 4-core box at pool size 2 (135M Q4_K_M, 512-token outputs):
-/// splitting (2+2) beat oversubscribing (4+4) on total wall time, so we split.
+/// Splitting is not a nicety: ggml's CPU threads spin-wait, so oversubscribing
+/// them collapses throughput. Measured on a 4-core box, four concurrent
+/// generations at pool size 2 (135M Q4_K_M):
+///
+/// | threads/ctx | wall time    |
+/// |-------------|--------------|
+/// | 2 (split)   | 11.0s, 12.3s |
+/// | 4 (all)     | 218s, 262s   |
 pub fn threads_per_context(pool_size: usize) -> usize {
     (physical_cores() / pool_size.max(1)).max(2)
 }

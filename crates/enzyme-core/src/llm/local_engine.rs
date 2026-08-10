@@ -18,9 +18,10 @@
 //!
 //! One `LlamaModel` is loaded once (mmap, shared read-only) and up to
 //! [`hardware::local_concurrency`] contexts generate from it in parallel. Each
-//! context owns its own KV cache (~180 MB at 8k ctx) and gets a fresh grammar
-//! sampler per request, so concurrent calls cannot corrupt each other's
-//! automaton state.
+//! context owns its own KV cache and compute buffers — measured at ~224 MB of
+//! RSS per extra context for the 135M checkpoint at its 8k window — and gets a
+//! fresh grammar sampler per request, so concurrent calls cannot corrupt each
+//! other's automaton state.
 //!
 //! `LlamaContext` holds a raw `NonNull` and is therefore `!Send`: a context can
 //! never be moved between threads. The pool is consequently built from
