@@ -1,7 +1,7 @@
 name: Devbuild plugin binaries
 
 # Build Linux binaries on demand and stash them as artifacts so we can
-# manually push an updated plugin to jshph/enzyme without cutting a release.
+# manually push an updated plugin to useenzyme/enzyme without cutting a release.
 
 on:
   workflow_dispatch:

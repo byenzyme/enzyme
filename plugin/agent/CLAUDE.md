@@ -2,7 +2,7 @@
 
 ## Do not edit files here directly
 
-Most files in this repo are synced from [enzyme-rust](https://github.com/jshph/enzyme-rust) on every release. Edits made here will be overwritten.
+Most files in this repo are synced from [enzyme-rust](https://github.com/useenzyme/enzyme-rust) on every release. Edits made here will be overwritten.
 
 **To make changes, edit the source in enzyme-rust:**
 

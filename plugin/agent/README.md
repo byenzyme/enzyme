@@ -18,7 +18,7 @@ One `enzyme petri` call at session start gives the model your trending topics, t
 
 11 MB binary. 23 MB embedding model. Compiles 1,000+ docs in under 20s. $0 per query.
 
-This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://docs.openclaw.ai), with self-installing binary bootstrap. For the core CLI: [jshph/enzyme](https://github.com/jshph/enzyme). Docs and architecture: [enzyme.garden](https://enzyme.garden).
+This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://docs.openclaw.ai), with self-installing binary bootstrap. For the core CLI: [useenzyme/enzyme](https://github.com/useenzyme/enzyme). Docs and architecture: [enzyme.garden](https://enzyme.garden).
 
 ---
 
@@ -27,7 +27,7 @@ This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResear
 ### Install the plugin
 
 ```bash
-hermes plugins install jshph/enzyme-skill
+hermes plugins install useenzyme/enzyme-skill
 ```
 
 Verify it loaded:
@@ -135,7 +135,7 @@ enzyme init --use-env-llm
 ### Update the plugin
 
 ```bash
-cd /tmp && git clone --depth 1 https://github.com/jshph/enzyme-skill.git enzyme-update \
+cd /tmp && git clone --depth 1 https://github.com/useenzyme/enzyme-skill.git enzyme-update \
   && rm -rf ~/.hermes/plugins/enzyme \
   && mv enzyme-update ~/.hermes/plugins/enzyme \
   && rm -rf enzyme-update
@@ -144,7 +144,7 @@ cd /tmp && git clone --depth 1 https://github.com/jshph/enzyme-skill.git enzyme-
 Or if you want to track upstream for easier updates:
 
 ```bash
-git clone https://github.com/jshph/enzyme-skill.git ~/.hermes/enzyme-skill-repo
+git clone https://github.com/useenzyme/enzyme-skill.git ~/.hermes/enzyme-skill-repo
 ln -sfn ~/.hermes/enzyme-skill-repo ~/.hermes/plugins/enzyme
 ```
 
@@ -154,12 +154,12 @@ Then update with `cd ~/.hermes/enzyme-skill-repo && git pull`.
 
 ## OpenClaw skill
 
-> **Status:** The OpenClaw integration is designed and documented but hasn't been end-to-end tested yet. The SKILL.md metadata follows the OpenClaw spec, and the install block and skill instructions should work — but edge cases around `kind: "download"` install, `always: true` token cost, and skill directory structure after clone haven't been verified. If you hit issues, please [open an issue](https://github.com/jshph/enzyme/issues) or find us on [Discord](https://discord.gg/nhvsqtKjQd).
+> **Status:** The OpenClaw integration is designed and documented but hasn't been end-to-end tested yet. The SKILL.md metadata follows the OpenClaw spec, and the install block and skill instructions should work — but edge cases around `kind: "download"` install, `always: true` token cost, and skill directory structure after clone haven't been verified. If you hit issues, please [open an issue](https://github.com/useenzyme/enzyme/issues) or find us on [Discord](https://discord.gg/nhvsqtKjQd).
 
 ### Install the skill
 
 ```bash
-git clone https://github.com/jshph/enzyme-skill.git ~/.openclaw/skills/enzyme
+git clone https://github.com/useenzyme/enzyme-skill.git ~/.openclaw/skills/enzyme
 ```
 
 If the Enzyme CLI is already installed, the equivalent local activation command is:
@@ -273,7 +273,7 @@ These are untested areas we're tracking:
 Install the CLI directly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
 ```
 
 Then point your agent at `SKILL.md` for the full workflow, or install durable workspace instructions:
@@ -363,7 +363,7 @@ The live test exercises real `hermes chat` turns, plugin hooks, and enzyme tool 
 ## Links
 
 - [enzyme.garden](https://enzyme.garden) — docs
-- [jshph/enzyme](https://github.com/jshph/enzyme) — CLI releases and Claude Code plugin
+- [useenzyme/enzyme](https://github.com/useenzyme/enzyme) — CLI releases and Claude Code plugin
 - [Discord](https://discord.gg/nhvsqtKjQd)
 
 ## License

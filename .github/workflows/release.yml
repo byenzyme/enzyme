@@ -9,8 +9,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_REPO: jshph/enzyme
-  HOMEBREW_TAP_REPO: jshph/homebrew-enzyme
+  RELEASE_REPO: useenzyme/enzyme
+  HOMEBREW_TAP_REPO: useenzyme/homebrew-enzyme
 
 jobs:
   build:
@@ -90,13 +90,13 @@ jobs:
             "keywords": ["obsidian", "markdown", "vault", "semantic search", "knowledge base", "PKM", "notes"],
             "author": {
               "name": "Joshua Pham",
-              "url": "https://github.com/jshph"
+              "url": "https://github.com/useenzyme"
             },
             "homepage": "https://enzyme.garden",
             "documentation": "https://enzyme.garden/setup",
             "repository": {
               "type": "github",
-              "url": "https://github.com/jshph/enzyme"
+              "url": "https://github.com/useenzyme/enzyme"
             },
             "license": "MIT",
             "server": {
@@ -174,7 +174,7 @@ jobs:
             if [ -n "$PACKAGES" ]; then PACKAGES="${PACKAGES},"; fi
             PACKAGES="${PACKAGES}{
                 \"registryType\": \"mcpb\",
-                \"identifier\": \"https://github.com/jshph/enzyme/releases/download/v${VERSION}/$(basename "$MCPB_FILE")\",
+                \"identifier\": \"https://github.com/useenzyme/enzyme/releases/download/v${VERSION}/$(basename "$MCPB_FILE")\",
                 \"fileSha256\": \"${SHA256}\",
                 \"transport\": { \"type\": \"stdio\" },
                 \"environmentVariables\": [
@@ -198,13 +198,13 @@ jobs:
             cat > artifacts/server.json << EOF
           {
             "\$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-            "name": "io.github.jshph/enzyme",
+            "name": "io.github.useenzyme/enzyme",
             "title": "Enzyme",
             "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
             "version": "${VERSION}",
             "websiteUrl": "https://enzyme.garden",
             "repository": {
-              "url": "https://github.com/jshph/enzyme",
+              "url": "https://github.com/useenzyme/enzyme",
               "source": "github"
             },
             "packages": [
@@ -281,7 +281,7 @@ jobs:
           release_html_url: ${{ steps.release_metadata.outputs.html_url }}
           color: "8141549"
           username: "Enzyme releases"
-          footer_title: "jshph/enzyme"
+          footer_title: "useenzyme/enzyme"
           reduce_headings: true
           max_description: "3800"
 
@@ -368,7 +368,7 @@ jobs:
 
           # The public release is created before this sync so assets are available.
           # Move the public tag to the synced plugin commit so plugin installs pinned
-          # with `codex plugin marketplace add jshph/enzyme --ref "$tag"` see the
+          # with `codex plugin marketplace add useenzyme/enzyme --ref "$tag"` see the
           # same files as public main.
           git tag -f "$tag" HEAD
           git push --force origin "refs/tags/${tag}"
@@ -393,7 +393,7 @@ jobs:
           version="${tag#v}"
 
           git lfs install
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/jshph/enzyme-skill.git" skill-repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/useenzyme/enzyme-skill.git" skill-repo
           cd skill-repo
 
           mkdir -p bin tmp-bin
@@ -479,17 +479,17 @@ jobs:
           cat > Formula/enzyme-cli.rb << FORMULA
           class EnzymeCli < Formula
             desc "Local-first knowledge indexing for Obsidian vaults"
-            homepage "https://github.com/jshph/enzyme"
+            homepage "https://github.com/useenzyme/enzyme"
             version "${version}"
             license "MIT"
 
             depends_on :macos
 
             if Hardware::CPU.arm?
-              url "https://github.com/jshph/enzyme/releases/download/v#{version}/enzyme-macos-arm64.tar.gz"
+              url "https://github.com/useenzyme/enzyme/releases/download/v#{version}/enzyme-macos-arm64.tar.gz"
               sha256 "${sha256_arm64}"
             else
-              url "https://github.com/jshph/enzyme/releases/download/v#{version}/enzyme-macos-x86_64.tar.gz"
+              url "https://github.com/useenzyme/enzyme/releases/download/v#{version}/enzyme-macos-x86_64.tar.gz"
               sha256 "${sha256_x86_64}"
             end
 

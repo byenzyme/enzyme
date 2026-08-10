@@ -34,7 +34,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jshph/enzyme-rust.git",
+    "url": "https://github.com/useenzyme/enzyme-rust.git",
     "directory": "plugin/openclaw"
   },
   "homepage": "https://enzyme.garden",

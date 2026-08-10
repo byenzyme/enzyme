@@ -34,7 +34,7 @@ Benchmarks on an M5 MacBook Pro:
 
 ```bash
 # Default install
-curl -fsSL https://raw.githubusercontent.com/jshph/enzyme/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
 
 # Development install from this repo
 make install

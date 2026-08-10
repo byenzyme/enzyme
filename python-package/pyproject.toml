@@ -19,7 +19,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://enzyme.garden"
-Repository = "https://github.com/jshph/enzyme"
+Repository = "https://github.com/useenzyme/enzyme"
 
 [project.scripts]
 enzyme = "enzyme_python_package:main"

@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.7.2"
 edition = "2024"
 license = "BUSL-1.1"
-repository = "https://github.com/jshph/enzyme-rust"
+repository = "https://github.com/useenzyme/enzyme-rust"
 
 [workspace.dependencies]
 # Serialization

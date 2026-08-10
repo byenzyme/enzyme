@@ -9,7 +9,7 @@ on:
         default: v0.5.11
 
 env:
-  RELEASE_REPO: jshph/enzyme
+  RELEASE_REPO: useenzyme/enzyme
   DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
 
 jobs:
@@ -56,7 +56,7 @@ jobs:
           release_html_url: ${{ steps.release_metadata.outputs.html_url }}
           color: "8141549"
           username: "Enzyme releases"
-          footer_title: "jshph/enzyme"
+          footer_title: "useenzyme/enzyme"
           reduce_headings: true
           max_description: "3800"
 
