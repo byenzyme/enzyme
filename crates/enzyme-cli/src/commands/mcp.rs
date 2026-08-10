@@ -156,6 +156,7 @@ impl EnzymeMcp {
                 None,
                 false,
                 false,
+                false,
             ))
         })
         .await

@@ -62,6 +62,7 @@ pub async fn run_dump_prompts(
         max_samples: 20,
         concurrency: None,
         stream_partial_catalysts: false,
+        force_regenerate: false,
     };
 
     let llm = LlmClient::with_base_url("dummy", "http://localhost:0");

@@ -93,6 +93,8 @@ pub enum DisplayEvent {
     },
     DiscoveryComplete {
         entities_processed: usize,
+        /// Entities skipped because their catalyst context was unchanged.
+        entities_unchanged: usize,
         catalysts_generated: usize,
         errors_count: usize,
         rate_limited: usize,
@@ -277,6 +279,17 @@ const ROLLING_WINDOW_SIZE: usize = 10;
 const FRAME_INTERVAL: Duration = Duration::from_millis(100); // ~10fps
 
 #[allow(unused_assignments)]
+/// Report entities the incremental gate skipped, so a fast run reads as
+/// "nothing changed" rather than "nothing happened". Silent when everything
+/// was regenerated.
+fn format_unchanged_suffix(entities_unchanged: usize) -> String {
+    if entities_unchanged == 0 {
+        String::new()
+    } else {
+        format!(", {} unchanged", entities_unchanged)
+    }
+}
+
 fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut out = stdout();
     let mut spinner = HelixSpinner::new();
@@ -423,6 +436,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             }
             DisplayEvent::DiscoveryComplete {
                 entities_processed: _,
+                entities_unchanged,
                 catalysts_generated: count,
                 errors_count,
                 rate_limited,
@@ -440,10 +454,11 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 };
                 let _ = writeln!(
                     out,
-                    "  {}Catalysts:{} {} generated{}",
+                    "  {}Catalysts:{} {} generated{}{}",
                     crossterm::style::SetForegroundColor(colors::CATALYZING_ORANGE),
                     crossterm::style::ResetColor,
                     count,
+                    format_unchanged_suffix(entities_unchanged),
                     err_suffix,
                 );
                 // Mark catalysts as printed so EmbeddingComplete doesn't re-print
@@ -841,6 +856,7 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 }
                 DisplayEvent::DiscoveryComplete {
                     entities_processed: _,
+                    entities_unchanged,
                     catalysts_generated,
                     errors_count,
                     rate_limited,
@@ -853,8 +869,10 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                         String::new()
                     };
                     println!(
-                        "  Catalysts: {} generated{}",
-                        catalysts_generated, err_suffix,
+                        "  Catalysts: {} generated{}{}",
+                        catalysts_generated,
+                        format_unchanged_suffix(entities_unchanged),
+                        err_suffix,
                     );
                 }
                 DisplayEvent::EmbeddingStart => {
@@ -1011,11 +1029,12 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     }
                     DisplayEvent::DiscoveryComplete {
                         entities_processed,
+                        entities_unchanged,
                         catalysts_generated,
                         errors_count,
                         rate_limited,
                     } => {
-                        json!({"stage": "catalysts", "status": "complete", "entities": entities_processed, "catalysts": catalysts_generated, "errors": errors_count, "rate_limited": rate_limited})
+                        json!({"stage": "catalysts", "status": "complete", "entities": entities_processed, "unchanged": entities_unchanged, "catalysts": catalysts_generated, "errors": errors_count, "rate_limited": rate_limited})
                     }
                     DisplayEvent::EmbeddingStart => {
                         json!({"stage": "embedding", "status": "start"})

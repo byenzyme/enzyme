@@ -33,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Reset and rebuild the vault index
+    /// Build or update the vault index and catalysts
     Init {
         /// Internal background worker mode
         #[arg(long, hide = true)]
@@ -79,6 +79,10 @@ enum Commands {
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
         stage: Option<String>,
+
+        /// Discard the existing index and regenerate every entity's catalysts
+        #[arg(long, visible_alias = "regenerate")]
+        force: bool,
     },
 
     /// Incrementally refresh the vault index
@@ -372,6 +376,7 @@ async fn main() -> Result<()> {
             stream_partial_catalysts,
             use_env_llm,
             stage,
+            force,
         } => {
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
@@ -400,6 +405,7 @@ async fn main() -> Result<()> {
                     min_top_catalysts,
                     stream_partial_catalysts,
                     use_env_llm,
+                    force,
                 )
                 .await?;
 

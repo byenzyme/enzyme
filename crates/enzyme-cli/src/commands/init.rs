@@ -152,12 +152,48 @@ struct CatalystQualityGate {
     message: Option<String>,
 }
 
+/// Drop catalysts (and their context fingerprints) for entities that are no
+/// longer selected. Entity names are not unique across types, so keys are
+/// (name, type) — matching how catalysts are stored and deleted.
+fn prune_deselected_catalysts(
+    db: &Database,
+    selected: &[enzyme_core::models::Entity],
+) -> Result<usize> {
+    let selected_keys: std::collections::HashSet<(String, String)> = selected
+        .iter()
+        .map(|e| (e.name.clone(), e.entity_type.as_str().to_string()))
+        .collect();
+    let mut pruned = 0usize;
+    for (entity, entity_type) in db.get_catalyst_counts_by_entity()?.into_keys() {
+        // Legacy untyped rows report an empty type; keep them if any selected
+        // entity claims the name, since a typed delete would take them too.
+        let still_selected = if entity_type.is_empty() {
+            selected_keys.iter().any(|(name, _)| *name == entity)
+        } else {
+            selected_keys.contains(&(entity.clone(), entity_type.clone()))
+        };
+        if still_selected {
+            continue;
+        }
+        db.delete_catalysts_for_entity(&entity, &entity_type)?;
+        db.delete_catalyst_entity_hash(&entity, &entity_type)?;
+        pruned += 1;
+    }
+    if pruned > 0 {
+        debug!(entities = pruned, "pruned catalysts for deselected entities");
+    }
+    Ok(pruned)
+}
+
+/// Judge a catalyst run. `unchanged` entities were deliberately skipped as
+/// already-fresh, so they count as covered: a run where nothing changed is a
+/// success that generated zero catalysts, not a failure.
 fn evaluate_catalyst_quality(stats: &CatalystStats, total_entities: usize) -> CatalystQualityGate {
     let failed = stats.errors.len();
-    let succeeded = stats.entities_processed;
+    let succeeded = stats.entities_processed + stats.entities_unchanged;
     let attempted = succeeded + failed;
 
-    if stats.catalysts_generated == 0 {
+    if stats.catalysts_generated == 0 && stats.entities_unchanged == 0 {
         return CatalystQualityGate {
             quality: CatalystQuality::Failed,
             message: Some(format!(
@@ -464,6 +500,7 @@ pub async fn run_init(
     min_top_catalysts: Option<usize>,
     stream_partial_catalysts: bool,
     use_env_llm: bool,
+    force: bool,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
@@ -487,7 +524,11 @@ pub async fn run_init(
         None
     };
 
-    if !should_preserve_db_only_corpus(&paths, vault_path)? {
+    // A plain re-init reuses the existing database: indexing, embedding, and
+    // catalyst generation are all incremental against it, which is what makes
+    // a routine re-run finish in seconds instead of re-asking the model about
+    // every entity. `--force` restores the clean-slate rebuild.
+    if force && !should_preserve_db_only_corpus(&paths, vault_path)? {
         reset_vault_database(&paths)?;
     }
 
@@ -729,7 +770,15 @@ pub async fn run_init(
                 .ok()
                 .and_then(|v| v.parse().ok()),
             stream_partial_catalysts,
+            force_regenerate: force,
         };
+
+        // The database now survives a re-init, so entities that dropped out of
+        // the selection would otherwise keep their catalysts forever. A full
+        // rebuild used to drop them with the database; do it explicitly.
+        if let Err(e) = prune_deselected_catalysts(&db, &sel_result.entities) {
+            tracing::warn!("failed to prune catalysts for deselected entities: {e:#}");
+        }
 
         let stats = cat_pipeline
             .run(
@@ -802,6 +851,7 @@ pub async fn run_init(
 
         tx.send(DisplayEvent::DiscoveryComplete {
             entities_processed: stats.entities_processed,
+            entities_unchanged: stats.entities_unchanged,
             catalysts_generated: stats.catalysts_generated,
             errors_count: stats.errors.len(),
             rate_limited: stats.rate_limited,
@@ -1580,6 +1630,9 @@ async fn build_and_activate_epoch(
             .ok()
             .and_then(|v| v.parse().ok()),
         stream_partial_catalysts: false,
+        // The shadow epoch starts from a snapshot with its catalyst view
+        // wiped, so every selected entity is dirty by construction.
+        force_regenerate: false,
     };
 
     let stats = cat_pipeline
@@ -2081,6 +2134,7 @@ async fn run_refresh_interactive(
             min_top_catalysts,
             false,
             use_env_llm,
+            false,
         )
         .await?;
         return Ok(());
@@ -2175,6 +2229,7 @@ mod tests {
     fn catalyst_stats(succeeded: usize, generated: usize, failed: usize) -> CatalystStats {
         CatalystStats {
             entities_processed: succeeded,
+            entities_unchanged: 0,
             catalysts_generated: generated,
             errors: (0..failed)
                 .map(|i| (format!("entity-{i}"), "failed".to_string()))
@@ -2200,6 +2255,18 @@ mod tests {
     fn catalyst_quality_fails_majority_entity_failure() {
         let gate = evaluate_catalyst_quality(&catalyst_stats(1, 7, 3), 4);
         assert_eq!(gate.quality, CatalystQuality::Failed);
+    }
+
+    /// A run where every entity was already fresh generates nothing and must
+    /// still pass: the catalysts it would have produced are already stored.
+    #[test]
+    fn catalyst_quality_passes_when_everything_is_unchanged() {
+        let stats = CatalystStats {
+            entities_unchanged: 4,
+            ..catalyst_stats(0, 0, 0)
+        };
+        let gate = evaluate_catalyst_quality(&stats, 4);
+        assert_eq!(gate.quality, CatalystQuality::Passed);
     }
 
     #[test]
