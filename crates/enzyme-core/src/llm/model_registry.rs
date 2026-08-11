@@ -46,7 +46,7 @@ pub const REGISTRY: &[ModelEntry] = &[ModelEntry {
     // -0.003 on the 60-example GGUF gate) at Q4_0-class speed (+48% prefill
     // via AVX-VNNI/ARM repack paths, which K-quants miss on this model's
     // 576-dim tensors) and 19% smaller. See score-report-iq4nl.json.
-    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-smollm135-v3-dpo-8ep-iq4_nl-imat.gguf",
+    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-135m-v3.gguf",
     sha256: "710a79eea9a84b22cc18b8626b9d893e1a5a2de61f8852fcef839099e8138eab",
     size: 91_727_072,
     context_window: 8192,
