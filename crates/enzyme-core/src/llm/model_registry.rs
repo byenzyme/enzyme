@@ -42,11 +42,15 @@ pub const DEFAULT_MODEL: &str = "catalyst-135m-v3";
 /// required.
 pub const REGISTRY: &[ModelEntry] = &[ModelEntry {
     name: DEFAULT_MODEL,
-    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-smollm135-v3-dpo-8ep-q4_k_m.gguf",
-    sha256: "c1853769c45470e74992826c78ab4de7d8ca3876da3eb15ee232d761932ba62d",
-    size: 105_454_080,
+    // IQ4_NL + in-domain imatrix: matches Q4_K_M quality (paired lexical
+    // -0.003 on the 60-example GGUF gate) at Q4_0-class speed (+48% prefill
+    // via AVX-VNNI/ARM repack paths, which K-quants miss on this model's
+    // 576-dim tensors) and 19% smaller. See score-report-iq4nl.json.
+    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-smollm135-v3-dpo-8ep-iq4_nl-imat.gguf",
+    sha256: "710a79eea9a84b22cc18b8626b9d893e1a5a2de61f8852fcef839099e8138eab",
+    size: 91_727_072,
     context_window: 8192,
-    description: "SmolLM2-135M catalyst fine-tune (v3 DPO, Q4_K_M)",
+    description: "SmolLM2-135M catalyst fine-tune (v3 DPO, IQ4_NL imatrix)",
 }];
 
 /// Look up a registry entry by name.
