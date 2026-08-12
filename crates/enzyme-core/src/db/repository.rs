@@ -1550,29 +1550,50 @@ impl Database {
                 .await
                 .context("failed to begin transaction for upsert_catalyst_similarities")?;
 
-            for sim in &sims {
-                let chunk_meta =
-                    serde_json::to_string(&sim.chunk_metadata).unwrap_or_else(|_| "{}".to_string());
-                let timeline =
-                    serde_json::to_string(&sim.timeline_data).unwrap_or_else(|_| "{}".to_string());
-                let created_at = sim.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
-                tx.execute(
+            // Stay below SQLite's traditional 999-variable limit while
+            // reducing one execute per row to one execute per 100 rows.
+            const ROWS_PER_INSERT: usize = 100;
+            for batch in sims.chunks(ROWS_PER_INSERT) {
+                let mut sql = String::from(
                     "INSERT OR REPLACE INTO catalyst_similarities
                         (catalyst_id, catalyst_text, file_path, chunk_index,
-                         similarity, chunk_metadata, timeline_data, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    vec![
+                         similarity, chunk_metadata, timeline_data, created_at) VALUES ",
+                );
+                let mut params = Vec::with_capacity(batch.len() * 8);
+                for (row, sim) in batch.iter().enumerate() {
+                    if row > 0 {
+                        sql.push(',');
+                    }
+                    let first = row * 8 + 1;
+                    sql.push_str(&format!(
+                        "(?{},?{},?{},?{},?{},?{},?{},?{})",
+                        first,
+                        first + 1,
+                        first + 2,
+                        first + 3,
+                        first + 4,
+                        first + 5,
+                        first + 6,
+                        first + 7
+                    ));
+                    params.extend([
                         Value::Text(sim.catalyst_id.clone()),
                         Value::Text(sim.catalyst_text.clone()),
                         Value::Text(sim.file_path.clone()),
-                        Value::Integer(sim.chunk_index as i64),
+                        Value::Integer(sim.chunk_index),
                         Value::Real(sim.similarity),
-                        Value::Text(chunk_meta),
-                        Value::Text(timeline),
-                        Value::Text(created_at),
-                    ],
-                )
-                .await?;
+                        Value::Text(
+                            serde_json::to_string(&sim.chunk_metadata)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Value::Text(
+                            serde_json::to_string(&sim.timeline_data)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        Value::Text(sim.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    ]);
+                }
+                tx.execute(&sql, params).await?;
             }
 
             tx.commit()
@@ -2440,7 +2461,11 @@ impl Database {
                 let path = row.get::<String>(0)?;
                 let index = row.get::<i64>(1)?;
                 let blob = row.get::<Vec<u8>>(2)?;
-                live_chunks.push((path, index, quantize::decode_vector(&blob, EMBEDDING_DIMENSION)));
+                live_chunks.push((
+                    path,
+                    index,
+                    quantize::decode_vector(&blob, EMBEDDING_DIMENSION),
+                ));
             }
             drop(chunk_rows);
             let mut live_similarities = Vec::new();

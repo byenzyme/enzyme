@@ -102,14 +102,25 @@ If no hosted or env key is available, catalyst generation is skipped and the res
 Builds that ship with the `local-llm` feature can generate catalysts entirely on-device — no API key, no network:
 
 ```bash
-enzyme model install     # ~101 MB fine-tuned SmolLM2 GGUF into ~/.enzyme/models
-enzyme model list        # installed + available, * marks the active model
+enzyme model install     # ~88 MB fine-tuned SmolLM2 GGUF into ~/.enzyme/models
+enzyme model use catalyst-135m-v3 # require this installed model
+enzyme model status      # configured mode, effective provider, model, network use
 enzyme init              # catalysts generated in-process
 ```
 
-Once a model is installed it is preferred over hosted credits automatically. Precedence is: an explicit `OPENAI_BASE_URL` / `OPENROUTER_BASE_URL` override → the local model → hosted. Set `ENZYME_LOCAL_ENGINE=0` to ignore an installed model, or `enzyme model rm <name>` to remove it. Concurrency, threads, and the prompt context budget adapt to the machine; `ENZYME_LLM_CONCURRENCY` and `ENZYME_MAX_CONTEXT_CHARS` still override them.
+Catalyst mode is machine-wide and stored in `~/.enzyme/config.toml`:
 
-While the fine-tuned weights are hosted on a private release, `enzyme model install` needs `GITHUB_TOKEN` (or `GH_TOKEN`) set; public models will not.
+```bash
+enzyme model auto        # default: selected local model when installed, otherwise hosted
+enzyme model use <name>  # require local generation; fail clearly if weights are missing
+enzyme model disable     # use hosted generation without removing local weights
+enzyme model verify      # verify the selected file and registry checksum
+```
+
+`--use-env-llm` remains an explicit one-run override for OpenAI/OpenRouter-compatible credentials; inherited provider variables do not silently change `auto`, `local`, or `hosted` mode. `ENZYME_LOCAL_ENGINE=0` remains a legacy process-level opt-out. Concurrency, threads, and the prompt context budget adapt to the machine; `ENZYME_LLM_CONCURRENCY` and `ENZYME_MAX_CONTEXT_CHARS` still override them.
+
+The default fine-tuned weights are hosted on Enzyme's public GitHub release, so
+`enzyme model install` requires no account or API token.
 
 ## App Plugins
 

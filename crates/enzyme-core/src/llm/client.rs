@@ -8,6 +8,8 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
+
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -45,17 +47,32 @@ const LOCAL_BASE_URL_SCHEME: &str = "local://";
 /// Resolve a config that points the pipeline at the in-process engine, if one
 /// is available. Always `None` without the `local-llm` feature.
 ///
-/// Selection precedence (see the CLI docs): an explicit `OPENAI_BASE_URL` /
-/// `OPENROUTER_BASE_URL` override wins, then the local engine, then hosted.
-/// `ENZYME_LOCAL_ENGINE=0` opts out entirely.
-fn local_model_config() -> Option<ResolvedConfig> {
-    if env_value("OPENAI_BASE_URL").is_some() || env_value("OPENROUTER_BASE_URL").is_some() {
-        return None;
+/// Selection is controlled by the persisted catalyst mode. Auto prefers an
+/// installed local model and otherwise uses hosted; local requires one;
+/// hosted bypasses it. `ENZYME_LOCAL_ENGINE=0` is a legacy process opt-out.
+fn configured_catalyst_mode() -> Result<CatalystMode> {
+    Ok(EnzymeConfig::catalyst_llm_config()?.mode)
+}
+
+fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
+    if env_value("ENZYME_LOCAL_ENGINE").is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+    {
+        if required {
+            bail!(
+                "local catalyst mode is enabled but ENZYME_LOCAL_ENGINE disables it; unset the variable or run `enzyme model disable`"
+            );
+        }
+        return Ok(None);
     }
-    if env_value("ENZYME_LOCAL_ENGINE").is_some_and(|v| v == "0" || v == "false") {
-        return None;
+    match local_model_config_inner() {
+        Some(config) => Ok(Some(config)),
+        None if required => bail!(
+            "local catalyst mode requires model '{}', but it is not installed; run `enzyme model install {}`",
+            super::model_registry::selected_name(),
+            super::model_registry::selected_name()
+        ),
+        None => Ok(None),
     }
-    local_model_config_inner()
 }
 
 #[cfg(not(feature = "local-llm"))]
@@ -70,42 +87,38 @@ fn local_model_config_inner() -> Option<ResolvedConfig> {
         api_key: String::new(),
         base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
         model: name,
-        provider: ConfigProvider::Env,
+        provider: ConfigProvider::Local,
     })
 }
 
 #[cfg(not(feature = "local-llm"))]
-fn local_backend(_base_url: &str) -> Backend {
-    Backend::Http
+fn local_backend(base_url: &str) -> Result<Backend> {
+    if base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
+        bail!("this Enzyme binary was built without local-model support");
+    }
+    Ok(Backend::Http)
 }
 
 /// Load (once per process) and bind the in-process engine for a `local://` URL.
 #[cfg(feature = "local-llm")]
-fn local_backend(base_url: &str) -> Backend {
+fn local_backend(base_url: &str) -> Result<Backend> {
     use std::sync::Arc;
-    static ENGINE: OnceLock<Option<Arc<super::local_engine::LocalEngine>>> = OnceLock::new();
 
     let Some(name) = base_url.strip_prefix(LOCAL_BASE_URL_SCHEME) else {
-        return Backend::Http;
+        return Ok(Backend::Http);
     };
-    let engine = ENGINE.get_or_init(|| {
-        let path = super::model_registry::model_path(name).ok()?;
-        match super::local_engine::LocalEngine::load(
-            &path,
-            name,
-            super::model_registry::context_window(name),
-        ) {
-            Ok(engine) => Some(Arc::new(engine)),
-            Err(e) => {
-                warn!("failed to load local model {name}: {e:#}; falling back to HTTP");
-                None
-            }
-        }
-    });
-    match engine {
-        Some(engine) => Backend::Local(Arc::clone(engine)),
-        None => Backend::Http,
-    }
+    let path = super::model_registry::model_path(name)?;
+    let engine = super::local_engine::LocalEngine::load(
+        &path,
+        name,
+        super::model_registry::context_window(name),
+    )
+    .with_context(|| {
+        format!(
+            "failed to load local model '{name}'; run `enzyme model verify {name}` or select another provider with `enzyme model disable`"
+        )
+    })?;
+    Ok(Backend::Local(Arc::new(engine)))
 }
 
 /// Translate an OpenAI `response_format` into a GBNF grammar for local
@@ -156,6 +169,7 @@ pub struct EnzymeCreditsExhausted {
 #[derive(Debug, Clone)]
 pub enum ConfigProvider {
     Env,
+    Local,
     ServerFallback,
 }
 
@@ -171,7 +185,11 @@ pub struct ResolvedConfig {
 /// Which LLM credentials the caller explicitly wants to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmCredentialMode {
-    /// Use Enzyme hosted bootstrap/auth and ignore inherited env LLM keys.
+    /// Apply the persisted auto/local/hosted preference.
+    Auto,
+    /// Require the selected installed local model.
+    Local,
+    /// Use Enzyme hosted bootstrap/auth, bypassing installed local models.
     Hosted,
     /// Use OPENAI_*/OPENROUTER_* env configuration only.
     Env,
@@ -780,14 +798,14 @@ impl LlmClient {
     /// A `local://<model>` base URL binds the in-process engine instead of the
     /// HTTP client; only [`resolve_api_config`] mints such a config, and only
     /// when the binary was built with `local-llm`.
-    pub fn from_config(config: &ResolvedConfig) -> Self {
-        Self {
+    pub fn from_config(config: &ResolvedConfig) -> Result<Self> {
+        Ok(Self {
             client: reqwest::Client::new(),
             api_key: Arc::new(RwLock::new(config.api_key.clone())),
             base_url: config.base_url.clone(),
             free_tier: config.is_free_tier(),
-            backend: local_backend(&config.base_url),
-        }
+            backend: local_backend(&config.base_url)?,
+        })
     }
 
     /// Whether this client targets OpenRouter (enables prompt caching via cache_control).
@@ -1424,7 +1442,15 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
 /// 3. the on-disk API cache (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`)
 /// 4. Enzyme server free-config endpoint (hosted credits)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    if let Some(config) = local_model_config() {
+    let mode = match configured_catalyst_mode()? {
+        CatalystMode::Auto => LlmCredentialMode::Auto,
+        CatalystMode::Local => LlmCredentialMode::Local,
+        CatalystMode::Hosted => LlmCredentialMode::Hosted,
+    };
+    if !matches!(mode, LlmCredentialMode::Auto) {
+        return resolve_api_config_for_mode(mode).await;
+    }
+    if let Some(config) = local_model_config(false)? {
         return Ok(config);
     }
     if let Some(config) = resolved_env_config(env_value)? {
@@ -1436,12 +1462,20 @@ pub async fn resolve_api_config() -> Result<ResolvedConfig> {
 /// Resolve API configuration in an explicit credential mode.
 pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<ResolvedConfig> {
     match mode {
-        LlmCredentialMode::Hosted => match local_model_config() {
-            // An installed local model means the machine can generate offline;
-            // prefer it over spending hosted credits.
-            Some(config) => Ok(config),
-            None => resolve_hosted_api_config().await,
+        LlmCredentialMode::Auto => match configured_catalyst_mode()? {
+            CatalystMode::Auto => match local_model_config(false)? {
+                // An installed local model means the machine can generate offline;
+                // prefer it over spending hosted credits.
+                Some(config) => Ok(config),
+                None => resolve_hosted_api_config().await,
+            },
+            CatalystMode::Local => local_model_config(true)?
+                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable")),
+            CatalystMode::Hosted => resolve_hosted_api_config().await,
         },
+        LlmCredentialMode::Local => local_model_config(true)?
+            .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable")),
+        LlmCredentialMode::Hosted => resolve_hosted_api_config().await,
         LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "No env LLM config found. Set OPENAI_API_KEY or OPENROUTER_API_KEY, \
@@ -1455,8 +1489,33 @@ pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<Reso
 /// provider metadata such as free-tier refresh behavior.
 pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
     let config = resolve_api_config().await?;
-    let client = LlmClient::from_config(&config);
+    let client = LlmClient::from_config(&config)?;
     Ok((config, client))
+}
+
+/// Synchronously load and construct the preferred in-process local client.
+///
+/// This is intentionally separate from async provider resolution so callers
+/// can run expensive llama.cpp/Metal startup on a blocking worker while doing
+/// unrelated work. It returns `None` when local inference is unavailable,
+/// explicitly overridden, or disabled; it never consults hosted credentials.
+pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, LlmClient)>> {
+    let mode = configured_catalyst_mode()?;
+    if matches!(mode, CatalystMode::Hosted) {
+        return Ok(None);
+    }
+    let config = match local_model_config(matches!(mode, CatalystMode::Local))? {
+        Some(config) => config,
+        None => return Ok(None),
+    };
+    let started = std::time::Instant::now();
+    let client = LlmClient::from_config(&config)?;
+    info!(
+        model = config.model,
+        duration_ms = started.elapsed().as_millis(),
+        "local LLM preload complete"
+    );
+    Ok(Some((config, client)))
 }
 
 /// Resolve API configuration in an explicit credential mode and construct an
@@ -1465,7 +1524,7 @@ pub async fn resolve_llm_client_for_mode(
     mode: LlmCredentialMode,
 ) -> Result<(ResolvedConfig, LlmClient)> {
     let config = resolve_api_config_for_mode(mode).await?;
-    let client = LlmClient::from_config(&config);
+    let client = LlmClient::from_config(&config)?;
     Ok((config, client))
 }
 

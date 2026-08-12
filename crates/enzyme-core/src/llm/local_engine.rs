@@ -46,7 +46,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::client::{Message, MessageContent};
 use super::hardware;
@@ -82,11 +82,12 @@ pub struct LocalEngine {
     shared: Arc<Shared>,
     /// Maximum number of concurrent contexts.
     cap: usize,
-    jobs: Sender<Job>,
+    jobs: Option<Sender<Job>>,
     /// Shared work queue. A worker holds this lock only while parked in
     /// `recv()`; the next worker takes it as soon as a job is handed off.
     queue: Arc<Mutex<Receiver<Job>>>,
     state: Arc<Mutex<PoolState>>,
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl LocalEngine {
@@ -101,14 +102,24 @@ impl LocalEngine {
             llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
         });
 
+        let total_started = Instant::now();
+        let backend_started = Instant::now();
         let backend = LlamaBackend::init().context("failed to initialize llama.cpp backend")?;
-        let started = Instant::now();
+        let backend_ms = backend_started.elapsed().as_millis();
+        let model_started = Instant::now();
         let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
             .with_context(|| format!("failed to load model {}", path.display()))?;
+        let model_ms = model_started.elapsed().as_millis();
         let size_mb =
             std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
         eprintln!("local model {name} ({size_mb:.0} MB)");
-        debug!(?path, elapsed = ?started.elapsed(), "loaded local model");
+        info!(
+            ?path,
+            backend_ms,
+            model_ms,
+            total_ms = total_started.elapsed().as_millis(),
+            "local model ready"
+        );
 
         let cap = hardware::local_concurrency().max(1);
         // Thread budget is fixed at load time from the pool cap so that a full
@@ -125,9 +136,10 @@ impl LocalEngine {
                 threads,
             }),
             cap,
-            jobs,
+            jobs: Some(jobs),
             queue: Arc::new(Mutex::new(queue)),
             state: Arc::new(Mutex::new(PoolState::default())),
+            workers: Mutex::new(Vec::new()),
         })
     }
 
@@ -188,19 +200,28 @@ impl LocalEngine {
                 let spawned = std::thread::Builder::new()
                     .name(format!("enzyme-llm-{}", state.spawned))
                     .spawn(move || worker(&shared, &queue, &pool_state));
-                if let Err(e) = spawned {
-                    state.spawned -= 1;
-                    // Only fatal if this would have been the first worker;
-                    // otherwise an already-running one picks the job up.
-                    if state.spawned == 0 {
-                        state.outstanding -= 1;
-                        return Err(e).context("failed to spawn local generation worker");
+                match spawned {
+                    Ok(handle) => self
+                        .workers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(handle),
+                    Err(e) => {
+                        state.spawned -= 1;
+                        // Only fatal if this would have been the first worker;
+                        // otherwise an already-running one picks the job up.
+                        if state.spawned == 0 {
+                            state.outstanding -= 1;
+                            return Err(e).context("failed to spawn local generation worker");
+                        }
                     }
                 }
             }
         }
 
         self.jobs
+            .as_ref()
+            .ok_or_else(|| anyhow!("local generation pool is shutting down"))?
             .send(job)
             .map_err(|_| anyhow!("local generation pool is gone"))?;
         answer
@@ -238,6 +259,22 @@ impl LocalEngine {
         }
         prompt.push_str("<|im_start|>assistant\n");
         Ok(prompt)
+    }
+}
+
+impl Drop for LocalEngine {
+    fn drop(&mut self) {
+        // Closing the sole sender wakes every parked worker. Join them before
+        // Shared drops so all LlamaContexts release their Metal resource sets
+        // ahead of the model/backend and llama.cpp's global teardown.
+        self.jobs.take();
+        let workers = self
+            .workers
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        for worker in workers.drain(..) {
+            let _ = worker.join();
+        }
     }
 }
 

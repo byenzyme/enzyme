@@ -258,6 +258,27 @@ enum ModelCommands {
     /// List installed and available models
     List,
 
+    /// Select an installed model and require local catalyst generation
+    Use {
+        /// Installed model name
+        name: String,
+    },
+
+    /// Return to automatic selection (local when installed, otherwise hosted)
+    Auto,
+
+    /// Disable local catalyst generation and use Enzyme hosted
+    Disable,
+
+    /// Show the configured and effective catalyst-generation mode
+    Status,
+
+    /// Verify an installed model's file and registry checksum
+    Verify {
+        /// Model name (defaults to the selected model)
+        name: Option<String>,
+    },
+
     /// Remove an installed model
     Rm {
         /// Installed model name
@@ -339,6 +360,11 @@ async fn main() -> Result<()> {
                     commands::model::run_install(name.clone(), url.clone(), sha256.clone()).await
                 }
                 ModelCommands::List => commands::model::run_list(),
+                ModelCommands::Use { name } => commands::model::run_use(name),
+                ModelCommands::Auto => commands::model::run_auto(),
+                ModelCommands::Disable => commands::model::run_disable(),
+                ModelCommands::Status => commands::model::run_status(),
+                ModelCommands::Verify { name } => commands::model::run_verify(name.as_deref()),
                 ModelCommands::Rm { name } => commands::model::run_rm(name),
             };
         }

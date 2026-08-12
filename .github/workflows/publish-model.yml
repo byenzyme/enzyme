@@ -1,0 +1,99 @@
+name: Publish local model
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: Tracked model release manifest
+        required: true
+        default: models/catalyst-135m-v3.release.json
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_REPO: useenzyme/enzyme
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest path and load metadata
+        id: model
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          case "$MANIFEST" in
+            models/*.release.json) ;;
+            *) echo "manifest must be a tracked models/*.release.json file" >&2; exit 1 ;;
+          esac
+          test -f "$MANIFEST"
+          jq -e '
+            .name and .source_tag and .source_asset and .public_tag and
+            (.sha256 | test("^[0-9a-f]{64}$")) and
+            (.size | type == "number") and .model_card
+          ' "$MANIFEST" >/dev/null
+          card=$(jq -r .model_card "$MANIFEST")
+          case "$card" in models/*.md) ;; *) exit 1 ;; esac
+          test -f "$card"
+          for key in name source_tag source_asset public_tag sha256 size model_card; do
+            echo "$key=$(jq -r ".$key" "$MANIFEST")" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Download cleared asset from private source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ steps.model.outputs.source_tag }}
+          SOURCE_ASSET: ${{ steps.model.outputs.source_asset }}
+        run: |
+          mkdir -p model-staging
+          gh release download "$SOURCE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$SOURCE_ASSET" \
+            --dir model-staging
+
+      - name: Verify model artifact
+        env:
+          SOURCE_ASSET: ${{ steps.model.outputs.source_asset }}
+          EXPECTED_SHA256: ${{ steps.model.outputs.sha256 }}
+          EXPECTED_SIZE: ${{ steps.model.outputs.size }}
+        run: |
+          file="model-staging/$SOURCE_ASSET"
+          test "$(stat -c %s "$file")" = "$EXPECTED_SIZE"
+          echo "$EXPECTED_SHA256  $file" | sha256sum --check --strict
+          test "$(head -c 4 "$file")" = "GGUF"
+
+      - name: Create or update public model release
+        env:
+          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
+          PUBLIC_TAG: ${{ steps.model.outputs.public_tag }}
+          SOURCE_ASSET: ${{ steps.model.outputs.source_asset }}
+          MODEL_CARD: ${{ steps.model.outputs.model_card }}
+          MODEL_NAME: ${{ steps.model.outputs.name }}
+        run: |
+          if gh release view "$PUBLIC_TAG" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+            gh release upload "$PUBLIC_TAG" "model-staging/$SOURCE_ASSET" \
+              --repo "$RELEASE_REPO" --clobber
+            gh release edit "$PUBLIC_TAG" --repo "$RELEASE_REPO" \
+              --title "Enzyme local model: $MODEL_NAME" \
+              --notes-file "$MODEL_CARD"
+          else
+            gh release create "$PUBLIC_TAG" "model-staging/$SOURCE_ASSET" \
+              --repo "$RELEASE_REPO" \
+              --title "Enzyme local model: $MODEL_NAME" \
+              --notes-file "$MODEL_CARD"
+          fi
+
+      - name: Validate anonymous public download
+        env:
+          PUBLIC_TAG: ${{ steps.model.outputs.public_tag }}
+          SOURCE_ASSET: ${{ steps.model.outputs.source_asset }}
+          EXPECTED_SHA256: ${{ steps.model.outputs.sha256 }}
+        run: |
+          url="https://github.com/$RELEASE_REPO/releases/download/$PUBLIC_TAG/$SOURCE_ASSET"
+          curl --fail --location --retry 3 --output public.gguf "$url"
+          echo "$EXPECTED_SHA256  public.gguf" | sha256sum --check --strict
+          test "$(head -c 4 public.gguf)" = "GGUF"

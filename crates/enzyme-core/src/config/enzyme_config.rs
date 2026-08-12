@@ -21,6 +21,10 @@ const CONFIG_HEADER: &str = "\
 # max_embedding_files caps the number of docs embedded per run, newest first.
 # Set max_embedding_files = 0 to embed all docs.
 #
+# [llm]
+# mode = \"auto\"                    # auto, local, or hosted
+# local_model = \"catalyst-135m-v3\" # selected by `enzyme model use`
+#
 # Each vault gets its own section, keyed by absolute path:
 #
 # [vaults.\"/Users/you/notes\"]
@@ -167,7 +171,40 @@ struct GlobalTomlConfig {
     #[serde(default)]
     defaults: DefaultsTomlSection,
     #[serde(default)]
+    llm: CatalystLlmConfig,
+    #[serde(default)]
     vaults: HashMap<String, VaultTomlSection>,
+}
+
+/// Machine-wide catalyst-generation provider preference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CatalystMode {
+    /// Prefer the selected installed model, otherwise use Enzyme hosted.
+    #[default]
+    Auto,
+    /// Require the selected installed local model.
+    Local,
+    /// Always use Enzyme hosted generation.
+    Hosted,
+}
+
+impl std::fmt::Display for CatalystMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::Local => f.write_str("local"),
+            Self::Hosted => f.write_str("hosted"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalystLlmConfig {
+    #[serde(default)]
+    pub mode: CatalystMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +297,33 @@ impl EnzymeConfig {
 
         let global = load_global_toml(&config_path)?;
         Ok(global.vaults.keys().cloned().collect())
+    }
+
+    /// Load machine-wide catalyst provider preferences.
+    pub fn catalyst_llm_config() -> Result<CatalystLlmConfig> {
+        let path = Self::config_path()?;
+        if !path.exists() {
+            return Ok(CatalystLlmConfig::default());
+        }
+        Ok(load_global_toml(&path)?.llm)
+    }
+
+    /// Persist machine-wide catalyst provider preferences without changing vault settings.
+    pub fn save_catalyst_llm_config(llm: CatalystLlmConfig) -> Result<()> {
+        let path = Self::config_path()?;
+        let mut global = if path.exists() {
+            load_global_toml(&path)?
+        } else {
+            GlobalTomlConfig::default()
+        };
+        global.llm = llm;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let body = toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
+        fs::write(&path, format!("{CONFIG_HEADER}{body}"))
+            .with_context(|| format!("failed to write {}", path.display()))
     }
 
     pub fn load(vault_path: &Path) -> Result<Option<Self>> {
@@ -692,6 +756,27 @@ entities = [
     }
 
     #[test]
+    fn catalyst_llm_config_defaults_and_parses() {
+        let defaults: GlobalTomlConfig = toml::from_str("").unwrap();
+        assert_eq!(defaults.llm.mode, CatalystMode::Auto);
+        assert_eq!(defaults.llm.local_model, None);
+
+        let configured: GlobalTomlConfig = toml::from_str(
+            r#"
+[llm]
+mode = "local"
+local_model = "catalyst-135m-v3"
+"#,
+        )
+        .unwrap();
+        assert_eq!(configured.llm.mode, CatalystMode::Local);
+        assert_eq!(
+            configured.llm.local_model.as_deref(),
+            Some("catalyst-135m-v3")
+        );
+    }
+
+    #[test]
     fn test_save_and_load_global_toml() {
         let tmp = TempDir::new().unwrap();
         let old_home = std::env::var("ENZYME_HOME").ok();
@@ -700,6 +785,12 @@ entities = [
 
         let vault = tmp.path().join("vault");
         fs::create_dir_all(&vault).unwrap();
+
+        EnzymeConfig::save_catalyst_llm_config(CatalystLlmConfig {
+            mode: CatalystMode::Local,
+            local_model: Some("catalyst-135m-v3".to_string()),
+        })
+        .unwrap();
 
         let config = EnzymeConfig {
             catalyzed_entities: vec![
@@ -727,12 +818,17 @@ entities = [
         let raw = fs::read_to_string(EnzymeConfig::config_path().unwrap()).unwrap();
         assert!(raw.starts_with("# Enzyme configuration"));
         assert!(raw.contains("[defaults]"));
+        assert!(raw.contains("[llm]"));
+        assert!(raw.contains("mode = \"local\""));
         assert!(raw.contains("max_embedding_files = 1024"));
 
         let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
         assert_eq!(loaded.catalyzed_entities.len(), 2);
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
+        let llm = EnzymeConfig::catalyst_llm_config().unwrap();
+        assert_eq!(llm.mode, CatalystMode::Local);
+        assert_eq!(llm.local_model.as_deref(), Some("catalyst-135m-v3"));
         assert_eq!(
             loaded.trending.as_ref().and_then(|t| t.min_top_catalysts),
             Some(13)

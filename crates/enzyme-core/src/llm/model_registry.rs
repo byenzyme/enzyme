@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::config::enzyme_config::EnzymeConfig;
 use crate::config::paths::EnzymePaths;
 
 /// One blessed model. Registry entries are compiled in; `--url` on
@@ -35,18 +36,16 @@ pub const DEFAULT_MODEL: &str = "catalyst-135m-v3";
 
 /// Blessed models.
 ///
-/// The catalyst champion is currently hosted as a **private** release asset on
-/// `useenzyme/enzyme-rust` pending the training-data pseudonym sweep; installing it
-/// needs `GITHUB_TOKEN`/`GH_TOKEN`. Once the weights are cleared for public
-/// hosting this URL moves to a public `useenzyme/enzyme` release and no token is
-/// required.
+/// Model metadata must match the tracked `models/<name>.release.json` manifest.
+/// `.github/workflows/publish-model.yml` checksum-gates the cleared private
+/// source artifact and publishes it to the public release URL below.
 pub const REGISTRY: &[ModelEntry] = &[ModelEntry {
     name: DEFAULT_MODEL,
     // IQ4_NL + in-domain imatrix: matches Q4_K_M quality (paired lexical
     // -0.003 on the 60-example GGUF gate) at Q4_0-class speed (+48% prefill
     // via AVX-VNNI/ARM repack paths, which K-quants miss on this model's
     // 576-dim tensors) and 19% smaller. See score-report-iq4nl.json.
-    url: "https://github.com/useenzyme/enzyme-rust/releases/download/models-catalyst-v3/enzyme-catalyst-135m-v3.gguf",
+    url: "https://github.com/useenzyme/enzyme/releases/download/models-catalyst-v3/enzyme-catalyst-135m-v3.gguf",
     sha256: "710a79eea9a84b22cc18b8626b9d893e1a5a2de61f8852fcef839099e8138eab",
     size: 91_727_072,
     context_window: 8192,
@@ -91,22 +90,42 @@ pub fn installed() -> Vec<String> {
 
 /// The installed model the local engine would load.
 ///
-/// `ENZYME_LOCAL_MODEL_NAME` wins; otherwise the default if installed;
-/// otherwise the first installed model.
+/// `ENZYME_LOCAL_MODEL_NAME` wins, followed by the persisted `[llm]` selection,
+/// the default model, and finally the first installed model for backward
+/// compatibility with pre-mode custom installs.
 pub fn active() -> Option<(String, PathBuf)> {
     let installed = installed();
-    let pick = std::env::var("ENZYME_LOCAL_MODEL_NAME")
+    let env_pick = std::env::var("ENZYME_LOCAL_MODEL_NAME")
         .ok()
-        .filter(|n| !n.is_empty() && installed.iter().any(|i| i == n))
-        .or_else(|| {
-            installed
-                .iter()
-                .find(|n| *n == DEFAULT_MODEL)
-                .or_else(|| installed.first())
-                .cloned()
-        })?;
+        .filter(|n| !n.is_empty());
+    let configured_pick = EnzymeConfig::catalyst_llm_config()
+        .ok()
+        .and_then(|config| config.local_model);
+    let explicit_pick = env_pick.or(configured_pick);
+    let pick = match explicit_pick {
+        Some(name) if installed.iter().any(|installed| installed == &name) => name,
+        Some(_) => return None,
+        None => installed
+            .iter()
+            .find(|name| *name == DEFAULT_MODEL)
+            .or_else(|| installed.first())
+            .cloned()?,
+    };
     let path = model_path(&pick).ok()?;
     Some((pick, path))
+}
+
+/// Selected model name even when its weights are not currently installed.
+pub fn selected_name() -> String {
+    std::env::var("ENZYME_LOCAL_MODEL_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            EnzymeConfig::catalyst_llm_config()
+                .ok()
+                .and_then(|config| config.local_model)
+        })
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
 /// Context window for a name, defaulting to 8k for off-registry models.
@@ -135,6 +154,25 @@ mod tests {
                 m.name
             );
         }
+    }
+
+    #[test]
+    fn default_registry_entry_matches_release_manifest() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../models/catalyst-135m-v3.release.json"
+        )))
+        .unwrap();
+        let entry = lookup(DEFAULT_MODEL).unwrap();
+        assert_eq!(manifest["name"], entry.name);
+        assert_eq!(manifest["sha256"], entry.sha256);
+        assert_eq!(manifest["size"], entry.size);
+        let expected_url = format!(
+            "https://github.com/useenzyme/enzyme/releases/download/{}/{}",
+            manifest["public_tag"].as_str().unwrap(),
+            manifest["source_asset"].as_str().unwrap()
+        );
+        assert_eq!(entry.url, expected_url);
     }
 
     #[test]

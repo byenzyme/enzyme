@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use chrono::Utc;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -130,42 +131,58 @@ impl<'a> SimilarityPipeline<'a> {
         };
 
         let total = catalysts.len();
-        let mut similarities_computed = 0usize;
+        // Score catalysts independently across the Rayon pool. Each catalyst's
+        // dot products remain serial, preserving the exact floating-point
+        // operation order of the old implementation. IndexedParallelIterator
+        // also preserves catalyst order in the collected result.
+        let records_by_catalyst: Vec<Vec<CatalystSimilarity>> = catalysts
+            .par_iter()
+            .zip(catalyst_vecs.par_iter())
+            .map(|(catalyst, cat_vec)| {
+                let mut sims: Vec<(f64, &str, u32)> = chunk_embeddings
+                    .iter()
+                    .map(|(file_path, chunk_index, vector)| {
+                        let sim = Embedding::cosine_similarity(cat_vec, vector) as f64;
+                        (sim, file_path.as_str(), *chunk_index)
+                    })
+                    .collect();
 
-        // For each catalyst, compute cosine similarity against all chunk embeddings
-        for (i, (catalyst, cat_vec)) in catalysts.iter().zip(catalyst_vecs.iter()).enumerate() {
-            on_progress(i + 1, total);
+                // Make ties deterministic at the top-K boundary.
+                sims.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(b.1))
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                sims.truncate(CATALYST_TOP_K);
 
-            let mut sims: Vec<(f64, &str, u32)> = chunk_embeddings
-                .iter()
-                .map(|(file_path, chunk_index, vector)| {
-                    let sim = Embedding::cosine_similarity(cat_vec, vector) as f64;
-                    (sim, file_path.as_str(), *chunk_index)
-                })
-                .collect();
+                let created_at = Utc::now();
+                sims.into_iter()
+                    .map(|(sim, file_path, chunk_index)| CatalystSimilarity {
+                        id: None,
+                        catalyst_id: catalyst.id.clone(),
+                        catalyst_text: catalyst.text.clone(),
+                        file_path: file_path.to_string(),
+                        chunk_index: chunk_index as i64,
+                        similarity: sim,
+                        chunk_metadata: serde_json::json!({}),
+                        timeline_data: serde_json::json!({}),
+                        created_at,
+                    })
+                    .collect()
+            })
+            .collect();
 
-            // Sort by similarity descending, keep top 50
-            sims.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            sims.truncate(CATALYST_TOP_K);
-
-            let similarity_records: Vec<CatalystSimilarity> = sims
-                .into_iter()
-                .map(|(sim, file_path, chunk_index)| CatalystSimilarity {
-                    id: None,
-                    catalyst_id: catalyst.id.clone(),
-                    catalyst_text: catalyst.text.clone(),
-                    file_path: file_path.to_string(),
-                    chunk_index: chunk_index as i64,
-                    similarity: sim,
-                    chunk_metadata: serde_json::json!({}),
-                    timeline_data: serde_json::json!({}),
-                    created_at: Utc::now(),
-                })
-                .collect();
-
-            similarities_computed += similarity_records.len();
-            self.db.upsert_catalyst_similarities(&similarity_records)?;
-        }
+        let similarities_computed = records_by_catalyst.iter().map(Vec::len).sum();
+        let similarity_records: Vec<CatalystSimilarity> = records_by_catalyst
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, records)| {
+                on_progress(i + 1, total);
+                records
+            })
+            .collect();
+        self.db.upsert_catalyst_similarities(&similarity_records)?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         info!(
@@ -397,6 +414,7 @@ mod tests {
     use crate::embedding::{EmbeddingBackend, EmbeddingService};
     use crate::models::Catalyst;
     use chrono::Utc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct AxisBackend;
 
@@ -445,6 +463,75 @@ mod tests {
         let cats1 = vec![make_catalyst("a", "foo")];
         let cats2 = vec![make_catalyst("a", "bar")];
         assert_ne!(catalysts_fingerprint(&cats1), catalysts_fingerprint(&cats2));
+    }
+
+    #[test]
+    fn full_rebuild_batches_rows_and_breaks_top_k_ties_deterministically() {
+        let db = Database::open_in_memory().unwrap();
+        let service = EmbeddingService::new(Box::new(AxisBackend));
+        let catalysts = vec![
+            make_catalyst("cat-a", "axis"),
+            make_catalyst("cat-b", "axis"),
+            make_catalyst("cat-c", "axis"),
+        ];
+        db.insert_catalysts(&catalysts).unwrap();
+        let chunks: Vec<(String, u32, Vec<f32>)> = (0..60)
+            .rev()
+            .map(|i| (format!("doc-{i:03}"), 0, vec![1.0, 0.0]))
+            .collect();
+        db.replace_chunk_embeddings_for_documents(vec![], chunks, vec![])
+            .unwrap();
+
+        let progress = AtomicUsize::new(0);
+        let stats = SimilarityPipeline::new(&db, &service)
+            .run_with_catalysts(&catalysts, |done, total| {
+                assert_eq!(total, catalysts.len());
+                assert_eq!(done, progress.fetch_add(1, Ordering::SeqCst) + 1);
+            })
+            .unwrap();
+        assert_eq!(progress.load(Ordering::SeqCst), catalysts.len());
+        assert_eq!(
+            stats.similarities_computed,
+            catalysts.len() * CATALYST_TOP_K
+        );
+
+        let first: Vec<(String, String, i64, f64)> = db
+            .query_read(
+                "SELECT catalyst_id,file_path,chunk_index,similarity
+                 FROM catalyst_similarities
+                 ORDER BY catalyst_id,file_path,chunk_index",
+                vec![],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(first.len(), 150); // exercises more than one 100-row INSERT
+        for catalyst in ["cat-a", "cat-b", "cat-c"] {
+            let paths: Vec<&str> = first
+                .iter()
+                .filter(|row| row.0 == catalyst)
+                .map(|row| row.1.as_str())
+                .collect();
+            let expected: Vec<String> =
+                (0..CATALYST_TOP_K).map(|i| format!("doc-{i:03}")).collect();
+            assert_eq!(
+                paths,
+                expected.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+        }
+
+        SimilarityPipeline::new(&db, &service)
+            .run_with_catalysts(&catalysts, |_, _| {})
+            .unwrap();
+        let second: Vec<(String, String, i64, f64)> = db
+            .query_read(
+                "SELECT catalyst_id,file_path,chunk_index,similarity
+                 FROM catalyst_similarities
+                 ORDER BY catalyst_id,file_path,chunk_index",
+                vec![],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(first, second);
     }
 
     fn setup_incremental_db(

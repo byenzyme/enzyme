@@ -1,0 +1,9 @@
+{
+  "name": "catalyst-135m-v3",
+  "source_tag": "models-catalyst-v3",
+  "source_asset": "enzyme-catalyst-135m-v3.gguf",
+  "public_tag": "models-catalyst-v3",
+  "sha256": "710a79eea9a84b22cc18b8626b9d893e1a5a2de61f8852fcef839099e8138eab",
+  "size": 91727072,
+  "model_card": "models/catalyst-135m-v3.md"
+}

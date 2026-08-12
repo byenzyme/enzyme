@@ -46,6 +46,9 @@ pub enum DisplayEvent {
         model: String,
         masked_key: String,
     },
+    LocalLlm {
+        model: String,
+    },
 
     // Indexing
     IndexingStart,
@@ -338,6 +341,15 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     model,
                     base_url,
                     masked_key,
+                );
+            }
+            DisplayEvent::LocalLlm { model } => {
+                let _ = writeln!(
+                    out,
+                    "  {}Catalysts:{} local · {}",
+                    crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
+                    crossterm::style::ResetColor,
+                    model,
                 );
             }
             DisplayEvent::IndexingStart => {
@@ -805,6 +817,9 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 } => {
                     println!("  LLM: {} @ {} (key: {})", model, base_url, masked_key);
                 }
+                DisplayEvent::LocalLlm { model } => {
+                    println!("  Catalysts: local · {model}");
+                }
                 DisplayEvent::IndexingStart => {
                     println!("Indexing vault...");
                 }
@@ -974,6 +989,9 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                         masked_key,
                     } => {
                         json!({"stage": "api_config", "base_url": base_url, "model": model, "key": masked_key})
+                    }
+                    DisplayEvent::LocalLlm { model } => {
+                        json!({"stage": "llm_config", "mode": "local", "model": model})
                     }
                     DisplayEvent::IndexingStart => {
                         json!({"stage": "indexing", "status": "start"})

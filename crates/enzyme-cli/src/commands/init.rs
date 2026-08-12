@@ -6,13 +6,14 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use tracing::{debug, info};
 
-use enzyme_core::config::enzyme_config::EnzymeConfig;
+use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
 use enzyme_core::config::paths::{EnzymePaths, ensure_dir_symlink_aware};
 use enzyme_core::db::Database;
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{
-    DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmCredentialMode, resolve_llm_client_for_mode,
+    DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmCredentialMode, preload_preferred_local_llm_client,
+    resolve_api_config_for_mode, resolve_llm_client_for_mode,
 };
 use enzyme_core::models::Entity;
 use enzyme_core::pipeline::catalysts::{
@@ -539,6 +540,20 @@ pub async fn run_init(
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
 
+    // Local model startup (especially cold Metal initialization) is independent
+    // of the vault. Hide it behind indexing, but never touch local inference
+    // for an explicit environment-provider run. The core helper applies the
+    // remaining mode rules (feature, persisted provider preference, selected
+    // installed model, and ENZYME_LOCAL_ENGINE opt-out) without consulting
+    // hosted credentials.
+    let local_preload = if use_env_llm {
+        None
+    } else {
+        Some(tokio::task::spawn_blocking(
+            preload_preferred_local_llm_client,
+        ))
+    };
+
     // ── Step 1: Indexing ───────────────────────────────────────────────────
     // Run with animated display, then finish it before the interactive prompt.
     let idx_stats = {
@@ -624,16 +639,27 @@ pub async fn run_init(
     // a genuine network/parse failure.
     let mut hosted_resolve_error: Option<anyhow::Error> = None;
     let api_config = if catalyst_generation_planned(&sel_result.entities) {
-        if !use_env_llm && !byok_active() {
+        let preloaded_local = match local_preload {
+            Some(handle) => handle
+                .await
+                .context("local model preload task panicked")??,
+            None => None,
+        };
+
+        if !use_env_llm && preloaded_local.is_none() && !byok_active() {
             require_login_for_hosted_init_if_needed(vault_path, &paths)?;
         }
 
         let llm_mode = if use_env_llm {
             LlmCredentialMode::Env
         } else {
-            LlmCredentialMode::Hosted
+            LlmCredentialMode::Auto
         };
-        let resolved = match resolve_llm_client_for_mode(llm_mode).await {
+        let resolved_result = match preloaded_local {
+            Some(local) => Ok(local),
+            None => resolve_llm_client_for_mode(llm_mode).await,
+        };
+        let resolved = match resolved_result {
             Ok(resolved) => Some(resolved),
             Err(e) => {
                 if use_env_llm {
@@ -647,13 +673,22 @@ pub async fn run_init(
         };
 
         if let Some((ref cfg, _)) = resolved {
-            if matches!(cfg.provider, enzyme_core::llm::ConfigProvider::Env) {
-                tx.send(DisplayEvent::ApiConfig {
-                    base_url: cfg.base_url.clone(),
-                    model: cfg.model.clone(),
-                    masked_key: cfg.masked_api_key(),
-                })
-                .ok();
+            match cfg.provider {
+                enzyme_core::llm::ConfigProvider::Local => {
+                    tx.send(DisplayEvent::LocalLlm {
+                        model: cfg.model.clone(),
+                    })
+                    .ok();
+                }
+                enzyme_core::llm::ConfigProvider::Env => {
+                    tx.send(DisplayEvent::ApiConfig {
+                        base_url: cfg.base_url.clone(),
+                        model: cfg.model.clone(),
+                        masked_key: cfg.masked_api_key(),
+                    })
+                    .ok();
+                }
+                enzyme_core::llm::ConfigProvider::ServerFallback => {}
             }
         }
 
@@ -1283,13 +1318,24 @@ pub(super) async fn generation_contract(
     let mode = if use_env_llm {
         LlmCredentialMode::Env
     } else {
-        LlmCredentialMode::Hosted
+        LlmCredentialMode::Auto
     };
-    let (resolved_llm, _) = resolve_llm_client_for_mode(mode).await?;
+    let resolved_llm = resolve_api_config_for_mode(mode).await?;
     let model = resolved_llm.model;
-    let llm_mode = if use_env_llm { "env" } else { "hosted" }.to_string();
+    let llm_mode = match mode {
+        LlmCredentialMode::Auto => match EnzymeConfig::catalyst_llm_config()?.mode {
+            CatalystMode::Auto => "auto",
+            CatalystMode::Local => "local",
+            CatalystMode::Hosted => "hosted",
+        },
+        LlmCredentialMode::Local => "local",
+        LlmCredentialMode::Hosted => "hosted",
+        LlmCredentialMode::Env => "env",
+    }
+    .to_string();
     let llm_provider = match resolved_llm.provider {
         enzyme_core::llm::ConfigProvider::Env => "env",
+        enzyme_core::llm::ConfigProvider::Local => "local",
         enzyme_core::llm::ConfigProvider::ServerFallback => "server-fallback",
     }
     .to_string();
@@ -1593,11 +1639,12 @@ async fn build_and_activate_epoch(
     let llm_mode = if contract.llm_mode == "env" {
         LlmCredentialMode::Env
     } else {
-        LlmCredentialMode::Hosted
+        LlmCredentialMode::Auto
     };
     let (api_config, llm) = resolve_llm_client_for_mode(llm_mode).await?;
     let resolved_provider = match &api_config.provider {
         enzyme_core::llm::ConfigProvider::Env => "env",
+        enzyme_core::llm::ConfigProvider::Local => "local",
         enzyme_core::llm::ConfigProvider::ServerFallback => "server-fallback",
     };
     anyhow::ensure!(

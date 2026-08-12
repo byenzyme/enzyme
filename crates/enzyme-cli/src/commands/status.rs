@@ -3,8 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::json;
 
+use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
+use enzyme_core::llm::model_registry;
 
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
 
@@ -17,8 +19,21 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         return Ok(None);
     }
 
-    // Resolve async data first, before opening non-Send DB
-    let api_key_configured = enzyme_core::llm::resolve_api_key().await.is_ok();
+    // Status must stay read-only and offline: report provider intent from the
+    // persisted mode rather than resolving hosted credentials over the network.
+    let llm = EnzymeConfig::catalyst_llm_config()?;
+    let local_model = model_registry::selected_name();
+    let local_model_installed = model_registry::model_path(&local_model)?.exists();
+    let catalyst_mode = match llm.mode {
+        CatalystMode::Auto if local_model_installed => "local",
+        CatalystMode::Auto => "hosted",
+        CatalystMode::Local if local_model_installed => "local",
+        CatalystMode::Local => "local-missing",
+        CatalystMode::Hosted => "hosted",
+    };
+    let api_key_configured = ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()));
 
     let model_path = enzyme_core::embedding::model_description(&paths.home);
 
@@ -46,6 +61,10 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "entities": entity_count,
         "catalysts": catalyst_count,
         "model": model_path,
+        "catalyst_mode_configured": llm.mode.to_string(),
+        "catalyst_mode": catalyst_mode,
+        "catalyst_model": local_model,
+        "catalyst_model_installed": local_model_installed,
         "api_key_configured": api_key_configured,
         "last_background_refresh": last_background_refresh,
     })))
@@ -80,15 +99,24 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
             println!("Catalysts:  {}", json["catalysts"]);
             if let Some(outcome) = &outcome {
                 if outcome.status == OutcomeStatus::Succeeded {
-                    println!(
-                        "Refreshed:  {}",
-                        format_finished_at(outcome.finished_at_ms)
-                    );
+                    println!("Refreshed:  {}", format_finished_at(outcome.finished_at_ms));
                 }
             }
+            println!("Catalysts:  {}", json["catalyst_mode"]);
+            if json["catalyst_mode"] == "local" || json["catalyst_mode"] == "local-missing" {
+                println!(
+                    "Local LLM:  {} ({})",
+                    json["catalyst_model"].as_str().unwrap_or("unknown"),
+                    if json["catalyst_model_installed"].as_bool().unwrap_or(false) {
+                        "installed"
+                    } else {
+                        "not installed"
+                    }
+                );
+            }
             match json["model"].as_str() {
-                Some(path) => println!("Model:      {}", path),
-                None => println!("Model:      not found"),
+                Some(path) => println!("Embedding:  {}", path),
+                None => println!("Embedding:  not found"),
             }
             if json["api_key_configured"].as_bool().unwrap_or(false) {
                 println!("API key:    configured");

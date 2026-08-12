@@ -1,12 +1,13 @@
 //! `enzyme model` — install, list, and remove local GGUF weights.
 //!
-//! Deliberately three verbs and one line of output per action. The registry is
-//! compiled in (`enzyme_core::llm::model_registry`); `--url` bypasses it.
+//! The registry is compiled in (`enzyme_core::llm::model_registry`); `--url`
+//! bypasses it. Provider mode and model selection live in global config.toml.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
 use enzyme_core::llm::model_registry::{self, ModelEntry};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
@@ -61,8 +62,9 @@ pub async fn run_install(
 
     let dest = model_registry::model_path(&spec.name)?;
     if dest.exists() {
+        select_model(&spec.name, None)?;
         println!(
-            "{} already installed ({})",
+            "{} already installed and selected ({})",
             spec.name,
             human_bytes(file_len(&dest))
         );
@@ -87,13 +89,24 @@ pub async fn run_install(
     }
 
     std::fs::rename(&part, &dest).context("failed to move downloaded model into place")?;
-    println!("installed {} ({})", spec.name, human_bytes(file_len(&dest)));
+    select_model(&spec.name, None)?;
+    let mode = EnzymeConfig::catalyst_llm_config()?.mode;
+    println!(
+        "installed and selected {} ({}) — catalyst mode: {mode}",
+        spec.name,
+        human_bytes(file_len(&dest))
+    );
     Ok(())
 }
 
 pub fn run_list() -> Result<()> {
     let installed = model_registry::installed();
-    let active = model_registry::active().map(|(n, _)| n);
+    let mode = EnzymeConfig::catalyst_llm_config()?.mode;
+    let active = if mode == CatalystMode::Hosted {
+        None
+    } else {
+        model_registry::active().map(|(n, _)| n)
+    };
 
     if installed.is_empty() && model_registry::REGISTRY.is_empty() {
         println!("no models");
@@ -130,8 +143,151 @@ pub fn run_rm(name: &str) -> Result<()> {
     if !path.exists() {
         bail!("{name} is not installed");
     }
+    let mut llm = EnzymeConfig::catalyst_llm_config()?;
+    if llm.mode == CatalystMode::Local && llm.local_model.as_deref() == Some(name) {
+        bail!(
+            "{name} is the required local catalyst model; run `enzyme model disable` or `enzyme model auto` before removing it"
+        );
+    }
     std::fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    if llm.local_model.as_deref() == Some(name) {
+        llm.local_model = None;
+        EnzymeConfig::save_catalyst_llm_config(llm)?;
+    }
     println!("removed {name}");
+    Ok(())
+}
+
+pub fn run_use(name: &str) -> Result<()> {
+    let path = model_registry::model_path(name)?;
+    if !path.exists() {
+        bail!("{name} is not installed; run `enzyme model install {name}` first");
+    }
+    select_model(name, Some(CatalystMode::Local))?;
+    println!("catalyst mode: local ({name})");
+    Ok(())
+}
+
+pub fn run_auto() -> Result<()> {
+    let mut llm = EnzymeConfig::catalyst_llm_config()?;
+    llm.mode = CatalystMode::Auto;
+    EnzymeConfig::save_catalyst_llm_config(llm)?;
+    println!("catalyst mode: auto (local when selected model is installed, otherwise hosted)");
+    Ok(())
+}
+
+pub fn run_disable() -> Result<()> {
+    let mut llm = EnzymeConfig::catalyst_llm_config()?;
+    llm.mode = CatalystMode::Hosted;
+    EnzymeConfig::save_catalyst_llm_config(llm)?;
+    println!("catalyst mode: hosted (local model disabled)");
+    Ok(())
+}
+
+pub fn run_status() -> Result<()> {
+    let llm = EnzymeConfig::catalyst_llm_config()?;
+    let selected = model_registry::selected_name();
+    let installed = model_registry::model_path(&selected)?.exists();
+    let effective = match llm.mode {
+        CatalystMode::Local => {
+            if installed {
+                "local"
+            } else {
+                "local (model missing)"
+            }
+        }
+        CatalystMode::Hosted => "hosted",
+        CatalystMode::Auto => {
+            if installed {
+                "local"
+            } else {
+                "hosted"
+            }
+        }
+    };
+    println!("Configured: {}", llm.mode);
+    println!("Effective:  {effective}");
+    println!(
+        "Model:      {selected} ({})",
+        if installed {
+            "installed"
+        } else {
+            "not installed"
+        }
+    );
+    println!(
+        "Network:    {}",
+        if effective == "local" {
+            "not required"
+        } else {
+            "required"
+        }
+    );
+    Ok(())
+}
+
+pub fn run_verify(name: Option<&str>) -> Result<()> {
+    let name = name
+        .map(str::to_string)
+        .unwrap_or_else(model_registry::selected_name);
+    let path = model_registry::model_path(&name)?;
+    if !path.exists() {
+        bail!("{name} is not installed; run `enzyme model install {name}`");
+    }
+    verify_gguf_header(&path)?;
+    let Some(entry) = model_registry::lookup(&name) else {
+        println!(
+            "verified {name}: readable GGUF file ({}) — no registry checksum",
+            human_bytes(file_len(&path))
+        );
+        return Ok(());
+    };
+    let digest = sha256_file(&path)?;
+    if digest != entry.sha256 {
+        bail!(
+            "checksum mismatch for {name} (expected {}, got {digest}); remove and reinstall the model",
+            entry.sha256
+        );
+    }
+    println!("verified {name} ({})", human_bytes(file_len(&path)));
+    Ok(())
+}
+
+fn select_model(name: &str, mode: Option<CatalystMode>) -> Result<()> {
+    let mut llm = EnzymeConfig::catalyst_llm_config()?;
+    llm.local_model = Some(name.to_string());
+    if let Some(mode) = mode {
+        llm.mode = mode;
+    }
+    EnzymeConfig::save_catalyst_llm_config(llm)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn verify_gguf_header(path: &Path) -> Result<()> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("{} is truncated", path.display()))?;
+    if &magic != b"GGUF" {
+        bail!("{} is not a GGUF model file", path.display());
+    }
     Ok(())
 }
 
