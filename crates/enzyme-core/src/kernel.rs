@@ -8,12 +8,19 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+#[cfg(feature = "embedder-compat")]
+use std::collections::HashMap;
+#[cfg(feature = "embedder-compat")]
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
 use crate::embedding::{EmbeddingService, get_embedding_service};
 pub use crate::llm::Generator;
+#[cfg(feature = "embedder-compat")]
+use crate::models::Embedding;
 use crate::models::EntityType;
 use crate::pipeline::catalysts::{CatalystConfig, CatalystPipeline};
 use crate::pipeline::embedding::EmbeddingPipeline;
@@ -132,6 +139,144 @@ impl SearchIndex {
             })
             .collect())
     }
+
+    /// Catalyst-based search rendered as the legacy `catalyze` JSON envelope.
+    ///
+    /// This compatibility surface lets embedders that previously parsed the
+    /// Enzyme CLI's stdout consume an in-process value without changing their
+    /// envelope parser.
+    #[cfg(feature = "embedder-compat")]
+    pub fn catalyze_json(&self, query: &str, limit: usize) -> Result<String> {
+        let response = ContextSearch::new(&self.db, self.service)
+            .catalyze_search(query, limit)
+            .context("catalyze search")?;
+        let total = response.results.len();
+        let mut output =
+            serde_json::to_value(&response).context("serializing catalyze response")?;
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("query".into(), serde_json::json!(query));
+            obj.insert("search_strategy".into(), serde_json::json!("catalyze"));
+            // Real elapsed time is irrelevant to compatibility consumers, but
+            // the legacy envelope always carries the field.
+            obj.insert("processing_time".into(), serde_json::json!(0.0));
+            obj.insert("total_results".into(), serde_json::json!(total));
+        }
+        Ok(serde_json::to_string(&output)?)
+    }
+
+    /// Query-aware entity ranking rendered as the legacy `petri` JSON envelope.
+    #[cfg(feature = "embedder-compat")]
+    pub fn petri_json(&self, query: &str, top: usize, catalyst_budget: usize) -> Result<String> {
+        let query_vec = self.service.embed_query(query)?;
+        let catalysts = self.db.get_all_catalysts()?;
+        let cached = self.db.get_all_catalyst_embeddings().unwrap_or_default();
+        let cache: HashMap<&str, &Vec<f32>> =
+            cached.iter().map(|(id, v)| (id.as_str(), v)).collect();
+
+        // Per-catalyst cosine similarity, grouped by entity (by catalyst index).
+        let mut groups: HashMap<String, Vec<(usize, f32)>> = HashMap::new();
+        for (i, catalyst) in catalysts.iter().enumerate() {
+            if let Some(vec) = cache.get(catalyst.id.as_str()) {
+                let sim = Embedding::cosine_similarity(&query_vec, vec);
+                groups
+                    .entry(catalyst.entity.clone())
+                    .or_default()
+                    .push((i, sim));
+            }
+        }
+
+        let entities = self
+            .db
+            .get_top_entities(groups.len().max(100), "recency_score")
+            .unwrap_or_default();
+        let entity_by_name: HashMap<&str, &crate::models::Entity> =
+            entities.iter().map(|e| (e.name.as_str(), e)).collect();
+        let max_recency = entities
+            .iter()
+            .map(|e| e.trends.recency_score)
+            .fold(0.0f64, f64::max);
+
+        // Blend max catalyst similarity (0.7) with normalized recency (0.3).
+        let mut scored: Vec<(String, f64)> = groups
+            .iter()
+            .filter_map(|(name, sims)| {
+                let entity = entity_by_name.get(name.as_str())?;
+                let max_sim = sims.iter().map(|(_, s)| *s).fold(0.0f32, f32::max) as f64;
+                let norm_recency = if max_recency > 0.0 {
+                    entity.trends.recency_score / max_recency
+                } else {
+                    0.0
+                };
+                Some((name.clone(), max_sim * 0.7 + norm_recency * 0.3))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top);
+
+        let mut entities_json = Vec::new();
+        for (name, _) in &scored {
+            let Some(entity) = entity_by_name.get(name.as_str()).copied() else {
+                continue;
+            };
+            let mut group = groups.remove(name.as_str()).unwrap_or_default();
+            group.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            group.truncate(catalyst_budget);
+            let cats: Vec<serde_json::Value> = group
+                .iter()
+                .map(|&(idx, _)| {
+                    serde_json::json!({
+                        "text": catalysts[idx].text,
+                        "context": catalysts[idx].context,
+                    })
+                })
+                .collect();
+            entities_json.push(serde_json::json!({
+                "name": entity.name,
+                "type": entity.entity_type.as_str(),
+                "catalysts": cats,
+            }));
+        }
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "entities": entities_json,
+            "total_entities": entities_json.len(),
+            "query": query,
+        }))?)
+    }
+}
+
+/// Open an already-provisioned index for search without running provisioning.
+///
+/// Returns `None` when the index file does not exist yet so the embedder can
+/// choose whether to cold-provision. The worker owns initialization and keeps
+/// the sync API safe in callers that already have an async runtime.
+#[cfg(feature = "embedder-compat")]
+pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<SearchIndex>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let vault = vault_path.to_path_buf();
+    let db_path = db_path.to_path_buf();
+    std::thread::spawn(move || -> Result<SearchIndex> {
+        let db = Database::open(&db_path)
+            .with_context(|| format!("opening search index {}", db_path.display()))?;
+        let document_count = db.get_document_count().unwrap_or(0) as usize;
+        let service = get_embedding_service(&vault).context("initializing embeddings")?;
+        let bridged = if db.get_all_catalysts().map(|c| c.is_empty()).unwrap_or(true) {
+            Bridged::NoGenerator
+        } else {
+            Bridged::Ready
+        };
+        Ok(SearchIndex {
+            db,
+            service,
+            document_count,
+            bridged,
+        })
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("search open worker panicked"))?
+    .map(Some)
 }
 
 /// Open `db_path` and run index -> embed -> select -> catalyst -> similarity.
@@ -274,6 +419,53 @@ mod tests {
         .unwrap();
         let db = temp.path().join("explicit.db");
         (temp, vault, db)
+    }
+
+    #[cfg(feature = "embedder-compat")]
+    fn empty_index() -> SearchIndex {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let service = get_embedding_service(std::path::Path::new(".")).expect("embeddings");
+        SearchIndex {
+            db,
+            service,
+            document_count: 0,
+            bridged: Bridged::NoGenerator,
+        }
+    }
+
+    #[cfg(feature = "embedder-compat")]
+    #[test]
+    fn catalyze_json_envelope_shape() {
+        let index = empty_index();
+        let value: serde_json::Value =
+            serde_json::from_str(&index.catalyze_json("a query", 5).unwrap()).unwrap();
+        assert!(value["results"].is_array());
+        assert!(value["top_contributing_catalysts"].is_array());
+        assert_eq!(value["query"], "a query");
+        assert_eq!(value["search_strategy"], "catalyze");
+        assert!(value["processing_time"].is_number());
+        assert_eq!(value["total_results"], 0);
+    }
+
+    #[cfg(feature = "embedder-compat")]
+    #[test]
+    fn petri_json_envelope_shape() {
+        let index = empty_index();
+        let value: serde_json::Value =
+            serde_json::from_str(&index.petri_json("a query", 8, 2).unwrap()).unwrap();
+        assert!(value["entities"].is_array());
+        assert_eq!(value["total_entities"], 0);
+        assert_eq!(value["query"], "a query");
+    }
+
+    #[cfg(feature = "embedder-compat")]
+    #[test]
+    fn open_existing_returns_none_for_missing_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let result = open_existing_sync(&vault, &temp.path().join("missing.db")).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
