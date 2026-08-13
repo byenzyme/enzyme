@@ -5,10 +5,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod build_support;
+
+use build_support::resolve_shared_model_dir;
+
 static MODEL_URL: &'static str = "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1/resolve/main/0_StaticEmbedding/model.safetensors";
 static TOKENIZER_URL: &'static str = "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1/resolve/main/0_StaticEmbedding/tokenizer.json";
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=ESE_MODEL_CACHE");
+
     let out = Path::new(&env::var("OUT_DIR").unwrap()).to_path_buf();
 
     let dtype = dtype();
@@ -395,13 +401,15 @@ fn dtype_sz() -> usize {
 }
 
 fn shared_model_dir(out: &Path) -> PathBuf {
-    let target_dir = out
-        .ancestors()
-        .find(|p| p.file_name().map_or(false, |f| f == "target"))
-        .unwrap_or_else(|| panic!("could not find target/ in OUT_DIR"))
-        .to_path_buf();
-    let dir = target_dir.join(concat!(env!("CARGO_PKG_NAME"), "-cache"));
-    fs::create_dir_all(&dir).unwrap();
+    let model_cache = env::var_os("ESE_MODEL_CACHE").map(PathBuf::from);
+    let dir = resolve_shared_model_dir(
+        out,
+        model_cache.as_deref(),
+        concat!(env!("CARGO_PKG_NAME"), "-cache"),
+    )
+    .unwrap_or_else(|error| panic!("{error}; set ESE_MODEL_CACHE to override"));
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|error| panic!("failed to create model cache {}: {error}", dir.display()));
     dir
 }
 
