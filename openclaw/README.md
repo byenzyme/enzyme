@@ -8,7 +8,7 @@ The plugin shells out to the `enzyme` CLI binary. Install that first:
 
 ```bash
 curl -fsSL https://enzyme.garden/install.sh | bash
-# or: brew install useenzyme/enzyme/enzyme-cli
+# or: brew install byenzyme/enzyme/enzyme-cli
 ```
 
 Then install the plugin:
