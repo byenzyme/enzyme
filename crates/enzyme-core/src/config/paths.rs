@@ -15,6 +15,11 @@ use sha2::{Digest, Sha256};
 pub struct EnzymePaths {
     /// Global Enzyme home directory (`~/.enzyme` or `$ENZYME_HOME`).
     pub home: PathBuf,
+    /// Global TOML configuration file. Independent from the model store so
+    /// embedders can keep application configuration and weights separately.
+    pub config_file: PathBuf,
+    /// Directory containing local GGUF models.
+    pub models_dir: PathBuf,
     /// Path to the SQLite database the binary reads/writes.
     /// On FUSE this is the session-private mirror; otherwise the vault DB itself.
     pub vault_db: PathBuf,
@@ -86,6 +91,8 @@ impl EnzymePaths {
         };
 
         Ok(Self {
+            config_file: home.join("config.toml"),
+            models_dir: home.join("models"),
             home,
             vault_db: db_path,
             vault_db_origin: None,
@@ -112,6 +119,20 @@ impl EnzymePaths {
 
     /// Construct paths with explicit overrides (for testing without env var mutation).
     pub fn with_overrides(vault_path: impl AsRef<Path>, enzyme_home: Option<&str>) -> Result<Self> {
+        Self::with_path_overrides(vault_path, enzyme_home, None, None)
+    }
+
+    /// Construct paths with independent global-state overrides.
+    ///
+    /// `None` retains the CLI-compatible `<enzyme_home>/config.toml` and
+    /// `<enzyme_home>/models` defaults. This constructor does not consult
+    /// environment variables, making it suitable for embedded/library use.
+    pub fn with_path_overrides(
+        vault_path: impl AsRef<Path>,
+        enzyme_home: Option<&str>,
+        config_file: Option<&Path>,
+        models_dir: Option<&Path>,
+    ) -> Result<Self> {
         let vault_path = vault_path.as_ref();
 
         let home = match enzyme_home {
@@ -135,8 +156,16 @@ impl EnzymePaths {
             (vault_path.join(".enzyme").join("enzyme.db"), None)
         };
 
+        let config_file = config_file
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join("config.toml"));
+        let models_dir = models_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join("models"));
         let paths = Self {
             home,
+            config_file,
+            models_dir,
             vault_db,
             vault_db_origin,
         };
@@ -267,7 +296,7 @@ impl EnzymePaths {
 
     /// Path to the global config file.
     pub fn global_config(&self) -> PathBuf {
-        self.home.join("config.toml")
+        self.config_file.clone()
     }
 
     /// Path to the embedding daemon Unix socket.
@@ -363,6 +392,21 @@ mod tests {
         let paths = EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();
 
         assert_eq!(paths.global_config(), PathBuf::from("/tmp/eh/config.toml"));
+    }
+
+    #[test]
+    fn test_config_and_model_paths_are_independent() {
+        let paths = EnzymePaths::with_path_overrides(
+            "/dummy",
+            Some("/tmp/eh"),
+            Some(Path::new("/tmp/app/config.toml")),
+            Some(Path::new("/tmp/weights")),
+        )
+        .unwrap();
+
+        assert_eq!(paths.global_config(), PathBuf::from("/tmp/app/config.toml"));
+        assert_eq!(paths.models_dir, PathBuf::from("/tmp/weights"));
+        assert_eq!(paths.home, PathBuf::from("/tmp/eh"));
     }
 
     #[test]

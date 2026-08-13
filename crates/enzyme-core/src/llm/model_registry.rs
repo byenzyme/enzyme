@@ -5,7 +5,7 @@
 //! the CLI uses. `enzyme model install` writes them; the in-process engine
 //! (feature `local-llm`) reads them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -64,7 +64,12 @@ pub fn models_dir() -> Result<PathBuf> {
 
 /// Path an installed model occupies, whether or not it exists.
 pub fn model_path(name: &str) -> Result<PathBuf> {
-    Ok(models_dir()?.join(format!("{name}.gguf")))
+    Ok(model_path_in(&models_dir()?, name))
+}
+
+/// Path for a named model in an explicitly selected model store.
+pub fn model_path_in(models_dir: &Path, name: &str) -> PathBuf {
+    models_dir.join(format!("{name}.gguf"))
 }
 
 /// Names of every `.gguf` in the models directory, sorted.
@@ -72,6 +77,11 @@ pub fn installed() -> Vec<String> {
     let Ok(dir) = models_dir() else {
         return Vec::new();
     };
+    installed_in(&dir)
+}
+
+/// Names of installed GGUF models in an explicit model store.
+pub fn installed_in(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -94,14 +104,31 @@ pub fn installed() -> Vec<String> {
 /// the default model, and finally the first installed model for backward
 /// compatibility with pre-mode custom installs.
 pub fn active() -> Option<(String, PathBuf)> {
-    let installed = installed();
+    let models_dir = models_dir().ok()?;
+    let config_path = EnzymeConfig::config_path().ok()?;
     let env_pick = std::env::var("ENZYME_LOCAL_MODEL_NAME")
         .ok()
         .filter(|n| !n.is_empty());
-    let configured_pick = EnzymeConfig::catalyst_llm_config()
+    active_with_selection(&models_dir, &config_path, env_pick)
+}
+
+/// Resolve the active local model using independent model-store and config
+/// paths. Unlike [`active`], this never consults Enzyme path environment
+/// overrides or any other environment variables.
+pub fn active_in(models_dir: &Path, config_path: &Path) -> Option<(String, PathBuf)> {
+    active_with_selection(models_dir, config_path, None)
+}
+
+fn active_with_selection(
+    models_dir: &Path,
+    config_path: &Path,
+    explicit_pick: Option<String>,
+) -> Option<(String, PathBuf)> {
+    let installed = installed_in(models_dir);
+    let configured_pick = EnzymeConfig::catalyst_llm_config_at(config_path)
         .ok()
         .and_then(|config| config.local_model);
-    let explicit_pick = env_pick.or(configured_pick);
+    let explicit_pick = explicit_pick.or(configured_pick);
     let pick = match explicit_pick {
         Some(name) if installed.iter().any(|installed| installed == &name) => name,
         Some(_) => return None,
@@ -111,7 +138,7 @@ pub fn active() -> Option<(String, PathBuf)> {
             .or_else(|| installed.first())
             .cloned()?,
     };
-    let path = model_path(&pick).ok()?;
+    let path = model_path_in(models_dir, &pick);
     Some((pick, path))
 }
 
@@ -178,5 +205,26 @@ mod tests {
     #[test]
     fn unknown_name_falls_back_to_8k_context() {
         assert_eq!(context_window("not-a-model"), 8192);
+    }
+
+    #[test]
+    fn explicit_model_store_and_config_are_independent() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("weights");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(model_path_in(&models, "chosen"), b"fixture").unwrap();
+        let config = root.path().join("settings").join("enzyme.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "[llm]\nmode = \"local\"\nlocal_model = \"chosen\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            active_in(&models, &config),
+            Some(("chosen".into(), model_path_in(&models, "chosen")))
+        );
+        assert!(!root.path().join("settings/models/chosen.gguf").exists());
     }
 }

@@ -291,6 +291,10 @@ impl EnzymeConfig {
     /// signed-in account.
     pub fn configured_vault_keys() -> Result<Vec<String>> {
         let config_path = Self::config_path()?;
+        Self::configured_vault_keys_at(&config_path)
+    }
+
+    pub fn configured_vault_keys_at(config_path: &Path) -> Result<Vec<String>> {
         if !config_path.exists() {
             return Ok(Vec::new());
         }
@@ -302,6 +306,11 @@ impl EnzymeConfig {
     /// Load machine-wide catalyst provider preferences.
     pub fn catalyst_llm_config() -> Result<CatalystLlmConfig> {
         let path = Self::config_path()?;
+        Self::catalyst_llm_config_at(&path)
+    }
+
+    /// Load machine-wide catalyst preferences from an explicit file.
+    pub fn catalyst_llm_config_at(path: &Path) -> Result<CatalystLlmConfig> {
         if !path.exists() {
             return Ok(CatalystLlmConfig::default());
         }
@@ -311,6 +320,10 @@ impl EnzymeConfig {
     /// Persist machine-wide catalyst provider preferences without changing vault settings.
     pub fn save_catalyst_llm_config(llm: CatalystLlmConfig) -> Result<()> {
         let path = Self::config_path()?;
+        Self::save_catalyst_llm_config_at(&path, llm)
+    }
+
+    pub fn save_catalyst_llm_config_at(path: &Path, llm: CatalystLlmConfig) -> Result<()> {
         let mut global = if path.exists() {
             load_global_toml(&path)?
         } else {
@@ -328,6 +341,14 @@ impl EnzymeConfig {
 
     pub fn load(vault_path: &Path) -> Result<Option<Self>> {
         let config_path = Self::config_path()?;
+        Self::load_at(vault_path, &config_path)
+    }
+
+    /// Load a vault view from an explicit global TOML path.
+    ///
+    /// Legacy vault-local YAML remains the fallback only when that explicit
+    /// file does not exist, preserving the CLI's compatibility behavior.
+    pub fn load_at(vault_path: &Path, config_path: &Path) -> Result<Option<Self>> {
         if config_path.exists() {
             debug!(?config_path, "loading enzyme config from global TOML");
             let global = load_global_toml(&config_path)?;
@@ -345,6 +366,13 @@ impl EnzymeConfig {
     /// discovery never fails on a bad/absent config.
     pub fn excluded_folders_at(vault_path: &Path) -> Vec<String> {
         match Self::load(vault_path) {
+            Ok(Some(cfg)) => cfg.excluded_folders,
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn excluded_folders_with_config(vault_path: &Path, config_path: &Path) -> Vec<String> {
+        match Self::load_at(vault_path, config_path) {
             Ok(Some(cfg)) => cfg.excluded_folders,
             _ => Vec::new(),
         }

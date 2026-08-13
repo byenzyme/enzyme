@@ -792,6 +792,38 @@ impl LlmClient {
         }
     }
 
+    /// Bind the in-process engine to one explicit GGUF file.
+    ///
+    /// This bypasses config, environment, registry selection, and every hosted
+    /// resolver. It is the local-model entry point for embedded search users.
+    #[cfg(feature = "local-llm")]
+    pub fn from_local_model(path: &std::path::Path, model: &str) -> Result<Self> {
+        let engine = super::local_engine::LocalEngine::load(
+            path,
+            model,
+            super::model_registry::context_window(model),
+        )
+        .with_context(|| {
+            format!(
+                "failed to load local model '{}' from {}",
+                model,
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key: Arc::new(RwLock::new(String::new())),
+            base_url: format!("{LOCAL_BASE_URL_SCHEME}{model}"),
+            free_tier: false,
+            backend: Backend::Local(Arc::new(engine)),
+        })
+    }
+
+    #[cfg(not(feature = "local-llm"))]
+    pub fn from_local_model(_path: &std::path::Path, _model: &str) -> Result<Self> {
+        bail!("this Enzyme build does not include local-model support")
+    }
+
     /// Create a client from a resolved config, preserving free-tier status
     /// so that 401 errors can trigger automatic key refresh.
     ///
