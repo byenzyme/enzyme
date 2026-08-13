@@ -220,10 +220,11 @@ fn ensure_searchable_owned(
                 entity_profiles: &selection.entity_profiles,
                 ..Default::default()
             };
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("starting catalyst runtime")?;
+            // Catalyst/database calls use `block_in_place`; a current-thread
+            // runtime panics there, most visibly for the in-process local
+            // generator. Own a small multi-thread runtime so sync embedders do
+            // not inherit that Tokio requirement.
+            let runtime = catalyst_runtime()?;
             runtime
                 .block_on(
                     CatalystPipeline::new(&db, generator.client(), Some(service)).run(
@@ -248,6 +249,14 @@ fn ensure_searchable_owned(
         document_count,
         bridged,
     })
+}
+
+fn catalyst_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .context("starting catalyst runtime")
 }
 
 #[cfg(test)]
@@ -295,6 +304,13 @@ mod tests {
                     .unwrap();
                 assert_eq!(index.document_count, 1);
             });
+    }
+
+    #[test]
+    fn owned_catalyst_runtime_supports_block_in_place() {
+        catalyst_runtime().unwrap().block_on(async {
+            assert_eq!(tokio::task::block_in_place(|| 42), 42);
+        });
     }
 
     #[test]
