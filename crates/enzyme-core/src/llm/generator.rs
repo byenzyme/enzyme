@@ -7,7 +7,7 @@ use super::{LlmClient, model_registry};
 /// An explicitly selected catalyst generator.
 ///
 /// Construction never consults Enzyme config, provider environment variables,
-/// cached credentials, or the enzyme.garden hosted bootstrap endpoint.
+/// cached credentials, or the hosted credential broker.
 pub struct Generator {
     client: LlmClient,
     model: String,

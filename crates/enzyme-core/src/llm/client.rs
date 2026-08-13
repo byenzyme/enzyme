@@ -14,7 +14,8 @@ const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/enzyme-python/free-config";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
+const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
 const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
 
 /// URL of the hosted free-config endpoint.
@@ -231,6 +232,12 @@ struct FreeConfigResponse {
     api_key: String,
     base_url: String,
     model: String,
+    /// Margins leases currently omit expiry because they are persistent. Keep
+    /// accepting an epoch-seconds expiry for forward compatibility with the
+    /// broker's shared lease contract; the existing five-minute client cache
+    /// remains the freshness authority.
+    #[serde(default)]
+    expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1255,7 +1262,7 @@ fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
     Ok(identity.bootstrap_id)
 }
 
-/// Fetch a free shared API key from the Enzyme server.
+/// Fetch an anonymous, usage-limited API key from the Margins orchestrator.
 async fn fetch_free_config() -> Result<ResolvedConfig> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -1265,32 +1272,19 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
     let free_config_url = free_config_url();
     debug!("Fetching free config from {}", free_config_url);
 
-    // If the user is logged in, attach auth so the server can gate/charge
-    // account credits. First initialization is allowed to be loginless; in
-    // that case the server may dispense a limited bootstrap config.
+    // Hosted catalyst credentials are brokered independently from Enzyme
+    // account login and credits. A stable installation id lets the Margins
+    // orchestrator reuse the same usage-limited lease.
     let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
-        .context("failed to resolve enzyme home for auth lookup")?;
-    let auth_path = enzyme_home.join("auth.json");
-    let token = crate::config::auth::AuthToken::load(&auth_path).ok();
+        .context("failed to resolve enzyme home for bootstrap identity")?;
+    let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
 
-    let mut req = client.get(&free_config_url);
-    if let Some(token) = &token {
-        req = req.header("Authorization", format!("Bearer {}", token.api_key));
-    } else {
-        let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
-        req = req.header("X-Enzyme-Bootstrap-Id", bootstrap_id);
-    }
-
-    let resp = req
+    let resp = client
+        .get(&free_config_url)
+        .header(FREE_CONFIG_BOOTSTRAP_HEADER, bootstrap_id)
         .send()
         .await
-        .context("failed to reach Enzyme server for free config")?;
-
-    if token.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
-        bail!(
-            "Enzyme hosted bootstrap is unavailable without login. Run `enzyme login` and retry, or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
-        );
-    }
+        .context("failed to reach Margins orchestrator for free config")?;
 
     if resp.status().as_u16() == 402 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -1302,13 +1296,18 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
 
     let resp: FreeConfigResponse = resp
         .error_for_status()
-        .context("Enzyme server returned an error for free config")?
+        .context("Margins orchestrator returned an error for free config")?
         .json()
         .await
         .context("failed to parse free config response")?;
 
+    // The orchestrator may add an epoch-seconds expiry in the future. It is
+    // intentionally not persisted yet: the existing cache TTL and 401 remint
+    // path remain unchanged by this endpoint-only migration.
+    let _ = resp.expires_at;
+
     info!(
-        "Resolved API config from Enzyme server (model={})",
+        "Resolved API config from Margins orchestrator (model={})",
         resp.model
     );
 
@@ -1437,7 +1436,7 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
         }
     }
 
-    // Fetch shared key from Enzyme server.
+    // Fetch a usage-limited lease from the Margins orchestrator.
     match fetch_free_config().await {
         Ok(cfg) => {
             write_free_config_cache(cache_path, &cfg);
@@ -1452,15 +1451,15 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
     }
 }
 
-/// Keep the specific hosted failure (insufficient credits, login required,
+/// Keep the specific hosted failure (capacity exhausted, request refused, or
 /// server unreachable) visible in the single-line error the CLI prints,
 /// since most callers format errors with `{}` and would otherwise show only
 /// a generic message.
 fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
     format!(
-        "{cause:#}. No hosted Enzyme LLM config available — run `enzyme login` and ensure \
-         network access/credits, or pass `--use-env-llm` to intentionally use \
-         OPENAI_API_KEY or OPENROUTER_API_KEY."
+        "{cause:#}. No hosted LLM config is available from the Margins orchestrator — \
+         check network access and try again, or pass `--use-env-llm` to intentionally \
+         use OPENAI_API_KEY or OPENROUTER_API_KEY."
     )
 }
 
@@ -1472,7 +1471,7 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
 /// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
 /// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
 /// 3. the on-disk API cache (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`)
-/// 4. Enzyme server free-config endpoint (hosted credits)
+/// 4. Margins orchestrator free-config endpoint (hosted fallback)
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
     let mode = match configured_catalyst_mode()? {
         CatalystMode::Auto => LlmCredentialMode::Auto,
@@ -1615,7 +1614,24 @@ mod tests {
         );
         let msg = hosted_config_unavailable_message(&cause);
         assert!(msg.contains("Insufficient credits (0.0 remaining)"));
+        assert!(msg.contains("Margins orchestrator"));
         assert!(msg.contains("--use-env-llm"));
+    }
+
+    #[test]
+    fn margins_free_config_contract_accepts_missing_or_epoch_expiry() {
+        let persistent: FreeConfigResponse = serde_json::from_str(
+            r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture"}"#,
+        )
+        .unwrap();
+        assert_eq!(persistent.expires_at, None);
+
+        let expiring: FreeConfigResponse = serde_json::from_str(
+            r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture","expires_at":1800000000}"#,
+        )
+        .unwrap();
+        assert_eq!(expiring.expires_at, Some(1_800_000_000));
+        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Margins-Bootstrap-Id");
     }
 
     #[test]

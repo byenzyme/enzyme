@@ -105,10 +105,10 @@ struct EnzymeApiState {
     credits_get_replies: Option<ReplyQueue>,
     /// `Authorization` header of every free-config request, in order.
     free_config_auth_headers: Vec<String>,
-    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
     free_config_bootstrap_ids: Vec<String>,
     /// When true, free-config answers 400 `Missing bootstrap id` if neither an
-    /// `Authorization` nor an `X-Enzyme-Bootstrap-Id` header is present
+    /// `Authorization` nor an `X-Margins-Bootstrap-Id` header is present
     /// (emulates the deployed unauthenticated contract, matrix config 7).
     free_config_require_bootstrap: bool,
 }
@@ -196,7 +196,7 @@ impl Respond for FreeConfigResponder {
                 .to_string()
         };
         let auth = header("authorization");
-        let bootstrap = header("x-enzyme-bootstrap-id");
+        let bootstrap = header("x-margins-bootstrap-id");
         state.free_config_auth_headers.push(auth.clone());
         state.free_config_bootstrap_ids.push(bootstrap.clone());
 
@@ -245,7 +245,7 @@ impl Respond for CountingResponder {
 
 impl MockEnzymeApi {
     /// Path the free-config endpoint is mounted at.
-    pub const FREE_CONFIG_PATH: &'static str = "/enzyme-python/free-config";
+    pub const FREE_CONFIG_PATH: &'static str = "/margins/free-config";
 
     /// Start a fake Enzyme API with a default balance of 100.0 credits and a
     /// free-config endpoint that hands back key `enz-free-test` pointing at
@@ -610,7 +610,7 @@ impl MockEnzymeApi {
         self.state.lock().unwrap().free_config_auth_headers.clone()
     }
 
-    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
     /// Empty string when absent. Proves an anonymous CLI sends a bootstrap id
     /// (matrix config 7) instead of a Bearer token.
     pub fn free_config_bootstrap_ids(&self) -> Vec<String> {
@@ -623,7 +623,7 @@ impl MockEnzymeApi {
 
     /// When enabled, free-config answers `400 { error: 'Missing bootstrap id' }`
     /// for a request carrying neither `Authorization` nor
-    /// `X-Enzyme-Bootstrap-Id` (deployed unauthenticated contract, config 7).
+    /// `X-Margins-Bootstrap-Id` (hosted broker contract, config 7).
     pub fn set_free_config_require_bootstrap(&self, require: bool) {
         self.state.lock().unwrap().free_config_require_bootstrap = require;
     }
