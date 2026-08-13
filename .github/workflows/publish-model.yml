@@ -6,7 +6,7 @@ on:
       manifest:
         description: Tracked model release manifest
         required: true
-        default: models/catalyst-135m-v3.release.json
+        default: crates/enzyme-core/models/catalyst-135m-v3.release.json
         type: string
 
 permissions:
@@ -27,8 +27,8 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
         run: |
           case "$MANIFEST" in
-            models/*.release.json) ;;
-            *) echo "manifest must be a tracked models/*.release.json file" >&2; exit 1 ;;
+            crates/enzyme-core/models/*.release.json) ;;
+            *) echo "manifest must be a tracked crates/enzyme-core/models/*.release.json file" >&2; exit 1 ;;
           esac
           test -f "$MANIFEST"
           jq -e '
@@ -37,7 +37,7 @@ jobs:
             (.size | type == "number") and .model_card
           ' "$MANIFEST" >/dev/null
           card=$(jq -r .model_card "$MANIFEST")
-          case "$card" in models/*.md) ;; *) exit 1 ;; esac
+          case "$card" in crates/enzyme-core/models/*.md) ;; *) exit 1 ;; esac
           test -f "$card"
           for key in name source_tag source_asset public_tag sha256 size model_card; do
             echo "$key=$(jq -r ".$key" "$MANIFEST")" >> "$GITHUB_OUTPUT"

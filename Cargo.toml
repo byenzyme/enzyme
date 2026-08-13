@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["scaffolding/ese-api-py"]
 resolver = "2"
 
 [workspace.package]
@@ -31,7 +32,7 @@ rust-embed = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Embedding inference
-ese = { path = "vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
+ese = { path = "crates/enzyme-core/vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
 
 # HNSW
 instant-distance = "0.6"

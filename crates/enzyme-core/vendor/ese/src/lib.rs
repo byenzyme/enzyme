@@ -108,5 +108,5 @@ pub fn encode_single(input: impl AsRef<str>) -> [f32; DIMENSIONS] {
     vector
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "scaffolding"))]
 mod test;

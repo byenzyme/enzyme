@@ -187,7 +187,7 @@ mod tests {
     fn default_registry_entry_matches_release_manifest() {
         let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../models/catalyst-135m-v3.release.json"
+            "/models/catalyst-135m-v3.release.json"
         )))
         .unwrap();
         let entry = lookup(DEFAULT_MODEL).unwrap();

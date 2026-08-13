@@ -10,6 +10,7 @@ homepage = "https://github.com/flowercomputers/ese"
 repository = "https://github.com/flowercomputers/ese"
 keywords = ["embeddings", "model2vec", "nlp", "search"]
 categories = ["text-processing", "artificial-intelligence", "compression", "encoding", "science"]
+autobenches = false
 
 [features]
 default = ["dim-512"]
@@ -24,6 +25,7 @@ quant-16 = []
 quant-8 = []
 rayon = ["dep:rayon"]
 tests = ["dep:tokenizers"]
+scaffolding = ["tests"]
 
 [dependencies]
 rayon = { version = "1", optional = true }
@@ -44,3 +46,13 @@ minreq = { version = "2", features = ["https-native"] }
 [[bench]]
 name = "gooaq"
 harness = false
+required-features = ["scaffolding"]
+
+[[bench]]
+name = "bench_encode"
+harness = false
+required-features = ["scaffolding"]
+
+[[test]]
+name = "build_support"
+required-features = ["scaffolding"]

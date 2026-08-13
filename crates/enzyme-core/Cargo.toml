@@ -1,34 +1,42 @@
 [package]
 name = "enzyme-core"
-version.workspace = true
-edition.workspace = true
+version = "0.7.2"
+edition = "2024"
 description = "Core library for Enzyme — local-first knowledge indexing and approximate search"
+license = "BUSL-1.1"
+repository = "https://github.com/useenzyme/enzyme-rust"
+publish = false
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-libsql = { workspace = true }
-ese = { workspace = true }
-instant-distance = { workspace = true }
-pulldown-cmark = { workspace = true }
-rayon = { workspace = true }
-walkdir = { workspace = true }
-ignore = { workspace = true }
-tracing = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
-dirs = { workspace = true }
-sha2 = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+libsql = { version = "0.9", default-features = false, features = ["core", "remote", "tls"] }
+ese = { path = "vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
+instant-distance = "0.6"
+pulldown-cmark = "0.12"
+rayon = "1"
+walkdir = "2"
+ignore = "0.4"
+tracing = "0.1"
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "6"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 async-stream = "0.3"
 toml = "0.8"
 
 [features]
+default = []
+embedder-compat = []
+# Benchmarks/examples and the vendored ESE test/benchmark harnesses are opt-in
+# so embedders receive a lean default build without downstream pruning.
+scaffolding = ["ese/scaffolding"]
 rten = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
 # In-process llama.cpp inference. OFF by default: enabling it pulls in
 # llama-cpp-sys-2, which needs cmake + a C/C++ toolchain + libclang.
@@ -67,3 +75,20 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "catalyze"
 harness = false
+required-features = ["scaffolding"]
+
+[[example]]
+name = "bench_cpu_features"
+required-features = ["scaffolding"]
+
+[[example]]
+name = "bench_ese_batching"
+required-features = ["scaffolding"]
+
+[[example]]
+name = "era_diagnostic"
+required-features = ["scaffolding"]
+
+[[example]]
+name = "recompute_sim"
+required-features = ["scaffolding"]

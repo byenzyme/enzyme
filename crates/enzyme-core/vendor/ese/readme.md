@@ -12,7 +12,7 @@ This accepts a single string
 
 ## To use
 
-Clone the repo, and reference locally as a crate in your rust project. If you want to use a preliminary python wheel version [see the documentation at `./api-py/readme.md`](./api-py/readme.md). You might need to `cargo install maturin`.
+Clone the repo and reference it locally as a crate in your Rust project. Enzyme keeps the optional Python wrapper outside the subtree-ready core at `scaffolding/ese-api-py/`.
 
 ### Crate features
 
