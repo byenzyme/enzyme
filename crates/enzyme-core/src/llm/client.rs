@@ -8,119 +8,20 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
+#[cfg(feature = "hosted-credentials")]
+mod credentials;
+#[cfg(feature = "hosted-credentials")]
+pub use credentials::*;
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEFAULT_MODEL: &str = "google/gemini-3-flash-preview";
+#[cfg(test)]
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
-const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
-const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
-const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
-
-/// URL of the hosted free-config endpoint.
-///
-/// Overridable via `ENZYME_FREE_CONFIG_URL` so tests can point at a local
-/// mock server; defaults to the production endpoint.
-fn free_config_url() -> String {
-    std::env::var("ENZYME_FREE_CONFIG_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| FREE_CONFIG_URL.to_string())
-}
-
-/// Path of the on-disk free-tier config cache.
-///
-/// Overridable via `ENZYME_API_CACHE_PATH` so tests can run hermetically in
-/// parallel; defaults to `/tmp/enzyme-api-cache`.
-fn api_cache_path() -> std::path::PathBuf {
-    std::env::var("ENZYME_API_CACHE_PATH")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
-}
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Pseudo-scheme marking a `ResolvedConfig` that runs in-process rather than
 /// over HTTP. `local://<model-name>`.
 const LOCAL_BASE_URL_SCHEME: &str = "local://";
-
-/// Resolve a config that points the pipeline at the in-process engine, if one
-/// is available. Always `None` without the `local-llm` feature.
-///
-/// Selection is controlled by the persisted catalyst mode. Auto prefers an
-/// installed local model and otherwise uses hosted; local requires one;
-/// hosted bypasses it. `ENZYME_LOCAL_ENGINE=0` is a legacy process opt-out.
-fn configured_catalyst_mode() -> Result<CatalystMode> {
-    Ok(EnzymeConfig::catalyst_llm_config()?.mode)
-}
-
-fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
-    if env_value("ENZYME_LOCAL_ENGINE").is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-    {
-        if required {
-            bail!(
-                "local catalyst mode is enabled but ENZYME_LOCAL_ENGINE disables it; unset the variable or run `enzyme model disable`"
-            );
-        }
-        return Ok(None);
-    }
-    match local_model_config_inner() {
-        Some(config) => Ok(Some(config)),
-        None if required => bail!(
-            "local catalyst mode requires model '{}', but it is not installed; run `enzyme model install {}`",
-            super::model_registry::selected_name(),
-            super::model_registry::selected_name()
-        ),
-        None => Ok(None),
-    }
-}
-
-#[cfg(not(feature = "local-llm"))]
-fn local_model_config_inner() -> Option<ResolvedConfig> {
-    None
-}
-
-#[cfg(feature = "local-llm")]
-fn local_model_config_inner() -> Option<ResolvedConfig> {
-    let (name, _path) = super::model_registry::active()?;
-    Some(ResolvedConfig {
-        api_key: String::new(),
-        base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
-        model: name,
-        provider: ConfigProvider::Local,
-    })
-}
-
-#[cfg(not(feature = "local-llm"))]
-fn local_backend(base_url: &str) -> Result<Backend> {
-    if base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
-        bail!("this Enzyme binary was built without local-model support");
-    }
-    Ok(Backend::Http)
-}
-
-/// Load (once per process) and bind the in-process engine for a `local://` URL.
-#[cfg(feature = "local-llm")]
-fn local_backend(base_url: &str) -> Result<Backend> {
-    use std::sync::Arc;
-
-    let Some(name) = base_url.strip_prefix(LOCAL_BASE_URL_SCHEME) else {
-        return Ok(Backend::Http);
-    };
-    let path = super::model_registry::model_path(name)?;
-    let engine = super::local_engine::LocalEngine::load(
-        &path,
-        name,
-        super::model_registry::context_window(name),
-    )
-    .with_context(|| {
-        format!(
-            "failed to load local model '{name}'; run `enzyme model verify {name}` or select another provider with `enzyme model disable`"
-        )
-    })?;
-    Ok(Backend::Local(Arc::new(engine)))
-}
 
 /// Translate an OpenAI `response_format` into a GBNF grammar for local
 /// decoding. `json_object` has no schema to constrain, so it decodes freely.
@@ -150,94 +51,6 @@ fn grammar_for(response_format: Option<&ResponseFormat>) -> Option<String> {
 pub struct LlmApiError {
     pub status: u16,
     pub body: String,
-}
-
-/// Typed error for an HTTP 402 from the hosted free-config endpoint: the
-/// account's Enzyme credits are exhausted. Billing errors can only come from
-/// billing endpoints (this fetch and `POST /v1/credits/deduct`), never from a
-/// completions call — so this is one of the only places top-up guidance is
-/// correct.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "Insufficient Enzyme credits ({credits:.1} remaining) — top up at \
-     app.enzyme.garden/plans or use --use-env-llm"
-)]
-pub struct EnzymeCreditsExhausted {
-    pub credits: f64,
-}
-
-/// Where the resolved API configuration came from.
-#[derive(Debug, Clone)]
-pub enum ConfigProvider {
-    Env,
-    Local,
-    ServerFallback,
-}
-
-/// Fully resolved LLM configuration (key, URL, model, source).
-#[derive(Debug, Clone)]
-pub struct ResolvedConfig {
-    pub api_key: String,
-    pub base_url: String,
-    pub model: String,
-    pub provider: ConfigProvider,
-}
-
-/// Which LLM credentials the caller explicitly wants to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LlmCredentialMode {
-    /// Apply the persisted auto/local/hosted preference.
-    Auto,
-    /// Require the selected installed local model.
-    Local,
-    /// Use Enzyme hosted bootstrap/auth, bypassing installed local models.
-    Hosted,
-    /// Use OPENAI_*/OPENROUTER_* env configuration only.
-    Env,
-}
-
-impl ResolvedConfig {
-    /// Format a masked display of the API key (e.g. `sk-••••••••abcd`).
-    pub fn masked_api_key(&self) -> String {
-        let key = &self.api_key;
-        if key.len() <= 4 {
-            "••••".to_string()
-        } else {
-            let visible = &key[key.len() - 4..];
-            format!("{}••••{}", &key[..3.min(key.len())], visible)
-        }
-    }
-
-    /// Model to use for LLM selection (one-shot, needs strong reasoning).
-    ///
-    /// For free-tier users the server may return a cheap catalyst model
-    /// (e.g. flash-lite). Selection is a single call that benefits from a
-    /// more capable model, so we upgrade to DEFAULT_MODEL in that case.
-    pub fn selection_model(&self) -> &str {
-        match self.provider {
-            ConfigProvider::ServerFallback => DEFAULT_MODEL,
-            _ => &self.model,
-        }
-    }
-
-    /// Whether this config came from the free-tier server fallback.
-    pub fn is_free_tier(&self) -> bool {
-        matches!(self.provider, ConfigProvider::ServerFallback)
-    }
-}
-
-/// Shape of the JSON returned by the free-config endpoint.
-#[derive(Deserialize)]
-struct FreeConfigResponse {
-    api_key: String,
-    base_url: String,
-    model: String,
-    /// Margins leases currently omit expiry because they are persistent. Keep
-    /// accepting an epoch-seconds expiry for forward compatibility with the
-    /// broker's shared lease contract; the existing five-minute client cache
-    /// remains the freshness authority.
-    #[serde(default)]
-    expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -457,6 +270,7 @@ pub struct LlmClient {
     base_url: String,
     /// Whether this client was created from the free-tier server fallback.
     /// When true, 401 errors trigger an automatic key refresh.
+    #[cfg(feature = "hosted-credentials")]
     free_tier: bool,
     /// Only read on the `local-llm` paths; always `Http` otherwise.
     #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
@@ -758,32 +572,20 @@ struct StreamingDelta {
     content: Option<String>,
 }
 
-/// How long a cached free-tier config is considered fresh (5 minutes).
-/// OpenRouter free-tier keys rotate frequently; a short TTL ensures we
-/// re-fetch before the key expires rather than discovering it mid-run via 401.
-const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
-
-#[derive(Deserialize, Serialize)]
-struct CachedFreeConfig {
-    api_key: String,
-    base_url: String,
-    model: String,
-    /// Unix timestamp (seconds) when the config was cached.
-    #[serde(default)]
-    cached_at: u64,
-}
-
-#[derive(Deserialize, Serialize)]
-struct BootstrapIdentity {
-    bootstrap_id: String,
+fn completion_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(LLM_REQUEST_TIMEOUT)
+        .build()
+        .expect("valid completion HTTP client configuration")
 }
 
 impl LlmClient {
     pub fn new(api_key: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: completion_http_client(),
             api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: DEFAULT_BASE_URL.to_string(),
+            #[cfg(feature = "hosted-credentials")]
             free_tier: false,
             backend: Backend::Http,
         }
@@ -791,9 +593,10 @@ impl LlmClient {
 
     pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: completion_http_client(),
             api_key: Arc::new(RwLock::new(api_key.to_string())),
             base_url: base_url.to_string(),
+            #[cfg(feature = "hosted-credentials")]
             free_tier: false,
             backend: Backend::Http,
         }
@@ -818,9 +621,10 @@ impl LlmClient {
             )
         })?;
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: completion_http_client(),
             api_key: Arc::new(RwLock::new(String::new())),
             base_url: format!("{LOCAL_BASE_URL_SCHEME}{model}"),
+            #[cfg(feature = "hosted-credentials")]
             free_tier: false,
             backend: Backend::Local(Arc::new(engine)),
         })
@@ -829,22 +633,6 @@ impl LlmClient {
     #[cfg(not(feature = "local-llm"))]
     pub fn from_local_model(_path: &std::path::Path, _model: &str) -> Result<Self> {
         bail!("this Enzyme build does not include local-model support")
-    }
-
-    /// Create a client from a resolved config, preserving free-tier status
-    /// so that 401 errors can trigger automatic key refresh.
-    ///
-    /// A `local://<model>` base URL binds the in-process engine instead of the
-    /// HTTP client; only [`resolve_api_config`] mints such a config, and only
-    /// when the binary was built with `local-llm`.
-    pub fn from_config(config: &ResolvedConfig) -> Result<Self> {
-        Ok(Self {
-            client: reqwest::Client::new(),
-            api_key: Arc::new(RwLock::new(config.api_key.clone())),
-            base_url: config.base_url.clone(),
-            free_tier: config.is_free_tier(),
-            backend: local_backend(&config.base_url)?,
-        })
     }
 
     /// Whether this client targets OpenRouter (enables prompt caching via cache_control).
@@ -879,27 +667,6 @@ impl LlmClient {
     /// Read the current API key.
     fn current_api_key(&self) -> String {
         self.api_key.read().unwrap().clone()
-    }
-
-    /// Attempt to refresh the API key by re-fetching from the free-config endpoint.
-    /// Returns true if the key was actually updated.
-    async fn try_refresh_key(&self) -> bool {
-        if !self.free_tier {
-            return false;
-        }
-        info!("free-tier key returned 401, refreshing from server");
-        invalidate_free_config_cache();
-        match fetch_free_config().await {
-            Ok(cfg) => {
-                *self.api_key.write().unwrap() = cfg.api_key.clone();
-                write_free_config_cache(&api_cache_path(), &cfg);
-                true
-            }
-            Err(e) => {
-                warn!("failed to refresh free-tier key: {}", e);
-                false
-            }
-        }
     }
 
     /// Send a single chat completion request with the given API key.
@@ -1027,6 +794,7 @@ impl LlmClient {
             .await
         {
             Ok(content) => Ok(content),
+            #[cfg(feature = "hosted-credentials")]
             Err(e) if self.free_tier && e.to_string().contains("401") => {
                 // Key likely rotated — refresh and retry once
                 if self.try_refresh_key().await {
@@ -1089,6 +857,7 @@ impl LlmClient {
             .send_streaming_request(&url, &api_key, &request_body)
             .await?;
 
+        #[cfg(feature = "hosted-credentials")]
         if self.free_tier && response.status() == reqwest::StatusCode::UNAUTHORIZED {
             if self.try_refresh_key().await {
                 let new_key = self.current_api_key();
@@ -1215,367 +984,9 @@ impl LlmClient {
     }
 }
 
-/// Delete the cached free-tier config so the next resolve re-fetches.
-fn invalidate_free_config_cache() {
-    let _ = std::fs::remove_file(api_cache_path());
-}
-
-/// Write a resolved free-tier config to the cache with a timestamp.
-fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig) {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let cached = CachedFreeConfig {
-        api_key: cfg.api_key.clone(),
-        base_url: cfg.base_url.clone(),
-        model: cfg.model.clone(),
-        cached_at: now_secs,
-    };
-    if let Ok(json) = serde_json::to_string(&cached) {
-        let _ = std::fs::write(path, json);
-    }
-}
-
-fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
-    if path.exists() {
-        let contents = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        if let Ok(identity) = serde_json::from_str::<BootstrapIdentity>(&contents) {
-            if !identity.bootstrap_id.trim().is_empty() {
-                return Ok(identity.bootstrap_id);
-            }
-        }
-    }
-
-    let identity = BootstrapIdentity {
-        bootstrap_id: uuid::Uuid::new_v4().to_string(),
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let contents = serde_json::to_string_pretty(&identity)
-        .context("failed to serialize bootstrap identity")?;
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(identity.bootstrap_id)
-}
-
-/// Fetch an anonymous, usage-limited API key from the Margins orchestrator.
-async fn fetch_free_config() -> Result<ResolvedConfig> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let free_config_url = free_config_url();
-    debug!("Fetching free config from {}", free_config_url);
-
-    // Hosted catalyst credentials are brokered independently from Enzyme
-    // account login and credits. A stable installation id lets the Margins
-    // orchestrator reuse the same usage-limited lease.
-    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
-        .context("failed to resolve enzyme home for bootstrap identity")?;
-    let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
-
-    let resp = client
-        .get(&free_config_url)
-        .header(FREE_CONFIG_BOOTSTRAP_HEADER, bootstrap_id)
-        .send()
-        .await
-        .context("failed to reach Margins orchestrator for free config")?;
-
-    if resp.status().as_u16() == 402 {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let credits = body["credits"].as_f64().unwrap_or(0.0);
-        // Typed so callers (e.g. `init`'s skip diagnostic) can distinguish a
-        // reachable server's credit refusal from a genuine network failure.
-        return Err(EnzymeCreditsExhausted { credits }.into());
-    }
-
-    let resp: FreeConfigResponse = resp
-        .error_for_status()
-        .context("Margins orchestrator returned an error for free config")?
-        .json()
-        .await
-        .context("failed to parse free config response")?;
-
-    // The orchestrator may add an epoch-seconds expiry in the future. It is
-    // intentionally not persisted yet: the existing cache TTL and 401 remint
-    // path remain unchanged by this endpoint-only migration.
-    let _ = resp.expires_at;
-
-    info!(
-        "Resolved API config from Margins orchestrator (model={})",
-        resp.model
-    );
-
-    Ok(ResolvedConfig {
-        api_key: resp.api_key,
-        base_url: resp.base_url,
-        model: resp.model,
-        provider: ConfigProvider::ServerFallback,
-    })
-}
-
-fn env_value(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
-}
-
-fn first_env_value<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-    get_env: &impl Fn(&str) -> Option<String>,
-) -> Option<String> {
-    names.into_iter().find_map(get_env)
-}
-
-fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Option<ResolvedConfig>> {
-    let openai_key = first_env_value(["OPENAI_API_KEY"], &get_env);
-    let openrouter_key = first_env_value(["OPENROUTER_API_KEY"], &get_env);
-
-    if let Some(key) = openai_key {
-        let base_url = first_env_value(["OPENAI_BASE_URL"], &get_env)
-            .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_string());
-        let model = first_env_value(["OPENAI_MODEL"], &get_env)
-            .unwrap_or_else(|| OPENAI_DEFAULT_MODEL.to_string());
-        debug!(
-            "Resolved API key from OPENAI_API_KEY (base_url={}, model={})",
-            base_url, model
-        );
-        return Ok(Some(ResolvedConfig {
-            api_key: key,
-            base_url,
-            model,
-            provider: ConfigProvider::Env,
-        }));
-    }
-
-    if let Some(key) = openrouter_key {
-        let base_url = first_env_value(["OPENROUTER_BASE_URL"], &get_env)
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let model = first_env_value(["OPENROUTER_MODEL"], &get_env)
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        debug!(
-            "Resolved API key from OPENROUTER_API_KEY (base_url={}, model={})",
-            base_url, model
-        );
-        return Ok(Some(ResolvedConfig {
-            api_key: key,
-            base_url,
-            model,
-            provider: ConfigProvider::Env,
-        }));
-    }
-
-    for var in [
-        "OPENAI_BASE_URL",
-        "OPENAI_MODEL",
-        "OPENROUTER_BASE_URL",
-        "OPENROUTER_MODEL",
-    ] {
-        if get_env(var).is_some() {
-            warn!("{var} is set but no LLM API key env var is set — ignoring partial env config");
-            break;
-        }
-    }
-
-    Ok(None)
-}
-
-async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
-    // Reuse cached free-tier config from /tmp if present and not expired.
-    let cache_path = api_cache_path();
-    let cache_path = cache_path.as_path();
-    if cache_path.exists() {
-        // The cache file may be shared with a co-located (possibly newer) CLI.
-        // A file that cannot be read or parsed is treated as ABSENT — fall
-        // through to a fresh fetch, which overwrites the unusable file.
-        // Propagating the parse error would leave no recovery path even though
-        // the server is reachable and can mint a usable lease.
-        let cached: Option<CachedFreeConfig> = std::fs::read_to_string(cache_path)
-            .ok()
-            .and_then(|contents| serde_json::from_str(&contents).ok());
-
-        match cached {
-            Some(cached) => {
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let age_secs = now_secs.saturating_sub(cached.cached_at);
-                let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
-
-                if !cached.api_key.is_empty() && !expired {
-                    debug!(
-                        "Resolved API config from {} (age={}s)",
-                        cache_path.display(),
-                        age_secs
-                    );
-                    return Ok(ResolvedConfig {
-                        api_key: cached.api_key,
-                        base_url: cached.base_url,
-                        model: cached.model,
-                        provider: ConfigProvider::ServerFallback,
-                    });
-                }
-
-                if expired {
-                    debug!(
-                        "Cached free-tier config expired (age={}s, ttl={}s), re-fetching",
-                        age_secs, FREE_CONFIG_CACHE_TTL_SECS
-                    );
-                }
-            }
-            None => {
-                warn!(
-                    "Unusable API cache at {}; discarding and re-fetching",
-                    cache_path.display()
-                );
-            }
-        }
-    }
-
-    // Fetch a usage-limited lease from the Margins orchestrator.
-    match fetch_free_config().await {
-        Ok(cfg) => {
-            write_free_config_cache(cache_path, &cfg);
-            Ok(cfg)
-        }
-        Err(e) => {
-            // `context` rather than `bail!` so typed causes (e.g.
-            // `EnzymeCreditsExhausted`) remain downcastable by callers.
-            let msg = hosted_config_unavailable_message(&e);
-            Err(e.context(msg))
-        }
-    }
-}
-
-/// Keep the specific hosted failure (capacity exhausted, request refused, or
-/// server unreachable) visible in the single-line error the CLI prints,
-/// since most callers format errors with `{}` and would otherwise show only
-/// a generic message.
-fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
-    format!(
-        "{cause:#}. No hosted LLM config is available from the Margins orchestrator — \
-         check network access and try again, or pass `--use-env-llm` to intentionally \
-         use OPENAI_API_KEY or OPENROUTER_API_KEY."
-    )
-}
-
-/// Resolve the API key, base URL, and model for LLM requests.
-///
-/// Checks (in order):
-/// 0. the in-process local engine, when built with `local-llm`, a model is
-///    installed, and no explicit `*_BASE_URL` override is set
-/// 1. `OPENAI_API_KEY` + optional `OPENAI_BASE_URL` / `OPENAI_MODEL`
-/// 2. `OPENROUTER_API_KEY` + optional `OPENROUTER_BASE_URL` / `OPENROUTER_MODEL`
-/// 3. the on-disk API cache (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`)
-/// 4. Margins orchestrator free-config endpoint (hosted fallback)
-pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    let mode = match configured_catalyst_mode()? {
-        CatalystMode::Auto => LlmCredentialMode::Auto,
-        CatalystMode::Local => LlmCredentialMode::Local,
-        CatalystMode::Hosted => LlmCredentialMode::Hosted,
-    };
-    if !matches!(mode, LlmCredentialMode::Auto) {
-        return resolve_api_config_for_mode(mode).await;
-    }
-    if let Some(config) = local_model_config(false)? {
-        return Ok(config);
-    }
-    if let Some(config) = resolved_env_config(env_value)? {
-        return Ok(config);
-    }
-    resolve_hosted_api_config().await
-}
-
-/// Resolve API configuration in an explicit credential mode.
-pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<ResolvedConfig> {
-    match mode {
-        LlmCredentialMode::Auto => match configured_catalyst_mode()? {
-            CatalystMode::Auto => match local_model_config(false)? {
-                // An installed local model means the machine can generate offline;
-                // prefer it over spending hosted credits.
-                Some(config) => Ok(config),
-                None => resolve_hosted_api_config().await,
-            },
-            CatalystMode::Local => local_model_config(true)?
-                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable")),
-            CatalystMode::Hosted => resolve_hosted_api_config().await,
-        },
-        LlmCredentialMode::Local => local_model_config(true)?
-            .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable")),
-        LlmCredentialMode::Hosted => resolve_hosted_api_config().await,
-        LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "No env LLM config found. Set OPENAI_API_KEY or OPENROUTER_API_KEY, \
-                 or omit `--use-env-llm` to use Enzyme hosted credits."
-            )
-        }),
-    }
-}
-
-/// Resolve API configuration and construct an LLM client that preserves
-/// provider metadata such as free-tier refresh behavior.
-pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
-    let config = resolve_api_config().await?;
-    let client = LlmClient::from_config(&config)?;
-    Ok((config, client))
-}
-
-/// Synchronously load and construct the preferred in-process local client.
-///
-/// This is intentionally separate from async provider resolution so callers
-/// can run expensive llama.cpp/Metal startup on a blocking worker while doing
-/// unrelated work. It returns `None` when local inference is unavailable,
-/// explicitly overridden, or disabled; it never consults hosted credentials.
-pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, LlmClient)>> {
-    let mode = configured_catalyst_mode()?;
-    if matches!(mode, CatalystMode::Hosted) {
-        return Ok(None);
-    }
-    let config = match local_model_config(matches!(mode, CatalystMode::Local))? {
-        Some(config) => config,
-        None => return Ok(None),
-    };
-    let started = std::time::Instant::now();
-    let client = LlmClient::from_config(&config)?;
-    info!(
-        model = config.model,
-        duration_ms = started.elapsed().as_millis(),
-        "local LLM preload complete"
-    );
-    Ok(Some((config, client)))
-}
-
-/// Resolve API configuration in an explicit credential mode and construct an
-/// LLM client that preserves provider metadata such as free-tier behavior.
-pub async fn resolve_llm_client_for_mode(
-    mode: LlmCredentialMode,
-) -> Result<(ResolvedConfig, LlmClient)> {
-    let config = resolve_api_config_for_mode(mode).await?;
-    let client = LlmClient::from_config(&config)?;
-    Ok((config, client))
-}
-
-/// Backward-compatible: resolve just the API key.
-pub async fn resolve_api_key() -> Result<String> {
-    resolve_api_config().await.map(|c| c.api_key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let values: HashMap<String, String> = vars
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
-        move |key| values.get(key).cloned()
-    }
 
     /// Pins the `LlmApiError` Display prefix. Any consumer that (as a
     /// fallback) matches the stringified error must agree with this format;
@@ -1590,96 +1001,6 @@ mod tests {
             err.to_string(),
             r#"LLM API returned status 402: {"error":{"message":"Insufficient credits"}}"#
         );
-    }
-
-    /// The typed credit-exhaustion error must stay downcastable through the
-    /// context wrapper `resolve_hosted_api_config` adds, since `init` branches
-    /// on it to pick the skip diagnostic.
-    #[test]
-    fn credits_exhausted_survives_context_wrapping() {
-        let err = anyhow::Error::from(EnzymeCreditsExhausted { credits: 0.0 });
-        let wrapped = err.context(hosted_config_unavailable_message(&anyhow::anyhow!("x")));
-        assert!(wrapped.downcast_ref::<EnzymeCreditsExhausted>().is_some());
-        assert!(
-            EnzymeCreditsExhausted { credits: 0.0 }
-                .to_string()
-                .contains("app.enzyme.garden/plans")
-        );
-    }
-
-    #[test]
-    fn hosted_unavailable_message_preserves_specific_cause() {
-        let cause = anyhow::anyhow!(
-            "Insufficient credits (0.0 remaining). Visit app.enzyme.garden/plans to top up."
-        );
-        let msg = hosted_config_unavailable_message(&cause);
-        assert!(msg.contains("Insufficient credits (0.0 remaining)"));
-        assert!(msg.contains("Margins orchestrator"));
-        assert!(msg.contains("--use-env-llm"));
-    }
-
-    #[test]
-    fn margins_free_config_contract_accepts_missing_or_epoch_expiry() {
-        let persistent: FreeConfigResponse = serde_json::from_str(
-            r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture"}"#,
-        )
-        .unwrap();
-        assert_eq!(persistent.expires_at, None);
-
-        let expiring: FreeConfigResponse = serde_json::from_str(
-            r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture","expires_at":1800000000}"#,
-        )
-        .unwrap();
-        assert_eq!(expiring.expires_at, Some(1_800_000_000));
-        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Margins-Bootstrap-Id");
-    }
-
-    #[test]
-    fn openrouter_env_uses_openrouter_defaults() {
-        let config = resolved_env_config(env(&[("OPENROUTER_API_KEY", "openrouter-key")]))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(config.api_key, "openrouter-key");
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert!(matches!(config.provider, ConfigProvider::Env));
-    }
-
-    #[test]
-    fn openai_env_accepts_overrides() {
-        let config = resolved_env_config(env(&[
-            ("OPENAI_API_KEY", "openai-key"),
-            ("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            ("OPENAI_MODEL", "gpt-4o-mini"),
-        ]))
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(config.api_key, "openai-key");
-        assert_eq!(config.base_url, "https://api.openai.com/v1");
-        assert_eq!(config.model, "gpt-4o-mini");
-        assert!(matches!(config.provider, ConfigProvider::Env));
-    }
-
-    #[test]
-    fn openai_env_uses_openai_defaults() {
-        let config = resolved_env_config(env(&[("OPENAI_API_KEY", "openai-key")]))
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(config.api_key, "openai-key");
-        assert_eq!(config.base_url, OPENAI_DEFAULT_BASE_URL);
-        assert_eq!(config.model, OPENAI_DEFAULT_MODEL);
-        assert!(matches!(config.provider, ConfigProvider::Env));
-    }
-
-    #[test]
-    fn partial_env_config_does_not_block_fallback() {
-        let config =
-            resolved_env_config(env(&[("OPENAI_BASE_URL", "https://llm.example/v1")])).unwrap();
-
-        assert!(config.is_none());
     }
 
     #[test]

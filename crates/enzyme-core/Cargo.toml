@@ -11,7 +11,7 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-libsql = { version = "0.9", default-features = false, features = ["core", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
 ese = { path = "vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
 instant-distance = "0.6"
 pulldown-cmark = "0.12"
@@ -34,6 +34,9 @@ toml = "0.8"
 [features]
 default = []
 embedder-compat = []
+# CLI-only credential, account, and hosted free-tier resolution. Embedders
+# construct Generator/LlmClient explicitly and do not compile this machinery.
+hosted-credentials = ["libsql/tls"]
 # Benchmarks/examples and the vendored ESE test/benchmark harnesses are opt-in
 # so embedders receive a lean default build without downstream pruning.
 scaffolding = ["ese/scaffolding"]
