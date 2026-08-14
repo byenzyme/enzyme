@@ -54,7 +54,7 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --bin enzyme
+        run: cargo build --release --target ${{ matrix.target }} --bin enzyme --features local-llm
 
       - name: Package
         run: |
@@ -92,8 +92,8 @@ jobs:
               "name": "Joshua Pham",
               "url": "https://github.com/useenzyme"
             },
-            "homepage": "https://enzyme.garden",
-            "documentation": "https://enzyme.garden/setup",
+            "homepage": "https://memory.enzyme.garden",
+            "documentation": "https://memory.enzyme.garden/setup",
             "repository": {
               "type": "github",
               "url": "https://github.com/useenzyme/enzyme"
@@ -202,7 +202,7 @@ jobs:
             "title": "Enzyme",
             "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
             "version": "${VERSION}",
-            "websiteUrl": "https://enzyme.garden",
+            "websiteUrl": "https://memory.enzyme.garden",
             "repository": {
               "url": "https://github.com/useenzyme/enzyme",
               "source": "github"
@@ -511,7 +511,7 @@ jobs:
                 Then ask your agent: Use Enzyme to inspect and initialize this vault.
                 Terminal-only setup: enzyme scan --write-config && enzyme init
 
-                Setup guide: https://enzyme.garden/setup
+                Setup guide: https://memory.enzyme.garden/setup
               EOS
             end
 

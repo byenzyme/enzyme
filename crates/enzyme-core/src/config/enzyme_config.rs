@@ -12,7 +12,7 @@ use crate::models::{EntityType, ROOT_FOLDER_ENTITY};
 /// Comment header prepended to config.toml on every save.
 const CONFIG_HEADER: &str = "\
 # Enzyme configuration
-# https://enzyme.garden/docs/config
+# https://memory.enzyme.garden/docs/config
 #
 # This file configures how Enzyme processes your Obsidian vault(s).
 # Edit it directly \u{2014} changes take effect on the next `enzyme refresh`.

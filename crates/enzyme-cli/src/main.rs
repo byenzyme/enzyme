@@ -144,7 +144,7 @@ enum Commands {
     /// Show vault status and configuration
     Status,
 
-    /// Sign in to enzyme.garden
+    /// Sign in to memory.enzyme.garden
     Login {
         /// Do not try to open a browser automatically
         #[arg(long)]
@@ -155,7 +155,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Sign out of enzyme.garden
+    /// Sign out of memory.enzyme.garden
     Logout,
 
     /// Start MCP (Model Context Protocol) server over stdio

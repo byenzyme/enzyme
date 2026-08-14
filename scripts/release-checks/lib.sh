@@ -47,7 +47,7 @@ isolated_home() {
 require_bin() {
   if [ ! -x "$ENZYME_BIN" ]; then
     echo "release-checks: enzyme binary not found at $ENZYME_BIN" >&2
-    echo "run: cargo build -p enzyme-cli   (or set ENZYME_BIN)" >&2
+    echo "run: cargo build -p enzyme-cli --features local-llm   (or set ENZYME_BIN)" >&2
     exit 1
   fi
 }

@@ -10,7 +10,7 @@
 [![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
 
-[Website](https://enzyme.garden) · [Docs](https://enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
+[Website](https://memory.enzyme.garden) · [Docs](https://memory.enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
 
 </div>
 
@@ -185,6 +185,6 @@ This matters when you're building on imported content (reading highlights, curat
 
 ## Links
 
-- [enzyme.garden](https://enzyme.garden) — landing page
-- [Docs](https://enzyme.garden/docs) — how it works, catalysts, target search, for teams
-- [Setup guide](https://enzyme.garden/setup) — install and configure
+- [memory.enzyme.garden](https://memory.enzyme.garden) — landing page
+- [Docs](https://memory.enzyme.garden/docs) — how it works, catalysts, target search, for teams
+- [Setup guide](https://memory.enzyme.garden/setup) — install and configure

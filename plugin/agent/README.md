@@ -18,7 +18,7 @@ One `enzyme petri` call at session start gives the model your trending topics, t
 
 11 MB binary. 23 MB embedding model. Compiles 1,000+ docs in under 20s. $0 per query.
 
-This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://docs.openclaw.ai), with self-installing binary bootstrap. For the core CLI: [useenzyme/enzyme](https://github.com/useenzyme/enzyme). Docs and architecture: [enzyme.garden](https://enzyme.garden).
+This repo packages enzyme as a plugin for [Hermes](https://github.com/NousResearch/hermes-agent) and [OpenClaw](https://docs.openclaw.ai), with self-installing binary bootstrap. For the core CLI: [useenzyme/enzyme](https://github.com/useenzyme/enzyme). Docs and architecture: [memory.enzyme.garden](https://memory.enzyme.garden).
 
 ---
 
@@ -362,7 +362,7 @@ The live test exercises real `hermes chat` turns, plugin hooks, and enzyme tool 
 
 ## Links
 
-- [enzyme.garden](https://enzyme.garden) — docs
+- [memory.enzyme.garden](https://memory.enzyme.garden) — docs
 - [useenzyme/enzyme](https://github.com/useenzyme/enzyme) — CLI releases and Claude Code plugin
 - [Discord](https://discord.gg/nhvsqtKjQd)
 

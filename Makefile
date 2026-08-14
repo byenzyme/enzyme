@@ -39,16 +39,16 @@ check-workspace-skill:
 # Set ENZYME_TEST_VAULT to a snapshot-vault.sh output to add the real-scale
 # tier; set ENZYME_CHECK_FULL=0 to skip the hosted-bootstrap full-init tier.
 release-check:
-	cargo build -p enzyme-cli
+	cargo build -p enzyme-cli --features local-llm
 	bash scripts/release-checks/10-install-matrix.sh
 	bash scripts/release-checks/20-sync-contract.sh
 	bash scripts/release-checks/30-vault-lifecycle.sh
 
-# Agentic release checks: a headless Claude agent does the enzyme.garden
+# Agentic release checks: a headless Claude agent does the memory.enzyme.garden
 # cold-start install and a full teardown, graded by deterministic assertions.
 # Uses the local claude subscription; run at release time or nightly.
 release-check-agentic:
-	cargo build -p enzyme-cli
+	cargo build -p enzyme-cli --features local-llm
 	bash scripts/release-checks/40-agentic-setup.sh
 
 # Snapshot the real vault's markdown corpus into ~/.enzyme-test-vaults/real

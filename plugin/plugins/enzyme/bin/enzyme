@@ -24,7 +24,7 @@ case "${OS}-${ARCH}" in
     Linux-aarch64)  BINARY="enzyme-linux-arm64"  ;;
     *)
         echo "enzyme: this plugin bundles Linux binaries for the Claude desktop VM only." >&2
-        echo "For host CLI use, install via Homebrew or https://enzyme.garden/install.sh" >&2
+        echo "For host CLI use, install via Homebrew or https://memory.enzyme.garden/install.sh" >&2
         echo "Standalone binaries: https://github.com/useenzyme/enzyme/releases" >&2
         exit 1
         ;;

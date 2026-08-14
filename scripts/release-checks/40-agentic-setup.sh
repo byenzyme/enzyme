@@ -3,7 +3,7 @@
 # two setup journeys users actually take, and grade with deterministic
 # assertions.
 #
-#   cold-start — agent is pointed at https://enzyme.garden in a fresh sandbox
+#   cold-start — agent is pointed at https://memory.enzyme.garden in a fresh sandbox
 #                and must install enzyme and set up a markdown workspace.
 #                Exercises the public site copy, install.sh, the released
 #                binary, and loginless hosted bootstrap end to end.
@@ -98,7 +98,7 @@ HOME override is present in that exact command line. Never install to or
 modify anything outside $sandbox and this workspace.
 
 Task: this workspace ($ws) is a markdown notes vault with no Enzyme setup.
-Fetch https://enzyme.garden and follow its published instructions to install
+Fetch https://memory.enzyme.garden and follow its published instructions to install
 the enzyme CLI and set up this workspace, exactly as a new user would. Do not
 use any local checkout or prior knowledge of undocumented flags; rely on what
 the site and the installed tool tell you. Finish when 'enzyme status' (run

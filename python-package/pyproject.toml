@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://enzyme.garden"
+Homepage = "https://memory.enzyme.garden"
 Repository = "https://github.com/useenzyme/enzyme"
 
 [project.scripts]

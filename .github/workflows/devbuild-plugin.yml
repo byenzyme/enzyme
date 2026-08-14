@@ -1,6 +1,6 @@
 name: Devbuild plugin binaries
 
-# Build Linux binaries on demand and stash them as artifacts so we can
+# Build release binaries on demand and stash them as artifacts so we can
 # manually push an updated plugin to useenzyme/enzyme without cutting a release.
 
 on:
@@ -23,6 +23,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            release_name: macos-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            release_name: macos-x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             release_name: linux-x86_64
@@ -55,7 +61,7 @@ jobs:
         run: cd ui && npm ci && npm run build
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }} --bin enzyme
+        run: cargo build --release --target ${{ matrix.target }} --bin enzyme --features local-llm
 
       - name: Stage binary
         run: |

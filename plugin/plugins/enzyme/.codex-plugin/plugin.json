@@ -6,7 +6,7 @@
     "name": "Joshua Pham",
     "url": "https://github.com/useenzyme"
   },
-  "homepage": "https://enzyme.garden",
+  "homepage": "https://memory.enzyme.garden",
   "repository": "https://github.com/useenzyme/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
@@ -18,7 +18,7 @@
     "developerName": "Joshua Pham",
     "category": "Productivity",
     "capabilities": ["Local indexing", "Explicit refresh", "Vault setup"],
-    "websiteURL": "https://enzyme.garden",
+    "websiteURL": "https://memory.enzyme.garden",
     "defaultPrompt": [
       "Set up Enzyme for this vault.",
       "Scan this vault and confirm what to index.",

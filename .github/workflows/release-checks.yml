@@ -43,7 +43,7 @@ jobs:
         run: mkdir -p ui/dist && echo "release-checks placeholder" > ui/dist/index.html
 
       - name: Build enzyme-cli
-        run: cargo build -p enzyme-cli
+        run: cargo build -p enzyme-cli --features local-llm
 
       - name: Install matrix
         run: bash scripts/release-checks/10-install-matrix.sh
@@ -52,6 +52,6 @@ jobs:
         run: bash scripts/release-checks/20-sync-contract.sh
 
       # The full tier exercises the loginless hosted bootstrap against
-      # enzyme.garden — the real cold-start path — from a clean environment.
+      # memory.enzyme.garden — the real cold-start path — from a clean environment.
       - name: Vault lifecycle
         run: bash scripts/release-checks/30-vault-lifecycle.sh

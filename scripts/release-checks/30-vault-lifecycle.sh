@@ -8,7 +8,7 @@
 #                        sweep: empty-catalyst retrieval, malformed frontmatter,
 #                        corrupt DB, uninitialized vault.
 #   full     (default) — full init on the small canary fixture through the
-#                        loginless hosted bootstrap (the enzyme.garden cold-start
+#                        loginless hosted bootstrap (the memory.enzyme.garden cold-start
 #                        path). Asserts embeddings, catalysts, canary retrieval,
 #                        and incremental refresh. Consumes a small amount of
 #                        hosted bootstrap credits; skip with ENZYME_CHECK_FULL=0.
