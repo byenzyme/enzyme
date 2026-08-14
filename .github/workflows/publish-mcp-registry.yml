@@ -1,0 +1,58 @@
+name: Publish MCP Registry metadata
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Public Enzyme release tag containing server.json
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Public Enzyme release tag containing server.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and validate server metadata
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Invalid release tag: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+          curl --fail --location --silent --show-error \
+            --output server.json \
+            "https://github.com/byenzyme/enzyme/releases/download/${RELEASE_TAG}/server.json"
+
+          version="${RELEASE_TAG#v}"
+          jq --exit-status --arg version "$version" '
+            .name == "io.github.byenzyme/enzyme" and
+            .version == $version and
+            .repository.url == "https://github.com/byenzyme/enzyme"
+          ' server.json >/dev/null
+
+      - name: Install MCP Registry publisher
+        run: |
+          archive="$RUNNER_TEMP/mcp-publisher.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz"
+          tar --extract --gzip --file "$archive" --directory "$RUNNER_TEMP" mcp-publisher
+          chmod +x "$RUNNER_TEMP/mcp-publisher"
+
+      - name: Publish through GitHub OIDC
+        run: |
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          "$RUNNER_TEMP/mcp-publisher" publish server.json
+
