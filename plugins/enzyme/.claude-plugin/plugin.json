@@ -1,13 +1,13 @@
 {
   "name": "enzyme",
   "description": "Set up and keep Enzyme fresh for local knowledge vaults",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "author": {
     "name": "Joshua Pham",
-    "url": "https://github.com/byenzyme"
+    "url": "https://github.com/useenzyme"
   },
-  "homepage": "https://enzyme.garden",
-  "repository": "https://github.com/byenzyme/enzyme",
+  "homepage": "https://memory.enzyme.garden",
+  "repository": "https://github.com/useenzyme/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
   "skills": "./skills/"

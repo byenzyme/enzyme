@@ -7,8 +7,8 @@ Semantic search and pattern discovery for Obsidian vaults, exposed as an OpenCla
 The plugin shells out to the `enzyme` CLI binary. Install that first:
 
 ```bash
-curl -fsSL https://enzyme.garden/install.sh | bash
-# or: brew install byenzyme/enzyme/enzyme-cli
+curl -fsSL https://memory.enzyme.garden/install.sh | bash
+# or: brew install useenzyme/enzyme/enzyme-cli
 ```
 
 Then install the plugin:

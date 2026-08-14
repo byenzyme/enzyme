@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.byenzyme/enzyme",
+  "name": "io.github.useenzyme/enzyme",
   "title": "Enzyme",
   "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
-  "version": "0.7.2",
-  "websiteUrl": "https://enzyme.garden",
+  "version": "0.8.0",
+  "websiteUrl": "https://memory.enzyme.garden",
   "repository": {
-    "url": "https://github.com/byenzyme/enzyme",
+    "url": "https://github.com/useenzyme/enzyme",
     "source": "github"
   },
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/byenzyme/enzyme/releases/download/v0.7.2/enzyme-mcp-0.7.2-macos-arm64.mcpb",
-      "fileSha256": "4adc2974dc0cdaf4b7786f95f1c5650a70397c6e87c97f0cecc63e3b8f208768",
+      "identifier": "https://github.com/useenzyme/enzyme/releases/download/v0.8.0/enzyme-mcp-0.8.0-macos-arm64.mcpb",
+      "fileSha256": "775238110e8706bce45ad3f25986957ba89dae6fbf390fc3623c8990f7b7ffaf",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -26,8 +26,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/byenzyme/enzyme/releases/download/v0.7.2/enzyme-mcp-0.7.2-macos-x86_64.mcpb",
-      "fileSha256": "a1e38b6d1594ba3205e9386208caee8cce68c5b4eff56fef0267d89417fc4b60",
+      "identifier": "https://github.com/useenzyme/enzyme/releases/download/v0.8.0/enzyme-mcp-0.8.0-macos-x86_64.mcpb",
+      "fileSha256": "f3587ee5aeba0483d83a413f534f999b8dae729b9c2839b2fad3157dd429a2ed",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -40,8 +40,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/byenzyme/enzyme/releases/download/v0.7.2/enzyme-mcp-0.7.2-linux-x86_64.mcpb",
-      "fileSha256": "983c37ad545773fda636ca43c25d29bf810f63d65c00e9f45ea611c32a0c04c8",
+      "identifier": "https://github.com/useenzyme/enzyme/releases/download/v0.8.0/enzyme-mcp-0.8.0-linux-x86_64.mcpb",
+      "fileSha256": "8c99bdea8fdced98e7d45011be2cf4020e3ce34ac11ecae0ef25bb625bfda82d",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {
@@ -54,8 +54,8 @@
       ]
     },{
       "registryType": "mcpb",
-      "identifier": "https://github.com/byenzyme/enzyme/releases/download/v0.7.2/enzyme-mcp-0.7.2-linux-arm64.mcpb",
-      "fileSha256": "844b55e185f8e6f45fd19d9dc06fd1e2e72384d6ae14505f98e0174cba571648",
+      "identifier": "https://github.com/useenzyme/enzyme/releases/download/v0.8.0/enzyme-mcp-0.8.0-linux-arm64.mcpb",
+      "fileSha256": "b2d9b8dcf5f65abb5548f6ee53036e382a02ef14f688b7a8b5844e52d3d3b6d2",
       "transport": { "type": "stdio" },
       "environmentVariables": [
         {

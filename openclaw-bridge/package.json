@@ -13,7 +13,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/byenzyme/enzyme-rust.git",
+    "url": "https://github.com/useenzyme/enzyme-rust.git",
     "directory": "plugin/openclaw-bridge"
   }
 }

@@ -6,11 +6,11 @@
 **Enzyme compiles 1,000+ documents into a concept graph in under 20 seconds. 8ms queries on device.**
 
 [![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
-[![License](https://img.shields.io/github/license/byenzyme/enzyme?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/byenzyme/enzyme?style=flat-square)](https://github.com/byenzyme/enzyme/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/byenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/byenzyme/enzyme/releases)
+[![License](https://img.shields.io/github/license/useenzyme/enzyme?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
 
-[Website](https://enzyme.garden) · [Docs](https://enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
+[Website](https://memory.enzyme.garden) · [Docs](https://memory.enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
 
 </div>
 
@@ -21,19 +21,19 @@ No conversation history needed. No runtime reasoning. The expensive work happens
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
 ```
 
 On macOS you can also use Homebrew:
 
 ```bash
-brew install byenzyme/enzyme/enzyme-cli
+brew install useenzyme/enzyme/enzyme-cli
 ```
 
 App plugins are optional and installed separately inside Claude Code or Codex:
 
 ```bash
-claude plugin marketplace add byenzyme/enzyme
+claude plugin marketplace add useenzyme/enzyme
 claude plugin install enzyme
 ```
 
@@ -185,6 +185,6 @@ This matters when you're building on imported content (reading highlights, curat
 
 ## Links
 
-- [enzyme.garden](https://enzyme.garden) — landing page
-- [Docs](https://enzyme.garden/docs) — how it works, catalysts, target search, for teams
-- [Setup guide](https://enzyme.garden/setup) — install and configure
+- [memory.enzyme.garden](https://memory.enzyme.garden) — landing page
+- [Docs](https://memory.enzyme.garden/docs) — how it works, catalysts, target search, for teams
+- [Setup guide](https://memory.enzyme.garden/setup) — install and configure

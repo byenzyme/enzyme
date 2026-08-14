@@ -1,7 +1,7 @@
 /**
  * Enzyme — OpenClaw memory/search plugin.
  *
- * Wraps the `enzyme` CLI binary (https://enzyme.garden) and exposes:
+ * Wraps the `enzyme` CLI binary (https://memory.enzyme.garden) and exposes:
  *   - Tools: enzyme_petri, enzyme_catalyze, enzyme_status
  *   - Hook (optional): before_prompt_build — auto-inject petri context per turn
  *   - Hook (optional): agent_end — refresh the vault index after a turn
