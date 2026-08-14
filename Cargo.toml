@@ -4,7 +4,7 @@ exclude = ["scaffolding/ese-api-py"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 license = "BUSL-1.1"
 repository = "https://github.com/useenzyme/enzyme-rust"

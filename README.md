@@ -26,7 +26,7 @@ Benchmarks on an M5 MacBook Pro:
 
 - **Indexing** — file discovery, entity extraction, and trending score computation happen in-process with no network calls.
 - **Embeddings** — computed locally on the ONNX runtime at zero API cost. The model is 23M parameters (BERT variant, int4 quantized) running on 4 threads. The daemon keeps it loaded across invocations so repeat runs skip model load time.
-- **Catalysts** — the only network call. Uses a small, fast model (Gemini Flash Lite via OpenRouter). Concurrent generation across all entities. A full vault refresh costs a few cents.
+- **Catalysts** — generated on-device when the local model is installed and selected. Without it, Enzyme uses the hosted bootstrap or an explicitly configured provider. Generation runs concurrently across entities.
 - **Search** — catalyst-mediated retrieval against precomputed similarities. Sub-second.
 - **Disk footprint** — single binary + 52 MB model file. Vault data lives in a SQLite database and a compact binary embeddings file alongside your vault. No Docker, no server.
 
@@ -136,7 +136,7 @@ The curl installer is CLI-only. Claude Code and Codex plugins are app-based inst
 | Embedding runtime | ONNX Runtime, 4 threads, Unix socket daemon |
 | Search | HNSW + BM25, catalyst-mediated |
 | Database | SQLite with WAL mode |
-| LLM | Gemini Flash Lite via OpenRouter (structured output) |
+| LLM | Local fine-tuned SmolLM2 via llama.cpp, or hosted Gemini Flash Lite (structured output) |
 | Catalyst profiles | dialectical, synthesis, relational, operational, strategic, reflective |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
