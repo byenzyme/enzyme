@@ -174,7 +174,7 @@ jobs:
             if [ -n "$PACKAGES" ]; then PACKAGES="${PACKAGES},"; fi
             PACKAGES="${PACKAGES}{
                 \"registryType\": \"mcpb\",
-                \"identifier\": \"https://github.com/useenzyme/enzyme/releases/download/v${VERSION}/$(basename "$MCPB_FILE")\",
+                \"identifier\": \"https://github.com/byenzyme/enzyme/releases/download/v${VERSION}/$(basename "$MCPB_FILE")\",
                 \"fileSha256\": \"${SHA256}\",
                 \"transport\": { \"type\": \"stdio\" },
                 \"environmentVariables\": [
@@ -198,13 +198,13 @@ jobs:
             cat > artifacts/server.json << EOF
           {
             "\$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-            "name": "io.github.useenzyme/enzyme",
+            "name": "io.github.byenzyme/enzyme",
             "title": "Enzyme",
             "description": "Semantic search and pattern discovery for Obsidian and markdown vaults.",
             "version": "${VERSION}",
             "websiteUrl": "https://memory.enzyme.garden",
             "repository": {
-              "url": "https://github.com/useenzyme/enzyme",
+              "url": "https://github.com/byenzyme/enzyme",
               "source": "github"
             },
             "packages": [
