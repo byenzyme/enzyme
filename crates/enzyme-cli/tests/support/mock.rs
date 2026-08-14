@@ -105,12 +105,22 @@ struct EnzymeApiState {
     credits_get_replies: Option<ReplyQueue>,
     /// `Authorization` header of every free-config request, in order.
     free_config_auth_headers: Vec<String>,
-    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
     free_config_bootstrap_ids: Vec<String>,
     /// When true, free-config answers 400 `Missing bootstrap id` if neither an
-    /// `Authorization` nor an `X-Margins-Bootstrap-Id` header is present
+    /// `Authorization` nor an `X-Enzyme-Bootstrap-Id` header is present
     /// (emulates the deployed unauthenticated contract, matrix config 7).
     free_config_require_bootstrap: bool,
+    /// When present, select the response from request identity instead of a
+    /// preselected tier payload. This models Enzyme server-side tier routing.
+    free_config_by_auth: Option<AuthRoutedFreeConfig>,
+}
+
+#[derive(Debug)]
+struct AuthRoutedFreeConfig {
+    expected_token: String,
+    authenticated: Reply,
+    anonymous: Reply,
 }
 
 /// Fake `api.enzyme.garden`: hosted credits + the free-config endpoint.
@@ -196,7 +206,7 @@ impl Respond for FreeConfigResponder {
                 .to_string()
         };
         let auth = header("authorization");
-        let bootstrap = header("x-margins-bootstrap-id");
+        let bootstrap = header("x-enzyme-bootstrap-id");
         state.free_config_auth_headers.push(auth.clone());
         state.free_config_bootstrap_ids.push(bootstrap.clone());
 
@@ -208,6 +218,19 @@ impl Respond for FreeConfigResponder {
                 "message": "Unauthenticated free-config requests must include x-enzyme-bootstrap-id.",
             });
             return template(&Reply::new(400, body.to_string()));
+        }
+
+        if let Some(routed) = &state.free_config_by_auth {
+            if auth == format!("Bearer {}", routed.expected_token) && bootstrap.is_empty() {
+                return template(&routed.authenticated);
+            }
+            if auth.is_empty() && !bootstrap.is_empty() {
+                return template(&routed.anonymous);
+            }
+            return template(&Reply::new(
+                401,
+                r#"{"error":"invalid hosted identity headers"}"#,
+            ));
         }
 
         template(&state.free_config.next())
@@ -245,7 +268,7 @@ impl Respond for CountingResponder {
 
 impl MockEnzymeApi {
     /// Path the free-config endpoint is mounted at.
-    pub const FREE_CONFIG_PATH: &'static str = "/margins/free-config";
+    pub const FREE_CONFIG_PATH: &'static str = "/llm/free-config";
 
     /// Start a fake Enzyme API with a default balance of 100.0 credits and a
     /// free-config endpoint that hands back key `enz-free-test` pointing at
@@ -270,6 +293,7 @@ impl MockEnzymeApi {
             free_config_auth_headers: Vec::new(),
             free_config_bootstrap_ids: Vec::new(),
             free_config_require_bootstrap: false,
+            free_config_by_auth: None,
         }));
         let deduct_calls = Arc::new(AtomicUsize::new(0));
         let free_config_calls = Arc::new(AtomicUsize::new(0));
@@ -370,10 +394,7 @@ impl MockEnzymeApi {
 
     /// Fully override the `/v1/credits/deduct` replies; the last entry repeats.
     pub fn set_deduct_replies(&self, replies: Vec<Reply>) {
-        self.state.lock().unwrap().deduct_replies = Some(ReplyQueue {
-            replies,
-            served: 0,
-        });
+        self.state.lock().unwrap().deduct_replies = Some(ReplyQueue { replies, served: 0 });
     }
 
     /// Serve a successful free-config pointing at the given LLM.
@@ -472,6 +493,34 @@ impl MockEnzymeApi {
         );
     }
 
+    /// Select an authenticated vs anonymous lease from the actual request
+    /// headers, modeling `/llm/free-config` rather than preselecting a tier.
+    pub fn set_free_config_by_auth(
+        &self,
+        expected_token: &str,
+        authenticated_key: &str,
+        anonymous_key: &str,
+        base_url: &str,
+        model: &str,
+    ) {
+        let response = |api_key: &str, provider: &str| {
+            Reply::ok_json(
+                serde_json::json!({
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "model": model,
+                    "provider": provider,
+                })
+                .to_string(),
+            )
+        };
+        self.state.lock().unwrap().free_config_by_auth = Some(AuthRoutedFreeConfig {
+            expected_token: expected_token.to_string(),
+            authenticated: response(authenticated_key, "openrouter-pro-included"),
+            anonymous: response(anonymous_key, "openrouter-free"),
+        });
+    }
+
     /// Config 4, OLD server — a lapsed Pro whose credits are stranded still
     /// draws a FREE lease (the deployed handler selects pro only on a live
     /// billing row; a lapsed row falls through to free even with credits>0).
@@ -505,6 +554,7 @@ impl MockEnzymeApi {
     pub fn set_free_config_402_full(&self, credits: f64) {
         let body = serde_json::json!({
             "error": "Insufficient credits",
+            "reason": "account_credits",
             "credits": credits,
             "message": "Visit app.enzyme.garden/plans to top up.",
         });
@@ -531,7 +581,17 @@ impl MockEnzymeApi {
     /// POOL DRY, **new-server behavior** (config 5b): a clean pre-key refusal —
     /// free-config itself 402s before handing out a lease. No LLM call happens.
     pub fn set_pool_dry_new(&self, credits: f64) {
-        self.set_free_config_402_full(credits);
+        let body = serde_json::json!({
+            "error": "Hosted capacity unavailable",
+            "reason": "pool_exhausted",
+            "credits": credits,
+            "message": "Shared hosted LLM capacity is temporarily unavailable.",
+        });
+        self.state
+            .lock()
+            .unwrap()
+            .free_config
+            .set(vec![Reply::new(402, body.to_string())]);
     }
 
     /// Fully override the free-config replies; the last entry repeats.
@@ -580,10 +640,7 @@ impl MockEnzymeApi {
     /// Make `GET /v1/credits` answer `200 { credits }`. (Without this the
     /// endpoint synthesizes `{ credits: <current balance> }`.)
     pub fn set_credits_get(&self, credits: f64) {
-        self.state
-            .lock()
-            .unwrap()
-            .credits_get_replies = Some(ReplyQueue::new(Reply::ok_json(
+        self.state.lock().unwrap().credits_get_replies = Some(ReplyQueue::new(Reply::ok_json(
             serde_json::json!({ "credits": credits }).to_string(),
         )));
     }
@@ -591,10 +648,7 @@ impl MockEnzymeApi {
     /// Fully override `GET /v1/credits` replies (e.g. a 500 or 401); the last
     /// entry repeats.
     pub fn set_credits_get_replies(&self, replies: Vec<Reply>) {
-        self.state.lock().unwrap().credits_get_replies = Some(ReplyQueue {
-            replies,
-            served: 0,
-        });
+        self.state.lock().unwrap().credits_get_replies = Some(ReplyQueue { replies, served: 0 });
     }
 
     /// How many times `GET /v1/credits` was called.
@@ -610,20 +664,16 @@ impl MockEnzymeApi {
         self.state.lock().unwrap().free_config_auth_headers.clone()
     }
 
-    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
     /// Empty string when absent. Proves an anonymous CLI sends a bootstrap id
     /// (matrix config 7) instead of a Bearer token.
     pub fn free_config_bootstrap_ids(&self) -> Vec<String> {
-        self.state
-            .lock()
-            .unwrap()
-            .free_config_bootstrap_ids
-            .clone()
+        self.state.lock().unwrap().free_config_bootstrap_ids.clone()
     }
 
     /// When enabled, free-config answers `400 { error: 'Missing bootstrap id' }`
     /// for a request carrying neither `Authorization` nor
-    /// `X-Margins-Bootstrap-Id` (hosted broker contract, config 7).
+    /// `X-Enzyme-Bootstrap-Id` (hosted broker contract, config 7).
     pub fn set_free_config_require_bootstrap(&self, require: bool) {
         self.state.lock().unwrap().free_config_require_bootstrap = require;
     }

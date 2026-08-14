@@ -2,22 +2,9 @@
 //!
 //! Harness: `crates/enzyme-cli/tests/support/` (see `support::mock`, `support::fixture`).
 //!
-//! Bug under test
-//! -------------
-//! `run_logout` (crates/enzyme-cli/src/commands/login.rs:259) deletes
-//! `$ENZYME_HOME/auth.json` and revokes the key server-side, but it never calls
-//! `invalidate_free_config_cache()`. The only caller of that function is
-//! `LlmClient::try_refresh_key` (crates/enzyme-core/src/llm/client.rs:609), which
-//! only fires on a 401.
-//!
-//! So the previous account's hosted LLM API key survives logout in the
-//! free-config cache file — by default the hardcoded, world-readable path
-//! `/tmp/enzyme-api-cache` — and `resolve_hosted_api_config`
-//! (client.rs:1020) will happily hand it back to the *next* user of the machine
-//! for the remainder of the 300s TTL.
-//!
-//! These tests assert the CORRECT behavior (logout invalidates the cache), so
-//! they are expected to FAIL until the bug is fixed.
+//! Logout must remove both the local auth token and any cached hosted lease so
+//! a signed-out account key is neither retained on disk nor reused by the next
+//! account on the machine.
 
 mod support;
 
@@ -123,7 +110,6 @@ fn login_populate_cache_then_logout(
 /// still be sitting in the free-config cache. In production that cache defaults
 /// to the hardcoded, world-readable `/tmp/enzyme-api-cache`.
 #[test]
-#[ignore = "known defect: logout does not invalidate the cached hosted LLM config"]
 fn logout_invalidates_cached_hosted_llm_config() {
     let api = MockEnzymeApi::start();
     let llm_a = MockLlm::start();
@@ -143,12 +129,31 @@ fn logout_invalidates_cached_hosted_llm_config() {
          in the free-config cache at {}.\n\
          expected: the cache is invalidated (removed or rewritten without the key)\n\
          actual  : {:?}\n\
-         run_logout (login.rs:259) deletes auth.json but never calls \
-         invalidate_free_config_cache(); in production this path defaults to the \
-         hardcoded, world-readable /tmp/enzyme-api-cache.\n\
+         in production this path defaults to the hardcoded, world-readable \
+         /tmp/enzyme-api-cache.\n\
          --- logout stderr ---\n{logout_stderr}",
         fixture.api_cache_path().display(),
         cache_after_logout,
+    );
+}
+
+/// Logout remains a cache-clearing operation even if auth.json was removed by
+/// another process or an earlier partial logout.
+#[test]
+fn logout_without_auth_file_still_invalidates_hosted_cache() {
+    let api = MockEnzymeApi::start();
+    let fixture = VaultFixture::empty();
+    fixture.seed_api_cache("stale-signed-out-key", "http://127.0.0.1:1/v1", "stale", 0);
+    assert!(!fixture.is_logged_in());
+    assert!(fixture.api_cache_exists());
+
+    let logout = fixture.cli().arg("logout").enzyme_api(&api).run();
+    logout.assert_success();
+
+    assert!(
+        !fixture.api_cache_exists(),
+        "logout must remove a stale hosted cache even when auth.json is already absent; stderr={}",
+        logout.stderr
     );
 }
 
@@ -160,11 +165,7 @@ fn logout_invalidates_cached_hosted_llm_config() {
 /// Correct behavior: logout invalidated the cached hosted config, so B's run
 /// re-resolves and never touches A's key or A's LLM endpoint.
 ///
-/// Actual behavior (the bug): the cache file survives logout with A's key still
-/// in it and still inside its 300s TTL, so B's run silently reuses A's
-/// credentials.
 #[test]
-#[ignore = "known defect: resolve after logout reuses the previous account key from cache"]
 fn subsequent_resolve_after_logout_does_not_reuse_previous_account_key() {
     let api = MockEnzymeApi::start();
     let llm_a = MockLlm::start();
@@ -249,12 +250,7 @@ fn expired_cache_entry_is_not_reused() {
     fixture.login("enz-auth-account-A");
 
     // Cache entry aged well past the 300s TTL, pointing at the stale LLM.
-    fixture.seed_api_cache(
-        "k-stale-expired",
-        &llm_stale.base_url(),
-        "test-model",
-        400,
-    );
+    fixture.seed_api_cache("k-stale-expired", &llm_stale.base_url(), "test-model", 400);
     // The server would hand back the fresh config on a re-fetch.
     api.set_free_config(ACCOUNT_B_KEY, &llm_fresh.base_url(), "test-model");
 

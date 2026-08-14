@@ -929,15 +929,20 @@ pub async fn run_init(
 
         Some(stats)
     } else {
-        // A structured 402 from the hosted free-config fetch means the server
-        // was reachable and refused for credits — say so (this is the one
-        // place top-up guidance belongs). Anything else keeps the catch-all.
-        let msg = match hosted_resolve_error
+        // Only an explicit account-credit refusal receives top-up guidance.
+        // Shared pool exhaustion is a neutral capacity condition, not billing.
+        let msg = if let Some(credits_err) = hosted_resolve_error
             .as_ref()
             .and_then(|e| e.downcast_ref::<enzyme_core::llm::EnzymeCreditsExhausted>())
         {
-            Some(credits_err) => format!("{credits_err}. Skipping catalyst generation."),
-            None => "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string(),
+            format!("{credits_err}. Skipping catalyst generation.")
+        } else if let Some(capacity_err) = hosted_resolve_error
+            .as_ref()
+            .and_then(|e| e.downcast_ref::<enzyme_core::llm::EnzymeHostedCapacityUnavailable>())
+        {
+            format!("{capacity_err}. Skipping catalyst generation.")
+        } else {
+            "No API key found and Enzyme server unreachable — skipping catalyst generation. Set OPENAI_API_KEY or ensure network access.".to_string()
         };
         tx.send(DisplayEvent::ApiSkipped(msg.clone())).ok();
         warnings.push(msg);

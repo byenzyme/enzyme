@@ -310,6 +310,16 @@ fn pool_dry_new_server_old_cli_bails_sanely() {
         "the old CLI hit a new-CLI-contract endpoint (refund/account) while \
          handling the new-server refusal — it must require nothing new.\n{diag}"
     );
+    let visible_output = format!("{}\n{}", out.stdout, out.stderr).to_lowercase();
+    assert!(
+        !out.contains("app.enzyme.garden/plans")
+            && !visible_output.contains("insufficient enzyme credits"),
+        "pool exhaustion is shared capacity, not an account-credit refusal, so it must not emit top-up guidance.\n{diag}"
+    );
+    assert!(
+        visible_output.contains("capacity") || visible_output.contains("temporarily unavailable"),
+        "pool exhaustion should produce neutral capacity/unavailability guidance.\n{diag}"
+    );
 }
 
 /// GREEN (compat proof, anonymous variant). Same new-server pool-dry refusal,

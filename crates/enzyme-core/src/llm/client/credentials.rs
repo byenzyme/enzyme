@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use super::{
@@ -20,10 +21,11 @@ use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
-const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/llm/free-config";
+const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Enzyme-Bootstrap-Id";
 const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
+const FREE_CONFIG_CACHE_PROFILE_VERSION: &str = "enzyme-llm-v1";
 
 /// Where the resolved API configuration came from.
 #[derive(Debug, Clone)]
@@ -64,6 +66,13 @@ pub enum LlmCredentialMode {
 pub struct EnzymeCreditsExhausted {
     pub credits: f64,
 }
+
+/// Typed refusal when Enzyme's shared hosted capacity is temporarily unavailable.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Enzyme hosted LLM capacity is temporarily unavailable — try again later or use --use-env-llm"
+)]
+pub struct EnzymeHostedCapacityUnavailable;
 
 impl ResolvedConfig {
     /// Format a masked display of the API key (e.g. `sk-••••••••abcd`).
@@ -106,11 +115,40 @@ struct CachedFreeConfig {
     model: String,
     #[serde(default)]
     cached_at: u64,
+    profile: String,
 }
 
 #[derive(Deserialize, Serialize)]
 struct BootstrapIdentity {
     bootstrap_id: String,
+}
+
+struct HostedIdentity {
+    authorization: Option<String>,
+    bootstrap_id: Option<String>,
+    cache_profile: String,
+}
+
+struct FetchedFreeConfig {
+    config: ResolvedConfig,
+    cache_profile: String,
+}
+
+impl FetchedFreeConfig {
+    fn new(config: ResolvedConfig, identity: &HostedIdentity) -> Self {
+        Self {
+            config,
+            cache_profile: identity.cache_profile.clone(),
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct FreeConfigErrorResponse {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    credits: Option<f64>,
 }
 
 fn free_config_url() -> String {
@@ -213,11 +251,18 @@ impl LlmClient {
             return false;
         }
         info!("free-tier key returned 401, refreshing from server");
-        invalidate_free_config_cache();
-        match fetch_free_config().await {
-            Ok(cfg) => {
-                *self.api_key.write().unwrap() = cfg.api_key.clone();
-                write_free_config_cache(&api_cache_path(), &cfg);
+        let identity = match hosted_identity() {
+            Ok(identity) => identity,
+            Err(e) => {
+                warn!("failed to resolve hosted identity for key refresh: {e}");
+                return false;
+            }
+        };
+        invalidate_hosted_llm_config_cache();
+        match fetch_free_config(&identity).await {
+            Ok(fetched) => {
+                *self.api_key.write().unwrap() = fetched.config.api_key.clone();
+                write_free_config_cache(&api_cache_path(), &fetched.config, &fetched.cache_profile);
                 true
             }
             Err(e) => {
@@ -228,11 +273,12 @@ impl LlmClient {
     }
 }
 
-fn invalidate_free_config_cache() {
+/// Remove the cached hosted lease, for example after logout or a lease 401.
+pub fn invalidate_hosted_llm_config_cache() {
     let _ = std::fs::remove_file(api_cache_path());
 }
 
-fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig) {
+fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig, profile: &str) {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -242,9 +288,58 @@ fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig) {
         base_url: cfg.base_url.clone(),
         model: cfg.model.clone(),
         cached_at: now_secs,
+        profile: profile.to_string(),
     };
     if let Ok(json) = serde_json::to_string(&cached) {
         let _ = std::fs::write(path, json);
+    }
+}
+
+fn identity_cache_profile(kind: &str, value: &str) -> String {
+    format!(
+        "{FREE_CONFIG_CACHE_PROFILE_VERSION}:{kind}:{:x}",
+        Sha256::digest(value.as_bytes())
+    )
+}
+
+fn hosted_identity() -> Result<HostedIdentity> {
+    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
+        .context("failed to resolve enzyme home for hosted identity")?;
+    let auth_path = enzyme_home.join("auth.json");
+    if let Ok(token) = crate::config::auth::AuthToken::load(&auth_path) {
+        let account_identity = if token.user_id.trim().is_empty() {
+            token.api_key.as_str()
+        } else {
+            token.user_id.as_str()
+        };
+        return Ok(HostedIdentity {
+            authorization: Some(format!("Bearer {}", token.api_key)),
+            bootstrap_id: None,
+            cache_profile: identity_cache_profile("account", account_identity),
+        });
+    }
+
+    let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
+    Ok(HostedIdentity {
+        authorization: None,
+        cache_profile: identity_cache_profile("bootstrap", &bootstrap_id),
+        bootstrap_id: Some(bootstrap_id),
+    })
+}
+
+fn classify_free_config_402(body: FreeConfigErrorResponse) -> anyhow::Error {
+    match body.reason.as_deref() {
+        Some("account_credits") => EnzymeCreditsExhausted {
+            credits: body.credits.unwrap_or(0.0),
+        }
+        .into(),
+        Some("pool_exhausted") => EnzymeHostedCapacityUnavailable.into(),
+        // Older Enzyme servers returned only `credits` on account refusals.
+        None if body.credits.is_some() => EnzymeCreditsExhausted {
+            credits: body.credits.unwrap_or(0.0),
+        }
+        .into(),
+        _ => EnzymeHostedCapacityUnavailable.into(),
     }
 }
 
@@ -273,8 +368,8 @@ fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
     Ok(identity.bootstrap_id)
 }
 
-/// Fetch an anonymous, usage-limited API key from the Margins orchestrator.
-async fn fetch_free_config() -> Result<ResolvedConfig> {
+/// Fetch an account-selected or anonymous bootstrap config from Enzyme.
+async fn fetch_free_config(identity: &HostedIdentity) -> Result<FetchedFreeConfig> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -283,42 +378,51 @@ async fn fetch_free_config() -> Result<ResolvedConfig> {
     let free_config_url = free_config_url();
     debug!("Fetching free config from {}", free_config_url);
 
-    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
-        .context("failed to resolve enzyme home for bootstrap identity")?;
-    let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
+    let mut request = client.get(&free_config_url);
+    if let Some(authorization) = &identity.authorization {
+        request = request.header("Authorization", authorization);
+    } else if let Some(bootstrap_id) = &identity.bootstrap_id {
+        request = request.header(FREE_CONFIG_BOOTSTRAP_HEADER, bootstrap_id);
+    }
 
-    let resp = client
-        .get(&free_config_url)
-        .header(FREE_CONFIG_BOOTSTRAP_HEADER, bootstrap_id)
+    let resp = request
         .send()
         .await
-        .context("failed to reach Margins orchestrator for free config")?;
+        .context("failed to reach Enzyme server for free config")?;
+
+    if identity.authorization.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
+        bail!(
+            "Enzyme hosted bootstrap is unavailable without login. Run `enzyme login` and retry, or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
+        );
+    }
 
     if resp.status().as_u16() == 402 {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let credits = body["credits"].as_f64().unwrap_or(0.0);
-        return Err(EnzymeCreditsExhausted { credits }.into());
+        let body: FreeConfigErrorResponse = resp.json().await.unwrap_or_default();
+        return Err(classify_free_config_402(body));
     }
 
     let resp: FreeConfigResponse = resp
         .error_for_status()
-        .context("Margins orchestrator returned an error for free config")?
+        .context("Enzyme server returned an error for free config")?
         .json()
         .await
         .context("failed to parse free config response")?;
     let _ = resp.expires_at;
 
     info!(
-        "Resolved API config from Margins orchestrator (model={})",
+        "Resolved API config from Enzyme server (model={})",
         resp.model
     );
 
-    Ok(ResolvedConfig {
-        api_key: resp.api_key,
-        base_url: resp.base_url,
-        model: resp.model,
-        provider: ConfigProvider::ServerFallback,
-    })
+    Ok(FetchedFreeConfig::new(
+        ResolvedConfig {
+            api_key: resp.api_key,
+            base_url: resp.base_url,
+            model: resp.model,
+            provider: ConfigProvider::ServerFallback,
+        },
+        identity,
+    ))
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -379,6 +483,7 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
 }
 
 async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
+    let identity = hosted_identity()?;
     let cache_path = api_cache_path();
     let cache_path = cache_path.as_path();
     if cache_path.exists() {
@@ -395,7 +500,9 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
                 let age_secs = now_secs.saturating_sub(cached.cached_at);
                 let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
 
-                if !cached.api_key.is_empty() && !expired {
+                let wrong_profile = cached.profile != identity.cache_profile;
+
+                if !cached.api_key.is_empty() && !expired && !wrong_profile {
                     debug!(
                         "Resolved API config from {} (age={}s)",
                         cache_path.display(),
@@ -414,6 +521,11 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
                         age_secs, FREE_CONFIG_CACHE_TTL_SECS
                     );
                 }
+                if wrong_profile {
+                    debug!(
+                        "Cached free-tier config belongs to another resolver profile; re-fetching"
+                    );
+                }
             }
             None => warn!(
                 "Unusable API cache at {}; discarding and re-fetching",
@@ -422,10 +534,10 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
         }
     }
 
-    match fetch_free_config().await {
-        Ok(cfg) => {
-            write_free_config_cache(cache_path, &cfg);
-            Ok(cfg)
+    match fetch_free_config(&identity).await {
+        Ok(fetched) => {
+            write_free_config_cache(cache_path, &fetched.config, &fetched.cache_profile);
+            Ok(fetched.config)
         }
         Err(e) => {
             let msg = hosted_config_unavailable_message(&e);
@@ -436,8 +548,8 @@ async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
 
 fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
     format!(
-        "{cause:#}. No hosted LLM config is available from the Margins orchestrator — \
-         check network access and try again, or pass `--use-env-llm` to intentionally \
+        "{cause:#}. No hosted Enzyme LLM config is available — run `enzyme login` and \
+         check network access, or pass `--use-env-llm` to intentionally \
          use OPENAI_API_KEY or OPENROUTER_API_KEY."
     )
 }
@@ -535,6 +647,56 @@ mod tests {
         move |key| values.get(key).cloned()
     }
 
+    fn account_identity(token: &str, user_id: &str) -> HostedIdentity {
+        HostedIdentity {
+            authorization: Some(format!("Bearer {token}")),
+            bootstrap_id: None,
+            cache_profile: identity_cache_profile("account", user_id),
+        }
+    }
+
+    fn server_config(api_key: &str) -> ResolvedConfig {
+        ResolvedConfig {
+            api_key: api_key.to_string(),
+            base_url: "https://llm.invalid/v1".to_string(),
+            model: "test-model".to_string(),
+            provider: ConfigProvider::ServerFallback,
+        }
+    }
+
+    fn assert_fetched_cache_profile(
+        captured: &HostedIdentity,
+        transitioned: &HostedIdentity,
+        api_key: &str,
+    ) {
+        assert_ne!(captured.cache_profile, transitioned.cache_profile);
+        let fetched = FetchedFreeConfig::new(server_config(api_key), captured);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosted-cache.json");
+        write_free_config_cache(&path, &fetched.config, &fetched.cache_profile);
+        let cached: CachedFreeConfig =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cached.profile, captured.cache_profile);
+        assert_ne!(cached.profile, transitioned.cache_profile);
+        assert_eq!(cached.api_key, api_key);
+    }
+
+    #[test]
+    fn resolve_cache_keeps_identity_captured_before_account_transition() {
+        let captured_a = account_identity("token-a", "account-a");
+        let transitioned_b = account_identity("token-b", "account-b");
+        assert_eq!(captured_a.authorization.as_deref(), Some("Bearer token-a"));
+        assert_fetched_cache_profile(&captured_a, &transitioned_b, "lease-for-a");
+    }
+
+    #[test]
+    fn refresh_cache_keeps_identity_captured_before_inverse_transition() {
+        let captured_b = account_identity("token-b", "account-b");
+        let transitioned_a = account_identity("token-a", "account-a");
+        assert_eq!(captured_b.authorization.as_deref(), Some("Bearer token-b"));
+        assert_fetched_cache_profile(&captured_b, &transitioned_a, "refreshed-lease-for-b");
+    }
+
     #[test]
     fn credits_exhausted_survives_context_wrapping() {
         let err = anyhow::Error::from(EnzymeCreditsExhausted { credits: 0.0 });
@@ -547,12 +709,12 @@ mod tests {
         let cause = anyhow::anyhow!("Insufficient credits (0.0 remaining)");
         let msg = hosted_config_unavailable_message(&cause);
         assert!(msg.contains("Insufficient credits (0.0 remaining)"));
-        assert!(msg.contains("Margins orchestrator"));
+        assert!(msg.contains("hosted Enzyme LLM config"));
         assert!(msg.contains("--use-env-llm"));
     }
 
     #[test]
-    fn margins_free_config_contract_accepts_missing_or_epoch_expiry() {
+    fn enzyme_free_config_contract_accepts_missing_or_epoch_expiry() {
         let persistent: FreeConfigResponse = serde_json::from_str(
             r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture"}"#,
         )
@@ -564,7 +726,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expiring.expires_at, Some(1_800_000_000));
-        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Margins-Bootstrap-Id");
+        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Enzyme-Bootstrap-Id");
+    }
+
+    #[test]
+    fn free_config_402_reason_distinguishes_credits_from_capacity() {
+        let credits = classify_free_config_402(FreeConfigErrorResponse {
+            reason: Some("account_credits".to_string()),
+            credits: Some(2.5),
+        });
+        assert!(credits.downcast_ref::<EnzymeCreditsExhausted>().is_some());
+
+        let pool = classify_free_config_402(FreeConfigErrorResponse {
+            reason: Some("pool_exhausted".to_string()),
+            credits: Some(100.0),
+        });
+        assert!(
+            pool.downcast_ref::<EnzymeHostedCapacityUnavailable>()
+                .is_some()
+        );
+
+        let legacy = classify_free_config_402(FreeConfigErrorResponse {
+            reason: None,
+            credits: Some(0.0),
+        });
+        assert!(legacy.downcast_ref::<EnzymeCreditsExhausted>().is_some());
     }
 
     #[test]

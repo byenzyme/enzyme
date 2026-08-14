@@ -113,6 +113,111 @@ fn assert_no_panic(out: &CliOutput, diag: &str) {
     );
 }
 
+#[test]
+fn hosted_cache_isolated_by_account_profile() {
+    const KEY_A: &str = "enz-account-a-lease";
+    const KEY_B: &str = "enz-account-b-lease";
+
+    let account_a = VaultFixture::new();
+    let account_b = VaultFixture::new();
+    account_a.login_as_user("token-a", "account-a");
+    account_b.login_as_user("token-b", "account-b");
+
+    let api = MockEnzymeApi::start();
+    let llm = MockLlm::start();
+    llm.set_ok_content(&catalyst_content());
+
+    api.set_free_config(KEY_A, &llm.base_url(), "model-a");
+    account_a
+        .cli()
+        .args(["init", "--quiet"])
+        .enzyme_api(&api)
+        .run()
+        .assert_success();
+    assert_eq!(api.free_config_calls(), 1);
+
+    api.set_free_config(KEY_B, &llm.base_url(), "model-b");
+    account_b
+        .cli()
+        .args(["init", "--quiet"])
+        .enzyme_api(&api)
+        .api_cache_path(account_a.api_cache_path())
+        .run()
+        .assert_success();
+
+    assert_eq!(
+        api.free_config_calls(),
+        2,
+        "a different account must re-fetch instead of reusing the first account's lease"
+    );
+    assert!(
+        api.free_config_auth_headers()
+            .iter()
+            .any(|header| header == "Bearer token-a")
+    );
+    assert!(
+        api.free_config_auth_headers()
+            .iter()
+            .any(|header| header == "Bearer token-b")
+    );
+    assert!(
+        llm.auth_headers()
+            .iter()
+            .any(|header| header == &bearer(KEY_B)),
+        "the second account must use its newly fetched lease"
+    );
+}
+
+#[test]
+fn legacy_margins_cache_without_profile_is_not_reused() {
+    const LEGACY_KEY: &str = "margins-legacy-lease";
+    const ENZYME_KEY: &str = "enzyme-route-lease";
+
+    let fixture = VaultFixture::new();
+    fixture.login("enzyme-account-token");
+    let llm = MockLlm::start();
+    llm.set_ok_content(&catalyst_content());
+    let api = MockEnzymeApi::start();
+    api.set_free_config(ENZYME_KEY, &llm.base_url(), "enzyme-model");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fixture.seed_api_cache_raw(
+        &serde_json::json!({
+            "api_key": LEGACY_KEY,
+            "base_url": llm.base_url(),
+            "model": "margins-model",
+            "cached_at": now,
+        })
+        .to_string(),
+    );
+
+    fixture
+        .cli()
+        .args(["init", "--quiet"])
+        .enzyme_api(&api)
+        .run()
+        .assert_success();
+
+    assert_eq!(
+        api.free_config_calls(),
+        1,
+        "a pre-migration cache entry has no Enzyme resolver profile and must be replaced"
+    );
+    assert!(
+        llm.auth_headers()
+            .iter()
+            .any(|header| header == &bearer(ENZYME_KEY))
+    );
+    assert!(
+        llm.auth_headers()
+            .iter()
+            .all(|header| header != &bearer(LEGACY_KEY))
+    );
+}
+
 /// Drive the CURRENT ("old") CLI's `init --quiet` against a cache file that a
 /// (possibly newer) co-located CLI has already written. `shared_cache` OWNS the
 /// cache file; `old_cli` is a *separate* vault + home whose
@@ -156,7 +261,11 @@ fn additive_cache_fields_are_reused_by_old_cli() {
     llm.set_ok_content(&catalyst_content());
     // If the CLI ever ignored the cache and re-fetched, the server would hand
     // back a DIFFERENT key/base_url, so a re-fetch would be observable.
-    api.set_free_config("enz-server-would-mint", "http://127.0.0.1:1/v1", "server-model");
+    api.set_free_config(
+        "enz-server-would-mint",
+        "http://127.0.0.1:1/v1",
+        "server-model",
+    );
 
     // Newer co-located CLI's cache: 3 core fields (base_url -> our mock LLM) +
     // additive future fields.
@@ -231,7 +340,11 @@ fn fresh_cache_within_ttl_is_reused() {
     let api = MockEnzymeApi::start();
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_content());
-    api.set_free_config("enz-server-would-mint", "http://127.0.0.1:1/v1", "server-model");
+    api.set_free_config(
+        "enz-server-would-mint",
+        "http://127.0.0.1:1/v1",
+        "server-model",
+    );
 
     // 60s old: comfortably inside the 300s TTL.
     shared_cache.seed_api_cache(CACHED_KEY, &llm.base_url(), CACHED_MODEL, 60);
@@ -349,7 +462,13 @@ fn missing_core_field_cache_should_refetch_red_by_design() {
     shared_cache.seed_api_cache_missing_field("enz-missing-model-key", &llm.base_url(), 30);
 
     let out = run_old_cli_against_shared_cache(&old_cli, &shared_cache, &api);
-    let diag = diagnostics("missing core field (red_by_design)", &shared_cache, &api, &llm, &out);
+    let diag = diagnostics(
+        "missing core field (red_by_design)",
+        &shared_cache,
+        &api,
+        &llm,
+        &out,
+    );
 
     assert_no_panic(&out, &diag);
     out.assert_success();

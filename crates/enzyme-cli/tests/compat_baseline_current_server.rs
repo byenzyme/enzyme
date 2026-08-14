@@ -18,7 +18,7 @@
 //!   2  free account, credits=0                 -> free-config 402, no LLM call, BYOK guidance
 //!   3  pro account active, pool funded         -> $10/mo pro lease, init proceeds
 //!   6  env-llm / BYOK                          -> no hosted call at all, no deduct
-//!   7  anonymous bootstrap (unauth first init) -> X-Margins-Bootstrap-Id sent, key handed out
+//!   7  anonymous bootstrap (unauth first init) -> X-Enzyme-Bootstrap-Id sent, key handed out
 //!
 //! NOTE on the credit deduct: the CLI deducts credits AFTER successful LLM
 //! work (deduct-after-success, gated on `ConfigProvider::ServerFallback` and
@@ -258,7 +258,16 @@ fn cell3_pro_active_gets_pro_lease_and_proceeds() {
     llm.set_ok_content(&catalyst_content());
 
     api.set_credit_balance(100.0);
-    api.set_free_config_pro_tier(PRO_KEY, &llm.base_url(), "test-model");
+    // The mock chooses the lease from the request identity: only the expected
+    // Bearer token receives the pro lease; a bootstrap request would receive a
+    // distinct free key. This proves the CLI exercises server-side tier routing.
+    api.set_free_config_by_auth(
+        "k-pro-user",
+        PRO_KEY,
+        "enz-anonymous-wrong-branch",
+        &llm.base_url(),
+        "test-model",
+    );
 
     let out = fixture
         .cli()
@@ -275,6 +284,16 @@ fn cell3_pro_active_gets_pro_lease_and_proceeds() {
     assert!(
         api.free_config_calls() >= 1,
         "expected the hosted free-config endpoint to be consulted.{diag}"
+    );
+    assert!(
+        api.free_config_auth_headers()
+            .iter()
+            .any(|header| header == "Bearer k-pro-user"),
+        "logged-in hosted resolution must send the account bearer token.{diag}"
+    );
+    assert!(
+        api.free_config_bootstrap_ids().iter().all(String::is_empty),
+        "logged-in hosted resolution must not also send a bootstrap identity.{diag}"
     );
     assert!(
         llm.request_count() > 0,
@@ -357,7 +376,7 @@ fn cell6_env_llm_makes_no_hosted_call_and_never_deducts() {
 // ---------------------------------------------------------------------------
 
 /// A fresh machine with no login: first init is allowed loginless. The CLI must
-/// send an `X-Margins-Bootstrap-Id` (never a Bearer token), the server hands out
+/// send an `X-Enzyme-Bootstrap-Id` (never a Bearer token), the server hands out
 /// a bootstrap lease, and catalyst generation proceeds on it. Because there is
 /// no account, nothing is deducted.
 #[test]
@@ -379,8 +398,13 @@ fn cell7_anonymous_bootstrap_sends_bootstrap_id_and_gets_key() {
     // Emulate the deployed unauthenticated contract: refuse (400) if neither a
     // Bearer token nor a bootstrap id is present. The CLI sending the bootstrap
     // id is what earns it the free lease.
-    api.set_free_config_require_bootstrap(true);
-    api.set_free_config_free_tier(BOOTSTRAP_KEY, &llm.base_url(), "test-model");
+    api.set_free_config_by_auth(
+        "unused-account-token",
+        "unused-account-lease",
+        BOOTSTRAP_KEY,
+        &llm.base_url(),
+        "test-model",
+    );
 
     let out = fixture
         .cli()
@@ -400,7 +424,7 @@ fn cell7_anonymous_bootstrap_sends_bootstrap_id_and_gets_key() {
             .iter()
             .any(|id| !id.trim().is_empty()),
         "expected the unauthenticated CLI to send a non-empty \
-         X-Margins-Bootstrap-Id.{diag}"
+         X-Enzyme-Bootstrap-Id.{diag}"
     );
     // ...and NO Bearer token was ever presented (there is no account).
     assert!(
@@ -417,7 +441,10 @@ fn cell7_anonymous_bootstrap_sends_bootstrap_id_and_gets_key() {
     // ...the bootstrap lease was actually used against the LLM...
     assert!(
         llm.request_count() > 0
-            && llm.auth_headers().iter().any(|h| h == &bearer(BOOTSTRAP_KEY)),
+            && llm
+                .auth_headers()
+                .iter()
+                .any(|h| h == &bearer(BOOTSTRAP_KEY)),
         "expected the handed-out bootstrap key {BOOTSTRAP_KEY:?} to reach the LLM.{diag}"
     );
     // ...and nothing was deducted, since there is no account to charge.

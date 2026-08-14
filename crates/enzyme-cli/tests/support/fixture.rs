@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 use super::mock::{MockEnzymeApi, MockLlm};
 
 /// Env vars that must never leak from the developer's shell into a test run.
@@ -59,6 +61,10 @@ pub struct VaultFixture {
 }
 
 impl VaultFixture {
+    fn account_cache_profile() -> String {
+        format!("enzyme-llm-v1:account:{:x}", Sha256::digest(b"user-test"))
+    }
+
     /// Vault seeded from `tests/fixtures/canary-vault`.
     pub fn new() -> Self {
         let fixture = Self::empty();
@@ -111,11 +117,17 @@ impl VaultFixture {
 
     /// Seed `$ENZYME_HOME/auth.json` so the CLI believes it is logged in.
     pub fn login(&self, api_key: &str) {
+        self.login_as_user(api_key, "user-test");
+    }
+
+    /// Seed auth for a specific account identity. Cache-isolation tests use
+    /// distinct user IDs while sharing one cache path.
+    pub fn login_as_user(&self, api_key: &str, user_id: &str) {
         let home = self.enzyme_home();
         std::fs::create_dir_all(&home).expect("create enzyme home");
         let body = serde_json::json!({
             "api_key": api_key,
-            "user_id": "user-test",
+            "user_id": user_id,
             "email": "test@example.com",
         });
         std::fs::write(home.join("auth.json"), body.to_string()).expect("write auth.json");
@@ -148,6 +160,7 @@ impl VaultFixture {
             "base_url": base_url,
             "model": model,
             "cached_at": now.saturating_sub(age_secs),
+            "profile": Self::account_cache_profile(),
         });
         std::fs::write(self.api_cache_path(), body.to_string()).expect("write api cache");
     }
@@ -179,6 +192,7 @@ impl VaultFixture {
             "base_url": base_url,
             "model": model,
             "cached_at": now.saturating_sub(age_secs),
+            "profile": Self::account_cache_profile(),
             // Additive fields a future co-located CLI might persist:
             "provider": "openrouter-free",
             "expires_at": now + 3600,
@@ -203,6 +217,7 @@ impl VaultFixture {
             "api_key": api_key,
             "base_url": base_url,
             "cached_at": now.saturating_sub(age_secs),
+            "profile": Self::account_cache_profile(),
         });
         std::fs::write(self.api_cache_path(), body.to_string()).expect("write api cache");
     }

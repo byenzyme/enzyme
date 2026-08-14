@@ -285,6 +285,8 @@ pub async fn run_logout() -> Result<()> {
             ResetColor,
         );
     }
+    // Clear any retained hosted lease even when auth.json was already absent.
+    enzyme_core::llm::invalidate_hosted_llm_config_cache();
     Ok(())
 }
 
