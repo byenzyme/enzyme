@@ -73,10 +73,72 @@ pub struct EnzymeConfig {
     /// External directories to project this vault's catalysts onto.
     #[serde(default)]
     pub targets: Vec<String>,
+    /// Read-only SQLite sources indexed alongside Markdown files.
+    #[serde(default)]
+    pub sources: HashMap<String, SqliteSourceConfig>,
     /// Maximum number of documents to embed per run.
     /// `None` uses the built-in default (1024). `Some(0)` means unlimited.
     #[serde(default)]
     pub max_embedding_files: Option<usize>,
+}
+
+/// A read-only SQLite query contract for one named source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqliteSourceConfig {
+    pub db: PathBuf,
+    pub query: String,
+    pub roles: SqliteSourceRoles,
+    pub timestamp: SqliteTimestampConfig,
+}
+
+/// Result columns assigned to Enzyme's source roles.
+///
+/// Composite roles are concatenated in configured order. A scalar is accepted
+/// as a one-column shorthand when parsing; serialization always emits arrays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqliteSourceRoles {
+    #[serde(deserialize_with = "deserialize_one_or_many")]
+    pub id: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    pub who: Vec<String>,
+    pub when: String,
+    #[serde(deserialize_with = "deserialize_one_or_many")]
+    pub what: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
+    pub r#where: Vec<String>,
+}
+
+fn deserialize_one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(value) => vec![value],
+        OneOrMany::Many(values) => values,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqliteTimestampConfig {
+    pub unit: SqliteTimestampUnit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SqliteTimestampUnit {
+    S,
+    Ms,
+    Us,
+    Ns,
 }
 
 /// A single entry in the config.
@@ -251,6 +313,8 @@ struct VaultTomlSection {
     entities: Vec<CatalyzedEntity>,
     #[serde(default)]
     targets: Vec<String>,
+    #[serde(default)]
+    sources: HashMap<String, SqliteSourceConfig>,
     /// Per-vault override for max embedding files. `0` = unlimited.
     #[serde(default)]
     max_embedding_files: Option<usize>,
@@ -403,6 +467,7 @@ impl EnzymeConfig {
                 .map(|v| v.excluded_folders.clone())
                 .unwrap_or_default(),
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
+            sources: vault.map(|v| v.sources.clone()).unwrap_or_default(),
             max_embedding_files: vault
                 .and_then(|v| v.max_embedding_files)
                 .or(global.defaults.max_embedding_files),
@@ -436,6 +501,7 @@ impl EnzymeConfig {
             excluded_links: legacy.excluded_links,
             excluded_folders: legacy.excluded_folders,
             targets: Vec::new(),
+            sources: HashMap::new(),
             max_embedding_files: None,
         }))
     }
@@ -564,6 +630,7 @@ impl EnzymeConfig {
         entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
         entry.entities = self.catalyzed_entities.clone();
         entry.targets = self.targets.clone();
+        entry.sources = self.sources.clone();
         entry.max_embedding_files = self.max_embedding_files;
 
         if let Some(parent) = config_path.parent() {
@@ -741,6 +808,7 @@ excludedTags:
             excluded_links: config.excluded_links,
             excluded_folders: config.excluded_folders,
             targets: Vec::new(),
+            sources: HashMap::new(),
             max_embedding_files: None,
         };
         let prefs = merged.parse_preferences();
@@ -783,6 +851,63 @@ entities = [
         );
     }
 
+    #[test]
+    fn sqlite_sources_parse_with_optional_roles_and_timestamp_variants() {
+        let without_sources: GlobalTomlConfig = toml::from_str(r#"[vaults."/tmp/plain"]"#).unwrap();
+        let plain = EnzymeConfig::from_global_config(Path::new("/tmp/plain"), &without_sources);
+        assert!(plain.sources.is_empty());
+
+        let global: GlobalTomlConfig = toml::from_str(
+            r#"
+[vaults."/tmp/sources".sources.seconds]
+db = "/tmp/seconds.db"
+query = "SELECT id, ts, body FROM rows"
+roles = { id = "id", when = "ts", what = "body" }
+timestamp = { unit = "s" }
+
+[vaults."/tmp/sources".sources.millis]
+db = "/tmp/millis.db"
+query = "SELECT account_id, message_id, sender, ts, subject, body, thread FROM rows"
+roles = { id = ["account_id", "message_id"], who = ["sender"], when = "ts", what = ["subject", "body"], where = ["thread"] }
+timestamp = { unit = "ms", epoch = "2001-01-01" }
+
+[vaults."/tmp/sources".sources.micros]
+db = "/tmp/micros.db"
+query = "SELECT id, ts, body FROM rows"
+roles = { id = "id", when = "ts", what = "body" }
+timestamp = { unit = "us" }
+
+[vaults."/tmp/sources".sources.nanos]
+db = "/tmp/nanos.db"
+query = "SELECT id, ts, body FROM rows"
+roles = { id = "id", when = "ts", what = "body" }
+timestamp = { unit = "ns" }
+"#,
+        )
+        .unwrap();
+        let config = EnzymeConfig::from_global_config(Path::new("/tmp/sources"), &global);
+        assert_eq!(config.sources.len(), 4);
+
+        let seconds = config.sources.get("seconds").unwrap();
+        assert_eq!(seconds.roles.id, vec!["id"]);
+        assert!(seconds.roles.who.is_empty());
+        assert!(seconds.roles.r#where.is_empty());
+        assert_eq!(seconds.timestamp.unit, SqliteTimestampUnit::S);
+
+        let millis = config.sources.get("millis").unwrap();
+        assert_eq!(millis.roles.id, vec!["account_id", "message_id"]);
+        assert_eq!(millis.roles.what, vec!["subject", "body"]);
+        assert_eq!(millis.timestamp.unit, SqliteTimestampUnit::Ms);
+        assert_eq!(millis.timestamp.epoch.as_deref(), Some("2001-01-01"));
+        assert_eq!(
+            config.sources.get("micros").unwrap().timestamp.unit,
+            SqliteTimestampUnit::Us
+        );
+        assert_eq!(
+            config.sources.get("nanos").unwrap().timestamp.unit,
+            SqliteTimestampUnit::Ns
+        );
+    }
     #[test]
     fn catalyst_llm_config_defaults_and_parses() {
         let defaults: GlobalTomlConfig = toml::from_str("").unwrap();
@@ -837,6 +962,25 @@ local_model = "catalyst-135m-v3"
             excluded_links: vec!["Template".to_string()],
             excluded_folders: vec!["templates".to_string()],
             targets: vec!["/Users/alice/code/my-app".to_string()],
+            sources: HashMap::from([(
+                "messages".to_string(),
+                SqliteSourceConfig {
+                    db: PathBuf::from("/tmp/messages.db"),
+                    query: "SELECT id, sender, sent_at, subject, body, thread FROM messages"
+                        .to_string(),
+                    roles: SqliteSourceRoles {
+                        id: vec!["id".to_string()],
+                        who: vec!["sender".to_string()],
+                        when: "sent_at".to_string(),
+                        what: vec!["subject".to_string(), "body".to_string()],
+                        r#where: vec!["thread".to_string()],
+                    },
+                    timestamp: SqliteTimestampConfig {
+                        unit: SqliteTimestampUnit::Ms,
+                        epoch: Some("2001-01-01".to_string()),
+                    },
+                },
+            )]),
             max_embedding_files: None,
         };
 
@@ -850,10 +994,17 @@ local_model = "catalyst-135m-v3"
         assert!(raw.contains("mode = \"local\""));
         assert!(raw.contains("max_embedding_files = 1024"));
 
-        let loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
+        let mut loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
         assert_eq!(loaded.catalyzed_entities.len(), 2);
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
+        let source = loaded.sources.get("messages").unwrap();
+        assert_eq!(source.roles.id, vec!["id"]);
+        assert_eq!(source.roles.who, vec!["sender"]);
+        assert_eq!(source.roles.what, vec!["subject", "body"]);
+        assert_eq!(source.roles.r#where, vec!["thread"]);
+        assert_eq!(source.timestamp.unit, SqliteTimestampUnit::Ms);
+        assert_eq!(source.timestamp.epoch.as_deref(), Some("2001-01-01"));
         let llm = EnzymeConfig::catalyst_llm_config().unwrap();
         assert_eq!(llm.mode, CatalystMode::Local);
         assert_eq!(llm.local_model.as_deref(), Some("catalyst-135m-v3"));
@@ -861,6 +1012,12 @@ local_model = "catalyst-135m-v3"
             loaded.trending.as_ref().and_then(|t| t.min_top_catalysts),
             Some(13)
         );
+        let expected_sources = loaded.sources.clone();
+        loaded
+            .set_auto_selected_entities(&vault, vec!["[[Rewritten]]".to_string()])
+            .unwrap();
+        let rewritten = EnzymeConfig::load(&vault).unwrap().unwrap();
+        assert_eq!(rewritten.sources, expected_sources);
 
         // SAFETY: test-only, single-threaded
         unsafe {

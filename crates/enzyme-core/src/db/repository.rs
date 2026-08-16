@@ -1919,6 +1919,41 @@ impl Database {
         Ok(rows.into_iter().next())
     }
 
+    /// Load the typed incremental cursor for a configured SQLite source.
+    pub fn get_source_cursor(&self, source_name: &str) -> Result<Option<(String, String)>> {
+        let rows = self.query_read(
+            "SELECT cursor_kind, cursor_value FROM source_cursors WHERE source_name = ?1",
+            vec![Value::Text(source_name.to_string())],
+            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+        )?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Advance a configured SQLite source cursor after its documents and
+    /// occurrences have been committed.
+    pub fn set_source_cursor(
+        &self,
+        source_name: &str,
+        cursor_kind: &str,
+        cursor_value: &str,
+    ) -> Result<()> {
+        self.execute_write(
+            "INSERT INTO source_cursors
+                (source_name, cursor_kind, cursor_value, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(source_name) DO UPDATE SET
+                cursor_kind = excluded.cursor_kind,
+                cursor_value = excluded.cursor_value,
+                updated_at = datetime('now')",
+            vec![
+                Value::Text(source_name.to_string()),
+                Value::Text(cursor_kind.to_string()),
+                Value::Text(cursor_value.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Clear generated vector-derived state when the embedding backend changes.
     ///
     /// This preserves user notes, indexed documents, chunks, catalysts, targets,

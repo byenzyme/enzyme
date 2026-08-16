@@ -33,6 +33,12 @@ pub struct IndexingPipeline<'a> {
 /// years-long daily journal from flooding the occurrence table; the newest
 /// entries are kept, and the drop is logged.
 const MAX_LOG_OCCURRENCES: usize = 1000;
+fn is_markdown_source_ref(source_ref: &str) -> bool {
+    std::path::Path::new(source_ref)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
 
 /// Summary statistics from an indexing run.
 pub struct IndexingStats {
@@ -99,8 +105,13 @@ impl<'a> IndexingPipeline<'a> {
         let discovery = FileDiscovery::new(self.vault_path.clone())
             .with_excluded_folders(self.resolve_excluded_folders());
         let all_paths = discovery.discover()?;
-        let db_doc_count = self.db.get_document_count().unwrap_or(0);
-        if all_paths.is_empty() && db_doc_count > 0 {
+        let existing_hashes = self.db.get_all_document_hashes()?;
+        let db_doc_count = existing_hashes.len();
+        let db_markdown_count = existing_hashes
+            .keys()
+            .filter(|source_ref| is_markdown_source_ref(source_ref))
+            .count();
+        if all_paths.is_empty() && db_doc_count > 0 && db_markdown_count == 0 {
             on_progress("Using DB-ingested documents...");
             self.compute_trending_scores()?;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -119,9 +130,6 @@ impl<'a> IndexingPipeline<'a> {
         }
         let files_discovered = all_paths.len();
         info!(files_discovered, "files discovered");
-
-        // Step 2: Get existing hashes from DB
-        let existing_hashes = self.db.get_all_document_hashes()?;
 
         // Step 3: Build a lookup from source_ref -> PathBuf for all discovered files
         let all_source_refs: HashMap<String, PathBuf> = all_paths
@@ -202,6 +210,7 @@ impl<'a> IndexingPipeline<'a> {
         // Find deleted files (present in DB but no longer on disk)
         let deleted_paths: Vec<String> = existing_hashes
             .keys()
+            .filter(|source_ref| is_markdown_source_ref(source_ref))
             .filter(|source_ref| !all_source_refs.contains_key(*source_ref))
             .cloned()
             .collect();
@@ -547,7 +556,9 @@ impl<'a> IndexingPipeline<'a> {
                         );
                     }
                 }
-                Err(e) => warn!(log = name.as_str(), error = %e, "failed to process configured log"),
+                Err(e) => {
+                    warn!(log = name.as_str(), error = %e, "failed to process configured log")
+                }
             }
         }
         Ok(())
@@ -968,8 +979,8 @@ mod tests {
         assert!(occs.iter().all(|o| o.date_source == "content"));
 
         // Replace semantics: a full re-run must not accumulate.
-        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
-            .with_configured_logs(configured);
+        let pipeline =
+            IndexingPipeline::new(&db, vault.path().to_path_buf()).with_configured_logs(configured);
         pipeline.run(true, |_| {}).unwrap();
         let entity = db
             .get_all_entities()
@@ -1022,8 +1033,8 @@ mod tests {
         // run processes nothing — promotion must still happen.
         let configured: std::collections::HashSet<String> =
             ["journal".to_string()].into_iter().collect();
-        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf())
-            .with_configured_logs(configured);
+        let pipeline =
+            IndexingPipeline::new(&db, vault.path().to_path_buf()).with_configured_logs(configured);
         let stats = pipeline.run(false, |_| {}).unwrap();
         assert_eq!(stats.files_new + stats.files_updated, 0);
         let entity = db

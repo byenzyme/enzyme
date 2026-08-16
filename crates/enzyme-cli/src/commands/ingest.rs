@@ -5,15 +5,16 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use enzyme_core::config::paths::{EnzymePaths, ensure_dir_symlink_aware};
 use enzyme_core::db::Database;
-use enzyme_core::document::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
+use enzyme_core::document::{
+    ProcessedDocument, StructuredDocumentInput, structured_document_to_processed_document,
+};
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
-use enzyme_core::models::{DateSource, EntityType};
+use enzyme_core::models::EntityType;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::epoch::now_ms as epoch_now_ms;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::similarity::{IncrementalSimilarityStats, SimilarityPipeline};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
 pub struct IngestEntry {
@@ -193,47 +194,17 @@ fn project_ingest_batch(
 }
 
 fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<ProcessedDocument> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ref content) = entry.content {
-        parts.push(content.clone());
-    }
-    if let Some(ref notes) = entry.notes {
-        if !notes.is_empty() {
-            parts.push(format!("\n{}", notes));
-        }
-    }
-    if let Some(ref source) = entry.source {
-        if !source.is_empty() {
-            parts.push(format!("\nSource: {}", source));
-        }
-    }
-
-    let full_content = if parts.is_empty() {
-        entry.title.clone()
-    } else {
-        format!("# {}\n\n{}", entry.title, parts.join("\n"))
-    };
-
-    let source_ref = entry.id.unwrap_or_else(|| slugify(&entry.title));
+    let source_ref = entry.id.clone().unwrap_or_else(|| slugify(&entry.title));
     let source_ref = if let Some(ref folder) = entry.folder {
         if folder.is_empty() {
             source_ref
         } else {
-            format!("{}/{}", folder, source_ref)
+            format!("{folder}/{source_ref}")
         }
     } else {
         source_ref
     };
 
-    let content_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(full_content.as_bytes());
-        format!("{:x}", hasher.finalize())
-    };
-    let chunks = chunk_document(&full_content, DEFAULT_CHUNK_SIZE_CHARS);
-    let word_count = full_content.split_whitespace().count() as i64;
-    let char_count = full_content.chars().count() as i64;
-    let created_at = parse_timestamp(&entry.created_at, now_ms);
     let mut folders = Vec::new();
     if let Some(ref folder) = entry.folder {
         push_unique_nonempty(&mut folders, folder);
@@ -245,35 +216,26 @@ fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<Proces
         push_unique_nonempty(&mut folders, collection);
     }
 
-    if let Some(metadata) = entry.metadata {
+    if let Some(ref metadata) = entry.metadata {
         tracing::debug!(
             ?metadata,
             "ingest metadata is accepted but not persisted yet"
         );
     }
 
-    Ok(ProcessedDocument {
-        source_ref,
-        title: Some(entry.title),
-        content: full_content,
-        content_hash,
-        word_count,
-        char_count,
-        created_at,
-        created_source: DateSource::Content,
-        modified_at: created_at,
-        modified_source: DateSource::Content,
-        tags: entry.tags,
-        links: entry.links,
-        folders,
-        chunk_entry_dates: vec![None; chunks.len()],
-        chunks,
-        frontmatter: None,
-        // Ingested items are externally-structured single units, not user
-        // append-only log files.
-        is_log: false,
-        append_log: None,
-    })
+    Ok(structured_document_to_processed_document(
+        StructuredDocumentInput {
+            source_ref,
+            title: entry.title,
+            content: entry.content,
+            notes: entry.notes,
+            source: entry.source,
+            tags: entry.tags,
+            links: entry.links,
+            folders,
+            created_at: parse_timestamp(&entry.created_at, now_ms),
+        },
+    ))
 }
 
 fn parse_timestamp(value: &Option<serde_json::Value>, default_ms: i64) -> i64 {

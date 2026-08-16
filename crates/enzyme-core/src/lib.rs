@@ -9,3 +9,4 @@ pub mod models;
 pub mod pipeline;
 pub mod query;
 pub mod search;
+pub mod sqlite_source;

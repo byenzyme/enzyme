@@ -28,6 +28,7 @@ use enzyme_core::pipeline::similarity::{
     IncrementalSimilarityStats, SimilarityPipeline, catalysts_fingerprint,
 };
 use enzyme_core::pipeline::staleness::store_staleness_bookkeeping;
+use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
 use super::lock::{acquire_projection_lock, acquire_refresh_lock, is_refresh_locked};
 use super::vault_summary;
@@ -112,8 +113,17 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
     Ok(db.get_document_count().unwrap_or(0) > 0)
 }
 
+fn index_configured_sqlite_sources(
+    db: &Database,
+    vault_path: &Path,
+) -> Result<SqliteSourceIndexingStats> {
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    run_configured_sqlite_sources(db, &config.sources)
+}
+
 struct LocalRefreshResult {
     indexing: IndexingStats,
+    sources: SqliteSourceIndexingStats,
     embedding: EmbeddingStats,
     similarity: IncrementalSimilarityStats,
 }
@@ -121,6 +131,7 @@ struct LocalRefreshResult {
 impl LocalRefreshResult {
     fn collection_changed(&self) -> bool {
         has_index_changes(&self.indexing)
+            || self.sources.changed()
             || self.embedding.documents_embedded > 0
             || self.embedding.documents_pruned > 0
             || self.similarity.rows_upserted > 0
@@ -128,7 +139,7 @@ impl LocalRefreshResult {
 
     fn change_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
-        if has_index_changes(&self.indexing) {
+        if has_index_changes(&self.indexing) || self.sources.changed() {
             reasons.push("documents_changed");
         }
         if self.embedding.documents_embedded > 0 || self.embedding.documents_pruned > 0 {
@@ -330,6 +341,12 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     }
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
+    let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
+    debug!(
+        sources = source_stats.sources_queried,
+        rows = source_stats.rows_indexed,
+        "SQLite source indexing complete"
+    );
 
     // Run indexing
     let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
@@ -539,6 +556,12 @@ pub async fn run_init(
     // Open database
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
+    let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
+    debug!(
+        sources = source_stats.sources_queried,
+        rows = source_stats.rows_indexed,
+        "SQLite source indexing complete"
+    );
 
     // Local model startup (especially cold Metal initialization) is independent
     // of the vault. Hide it behind indexing, but never touch local inference
@@ -1268,6 +1291,12 @@ fn run_local_refresh_work(
     let projection_token = db.begin_continuous_projection()?;
     let before_embeddings = db.get_all_chunk_embeddings()?;
     let index_start_ms = chrono::Utc::now().timestamp_millis();
+    let source_stats = index_configured_sqlite_sources(db, vault_path)?;
+    debug!(
+        sources = source_stats.sources_queried,
+        rows = source_stats.rows_indexed,
+        "fast refresh: SQLite source indexing complete"
+    );
     let indexing = IndexingPipeline::new(db, vault_path.to_path_buf());
     let idx_stats = indexing.run(false, |_msg| {})?;
     debug!(
@@ -1278,8 +1307,12 @@ fn run_local_refresh_work(
     );
 
     let service = get_embedding_service(&paths.home).ok();
-    let embedding =
-        refresh_changed_doc_embeddings(db, service, index_start_ms, has_index_changes(&idx_stats))?;
+    let embedding = refresh_changed_doc_embeddings(
+        db,
+        service,
+        index_start_ms,
+        has_index_changes(&idx_stats) || source_stats.changed(),
+    )?;
 
     let after_embeddings = db.get_all_chunk_embeddings()?;
     let similarity = if recovery_required && database_has_catalysts(db) {
@@ -1304,6 +1337,7 @@ fn run_local_refresh_work(
     db.finish_continuous_projection(&projection_token)?;
     Ok(LocalRefreshResult {
         indexing: idx_stats,
+        sources: source_stats,
         embedding,
         similarity,
     })
