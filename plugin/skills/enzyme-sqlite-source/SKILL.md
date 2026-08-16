@@ -1,0 +1,312 @@
+---
+name: enzyme-sqlite-source
+description: Explore an unfamiliar SQLite database, bind records to Enzyme's universal entity/timestamp/content/collection roles, show evidence for confirmation, freeze a deterministic per-workspace TOML source contract, and verify native init/refresh results. Use for email, message, CRM, archive, or other structured SQLite sources with no app-specific preset. Never modify source rows.
+---
+
+# Enzyme SQLite Source
+
+The durable promise:
+
+> Explore read-only. Show joined records and timestamp interpretation before writing anything. Once confirmed, freeze every judgment into a contract that `enzyme init` and `enzyme refresh` execute without an LLM.
+
+The conceptual roles and TOML keys are:
+
+- `entity` / `who`: repeated categorical values naming who or what.
+- `timestamp` / `when`: when the record happened.
+- `content` / `what`: the record body.
+- `collection` / `where`: optional thread, mailbox, folder, or comparable grouping.
+
+Never edit, migrate, vacuum, attach to, or create objects in the source database. Open it read-only. Do not write config, workspace files, or Enzyme data before the evidence gate.
+
+## Inputs and workspace shapes
+
+The path keyed by `[vaults."path"]` is the **workspace home**: the directory holding `.enzyme` state, indexed documents, embeddings, catalysts, and native source sync state. It need not contain Markdown.
+
+Support both first-class shapes:
+
+1. **Existing Markdown workspace:** add a `sources.<name>` tributary beside its existing entity, log, and exclusion settings. Native source execution must preserve both Markdown and database documents.
+2. **Standalone SQLite workspace:** after confirmation, create or use an empty directory, add a vault section containing only `sources.<name>`, then initialize with zero Markdown files.
+
+Resolve absolute paths and tools:
+
+```bash
+SOURCE_DB="/absolute/path/to/source.sqlite"
+WORKSPACE_HOME="/absolute/path/to/workspace-home"
+ENZYME_BIN=enzyme
+test -f "$SOURCE_DB"
+sqlite3 -readonly "$SOURCE_DB" 'PRAGMA query_only; PRAGMA quick_check;'
+"$ENZYME_BIN" --version
+```
+
+Before consent, inspect an existing workspace without changing it:
+
+```bash
+test ! -e "$WORKSPACE_HOME" || test -d "$WORKSPACE_HOME"
+test ! -d "$WORKSPACE_HOME" || find "$WORKSPACE_HOME" -type f -name '*.md' -not -path '*/.enzyme/*' -print
+```
+
+For standalone onboarding, create a missing directory only after confirmation. For a live database, use an application-safe snapshot or SQLite's backup API; do not copy a lone main file while a WAL may contain committed data.
+
+## 1. Explore read-only
+
+Evidence comes from values and joins, not names such as `date`, `from_id`, or `text`.
+
+### Survey schema and volume
+
+```bash
+sqlite3 -readonly "$SOURCE_DB" <<'SQL'
+.headers on
+.mode column
+SELECT name, type
+FROM sqlite_schema
+WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+ORDER BY type, name;
+SELECT name AS table_name, sql
+FROM sqlite_schema
+WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+ORDER BY name;
+PRAGMA foreign_key_list('candidate_table');
+PRAGMA index_list('candidate_table');
+PRAGMA table_info('candidate_table');
+SQL
+sqlite3 -readonly "$SOURCE_DB" 'SELECT count(*) AS rows FROM "candidate_table";'
+```
+
+Inspect views and triggers too. A view may encode canonical joins; triggers may explain timestamps or soft deletion. Many application databases omit declared foreign keys.
+
+### Find entity candidates
+
+For every text or foreign-key candidate, measure coverage, cardinality, and common values:
+
+```sql
+SELECT count(*) AS rows,
+       count(candidate) AS nonnull,
+       count(DISTINCT candidate) AS distinct_values,
+       round(1.0 * count(DISTINCT candidate) / nullif(count(candidate), 0), 4) AS distinct_ratio
+FROM "candidate_table";
+
+SELECT candidate, count(*) AS occurrences
+FROM "candidate_table"
+WHERE candidate IS NOT NULL AND trim(CAST(candidate AS TEXT)) <> ''
+GROUP BY candidate
+ORDER BY occurrences DESC
+LIMIT 20;
+```
+
+Prefer recurring human-readable names, addresses, handles, or organizations. Reject booleans, delivery states, MIME types, and opaque IDs as final entities. An opaque key may join to an entity.
+
+### Find timestamp candidates
+
+Measure storage and range before converting:
+
+```sql
+SELECT typeof(candidate) AS storage_type, count(*) AS rows
+FROM "candidate_table"
+GROUP BY storage_type;
+
+SELECT min(CAST(candidate AS INTEGER)) AS min_value,
+       max(CAST(candidate AS INTEGER)) AS max_value,
+       length(CAST(max(CAST(candidate AS INTEGER)) AS TEXT)) AS max_digits
+FROM "candidate_table"
+WHERE candidate IS NOT NULL;
+```
+
+Use magnitude only to form hypotheses, then prove them on minimum, recent, maximum, and joined samples:
+
+| Likely shape | SQL to Unix milliseconds |
+|---|---|
+| Unix seconds (~10 digits) | `CAST(value * 1000 AS INTEGER)` |
+| Unix milliseconds (~13) | `CAST(value AS INTEGER)` |
+| Unix microseconds (~16) | `CAST(value / 1000 AS INTEGER)` |
+| Unix nanoseconds (~19) | `CAST(value / 1000000 AS INTEGER)` |
+| Apple 2001 seconds | `CAST(value * 1000 AS INTEGER) + 978307200000` |
+| Apple 2001 nanoseconds | `CAST(value / 1000000 AS INTEGER) + 978307200000` |
+
+Apple epoch is `2001-01-01T00:00:00Z`; its Unix offset is `978307200000` ms. Never infer it from an Apple-looking schema. Compare converted values with known dates and source-file recency. Handle mixed units, negative sentinels, local-time strings, timezone offsets, and Cocoa floating-point seconds explicitly.
+
+```sql
+SELECT candidate AS raw,
+       <millisecond_expression> AS unix_ms,
+       datetime(<millisecond_expression> / 1000, 'unixepoch') AS utc
+FROM "candidate_table"
+WHERE candidate IS NOT NULL
+ORDER BY candidate
+LIMIT 10;
+```
+
+Make the final query output one integer Unix-millisecond column. Native execution must reject null or invalid timestamps rather than silently substituting indexing time.
+
+### Find content candidates
+
+```sql
+SELECT count(*) AS rows,
+       sum(CASE WHEN candidate IS NOT NULL AND trim(CAST(candidate AS TEXT)) <> '' THEN 1 ELSE 0 END) AS nonempty,
+       min(length(CAST(candidate AS TEXT))) AS min_len,
+       round(avg(length(CAST(candidate AS TEXT))), 1) AS avg_len,
+       max(length(CAST(candidate AS TEXT))) AS max_len
+FROM "candidate_table";
+
+SELECT length(CAST(candidate AS TEXT)) AS chars,
+       substr(replace(replace(CAST(candidate AS TEXT), char(10), ' '), char(13), ' '), 1, 160) AS sample
+FROM "candidate_table"
+WHERE candidate IS NOT NULL AND trim(CAST(candidate AS TEXT)) <> ''
+ORDER BY chars DESC
+LIMIT 12;
+```
+
+Reject blobs, encoded payloads, and status fields. Bind multiple content columns only when their order is stable and intelligible.
+
+### Discover normalized joins
+
+Start with declared foreign keys, then test likely pairs:
+
+```sql
+SELECT count(*) AS base_rows,
+       count(p.rowid) AS resolved_rows,
+       count(DISTINCT m.person_id) AS distinct_keys,
+       count(DISTINCT p.display_name) AS distinct_names
+FROM messages AS m
+LEFT JOIN people AS p ON p.rowid = m.person_id;
+
+SELECT m.rowid AS message_rowid,
+       p.display_name AS sender,
+       datetime(<millisecond_expression> / 1000, 'unixepoch') AS utc,
+       substr(m.body, 1, 160) AS body,
+       t.name AS thread
+FROM messages AS m
+LEFT JOIN people AS p ON p.rowid = m.person_id
+LEFT JOIN threads AS t ON t.rowid = m.thread_id
+ORDER BY m.rowid DESC
+LIMIT 12;
+```
+
+A good join preserves base cardinality and resolves IDs to names. Investigate fan-out. Aggregate many-to-many values with SQLite JSON functions or a correlated subquery. Final SQL must return exactly one source record per row with unique aliases.
+
+Prove identity separately:
+
+```sql
+SELECT count(*) AS rows,
+       count(message_rowid) AS nonnull_ids,
+       count(DISTINCT message_rowid) AS distinct_ids
+FROM (<proposed single-row-per-record query>);
+```
+
+Require all three counts to match. Prefer a declared `INTEGER PRIMARY KEY`. Bare `rowid` can change after `VACUUM` unless it aliases one.
+
+## 2. Bind and show evidence
+
+Before mutation, present:
+
+1. Source path, base table/view, row count, and join coverage.
+2. Every output alias, universal role, source expression, null rate, relevant distinct count, and rationale.
+3. At least 8 joined rows spanning old/new, null edges, multiple entities or collections, and ordinary records. Redact only the presentation; do not silently change SQL.
+4. Raw timestamp range, inferred unit/epoch, exact millisecond expression, and readable UTC samples.
+5. Stable identity result column(s) and uniqueness evidence.
+6. Workspace shape/path and whether `where` becomes a collection.
+
+Ask the user to confirm or correct. Correction returns to exploration. A yes authorizes only the config contract, optional standalone directory, and subsequent Enzyme state. It never authorizes source mutation.
+
+## 3. Freeze the native contract
+
+After confirmation, create a missing standalone home with `mkdir -p "$WORKSPACE_HOME"`. Merge the contract into `~/.enzyme/config.toml` under the canonical absolute workspace key without disturbing existing settings:
+
+```toml
+[vaults."/absolute/path/to/workspace-home".sources.messages]
+db = "/absolute/path/to/source.sqlite"
+query = """
+SELECT
+  m.rowid AS message_rowid,
+  p.name AS sender,
+  CAST(m.sent_ns / 1000000 AS INTEGER) + 978307200000 AS sent_at_ms,
+  m.body AS body,
+  t.name AS thread
+FROM messages AS m
+LEFT JOIN people AS p ON p.rowid = m.person_id
+LEFT JOIN threads AS t ON t.rowid = m.thread_id
+ORDER BY m.rowid
+"""
+id = ["message_rowid"]
+
+[vaults."/absolute/path/to/workspace-home".sources.messages.roles]
+who = ["sender"]
+when = "sent_at_ms"
+what = ["body"]
+where = ["thread"]
+
+[vaults."/absolute/path/to/workspace-home".sources.messages.timestamp]
+unit = "milliseconds"
+epoch = "unix"
+conversion = "m.sent_ns is Apple-epoch nanoseconds; SQL divides by 1000000 and adds 978307200000"
+```
+
+This is the exact `enzyme.sqlite-source.v1` shape:
+
+- Source root keys: `db` (absolute SQLite path), `query` (one read-only SQL statement), and `id` (one or more result columns).
+- `roles.who`: non-empty array of result columns mapped to link entities.
+- `roles.when`: exactly one result column.
+- `roles.what`: non-empty array of result columns concatenated in order.
+- `roles.where`: optional array of result columns mapped to collection/folder entities.
+- `timestamp.unit`: unit of the `when` result; freeze as `milliseconds`.
+- `timestamp.epoch`: epoch of the `when` result; freeze as `unix`.
+- `timestamp.conversion`: human-readable notes explaining the original unit/epoch and exact conversion already performed by SQL.
+
+The `id` key is the one necessary addition beyond `db`, `query`, `roles`, and `timestamp`. Native execution needs it to derive a stable deterministic document ID from source primary keys/rowids so refresh upserts rather than duplicates. It is declarative identity, not a sync cursor. Enzyme owns incremental cursor/state in `.enzyme/enzyme.db`; never add mutable cursor values to TOML.
+
+Additional invariants:
+
+- Query is one `SELECT` or `WITH ... SELECT` and returns one row per document.
+- Every configured column is uniquely aliased, present, and non-null where required.
+- `id` tuple is stable and unique. The engine namespaces it by workspace source name before deriving document identity.
+- SQL performs timestamp conversion; notes do not contain executable logic.
+- No application-specific presets or hidden role inference remain.
+
+Show the exact stanza and config path after writing. Re-read it mechanically. Do not run `scan --write-config` afterward unless native config serialization is known to preserve `sources`.
+
+## 4. Initialize and verify
+
+Native source execution is the only ingestion path:
+
+```bash
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" init --quiet
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one real person or organization>"
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one real person or organization>?"
+```
+
+For an existing Markdown workspace, init/refresh must preserve and update both filesystem and SQLite sources. For standalone, zero Markdown files is valid; the source contract supplies the corpus.
+
+Verify without printing private bodies:
+
+```bash
+sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
+.headers on
+.mode column
+SELECT count(*) AS documents FROM docs;
+SELECT e.name, count(eo.id) AS occurrences
+FROM entities e JOIN entity_occurrences eo ON eo.entity_id = e.id
+WHERE e.entity_type = 'link'
+GROUP BY e.id, e.name
+ORDER BY occurrences DESC
+LIMIT 20;
+SELECT e.name, count(c.id) AS catalysts
+FROM entities e LEFT JOIN catalysts c ON c.entity = e.name
+WHERE e.entity_type = 'link'
+GROUP BY e.id, e.name
+ORDER BY catalysts DESC, e.name
+LIMIT 20;
+SQL
+```
+
+Compare document counts with the contract query, confirm expected people have occurrences, and confirm `petri` exposes catalysts. Catalyst work may be backgrounded; use `status` and verify after completion. If native source parsing/execution is unavailable, fails on an empty workspace, or drops either source shape, stop and report the Rust blocker. Do not fall back to `enzyme ingest` or a skill-managed extractor.
+
+## 5. Re-sync
+
+Run:
+
+```bash
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
+```
+
+Enzyme owns source cursors, replay, upsert state, embeddings, and catalyst scheduling in `.enzyme/enzyme.db`. The skill owns none of that mutable state. Re-open exploration only when refresh reports schema drift, a configured result alias disappears, join cardinality changes, or converted dates become implausible. Show new evidence and obtain confirmation before editing the frozen contract.
