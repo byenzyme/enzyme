@@ -9,6 +9,16 @@ The main rule:
 
 > Inspect the source without changing it. Before writing config, show the user real joined rows and explain the timestamps. After the user confirms the mapping, record it in config so `enzyme init` and `enzyme refresh` can repeat the same work without an LLM.
 
+Follow this order:
+
+1. Inspect the database read-only.
+2. Identify the person, date, message, folder, and ID columns.
+3. Show real examples and ask the user to confirm the mapping.
+4. Write the confirmed config.
+5. Run `init` once, then use `refresh`.
+6. Verify document and embedding counts.
+7. Test whether searches for a person are actually about that person.
+
 Enzyme needs these parts from each source row:
 
 - `id`: a stable value that uniquely identifies the row.
@@ -56,6 +66,8 @@ Do not trust a column only because it is named `date`, `from_id`, or `text`. Che
 
 ### List the schema and count the rows
 
+This first query lists every table, view, and trigger, shows their definitions, and inspects keys and columns on a candidate table. The final command counts that table's rows.
+
 ```bash
 sqlite3 -readonly "$SOURCE_DB" <<'SQL'
 .headers on
@@ -76,6 +88,10 @@ sqlite3 -readonly "$SOURCE_DB" 'SELECT count(*) AS rows FROM "candidate_table";'
 ```
 
 Read views and triggers as well as tables. A view may contain the application's intended join. A trigger may explain how timestamps or soft deletion work. Do not assume foreign keys are declared; many application databases omit them.
+
+## 2. Identify the person, date, message, and folder columns
+
+The remaining inspection decides how source rows map to Enzyme. Find `who` (people or organizations), `when` (date), `what` (message text), and optional `where` (folder or thread). Also find a stable `id` and prove that the joins still return one row per record.
 
 ### Find possible `who` columns
 
@@ -141,6 +157,8 @@ The number of digits can suggest a unit, but it is not proof. Test the oldest, n
 
 Apple's epoch starts at `2001-01-01T00:00:00Z`, which is `978307200000` milliseconds after the Unix epoch. Do not assume Apple time just because the schema looks Apple-related. A database file's modification time may reflect a copy, restore, or WAL checkpoint, so it is weak evidence. Prefer dates mentioned inside the records and the database's own maximum timestamp. Use file recency only as a secondary check. Investigate mixed units, negative sentinel values, local-time strings, timezone offsets, and Cocoa floating-point seconds instead of silently accepting them.
 
+Use this query to show the raw value, the proposed Unix-millisecond value, and the readable UTC date side by side:
+
 ```sql
 SELECT candidate AS raw,
        <millisecond_expression> AS unix_ms,
@@ -154,6 +172,8 @@ LIMIT 10;
 Use these conversions only while showing evidence. The saved query must return the original timestamp value. Put its unit (`s`, `ms`, `us`, or `ns`) and optional epoch in the `timestamp` config table, and let Enzyme convert it. Do not put timestamp conversion arithmetic in the saved SQL. Enzyme rejects a row whose timestamp is NULL or invalid; it does not silently replace it with indexing time.
 
 ### Find the `what` column
+
+These queries show how often the candidate contains usable text, its typical length, and a few of its longest examples:
 
 ```sql
 SELECT count(*) AS rows,
@@ -241,7 +261,7 @@ FROM (<proposed single-row-per-record query>);
 
 All three counts must match. Prefer a declared `INTEGER PRIMARY KEY`. A bare `rowid` may change after `VACUUM` unless it is an alias for that primary key.
 
-## 2. Show the proposed mapping and ask the user
+## 3. Show real examples and ask the user to confirm
 
 Before writing anything, show:
 
@@ -254,7 +274,7 @@ Before writing anything, show:
 
 Ask the user to confirm or correct the mapping. If they correct it, inspect the database again and show new evidence. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
 
-## 3. Write the confirmed config
+## 4. Write the confirmed config
 
 After confirmation, create a missing standalone workspace with `mkdir -p "$WORKSPACE_HOME"`. Then find the correct global config path:
 
@@ -346,7 +366,7 @@ The query must also follow these rules:
 
 After writing, show the exact config path and the text you added. Read it back from disk. Do not run `scan --write-config` afterward unless you know that the installed Enzyme version preserves `sources` when it rewrites config.
 
-## 4. Initialize the workspace and check the result
+## 5. Initialize once, then use refresh
 
 Use this configured source as the only ingestion path. Run `init` once for a workspace. Use `refresh` after that. Running `init` again regenerates and **replaces** catalysts, so their wording and counts may change even when the config and source data did not. `refresh` is the normal, repeatable way to sync again.
 
@@ -357,6 +377,18 @@ Use this configured source as the only ingestion path. Run `init` once for a wor
 ```
 
 In an existing Markdown workspace, `init` and `refresh` must keep and update both the Markdown files and SQLite records. In a standalone workspace, zero Markdown files is valid because the configured SQLite source supplies the documents.
+
+After the first `init`, use these commands whenever the source changes:
+
+```bash
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
+sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
+```
+
+The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages cursors, replay, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
+
+## 6. Verify document and embedding counts
 
 The next queries count documents, embeddings, entities, and catalysts without printing private message bodies:
 
@@ -402,6 +434,8 @@ max_embedding_files = 0
 ```
 
 Do not run `init` again to finish an embedding backlog.
+
+## 7. Test whether person searches are relevant
 
 To check an exact person name, query Enzyme's database directly. `petri --query` uses semantic search, so it cannot prove that an exact name exists or that its occurrences are correct. The following query proves both the exact match and the person's yearly and monthly coverage:
 
@@ -451,15 +485,3 @@ Now test the user-facing search. A query for a top person must return material t
 ```
 
 Confirm that expected people have occurrences, folder entities from `where` have catalysts, and `petri` shows catalysts. Catalyst generation may continue in the background, so use `status` and check again after it finishes. If Enzyme cannot read the configured source, cannot initialize an empty standalone workspace, or loses either Markdown or SQLite documents, stop and report that the implementation needs a Rust fix. Do not switch to `enzyme ingest` or write a custom extractor in the skill.
-
-## 5. Sync later changes
-
-After the first `init`, use these commands whenever the source changes:
-
-```bash
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
-sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
-```
-
-The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages cursors, replay, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
