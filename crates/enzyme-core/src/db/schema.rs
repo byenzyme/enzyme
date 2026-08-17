@@ -136,12 +136,12 @@ CREATE TABLE IF NOT EXISTS config (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- Incremental cursors for configured read-only SQLite sources -----------------
-CREATE TABLE IF NOT EXISTS source_cursors (
-    source_name  TEXT PRIMARY KEY,
-    cursor_kind  TEXT NOT NULL,
-    cursor_value TEXT NOT NULL,
-    updated_at   TEXT DEFAULT (datetime('now'))
+-- Read-only orientation for configured SQLite sources -------------------------
+CREATE TABLE IF NOT EXISTS source_refreshes (
+    source_name     TEXT PRIMARY KEY,
+    row_count       INTEGER NOT NULL,
+    bucket_count    INTEGER NOT NULL,
+    refreshed_at_ms INTEGER NOT NULL
 );
 
 -- Applied targets (external directories this vault's catalysts have been projected onto)
@@ -251,7 +251,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "catalyst_similarities",
     "context_cache",
     "config",
-    "source_cursors",
+    "source_refreshes",
     "applied_targets",
     "chunk_embeddings",
     "catalyst_embeddings_packed",

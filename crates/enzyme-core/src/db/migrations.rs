@@ -61,6 +61,11 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
     conn.execute_batch(schema::SCHEMA_SQL)
         .await
         .map_err(DbError::Libsql)?;
+    // SQLite sources now reconcile complete per-document fingerprints. The
+    // legacy high-water cursor is neither read nor retained as sync state.
+    conn.execute("DROP TABLE IF EXISTS source_cursors", ())
+        .await
+        .map_err(DbError::Libsql)?;
     ensure_chunk_entry_date_column(conn).await?;
     backfill_chunk_entry_dates(conn).await?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;

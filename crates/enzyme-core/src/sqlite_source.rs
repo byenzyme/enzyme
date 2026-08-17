@@ -1,22 +1,24 @@
-use std::collections::HashMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use chrono::NaiveDate;
-use rusqlite::types::{Value, ValueRef};
-use rusqlite::{Connection, OpenFlags, params_from_iter};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, NaiveDate, Utc};
+use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OpenFlags};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
     SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
 };
 use crate::db::Database;
-use crate::document::{StructuredDocumentInput, structured_document_to_processed_document};
-use crate::models::EntityType;
+use crate::document::{
+    ProcessedDocument, StructuredDocumentInput, StructuredLogDocumentInput, StructuredLogEntry,
+    structured_document_to_processed_document, structured_log_document_to_processed_document,
+};
+use crate::models::{EntityOccurrence, EntityType};
 use crate::pipeline::indexing::IndexingPipeline;
-
-const CURSOR_KIND: &str = "sqlite-composite-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteSourceValidation {
@@ -26,16 +28,29 @@ pub struct SqliteSourceValidation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SqliteSourceIndexingStats {
     pub sources_queried: usize,
-    pub rows_indexed: usize,
+    pub rows_seen: usize,
+    pub buckets_seen: usize,
+    pub documents_rebuilt: usize,
+    pub documents_skipped: usize,
+    pub documents_pruned: usize,
 }
 
 impl SqliteSourceIndexingStats {
     pub fn changed(&self) -> bool {
-        self.rows_indexed > 0
+        self.documents_rebuilt > 0 || self.documents_pruned > 0
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.sources_queried += other.sources_queried;
+        self.rows_seen += other.rows_seen;
+        self.buckets_seen += other.buckets_seen;
+        self.documents_rebuilt += other.documents_rebuilt;
+        self.documents_skipped += other.documents_skipped;
+        self.documents_pruned += other.documents_pruned;
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 enum CursorValue {
     Integer(i64),
@@ -59,15 +74,32 @@ impl CursorValue {
             ValueRef::Blob(value) => Ok(Self::Blob(value.to_vec())),
         }
     }
+}
 
-    fn to_sql_value(&self) -> Value {
-        match self {
-            Self::Integer(value) => Value::Integer(*value),
-            Self::Real(value) => Value::Real(*value),
-            Self::Text(value) => Value::Text(value.clone()),
-            Self::Blob(value) => Value::Blob(value.clone()),
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+enum FingerprintValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+}
+
+#[derive(Debug, Clone)]
+struct SourceRow {
+    id: Vec<CursorValue>,
+    who: Vec<String>,
+    what: String,
+    where_labels: Vec<String>,
+    where_key: Vec<Option<String>>,
+    created_at: i64,
+    fingerprint_values: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct PendingDocument {
+    document: ProcessedDocument,
+    occurrences: Vec<(String, EntityType, EntityOccurrence)>,
 }
 
 /// Validate a configured SQLite source without reading or modifying Enzyme's
@@ -108,25 +140,6 @@ pub fn check_sqlite_source_reachability(path: &Path) -> Result<()> {
     open_source_read_only(path).map(drop)
 }
 
-/// Render the typed composite cursor stored by SQLite source indexing.
-pub fn format_sqlite_source_cursor(cursor_json: &str) -> Result<String> {
-    let values: Vec<CursorValue> =
-        serde_json::from_str(cursor_json).context("failed to parse stored source cursor")?;
-    let rendered = values
-        .iter()
-        .map(|value| match value {
-            CursorValue::Integer(value) => value.to_string(),
-            CursorValue::Real(value) => value.to_string(),
-            CursorValue::Text(value) => value.clone(),
-            CursorValue::Blob(value) => format!("<{} bytes>", value.len()),
-        })
-        .collect::<Vec<_>>();
-    Ok(match rendered.as_slice() {
-        [value] => value.clone(),
-        _ => format!("[{}]", rendered.join(", ")),
-    })
-}
-
 fn ensure_source_path_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         bail!("source database does not exist: {}", path.display());
@@ -160,55 +173,41 @@ pub fn run_configured_sqlite_sources(
         let source = sources
             .get(name)
             .expect("source name was collected from the same map");
-        let indexed = run_sqlite_source(db, name, source)
+        let source_stats = run_sqlite_source(db, name, source)
             .with_context(|| format!("failed to index SQLite source {name:?}"))?;
-        stats.sources_queried += 1;
-        stats.rows_indexed += indexed;
+        stats.add_assign(&source_stats);
     }
     Ok(stats)
 }
 
-/// Execute one configured source and advance its cursor after durable upserts.
+/// Execute one configured source as a complete fingerprint reconciliation.
+/// Every configured query is read in full: matching fingerprints are skipped,
+/// changed fingerprints are rebuilt, and documents absent from the result are
+/// pruned. A configured `where` role activates monthly conversation buckets;
+/// sources without it retain one document per source row.
 pub fn run_sqlite_source(
     db: &Database,
     source_name: &str,
     source: &SqliteSourceConfig,
-) -> Result<usize> {
+) -> Result<SqliteSourceIndexingStats> {
     validate_contract(source_name, source)?;
-
-    let cursor = load_cursor(db, source_name)?;
-    if let Some(values) = &cursor
-        && values.len() != source.roles.id.len()
-    {
-        bail!(
-            "stored cursor has {} columns but source config declares {} id columns",
-            values.len(),
-            source.roles.id.len()
-        );
-    }
-
     ensure_source_path_exists(&source.db)?;
     let source_db = open_source_read_only(&source.db)?;
 
-    let sql = incremental_query(&source.query, &source.roles, cursor.is_some());
+    let sql = source.query.trim().trim_end_matches(';').trim_end();
     let mut statement = source_db
-        .prepare(&sql)
+        .prepare(sql)
         .with_context(|| format!("failed to prepare source query: {sql}"))?;
     if !statement.readonly() {
         bail!("source query must be read-only");
     }
     let columns = ResolvedColumns::new(&statement, &source.roles)?;
-    let params: Vec<Value> = cursor
-        .as_ref()
-        .map(|values| values.iter().map(CursorValue::to_sql_value).collect())
-        .unwrap_or_default();
     let mut rows = statement
-        .query(params_from_iter(params))
+        .query([])
         .context("failed to execute source query")?;
 
     let epoch_ms = timestamp_epoch_ms(&source.timestamp)?;
-    let mut documents = Vec::new();
-    let mut last_id = None;
+    let mut source_rows = Vec::new();
     while let Some(row) = rows.next().context("failed to read source query row")? {
         let id = columns
             .id
@@ -221,48 +220,86 @@ pub fn run_sqlite_source(
         let where_labels = role_text_values(row, &columns.where_columns, "where")?;
         let created_at =
             timestamp_value_to_unix_ms(row.get_ref(columns.when)?, &source.timestamp, epoch_ms)?;
-
-        let source_ref = stable_source_ref(source_name, &id);
-        let title = who
-            .first()
-            .cloned()
-            .unwrap_or_else(|| source_name.to_string());
-        documents.push(structured_document_to_processed_document(
-            StructuredDocumentInput {
-                source_ref,
-                title,
-                content: Some(what),
-                notes: None,
-                source: Some(source_name.to_string()),
-                tags: Vec::new(),
-                links: who,
-                folders: where_labels,
-                created_at,
-            },
-        ));
-        last_id = Some(id);
+        let where_key = role_optional_text_values(row, &columns.where_columns, "where")?;
+        let fingerprint_values = fingerprint_record(row, &columns)?;
+        source_rows.push(SourceRow {
+            id,
+            who,
+            what,
+            where_labels,
+            where_key,
+            created_at,
+            fingerprint_values,
+        });
     }
     drop(rows);
     drop(statement);
 
-    if documents.is_empty() {
-        return Ok(0);
+    source_rows.sort_by(compare_source_rows);
+    let rows_seen = source_rows.len();
+    let pending = if source.roles.r#where.is_empty() {
+        build_row_documents(source_name, source_rows)
+    } else {
+        build_bucket_documents(source_name, source_rows)?
+    };
+
+    let existing = source_document_hashes(db, source_name)?;
+    let current_paths: HashSet<&str> = pending
+        .iter()
+        .map(|item| item.document.source_ref.as_str())
+        .collect();
+    let pruned_paths: Vec<String> = existing
+        .keys()
+        .filter(|path| !current_paths.contains(path.as_str()))
+        .cloned()
+        .collect();
+    let mut rebuilt = Vec::new();
+    let mut skipped = 0usize;
+    for item in pending {
+        match existing.get(&item.document.source_ref) {
+            Some((fingerprint, _)) if fingerprint == &item.document.content_hash => skipped += 1,
+            _ => rebuilt.push(item),
+        }
     }
 
-    db.upsert_documents_batch(&documents)?;
-    let entity_entries = IndexingPipeline::collect_entity_entries(&documents);
-    let refs: Vec<(&str, &EntityType, &crate::models::EntityOccurrence)> = entity_entries
+    let rebuilt_paths: Vec<String> = rebuilt
         .iter()
-        .map(|(name, entity_type, occurrence)| (name.as_str(), entity_type, occurrence))
+        .map(|item| item.document.source_ref.clone())
         .collect();
-    db.upsert_entities_batch(&refs)?;
+    if !rebuilt_paths.is_empty() {
+        db.remove_occurrences_for_paths(&rebuilt_paths)?;
+        let documents: Vec<ProcessedDocument> =
+            rebuilt.iter().map(|item| item.document.clone()).collect();
+        db.upsert_documents_batch(&documents)?;
+        let entity_entries: Vec<(String, EntityType, EntityOccurrence)> = rebuilt
+            .iter()
+            .flat_map(|item| item.occurrences.iter().cloned())
+            .collect();
+        let refs: Vec<(&str, &EntityType, &EntityOccurrence)> = entity_entries
+            .iter()
+            .map(|(name, entity_type, occurrence)| (name.as_str(), entity_type, occurrence))
+            .collect();
+        db.upsert_entities_batch(&refs)?;
+    }
+    let documents_pruned = db.delete_documents_by_paths(&pruned_paths)?;
+    db.prune_entities_without_occurrences()?;
 
-    let last_id = last_id.expect("non-empty document batch has a final id");
-    let cursor_json =
-        serde_json::to_string(&last_id).context("failed to serialize source cursor")?;
-    db.set_source_cursor(source_name, CURSOR_KIND, &cursor_json)?;
+    let refreshed_at = Utc::now().timestamp_millis();
+    db.set_source_refresh_status(
+        source_name,
+        rows_seen,
+        rebuilt.len() + skipped,
+        refreshed_at,
+    )?;
 
-    Ok(documents.len())
+    Ok(SqliteSourceIndexingStats {
+        sources_queried: 1,
+        rows_seen,
+        buckets_seen: rebuilt.len() + skipped,
+        documents_rebuilt: rebuilt.len(),
+        documents_skipped: skipped,
+        documents_pruned,
+    })
 }
 
 fn validate_contract(source_name: &str, source: &SqliteSourceConfig) -> Result<()> {
@@ -290,44 +327,203 @@ fn validate_contract(source_name: &str, source: &SqliteSourceConfig) -> Result<(
     Ok(())
 }
 
-fn load_cursor(db: &Database, source_name: &str) -> Result<Option<Vec<CursorValue>>> {
-    let Some((kind, value)) = db.get_source_cursor(source_name)? else {
-        return Ok(None);
-    };
-    if kind != CURSOR_KIND {
-        bail!("unsupported stored cursor kind {kind:?}");
-    }
-    serde_json::from_str(&value)
-        .context("failed to parse stored source cursor")
-        .map(Some)
+fn source_document_hashes(
+    db: &Database,
+    source_name: &str,
+) -> Result<HashMap<String, (String, i64)>> {
+    let prefix = format!("sqlite:{}/", escape_source_name(source_name));
+    Ok(db
+        .get_all_document_hashes()?
+        .into_iter()
+        .filter(|(source_ref, _)| source_ref.starts_with(&prefix))
+        .collect())
 }
 
-fn incremental_query(query: &str, roles: &SqliteSourceRoles, has_cursor: bool) -> String {
-    let query = query.trim().trim_end_matches(';').trim_end();
-    let id_columns: Vec<String> = roles.id.iter().map(|name| quote_identifier(name)).collect();
-    let order = id_columns.join(", ");
+fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDocument> {
+    rows.into_iter()
+        .map(|row| {
+            let document = structured_document_to_processed_document(StructuredDocumentInput {
+                source_ref: stable_source_ref(source_name, &row.id),
+                title: row
+                    .who
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| source_name.to_string()),
+                content: Some(row.what),
+                notes: None,
+                source: Some(source_name.to_string()),
+                tags: Vec::new(),
+                links: row.who,
+                folders: row.where_labels,
+                created_at: row.created_at,
+            });
+            let occurrences =
+                IndexingPipeline::collect_entity_entries(std::slice::from_ref(&document));
+            PendingDocument {
+                document,
+                occurrences,
+            }
+        })
+        .collect()
+}
 
-    if !has_cursor {
-        return format!("SELECT * FROM ({query}) AS enzyme_source ORDER BY {order}");
+fn build_bucket_documents(source_name: &str, rows: Vec<SourceRow>) -> Result<Vec<PendingDocument>> {
+    let mut buckets: BTreeMap<(Vec<Option<String>>, String), Vec<SourceRow>> = BTreeMap::new();
+    for row in rows {
+        let month = DateTime::<Utc>::from_timestamp_millis(row.created_at)
+            .context("when timestamp is outside the UTC calendar range")?
+            .format("%Y-%m")
+            .to_string();
+        buckets
+            .entry((row.where_key.clone(), month))
+            .or_default()
+            .push(row);
     }
 
-    let placeholders: Vec<String> = (1..=id_columns.len())
-        .map(|index| format!("?{index}"))
+    let mut documents = Vec::with_capacity(buckets.len());
+    for ((where_key, month), mut rows) in buckets {
+        rows.sort_by(compare_source_rows);
+        let fingerprint = bucket_fingerprint(&rows);
+        let where_digest = stable_where_digest(&where_key);
+        let source_ref = format!(
+            "sqlite:{}/{where_digest}/{month}",
+            escape_source_name(source_name)
+        );
+        let folders: Vec<String> = rows
+            .iter()
+            .flat_map(|row| row.where_labels.iter().cloned())
+            .map(|folder| (folder, ()))
+            .collect::<BTreeMap<_, ()>>()
+            .into_keys()
+            .collect();
+        let title = if folders.is_empty() {
+            format!("{source_name} {month}")
+        } else {
+            folders.join(" / ")
+        };
+        let entries: Vec<StructuredLogEntry> = rows
+            .iter()
+            .map(|row| StructuredLogEntry {
+                who: row.who.clone(),
+                content: row.what.clone(),
+                created_at: row.created_at,
+            })
+            .collect();
+        let output = structured_log_document_to_processed_document(StructuredLogDocumentInput {
+            source_ref: source_ref.clone(),
+            title,
+            source: Some(source_name.to_string()),
+            folders,
+            entries,
+            fingerprint,
+        });
+        let now = Utc::now().timestamp_millis();
+        let mut occurrences = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let context = output.entry_contexts.get(index).cloned();
+            for who in &row.who {
+                occurrences.push((
+                    who.clone(),
+                    EntityType::Link,
+                    source_occurrence(&source_ref, context.clone(), now, row.created_at),
+                ));
+            }
+            for folder in &row.where_labels {
+                occurrences.push((
+                    folder.clone(),
+                    EntityType::Folder,
+                    source_occurrence(&source_ref, context.clone(), now, row.created_at),
+                ));
+            }
+        }
+        documents.push(PendingDocument {
+            document: output.document,
+            occurrences,
+        });
+    }
+    Ok(documents)
+}
+
+fn source_occurrence(
+    source_ref: &str,
+    context: Option<String>,
+    created_at: i64,
+    effective_date: i64,
+) -> EntityOccurrence {
+    EntityOccurrence {
+        id: None,
+        entity_id: 0,
+        file_path: source_ref.to_string(),
+        context,
+        created_at,
+        effective_date: Some(effective_date),
+        date_source: "content".to_string(),
+    }
+}
+
+fn compare_source_rows(left: &SourceRow, right: &SourceRow) -> Ordering {
+    left.created_at
+        .cmp(&right.created_at)
+        .then_with(|| compare_cursor_tuples(&left.id, &right.id))
+}
+
+fn compare_cursor_tuples(left: &[CursorValue], right: &[CursorValue]) -> Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| compare_cursor_values(left, right))
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn compare_cursor_values(left: &CursorValue, right: &CursorValue) -> Ordering {
+    fn rank(value: &CursorValue) -> u8 {
+        match value {
+            CursorValue::Integer(_) => 0,
+            CursorValue::Real(_) => 1,
+            CursorValue::Text(_) => 2,
+            CursorValue::Blob(_) => 3,
+        }
+    }
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (CursorValue::Integer(left), CursorValue::Integer(right)) => left.cmp(right),
+            (CursorValue::Real(left), CursorValue::Real(right)) => left.total_cmp(right),
+            (CursorValue::Text(left), CursorValue::Text(right)) => left.cmp(right),
+            (CursorValue::Blob(left), CursorValue::Blob(right)) => left.cmp(right),
+            _ => Ordering::Equal,
+        })
+}
+
+fn bucket_fingerprint(rows: &[SourceRow]) -> String {
+    let mut records: Vec<&[u8]> = rows
+        .iter()
+        .map(|row| row.fingerprint_values.as_slice())
         .collect();
-    let predicate = if id_columns.len() == 1 {
-        format!("{} > {}", id_columns[0], placeholders[0])
-    } else {
-        format!(
-            "({}) > ({})",
-            id_columns.join(", "),
-            placeholders.join(", ")
-        )
-    };
-    format!("SELECT * FROM ({query}) AS enzyme_source WHERE {predicate} ORDER BY {order}")
+    records.sort_unstable();
+    let mut hasher = Sha256::new();
+    hasher.update(b"enzyme-sqlite-bucket-v1\0");
+    for record in records {
+        hasher.update(record.len().to_le_bytes());
+        hasher.update(record);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+fn stable_where_digest(where_key: &[Option<String>]) -> String {
+    let normalized: Vec<Option<&str>> = where_key
+        .iter()
+        .map(|value| value.as_deref().filter(|value| !value.is_empty()))
+        .collect();
+    let payload = if normalized.iter().all(Option::is_none) {
+        serde_json::to_vec(&"fallback").expect("serializing a string cannot fail")
+    } else {
+        serde_json::to_vec(&normalized).expect("serializing strings cannot fail")
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"enzyme-sqlite-where-v1\0");
+    hasher.update(payload);
+    format!("{:x}", hasher.finalize())
 }
 
 struct ResolvedColumns {
@@ -408,6 +604,59 @@ fn role_text_values(row: &rusqlite::Row<'_>, columns: &[usize], role: &str) -> R
         }
     }
     Ok(values)
+}
+
+fn role_optional_text_values(
+    row: &rusqlite::Row<'_>,
+    columns: &[usize],
+    role: &str,
+) -> Result<Vec<Option<String>>> {
+    columns
+        .iter()
+        .map(|index| {
+            Ok(scalar_text(row.get_ref(*index)?, role)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()))
+        })
+        .collect()
+}
+
+fn fingerprint_record(row: &rusqlite::Row<'_>, columns: &ResolvedColumns) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct Record {
+        who: Vec<FingerprintValue>,
+        when: FingerprintValue,
+        what: Vec<FingerprintValue>,
+    }
+
+    fn values(row: &rusqlite::Row<'_>, columns: &[usize]) -> Result<Vec<FingerprintValue>> {
+        columns
+            .iter()
+            .map(|index| fingerprint_value(row.get_ref(*index)?))
+            .collect()
+    }
+
+    serde_json::to_vec(&Record {
+        who: values(row, &columns.who)?,
+        when: fingerprint_value(row.get_ref(columns.when)?)?,
+        what: values(row, &columns.what)?,
+    })
+    .context("failed to serialize SQLite bucket fingerprint values")
+}
+
+fn fingerprint_value(value: ValueRef<'_>) -> Result<FingerprintValue> {
+    match value {
+        ValueRef::Null => Ok(FingerprintValue::Null),
+        ValueRef::Integer(value) => Ok(FingerprintValue::Integer(value)),
+        ValueRef::Real(value) if value.is_finite() => Ok(FingerprintValue::Real(value)),
+        ValueRef::Real(_) => bail!("fingerprinted role column contains a non-finite REAL"),
+        ValueRef::Text(value) => Ok(FingerprintValue::Text(
+            std::str::from_utf8(value)
+                .context("fingerprinted role column contains non-UTF-8 text")?
+                .to_string(),
+        )),
+        ValueRef::Blob(_) => bail!("fingerprinted role columns may not contain BLOB values"),
+    }
 }
 
 fn scalar_text(value: ValueRef<'_>, role: &str) -> Result<Option<String>> {

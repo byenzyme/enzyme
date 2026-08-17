@@ -1958,36 +1958,47 @@ impl Database {
         Ok(rows.into_iter().next())
     }
 
-    /// Load the typed incremental cursor for a configured SQLite source.
-    pub fn get_source_cursor(&self, source_name: &str) -> Result<Option<(String, String)>> {
+    /// Load read-only orientation from the most recent SQLite source refresh.
+    pub fn get_source_refresh_status(
+        &self,
+        source_name: &str,
+    ) -> Result<Option<(usize, usize, i64)>> {
         let rows = self.query_read(
-            "SELECT cursor_kind, cursor_value FROM source_cursors WHERE source_name = ?1",
+            "SELECT row_count, bucket_count, refreshed_at_ms
+             FROM source_refreshes WHERE source_name = ?1",
             vec![Value::Text(source_name.to_string())],
-            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<i64>(0)? as usize,
+                    row.get::<i64>(1)? as usize,
+                    row.get::<i64>(2)?,
+                ))
+            },
         )?;
         Ok(rows.into_iter().next())
     }
 
-    /// Advance a configured SQLite source cursor after its documents and
-    /// occurrences have been committed.
-    pub fn set_source_cursor(
+    /// Record source orientation after document and occurrence reconciliation.
+    pub fn set_source_refresh_status(
         &self,
         source_name: &str,
-        cursor_kind: &str,
-        cursor_value: &str,
+        row_count: usize,
+        bucket_count: usize,
+        refreshed_at_ms: i64,
     ) -> Result<()> {
         self.execute_write(
-            "INSERT INTO source_cursors
-                (source_name, cursor_kind, cursor_value, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
+            "INSERT INTO source_refreshes
+                (source_name, row_count, bucket_count, refreshed_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(source_name) DO UPDATE SET
-                cursor_kind = excluded.cursor_kind,
-                cursor_value = excluded.cursor_value,
-                updated_at = datetime('now')",
+                row_count = excluded.row_count,
+                bucket_count = excluded.bucket_count,
+                refreshed_at_ms = excluded.refreshed_at_ms",
             vec![
                 Value::Text(source_name.to_string()),
-                Value::Text(cursor_kind.to_string()),
-                Value::Text(cursor_value.to_string()),
+                Value::Integer(row_count as i64),
+                Value::Integer(bucket_count as i64),
+                Value::Integer(refreshed_at_ms),
             ],
         )?;
         Ok(())

@@ -344,7 +344,11 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
     debug!(
         sources = source_stats.sources_queried,
-        rows = source_stats.rows_indexed,
+        rows = source_stats.rows_seen,
+        buckets = source_stats.buckets_seen,
+        rebuilt = source_stats.documents_rebuilt,
+        skipped = source_stats.documents_skipped,
+        pruned = source_stats.documents_pruned,
         "SQLite source indexing complete"
     );
 
@@ -559,7 +563,11 @@ pub async fn run_init(
     let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
     debug!(
         sources = source_stats.sources_queried,
-        rows = source_stats.rows_indexed,
+        rows = source_stats.rows_seen,
+        buckets = source_stats.buckets_seen,
+        rebuilt = source_stats.documents_rebuilt,
+        skipped = source_stats.documents_skipped,
+        pruned = source_stats.documents_pruned,
         "SQLite source indexing complete"
     );
 
@@ -1306,7 +1314,11 @@ fn run_local_refresh_work(
     let source_stats = index_configured_sqlite_sources(db, vault_path)?;
     debug!(
         sources = source_stats.sources_queried,
-        rows = source_stats.rows_indexed,
+        rows = source_stats.rows_seen,
+        buckets = source_stats.buckets_seen,
+        rebuilt = source_stats.documents_rebuilt,
+        skipped = source_stats.documents_skipped,
+        pruned = source_stats.documents_pruned,
         "fast refresh: SQLite source indexing complete"
     );
     let indexing = IndexingPipeline::new(db, vault_path.to_path_buf());

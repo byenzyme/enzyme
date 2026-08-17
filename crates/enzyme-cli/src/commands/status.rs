@@ -10,7 +10,7 @@ use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig, SqliteSourc
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::llm::model_registry;
-use enzyme_core::sqlite_source::{check_sqlite_source_reachability, format_sqlite_source_cursor};
+use enzyme_core::sqlite_source::check_sqlite_source_reachability;
 
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
 
@@ -19,17 +19,15 @@ struct SourceStatus {
     name: String,
     database: String,
     documents: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    row_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bucket_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_refresh_ms: Option<i64>,
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reachability_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cursor: Option<SourceCursorStatus>,
-}
-
-#[derive(Debug, Serialize)]
-struct SourceCursorStatus {
-    kind: String,
-    value: String,
 }
 
 /// Build structured JSON with vault status info.
@@ -125,20 +123,17 @@ fn build_source_statuses(
                 Ok(()) => (true, None),
                 Err(error) => (false, Some(format!("{error:#}"))),
             };
-            let cursor = db
-                .get_source_cursor(name)?
-                .map(|(kind, raw_value)| SourceCursorStatus {
-                    kind,
-                    value: format_sqlite_source_cursor(&raw_value).unwrap_or(raw_value),
-                });
+            let refresh = db.get_source_refresh_status(name)?;
 
             Ok(SourceStatus {
                 name: name.clone(),
                 database: source.db.display().to_string(),
                 documents,
+                row_count: refresh.map(|status| status.0),
+                bucket_count: refresh.map(|status| status.1),
+                last_refresh_ms: refresh.map(|status| status.2),
                 reachable,
                 reachability_error,
-                cursor,
             })
         })
         .collect()
@@ -230,14 +225,14 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
                                 .unwrap_or("unknown error")
                         );
                     }
-                    if source["cursor"].is_object() {
+                    if let Some(row_count) = source["row_count"].as_u64() {
                         println!(
-                            "    Cursor: {} = {}",
-                            source["cursor"]["kind"].as_str().unwrap_or("unknown"),
-                            source["cursor"]["value"].as_str().unwrap_or("unknown")
+                            "    Rows: {row_count}; buckets: {}",
+                            source["bucket_count"].as_u64().unwrap_or(0)
                         );
-                    } else {
-                        println!("    Cursor: not set");
+                    }
+                    if let Some(last_refresh_ms) = source["last_refresh_ms"].as_i64() {
+                        println!("    Refreshed: {}", format_finished_at(last_refresh_ms));
                     }
                 }
             }
@@ -284,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn source_status_reports_documents_cursor_and_reachability() {
+    fn source_status_reports_documents_refresh_orientation_and_reachability() {
         let temp = TempDir::new().unwrap();
         let source_path = temp.path().join("source.db");
         Database::open(&source_path).unwrap();
@@ -303,12 +298,8 @@ mod tests {
             )
             .unwrap();
         }
-        db.set_source_cursor(
-            "entry_log",
-            "sqlite-composite-v1",
-            r#"[{"type":"integer","value":3000}]"#,
-        )
-        .unwrap();
+        db.set_source_refresh_status("entry_log", 3000, 2, 1_700_000_000_000)
+            .unwrap();
         let sources = HashMap::from([("entry_log".to_string(), source_config(&source_path))]);
 
         let statuses = build_source_statuses(&db, &sources).unwrap();
@@ -317,7 +308,8 @@ mod tests {
         assert_eq!(value["name"], "entry_log");
         assert_eq!(value["documents"], 2);
         assert_eq!(value["reachable"], true);
-        assert_eq!(value["cursor"]["kind"], "sqlite-composite-v1");
-        assert_eq!(value["cursor"]["value"], "3000");
+        assert_eq!(value["row_count"], 3000);
+        assert_eq!(value["bucket_count"], 2);
+        assert_eq!(value["last_refresh_ms"], 1_700_000_000_000_i64);
     }
 }
