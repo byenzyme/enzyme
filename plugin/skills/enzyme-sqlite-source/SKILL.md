@@ -426,7 +426,7 @@ SQL
 
 Replace `messages` with the configured source name. `source_documents` must match the number of rows returned by the saved source query. In a standalone workspace, it should also match total `documents`. In a mixed Markdown workspace, total `documents` includes both sources, so do not compare that combined number directly with the SQLite row count.
 
-By default, one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
+The default is `max_embedding_files = 1024`, so one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
 
 ```toml
 [vaults."/absolute/path/to/workspace-home"]
