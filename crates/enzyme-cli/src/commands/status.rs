@@ -1,14 +1,36 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
+use libsql::Value;
+use serde::Serialize;
 use serde_json::json;
 
-use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
+use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig, SqliteSourceConfig};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::llm::model_registry;
+use enzyme_core::sqlite_source::{check_sqlite_source_reachability, format_sqlite_source_cursor};
 
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
+
+#[derive(Debug, Serialize)]
+struct SourceStatus {
+    name: String,
+    database: String,
+    documents: i64,
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reachability_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<SourceCursorStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct SourceCursorStatus {
+    kind: String,
+    value: String,
+}
 
 /// Build structured JSON with vault status info.
 /// Returns None if the vault is not initialized.
@@ -46,7 +68,10 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     let catalyst_count = catalysts.len();
 
     let docs_needing = db.get_documents_needing_embedding(None, None)?;
-    let embedded_count = doc_count - docs_needing.len() as i64;
+    let awaiting_embedding = docs_needing.len() as i64;
+    let embedded_count = doc_count - awaiting_embedding;
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let sources = build_source_statuses(&db, &config.sources)?;
 
     // Terminal outcome of the most recent detached background epoch build
     // (see `refresh_outcome`). `null` when no background build has finished
@@ -58,6 +83,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "database": paths.vault_db.display().to_string(),
         "documents": doc_count,
         "embedded": embedded_count,
+        "awaiting_embedding": awaiting_embedding,
         "entities": entity_count,
         "catalysts": catalyst_count,
         "model": model_path,
@@ -67,7 +93,62 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "catalyst_model_installed": local_model_installed,
         "api_key_configured": api_key_configured,
         "last_background_refresh": last_background_refresh,
+        "sources": sources,
     })))
+}
+
+fn build_source_statuses(
+    db: &Database,
+    sources: &HashMap<String, SqliteSourceConfig>,
+) -> Result<Vec<SourceStatus>> {
+    let mut names: Vec<_> = sources.keys().collect();
+    names.sort();
+
+    names
+        .into_iter()
+        .map(|name| {
+            let source = sources
+                .get(name)
+                .expect("source name was collected from the same map");
+            let pattern = format!("sqlite:{}/%", escape_like_pattern(name));
+            let documents = db
+                .query_read(
+                    "SELECT COUNT(*) FROM docs WHERE source_ref LIKE ?1 ESCAPE '\\'",
+                    vec![Value::Text(pattern)],
+                    |row| row.get::<i64>(0),
+                )?
+                .first()
+                .copied()
+                .unwrap_or(0);
+            let (reachable, reachability_error) = match check_sqlite_source_reachability(&source.db)
+            {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(format!("{error:#}"))),
+            };
+            let cursor = db
+                .get_source_cursor(name)?
+                .map(|(kind, raw_value)| SourceCursorStatus {
+                    kind,
+                    value: format_sqlite_source_cursor(&raw_value).unwrap_or(raw_value),
+                });
+
+            Ok(SourceStatus {
+                name: name.clone(),
+                database: source.db.display().to_string(),
+                documents,
+                reachable,
+                reachability_error,
+                cursor,
+            })
+        })
+        .collect()
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Render `finished_at_ms` for humans, falling back to the raw value if it is
@@ -95,6 +176,7 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
             println!();
             println!("Documents:  {}", json["documents"]);
             println!("Embedded:   {}/{}", json["embedded"], json["documents"]);
+            println!("Awaiting:   {} embeddings", json["awaiting_embedding"]);
             println!("Entities:   {}", json["entities"]);
             println!("Catalysts:  {}", json["catalysts"]);
             if let Some(outcome) = &outcome {
@@ -123,6 +205,42 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
             } else {
                 println!("API key:    not configured");
             }
+            if let Some(sources) = json["sources"].as_array()
+                && !sources.is_empty()
+            {
+                println!();
+                println!("Sources:");
+                for source in sources {
+                    println!(
+                        "  {}: {} documents",
+                        source["name"].as_str().unwrap_or("unknown"),
+                        source["documents"]
+                    );
+                    if source["reachable"].as_bool().unwrap_or(false) {
+                        println!(
+                            "    Database: reachable ({})",
+                            source["database"].as_str().unwrap_or("unknown")
+                        );
+                    } else {
+                        println!(
+                            "    Database: unreachable ({}) — {}",
+                            source["database"].as_str().unwrap_or("unknown"),
+                            source["reachability_error"]
+                                .as_str()
+                                .unwrap_or("unknown error")
+                        );
+                    }
+                    if source["cursor"].is_object() {
+                        println!(
+                            "    Cursor: {} = {}",
+                            source["cursor"]["kind"].as_str().unwrap_or("unknown"),
+                            source["cursor"]["value"].as_str().unwrap_or("unknown")
+                        );
+                    } else {
+                        println!("    Cursor: not set");
+                    }
+                }
+            }
             if let Some(outcome) = &outcome {
                 if outcome.status == OutcomeStatus::Failed {
                     println!();
@@ -137,4 +255,69 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use enzyme_core::config::enzyme_config::{
+        SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+    };
+    use tempfile::TempDir;
+
+    fn source_config(path: &Path) -> SqliteSourceConfig {
+        SqliteSourceConfig {
+            db: path.to_path_buf(),
+            query: "SELECT id, created_at, body FROM entries".to_string(),
+            roles: SqliteSourceRoles {
+                id: vec!["id".to_string()],
+                who: Vec::new(),
+                when: "created_at".to_string(),
+                what: vec!["body".to_string()],
+                r#where: Vec::new(),
+            },
+            timestamp: SqliteTimestampConfig {
+                unit: SqliteTimestampUnit::Ms,
+                epoch: None,
+            },
+        }
+    }
+
+    #[test]
+    fn source_status_reports_documents_cursor_and_reachability() {
+        let temp = TempDir::new().unwrap();
+        let source_path = temp.path().join("source.db");
+        Database::open(&source_path).unwrap();
+        let db = Database::open_in_memory().unwrap();
+        for source_ref in [
+            "sqlite:entry_log/integer:1",
+            "sqlite:entry_log/integer:2",
+            "sqlite:entryXlog/not-this-source",
+            "notes/entry.md",
+        ] {
+            db.execute_write(
+                "INSERT INTO docs
+                    (source_ref, content_hash, created_at, modified_at, indexed_at)
+                 VALUES (?1, 'hash', 1, 1, 1)",
+                vec![Value::Text(source_ref.to_string())],
+            )
+            .unwrap();
+        }
+        db.set_source_cursor(
+            "entry_log",
+            "sqlite-composite-v1",
+            r#"[{"type":"integer","value":3000}]"#,
+        )
+        .unwrap();
+        let sources = HashMap::from([("entry_log".to_string(), source_config(&source_path))]);
+
+        let statuses = build_source_statuses(&db, &sources).unwrap();
+        let value = serde_json::to_value(&statuses[0]).unwrap();
+
+        assert_eq!(value["name"], "entry_log");
+        assert_eq!(value["documents"], 2);
+        assert_eq!(value["reachable"], true);
+        assert_eq!(value["cursor"]["kind"], "sqlite-composite-v1");
+        assert_eq!(value["cursor"]["value"], "3000");
+    }
 }
