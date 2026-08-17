@@ -314,7 +314,7 @@ cat <<'TOML' >> "$CONFIG_PATH"
 TOML
 ```
 
-If the vault section or source name already exists, do not add a second copy. First run `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`. Then edit the existing section and leave unrelated settings alone. After either kind of edit, print the result and ask Enzyme to read it without writing anything:
+If the vault section or source name already exists, do not add a second copy. First run `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`. Then edit the existing section and leave unrelated settings alone. After either kind of edit, re-read the written section and ask Enzyme to read it without writing anything. Record the exact config path and the section's full text in the technical appendix; do not show raw TOML to the user unless they ask:
 
 ```bash
 awk -v key="$WORKSPACE_HOME" '
@@ -535,7 +535,9 @@ Now test the user-facing search. A query for a top person must return material t
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
 ```
 
-Build the post-init reveal from questions that work, not from generic promises. Choose two or three questions grounded in the actual names, places, and dates you verified. When the source has both, include at least one person question and one familiar-place question. Run each proposed question first, using the same `petri` and `catalyze` checks. Only offer a question when its results are predominantly about the named person or place and use the expected dates.
+Build the post-init reveal from questions that work, not from generic promises. Choose two or three questions grounded in the actual names, places, and dates you verified. When the source has both people and places, pre-test at least one person question and one familiar-place question; include each in the reveal only if it passes, and disclose the failure plainly if it does not. Run each proposed question first, using the same `petri` and `catalyze` checks. Only offer a question when its results are predominantly about the named person or place and use the expected dates.
+
+If every focused person or place question fails, run a positive control before writing the reveal: pick one broad topic that recurs across the archive and test it the same way. A passing broad question shows the archive is searchable at all and belongs in the reveal, clearly distinguished from the failed focused questions — "broad questions about recurring subjects work; questions about one person do not yet."
 
 For a place question, adapt the same check:
 
