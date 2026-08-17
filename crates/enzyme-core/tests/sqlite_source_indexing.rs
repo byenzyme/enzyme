@@ -10,17 +10,22 @@ use enzyme_core::sqlite_source::{run_configured_sqlite_sources, run_sqlite_sourc
 use libsql::Value;
 use rusqlite::{Connection, params};
 
+const JAN_2020: i64 = 1_579_046_400_000;
+const JAN_2023: i64 = 1_673_740_800_000;
+const JAN_2024: i64 = 1_705_276_800_000;
+const FEB_2024: i64 = 1_707_955_200_000;
+
 fn source_config(path: PathBuf) -> SqliteSourceConfig {
     SqliteSourceConfig {
         db: path,
-        query: "SELECT part AS id_part, seq AS id_seq, sender AS who, ts AS when_ts, \
-                subject AS subject, body AS body, thread AS where_label FROM entries"
+        query: "SELECT id, sender AS who, ts AS when_ts, body, thread AS where_label \
+                FROM entries"
             .to_string(),
         roles: SqliteSourceRoles {
-            id: vec!["id_part".to_string(), "id_seq".to_string()],
+            id: vec!["id".to_string()],
             who: vec!["who".to_string()],
             when: "when_ts".to_string(),
-            what: vec!["subject".to_string(), "body".to_string()],
+            what: vec!["body".to_string()],
             r#where: vec!["where_label".to_string()],
         },
         timestamp: SqliteTimestampConfig {
@@ -30,269 +35,299 @@ fn source_config(path: PathBuf) -> SqliteSourceConfig {
     }
 }
 
-#[test]
-fn sqlite_source_indexes_occurrences_and_dates_incrementally_alongside_markdown() {
-    let temp = tempfile::tempdir().unwrap();
-    let vault = temp.path().join("workspace");
-    std::fs::create_dir_all(&vault).unwrap();
-    std::fs::write(
-        vault.join("note.md"),
-        "# Filesystem note\n\nA Markdown-owned #filesystem document.",
+fn create_entries(db: &Connection) {
+    db.execute_batch(
+        "CREATE TABLE entries (
+            id INTEGER PRIMARY KEY,
+            sender TEXT,
+            ts INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            thread TEXT
+         );",
     )
     .unwrap();
+}
 
+fn insert_entry(
+    db: &Connection,
+    id: i64,
+    sender: Option<&str>,
+    ts: i64,
+    body: &str,
+    thread: Option<&str>,
+) {
+    db.execute(
+        "INSERT INTO entries (id, sender, ts, body, thread) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, sender, ts, body, thread],
+    )
+    .unwrap();
+}
+
+fn mark_all_embedded(db: &Database) {
+    db.execute_write(
+        "UPDATE docs SET embedded_at = 1, embedded_content_hash = content_hash",
+        Vec::<Value>::new(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn log_bucket_fingerprints_rebuild_skip_and_prune_exactly() {
+    let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
     let source_db = Connection::open(&source_path).unwrap();
-    source_db
-        .execute_batch(
-            "CREATE TABLE entries (
-                part INTEGER NOT NULL,
-                seq INTEGER NOT NULL,
-                sender TEXT,
-                ts INTEGER NOT NULL,
-                subject TEXT,
-                body TEXT,
-                thread TEXT,
-                PRIMARY KEY (part, seq)
-             );",
-        )
-        .unwrap();
+    create_entries(&source_db);
+    insert_entry(
+        &source_db,
+        1,
+        Some("Alice"),
+        JAN_2024,
+        "January A",
+        Some("Thread A"),
+    );
+    insert_entry(
+        &source_db,
+        2,
+        Some("Bob"),
+        FEB_2024,
+        "February A",
+        Some("Thread A"),
+    );
+    insert_entry(
+        &source_db,
+        3,
+        Some("Carol"),
+        JAN_2024 + 1_000,
+        "January B",
+        Some("Thread B"),
+    );
+
+    let config = source_config(source_path);
+    let first = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(first.rows_seen, 3);
+    assert_eq!(first.buckets_seen, 3);
+    assert_eq!(first.documents_rebuilt, 3);
+    assert_eq!(first.documents_skipped, 0);
+    assert_eq!(first.documents_pruned, 0);
+
+    mark_all_embedded(&enzyme_db);
+    let unchanged = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(unchanged.documents_rebuilt, 0);
+    assert_eq!(unchanged.documents_skipped, 3);
+    assert_eq!(unchanged.documents_pruned, 0);
+    assert_eq!(
+        enzyme_db.count_documents_needing_embedding(None).unwrap(),
+        0,
+        "fingerprint skips must preserve current embeddings"
+    );
+
+    // A new high id with a backdated timestamp changes only historical Thread A / January.
+    insert_entry(
+        &source_db,
+        100,
+        Some("Alice"),
+        JAN_2024 + 2_000,
+        "Backdated January A",
+        Some("Thread A"),
+    );
+    let backdated = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(backdated.documents_rebuilt, 1);
+    assert_eq!(backdated.documents_skipped, 2);
+    assert_eq!(backdated.documents_pruned, 0);
+
+    mark_all_embedded(&enzyme_db);
     source_db
         .execute(
-            "INSERT INTO entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                1_i64,
-                1_i64,
-                "Alice",
-                1_700_000_000_123_i64,
-                "Planning",
-                "Meet tomorrow",
-                "Project Alpha"
-            ],
+            "UPDATE entries SET body = 'Edited February A' WHERE id = 2",
+            [],
         )
         .unwrap();
+    let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(edited.documents_rebuilt, 1);
+    assert_eq!(edited.documents_skipped, 2);
+    assert_eq!(edited.documents_pruned, 0);
+
+    mark_all_embedded(&enzyme_db);
     source_db
-        .execute(
-            "INSERT INTO entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                1_i64,
-                2_i64,
-                Option::<String>::None,
-                1_700_000_001_456_i64,
-                Option::<String>::None,
-                "Follow-up without optional roles",
-                Option::<String>::None
-            ],
-        )
+        .execute("DELETE FROM entries WHERE id = 100", [])
         .unwrap();
+    let deleted_row = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(deleted_row.documents_rebuilt, 1);
+    assert_eq!(deleted_row.documents_skipped, 2);
+    assert_eq!(deleted_row.documents_pruned, 0);
+
+    mark_all_embedded(&enzyme_db);
+    source_db
+        .execute("DELETE FROM entries WHERE id = 2", [])
+        .unwrap();
+    let deleted_bucket = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(deleted_bucket.documents_rebuilt, 0);
+    assert_eq!(deleted_bucket.documents_skipped, 2);
+    assert_eq!(deleted_bucket.documents_pruned, 1);
+
+    // Simulate a restore that assigned different row ids to identical content.
+    source_db
+        .execute("UPDATE entries SET id = id + 1000", [])
+        .unwrap();
+    mark_all_embedded(&enzyme_db);
+    let restored = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(restored.documents_rebuilt, 0);
+    assert_eq!(restored.documents_skipped, 2);
+    assert_eq!(restored.documents_pruned, 0);
+    assert_eq!(
+        enzyme_db.count_documents_needing_embedding(None).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let vault = temp.path().join("workspace");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("note.md"), "# Markdown\n\nStill indexed.").unwrap();
+    let source_path = temp.path().join("source.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    create_entries(&source_db);
+    insert_entry(
+        &source_db,
+        1,
+        Some("Alice"),
+        JAN_2020,
+        "Met Will",
+        Some("Friends"),
+    );
+    insert_entry(
+        &source_db,
+        2,
+        Some("Alice"),
+        JAN_2023,
+        "Saw Will again",
+        Some("Friends"),
+    );
 
     let sources = HashMap::from([("messages".to_string(), source_config(source_path))]);
-    let config = sources.get("messages").unwrap();
-    let first = run_configured_sqlite_sources(&enzyme_db, &sources).unwrap();
-    assert_eq!(first.sources_queried, 1);
-    assert_eq!(first.rows_indexed, 2);
+    let stats = run_configured_sqlite_sources(&enzyme_db, &sources).unwrap();
+    assert_eq!(stats.sources_queried, 1);
+    assert_eq!(stats.rows_seen, 2);
+    assert_eq!(stats.buckets_seen, 2);
 
-    // Markdown reconciliation owns only .md refs and must preserve source docs.
-    let markdown = IndexingPipeline::new(&enzyme_db, vault.clone());
-    let markdown_stats = markdown.run(true, |_| {}).unwrap();
-    assert_eq!(markdown_stats.files_new, 1);
+    let markdown = IndexingPipeline::new(&enzyme_db, vault);
+    assert_eq!(markdown.run(true, |_| {}).unwrap().files_new, 1);
     assert_eq!(enzyme_db.get_document_count().unwrap(), 3);
 
     let source_docs = enzyme_db
         .query_read(
-            "SELECT source_ref, content, created_at FROM docs
-             WHERE source_ref LIKE 'sqlite:messages/%' ORDER BY created_at",
+            "SELECT source_ref, content, content_hash FROM docs
+             WHERE source_ref LIKE 'sqlite:messages/%' ORDER BY source_ref",
             vec![],
             |row| {
                 Ok((
                     row.get::<String>(0)?,
                     row.get::<String>(1)?,
-                    row.get::<i64>(2)?,
+                    row.get::<String>(2)?,
                 ))
             },
         )
         .unwrap();
     assert_eq!(source_docs.len(), 2);
-    assert!(source_docs[0].0.starts_with("sqlite:messages/"));
-    assert!(source_docs[0].1.contains("Planning\n\nMeet tomorrow"));
-    assert!(source_docs[0].1.contains("Source: messages"));
-    assert_eq!(source_docs[0].2, 1_700_000_000_123);
-    assert_eq!(source_docs[1].2, 1_700_000_001_456);
+    assert!(
+        source_docs
+            .iter()
+            .all(|doc| doc.0.matches('/').count() == 2)
+    );
+    assert!(source_docs.iter().all(|doc| doc.1.contains("Alice")));
+    assert!(source_docs.iter().all(|doc| doc.2.len() == 64));
 
-    let alice_links = enzyme_db
+    let chunk_dates = enzyme_db
         .query_read(
-            "SELECT COUNT(*) FROM doc_links WHERE link = 'Alice'",
+            "SELECT c.entry_date FROM chunks c JOIN docs d ON d.id = c.doc_id
+             WHERE d.source_ref LIKE 'sqlite:messages/%' ORDER BY c.entry_date",
             vec![],
-            |row| row.get::<i64>(0),
+            |row| row.get::<Option<i64>>(0),
         )
         .unwrap();
-    assert_eq!(alice_links, vec![1]);
+    assert_eq!(chunk_dates, vec![Some(JAN_2020), Some(JAN_2023)]);
 
-    let source_occurrences = enzyme_db
+    let alice_dates = enzyme_db
         .query_read(
-            "SELECT e.name, e.type, eo.effective_date, eo.date_source
-             FROM entity_occurrences eo
+            "SELECT eo.effective_date FROM entity_occurrences eo
              JOIN entities e ON e.id = eo.entity_id
-             WHERE eo.file_path LIKE 'sqlite:messages/%'
-             ORDER BY e.type, e.name",
+             WHERE e.name = 'Alice' AND e.type = 'link'
+             ORDER BY eo.effective_date",
             vec![],
-            |row| {
-                Ok((
-                    row.get::<String>(0)?,
-                    row.get::<String>(1)?,
-                    row.get::<Option<i64>>(2)?,
-                    row.get::<String>(3)?,
-                ))
-            },
+            |row| row.get::<Option<i64>>(0),
         )
         .unwrap();
-    assert!(source_occurrences.iter().any(|row| {
-        row.0 == "Alice"
-            && row.1 == "link"
-            && row.2 == Some(1_700_000_000_123)
-            && row.3 == "content"
-    }));
-    assert!(source_occurrences.iter().any(|row| {
-        row.0 == "Project Alpha" && row.1 == "folder" && row.2 == Some(1_700_000_000_123)
-    }));
-
-    // The typed composite cursor makes an identical run a true no-op.
-    assert_eq!(
-        run_sqlite_source(&enzyme_db, "messages", config).unwrap(),
-        0
-    );
-    assert_eq!(enzyme_db.get_document_count().unwrap(), 3);
-    let cursor_count = enzyme_db
-        .query_read(
-            "SELECT COUNT(*) FROM source_cursors
-             WHERE source_name = 'messages' AND cursor_kind = 'sqlite-composite-v1'",
-            vec![],
-            |row| row.get::<i64>(0),
-        )
+    assert_eq!(alice_dates, vec![Some(JAN_2020), Some(JAN_2023)]);
+    let alice = enzyme_db
+        .get_all_entities()
+        .unwrap()
+        .into_iter()
+        .find(|entity| entity.name == "Alice")
         .unwrap();
-    assert_eq!(cursor_count, vec![1]);
-
-    source_db
-        .execute(
-            "INSERT INTO entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                2_i64,
-                1_i64,
-                "Carol",
-                1_700_000_002_789_i64,
-                "New tuple",
-                "Picked up incrementally",
-                "Project Beta"
-            ],
-        )
-        .unwrap();
-    assert_eq!(
-        run_sqlite_source(&enzyme_db, "messages", config).unwrap(),
-        1
-    );
-    assert_eq!(enzyme_db.get_document_count().unwrap(), 4);
-
-    // Removing the Markdown file deletes only the Markdown-owned document.
-    std::fs::remove_file(vault.join("note.md")).unwrap();
-    let refresh = IndexingPipeline::new(&enzyme_db, vault);
-    let refresh_stats = refresh.run(false, |_| {}).unwrap();
-    assert_eq!(refresh_stats.files_deleted, 1);
-    assert_eq!(enzyme_db.get_document_count().unwrap(), 3);
-    let remaining = enzyme_db
-        .query_read(
-            "SELECT COUNT(*) FROM docs WHERE source_ref LIKE 'sqlite:messages/%'",
-            Vec::<Value>::new(),
-            |row| row.get::<i64>(0),
-        )
-        .unwrap();
-    assert_eq!(remaining, vec![3]);
+    assert_eq!(alice.first_seen, Some(JAN_2020));
+    assert_eq!(alice.last_seen, Some(JAN_2023));
 }
 
 #[test]
-fn sqlite_source_populates_a_workspace_without_markdown_and_maps_role_arrays_independently() {
+fn null_where_rows_share_the_monthly_fallback_bucket() {
     let temp = tempfile::tempdir().unwrap();
-    let vault = temp.path().join("standalone");
-    std::fs::create_dir_all(&vault).unwrap();
-
     let enzyme_db = Database::open_in_memory().unwrap();
-    let source_path = temp.path().join("standalone.db");
+    let source_path = temp.path().join("source.db");
     let source_db = Connection::open(&source_path).unwrap();
-    source_db
-        .execute_batch(
-            "CREATE TABLE entries (
-                part INTEGER NOT NULL,
-                seq INTEGER NOT NULL,
-                sender TEXT,
-                mention TEXT,
-                ts INTEGER NOT NULL,
-                subject TEXT,
-                body TEXT,
-                thread TEXT,
-                mailbox TEXT,
-                PRIMARY KEY (part, seq)
-             );",
-        )
-        .unwrap();
-    source_db
-        .execute(
-            "INSERT INTO entries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                7_i64,
-                3_i64,
-                "Alice",
-                "Bob",
-                1_700_000_003_000_i64,
-                "Subject",
-                "Body",
-                "Thread A",
-                "Inbox"
-            ],
-        )
-        .unwrap();
+    create_entries(&source_db);
+    insert_entry(&source_db, 1, Some("A"), JAN_2024, "one", None);
+    insert_entry(&source_db, 2, Some("B"), JAN_2024 + 1_000, "two", None);
 
-    let mut config = source_config(source_path);
-    config.query = "SELECT part AS id_part, seq AS id_seq, sender, mention, ts AS when_ts, \
-                    subject, body, thread, mailbox FROM entries"
-        .to_string();
-    config.roles.who = vec!["sender".to_string(), "mention".to_string()];
-    config.roles.r#where = vec!["thread".to_string(), "mailbox".to_string()];
-
-    assert_eq!(
-        run_sqlite_source(&enzyme_db, "messages", &config).unwrap(),
-        1
-    );
-    let markdown_stats = IndexingPipeline::new(&enzyme_db, vault)
-        .run(true, |_| {})
-        .unwrap();
-    assert_eq!(markdown_stats.files_discovered, 0);
+    let stats = run_sqlite_source(&enzyme_db, "messages", &source_config(source_path)).unwrap();
+    assert_eq!(stats.rows_seen, 2);
+    assert_eq!(stats.buckets_seen, 1);
+    assert_eq!(stats.documents_rebuilt, 1);
     assert_eq!(enzyme_db.get_document_count().unwrap(), 1);
-
-    let links = enzyme_db
-        .query_read(
-            "SELECT link FROM doc_links ORDER BY link",
-            Vec::<Value>::new(),
-            |row| row.get::<String>(0),
-        )
-        .unwrap();
-    assert_eq!(links, vec!["Alice", "Bob"]);
     let folders = enzyme_db
-        .query_read(
-            "SELECT e.name FROM entities e
-             JOIN entity_occurrences eo ON eo.entity_id = e.id
-             WHERE e.type = 'folder' ORDER BY e.name",
-            Vec::<Value>::new(),
-            |row| row.get::<String>(0),
-        )
+        .query_read("SELECT COUNT(*) FROM doc_links", vec![], |row| {
+            row.get::<i64>(0)
+        })
         .unwrap();
-    assert_eq!(folders, vec!["Inbox", "Thread A"]);
-
-    let occurrence_count = enzyme_db
+    assert_eq!(folders, vec![2]);
+    let folder_occurrences = enzyme_db
         .query_read(
-            "SELECT COUNT(*) FROM entity_occurrences",
-            Vec::<Value>::new(),
+            "SELECT COUNT(*) FROM entity_occurrences eo
+             JOIN entities e ON e.id = eo.entity_id WHERE e.type = 'folder'",
+            vec![],
             |row| row.get::<i64>(0),
         )
         .unwrap();
-    assert_eq!(occurrence_count, vec![4]);
+    assert_eq!(folder_occurrences, vec![0]);
+}
+
+#[test]
+fn source_without_where_keeps_one_document_per_row_with_full_scan_staleness() {
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("source.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    create_entries(&source_db);
+    insert_entry(&source_db, 1, Some("A"), JAN_2024, "one", None);
+    insert_entry(&source_db, 2, Some("B"), JAN_2024 + 1_000, "two", None);
+    let mut config = source_config(source_path);
+    config.roles.r#where.clear();
+
+    let first = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(first.documents_rebuilt, 2);
+    assert_eq!(enzyme_db.get_document_count().unwrap(), 2);
+    let unchanged = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(unchanged.documents_rebuilt, 0);
+    assert_eq!(unchanged.documents_skipped, 2);
+
+    source_db
+        .execute("DELETE FROM entries WHERE id = 2", [])
+        .unwrap();
+    let deleted = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(deleted.documents_skipped, 1);
+    assert_eq!(deleted.documents_pruned, 1);
+    assert_eq!(enzyme_db.get_document_count().unwrap(), 1);
 }

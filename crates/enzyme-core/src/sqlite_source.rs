@@ -823,4 +823,69 @@ mod tests {
         );
         assert!(same.starts_with("sqlite:messages/"));
     }
+
+    fn source_row(id: i64, created_at: i64, body: &str) -> SourceRow {
+        SourceRow {
+            id: vec![CursorValue::Integer(id)],
+            who: vec!["Alice".to_string()],
+            what: body.to_string(),
+            where_labels: vec!["Thread".to_string()],
+            where_key: vec![Some("Thread".to_string())],
+            created_at,
+            fingerprint_values: format!("Alice|{created_at}|{body}").into_bytes(),
+        }
+    }
+
+    #[test]
+    fn bucket_fingerprint_is_order_independent_and_ignores_row_ids() {
+        let first = source_row(1, 1_700_000_000_000, "first");
+        let second = source_row(2, 1_700_000_001_000, "second");
+        let restored_first = source_row(900, 1_700_000_000_000, "first");
+        let restored_second = source_row(400, 1_700_000_001_000, "second");
+
+        assert_eq!(
+            bucket_fingerprint(&[first.clone(), second.clone()]),
+            bucket_fingerprint(&[second, first])
+        );
+        assert_eq!(
+            bucket_fingerprint(&[restored_second, restored_first]),
+            bucket_fingerprint(&[
+                source_row(1, 1_700_000_000_000, "first"),
+                source_row(2, 1_700_000_001_000, "second"),
+            ])
+        );
+    }
+
+    #[test]
+    fn bucket_rendering_is_deterministic_for_unsorted_query_rows() {
+        let first = source_row(1, 1_700_000_000_000, "first");
+        let second = source_row(2, 1_700_000_001_000, "second");
+        let forward =
+            build_bucket_documents("messages", vec![first.clone(), second.clone()]).unwrap();
+        let reverse = build_bucket_documents("messages", vec![second, first]).unwrap();
+
+        assert_eq!(forward.len(), 1);
+        assert_eq!(
+            forward[0].document.source_ref,
+            reverse[0].document.source_ref
+        );
+        assert_eq!(forward[0].document.content, reverse[0].document.content);
+        assert_eq!(
+            forward[0].document.content_hash,
+            reverse[0].document.content_hash
+        );
+    }
+
+    #[test]
+    fn null_where_uses_one_stable_fallback_digest() {
+        assert_eq!(stable_where_digest(&[None]), stable_where_digest(&[None]));
+        assert_eq!(
+            stable_where_digest(&[None, Some(String::new())]),
+            stable_where_digest(&[None])
+        );
+        assert_ne!(
+            stable_where_digest(&[None]),
+            stable_where_digest(&[Some("Thread".to_string())])
+        );
+    }
 }
