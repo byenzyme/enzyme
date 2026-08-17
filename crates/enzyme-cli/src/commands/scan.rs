@@ -12,11 +12,13 @@ use enzyme_core::document::{
 use enzyme_core::llm::CATALYST_PROFILES;
 use enzyme_core::models::ROOT_FOLDER_ENTITY;
 use enzyme_core::pipeline::selection_steps::{EXPANDABLE_DENSITY_THRESHOLD, MAX_FOLDER_CHILDREN};
+use enzyme_core::sqlite_source::validate_sqlite_source;
 
-/// Filesystem-only vault scan used before init.
+/// Vault scan used before init.
 ///
-/// This command intentionally does not read the enzyme DB. Its job is to
-/// propose the config that init should later consume.
+/// This command intentionally does not read the Enzyme DB. Its job is to
+/// propose the config that init should later consume and validate configured
+/// source databases read-only.
 pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
     let docs = process_docs(vault_path)?;
     let mut suggestion = build_scan_suggestion(vault_path, &docs)?;
@@ -25,8 +27,10 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
         let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
         if config.has_curated_entities() {
             suggestion.status = ScanStatus::AlreadyConfigured;
-            suggestion.message =
-                Some("config already has entities for this vault; not overwriting".to_string());
+            append_message(
+                &mut suggestion.message,
+                "config already has entities for this vault; not overwriting",
+            );
         } else {
             config.excluded_folders = suggestion.excluded_folders.clone();
             config.set_auto_selected_entities(vault_path, suggestion.entities.clone())?;
@@ -73,6 +77,7 @@ struct ScanSuggestion {
     sample_files: Vec<SampleFile>,
     current_config: CurrentConfigSummary,
     available_profiles: Vec<ProfileSummary>,
+    source_checks: Vec<SourceCheck>,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,6 +213,17 @@ struct ProfileSummary {
     description: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SourceCheck {
+    name: String,
+    database: String,
+    valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Debug, Default)]
 struct Metric {
     frequency: usize,
@@ -257,8 +273,21 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         &folder_page_entities,
     );
     let metrics = build_metrics(docs);
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let current_config = current_config_summary(vault_path)?;
     let existing_configured = current_config.has_curated_entities;
+    let source_checks = validate_configured_sources(&config);
+    let failed_sources = source_checks.iter().filter(|check| !check.valid).count();
+    let mut message = existing_configured
+        .then(|| "config already has entities for this vault; scan is a preview only".to_string());
+    if failed_sources > 0 {
+        append_message(
+            &mut message,
+            &format!(
+                "{failed_sources} configured SQLite source(s) failed validation; init/refresh will fail until corrected"
+            ),
+        );
+    }
 
     Ok(ScanSuggestion {
         files: docs.len(),
@@ -266,9 +295,7 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         excluded_folders: default_excluded_folders(),
         config_path: None,
         status: ScanStatus::Suggested,
-        message: existing_configured.then(|| {
-            "config already has entities for this vault; scan is a preview only".to_string()
-        }),
+        message,
         schema_version: "scan.v2",
         scan_id: format!("scan-{}", Utc::now().format("%Y%m%dT%H%M%S%.3fZ")),
         vault_path: vault_path.to_string_lossy().to_string(),
@@ -294,7 +321,44 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         sample_files: sample_files(docs, 30),
         current_config,
         available_profiles: available_profiles(),
+        source_checks,
     })
+}
+
+fn append_message(message: &mut Option<String>, addition: &str) {
+    match message {
+        Some(message) => {
+            message.push_str("; ");
+            message.push_str(addition);
+        }
+        None => *message = Some(addition.to_string()),
+    }
+}
+
+fn validate_configured_sources(config: &EnzymeConfig) -> Vec<SourceCheck> {
+    let mut sources: Vec<_> = config.sources.iter().collect();
+    sources.sort_by(|(left, _), (right, _)| left.cmp(right));
+    sources
+        .into_iter()
+        .map(
+            |(name, source)| match validate_sqlite_source(name, source) {
+                Ok(validation) => SourceCheck {
+                    name: name.clone(),
+                    database: source.db.display().to_string(),
+                    valid: true,
+                    rows: Some(validation.row_count),
+                    error: None,
+                },
+                Err(error) => SourceCheck {
+                    name: name.clone(),
+                    database: source.db.display().to_string(),
+                    valid: false,
+                    rows: None,
+                    error: Some(format!("{error:#}")),
+                },
+            },
+        )
+        .collect()
 }
 
 fn build_metrics(docs: &[ProcessedDocument]) -> HashMap<String, Metric> {
@@ -1082,13 +1146,78 @@ fn is_structural_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use enzyme_core::config::enzyme_config::EnzymeConfig;
+    use enzyme_core::config::enzyme_config::{
+        EnzymeConfig, SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig,
+        SqliteTimestampUnit,
+    };
+    use enzyme_core::db::Database;
     use enzyme_core::document::Frontmatter;
     use enzyme_core::models::DateSource;
+    use libsql::Value;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sqlite_source(db: PathBuf) -> SqliteSourceConfig {
+        SqliteSourceConfig {
+            db,
+            query: "SELECT id, author, created_at, body FROM entries".to_string(),
+            roles: SqliteSourceRoles {
+                id: vec!["id".to_string()],
+                who: vec!["author".to_string()],
+                when: "created_at".to_string(),
+                what: vec!["body".to_string()],
+                r#where: Vec::new(),
+            },
+            timestamp: SqliteTimestampConfig {
+                unit: SqliteTimestampUnit::Ms,
+                epoch: None,
+            },
+        }
+    }
+
+    fn config_with_source(source: SqliteSourceConfig) -> EnzymeConfig {
+        EnzymeConfig {
+            sources: HashMap::from([("entries".to_string(), source)]),
+            ..EnzymeConfig::default()
+        }
+    }
+
+    fn entries_db() -> (TempDir, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("entries.db");
+        let db = Database::open(&db_path).unwrap();
+        db.execute_write(
+            "CREATE TABLE entries (
+                id INTEGER PRIMARY KEY,
+                author TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                body TEXT NOT NULL
+             )",
+            Vec::new(),
+        )
+        .unwrap();
+        for values in [
+            vec![
+                Value::Integer(1),
+                Value::Text("Ada".to_string()),
+                Value::Integer(1_700_000_000_000),
+                Value::Text("one".to_string()),
+            ],
+            vec![
+                Value::Integer(2),
+                Value::Text("Grace".to_string()),
+                Value::Integer(1_700_000_001_000),
+                Value::Text("two".to_string()),
+            ],
+        ] {
+            db.execute_write("INSERT INTO entries VALUES (?1, ?2, ?3, ?4)", values)
+                .unwrap();
+        }
+        (temp, db_path)
+    }
 
     fn doc(folders: Vec<&str>) -> ProcessedDocument {
         doc_with(folders, Vec::new(), Vec::new(), None, "note.md", 0, "")
@@ -1150,6 +1279,68 @@ mod tests {
         assert!(is_structural_folder("obsidian-demo-vault"));
         assert!(!is_structural_folder("people"));
         assert!(!is_structural_folder("projects/client-a"));
+    }
+
+    #[test]
+    fn source_validation_reports_success_and_row_count() {
+        let (_temp, db_path) = entries_db();
+        let checks = validate_configured_sources(&config_with_source(sqlite_source(db_path)));
+
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].valid);
+        assert_eq!(checks[0].rows, Some(2));
+        assert!(checks[0].error.is_none());
+    }
+
+    #[test]
+    fn source_validation_reports_missing_database() {
+        let temp = TempDir::new().unwrap();
+        let checks = validate_configured_sources(&config_with_source(sqlite_source(
+            temp.path().join("missing.db"),
+        )));
+
+        assert!(!checks[0].valid);
+        assert!(
+            checks[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn source_validation_reports_bad_query() {
+        let (_temp, db_path) = entries_db();
+        let mut source = sqlite_source(db_path);
+        source.query = "SELECT FROM entries".to_string();
+        let checks = validate_configured_sources(&config_with_source(source));
+
+        assert!(!checks[0].valid);
+        assert!(
+            checks[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("failed to prepare source query")
+        );
+    }
+
+    #[test]
+    fn source_validation_reports_missing_role_column() {
+        let (_temp, db_path) = entries_db();
+        let mut source = sqlite_source(db_path);
+        source.roles.what = vec!["missing_body".to_string()];
+        let checks = validate_configured_sources(&config_with_source(source));
+
+        assert!(!checks[0].valid);
+        assert!(
+            checks[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("missing result column \"missing_body\"")
+        );
     }
 
     #[test]
@@ -1384,6 +1575,11 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::set_var("ENZYME_HOME", home.path()) };
 
+        let original_source = sqlite_source(home.path().join("configured-source.db"));
+        config_with_source(original_source.clone())
+            .save(vault.path())
+            .unwrap();
+
         let files = [
             ("readwise/articles/a.md", "Article about [[alice]]"),
             ("projects/done/b.md", "Project notes for [[alice]]"),
@@ -1402,6 +1598,8 @@ mod tests {
         run_scan(vault.path(), true).unwrap();
         let config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
         let refs = config_entity_refs(&config.catalyzed_entities);
+
+        assert_eq!(config.sources.get("entries"), Some(&original_source));
 
         assert!(refs.contains(&"folder:readwise".to_string()), "{refs:?}");
         assert!(refs.contains(&"folder:projects".to_string()), "{refs:?}");

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
@@ -16,6 +17,11 @@ use crate::models::EntityType;
 use crate::pipeline::indexing::IndexingPipeline;
 
 const CURSOR_KIND: &str = "sqlite-composite-v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteSourceValidation {
+    pub row_count: u64,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SqliteSourceIndexingStats {
@@ -64,6 +70,83 @@ impl CursorValue {
     }
 }
 
+/// Validate a configured SQLite source without reading or modifying Enzyme's
+/// own database. The source is opened read-only, its query is prepared, all
+/// configured role columns are resolved, and the query's total rows counted.
+pub fn validate_sqlite_source(
+    source_name: &str,
+    source: &SqliteSourceConfig,
+) -> Result<SqliteSourceValidation> {
+    validate_contract(source_name, source)?;
+    ensure_source_path_exists(&source.db)?;
+    let source_db = open_source_read_only(&source.db)?;
+    let query = source.query.trim().trim_end_matches(';').trim_end();
+
+    let statement = source_db
+        .prepare(query)
+        .with_context(|| format!("failed to prepare source query: {query}"))?;
+    if !statement.readonly() {
+        bail!("source query must be read-only");
+    }
+    ResolvedColumns::new(&statement, &source.roles)?;
+    drop(statement);
+
+    let count_sql = format!("SELECT COUNT(*) FROM ({query}) AS enzyme_source");
+    let row_count = source_db
+        .query_row(&count_sql, [], |row| row.get::<_, i64>(0))
+        .with_context(|| "failed to count source query rows")?;
+    let row_count =
+        u64::try_from(row_count).context("source query returned a negative row count")?;
+
+    Ok(SqliteSourceValidation { row_count })
+}
+
+/// Check whether a configured source database can be reached read-only.
+/// Query validity is intentionally separate so status remains lightweight.
+pub fn check_sqlite_source_reachability(path: &Path) -> Result<()> {
+    ensure_source_path_exists(path)?;
+    open_source_read_only(path).map(drop)
+}
+
+/// Render the typed composite cursor stored by SQLite source indexing.
+pub fn format_sqlite_source_cursor(cursor_json: &str) -> Result<String> {
+    let values: Vec<CursorValue> =
+        serde_json::from_str(cursor_json).context("failed to parse stored source cursor")?;
+    let rendered = values
+        .iter()
+        .map(|value| match value {
+            CursorValue::Integer(value) => value.to_string(),
+            CursorValue::Real(value) => value.to_string(),
+            CursorValue::Text(value) => value.clone(),
+            CursorValue::Blob(value) => format!("<{} bytes>", value.len()),
+        })
+        .collect::<Vec<_>>();
+    Ok(match rendered.as_slice() {
+        [value] => value.clone(),
+        _ => format!("[{}]", rendered.join(", ")),
+    })
+}
+
+fn ensure_source_path_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("source database does not exist: {}", path.display());
+    }
+    if !path.is_file() {
+        bail!("source database is not a file: {}", path.display());
+    }
+    Ok(())
+}
+
+fn open_source_read_only(path: &Path) -> Result<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let source_db = Connection::open_with_flags(path, flags)
+        .with_context(|| format!("failed to open {} read-only", path.display()))?;
+    source_db
+        .pragma_update(None, "query_only", true)
+        .context("failed to enforce SQLite query_only mode")?;
+    Ok(source_db)
+}
+
 /// Execute every configured SQLite source in deterministic source-name order.
 pub fn run_configured_sqlite_sources(
     db: &Database,
@@ -104,12 +187,8 @@ pub fn run_sqlite_source(
         );
     }
 
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let source_db = Connection::open_with_flags(&source.db, flags)
-        .with_context(|| format!("failed to open {} read-only", source.db.display()))?;
-    source_db
-        .pragma_update(None, "query_only", true)
-        .context("failed to enforce SQLite query_only mode")?;
+    ensure_source_path_exists(&source.db)?;
+    let source_db = open_source_read_only(&source.db)?;
 
     let sql = incremental_query(&source.query, &source.roles, cursor.is_some());
     let mut statement = source_db
