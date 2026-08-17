@@ -9,6 +9,8 @@ The main rule:
 
 > Inspect the source without changing it. Before writing config, show the user real joined rows and explain the timestamps. After the user confirms the mapping, record it in config so `enzyme init` and `enzyme refresh` can repeat the same work without an LLM.
 
+The first job of every user-facing message is revelation, not a report about the engine. Speak in the vocabulary of the archive: its people, dates, messages, mailboxes, threads, folders, and questions. Column names, SQL, NULL rates, embedding counts, entities, catalysts, and cursor state are evidence for the agent. Translate what they mean before speaking to the user, and keep the raw details in the technical appendix unless the user asks for them.
+
 Follow this order:
 
 1. Inspect the database read-only.
@@ -50,6 +52,8 @@ test -f "$SOURCE_DB"
 sqlite3 -readonly "$SOURCE_DB" 'PRAGMA query_only; PRAGMA quick_check;'
 "$ENZYME_BIN" --version
 ```
+
+`sqlite3 -readonly` is the safeguard that prevents source writes. The displayed `PRAGMA query_only` value may be `0`; do not present that value as proof that the source was writable or read-only. `PRAGMA quick_check` checks database integrity, not write protection.
 
 Before the user confirms the mapping, inspect an existing workspace without changing it:
 
@@ -322,7 +326,7 @@ awk -v key="$WORKSPACE_HOME" '
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
 ```
 
-The `awk` command matches both a parent vault header and source-only headers such as `[vaults."<workspace>".sources.messages]`, then prints that workspace's tables until the next vault begins. Here, `scan` is a dry run because it does not include `--write-config`. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
+The `awk` command matches both a parent vault header and source-only headers such as `[vaults."<workspace>".sources.messages]`, then prints that workspace's tables until the next vault begins. Here, `scan` is a dry run because it does not include `--write-config`. It proves that Enzyme can parse the TOML; it does not execute or validate the SQLite query. `init` is the first end-to-end source validation. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
 
 Write the config in exactly this shape:
 
@@ -477,7 +481,7 @@ Do not run `init` again to finish an embedding backlog.
 Catalysts are generated selectively and may finish in the background, so not every collection is expected to receive one. Use this pass bar:
 
 1. `status` shows that catalyst generation completed successfully.
-2. The high-occurrence people and collections in the top-20 query have catalysts. A top entity with zero catalysts after completion is a finding to report.
+2. Every high-occurrence person or collection returned by the top-20 query has at least one catalyst. A top entity with zero catalysts after completion is a finding to report.
 3. Record `collections_without_catalysts` in the technical appendix. A nonzero count is useful coverage information, not a failure by itself.
 
 ## 7. Test whether person searches are relevant
