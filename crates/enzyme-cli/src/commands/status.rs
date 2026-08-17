@@ -6,9 +6,14 @@ use serde_json::json;
 use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
+use enzyme_core::db::update_sentinel::{self, UpdateStatus};
 use enzyme_core::llm::model_registry;
 
+use super::init::BINARY_VERSION;
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
+use super::update::{
+    BinaryUpdateOutcome, BinaryUpdateStatus, load_outcome as load_binary_update, update_available,
+};
 
 /// Build structured JSON with vault status info.
 /// Returns None if the vault is not initialized.
@@ -53,6 +58,29 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     // yet (or the vault predates outcome recording).
     let last_background_refresh = load_outcome(&db);
 
+    // Status stays read-only: peek at the update sentinel without advancing
+    // it, so agents can see whether a regen is pending before it happens.
+    let binary_update = load_binary_update(&db);
+    let mut update = match update_sentinel::peek(&db, BINARY_VERSION)? {
+        UpdateStatus::UpToDate => json!({
+            "status": "up_to_date", "regen_required": false, "reason": null
+        }),
+        UpdateStatus::SentinelRefreshed { previous_version } => json!({
+            "status": "sentinel_stale", "regen_required": false,
+            "reason": format!(
+                "binary changed since {}; schema compatible, sentinel will advance on next refresh",
+                previous_version.as_deref().unwrap_or("unknown")
+            ),
+        }),
+        UpdateStatus::RegenRequired { reason } => json!({
+            "status": "regen_required", "regen_required": true, "reason": reason
+        }),
+    };
+    update["binary"] = json!({
+        "current": BINARY_VERSION,
+        "last_outcome": binary_update,
+    });
+
     Ok(Some(json!({
         "vault": vault_path.display().to_string(),
         "database": paths.vault_db.display().to_string(),
@@ -67,6 +95,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "catalyst_model_installed": local_model_installed,
         "api_key_configured": api_key_configured,
         "last_background_refresh": last_background_refresh,
+        "update": update,
     })))
 }
 
@@ -89,6 +118,8 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
         Some(json) => {
             let outcome: Option<BackgroundRefreshOutcome> =
                 serde_json::from_value(json["last_background_refresh"].clone()).ok();
+            let binary_update: Option<BinaryUpdateOutcome> =
+                serde_json::from_value(json["update"]["binary"]["last_outcome"].clone()).ok();
 
             println!("Vault: {}", json["vault"].as_str().unwrap_or(""));
             println!("Database: {}", json["database"].as_str().unwrap_or(""));
@@ -122,6 +153,34 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
                 println!("API key:    configured");
             } else {
                 println!("API key:    not configured");
+            }
+            if json["update"]["regen_required"].as_bool().unwrap_or(false) {
+                println!();
+                println!(
+                    "⚠ Update: regen required — {}. The next `enzyme init` or agent refresh will rebuild the index automatically (auth and config are preserved).",
+                    json["update"]["reason"].as_str().unwrap_or("schema drift"),
+                );
+            }
+            if let Some(binary) = &binary_update {
+                let staged = binary.status == BinaryUpdateStatus::Updated
+                    && binary.to.as_deref() != Some(BINARY_VERSION);
+                if staged {
+                    println!();
+                    println!(
+                        "⚠ Binary update to {} is staged and takes effect on the next invocation.",
+                        binary.to.as_deref().unwrap_or("the latest version")
+                    );
+                } else if !binary.channel.is_self_swappable()
+                    && binary.to.as_deref().is_some_and(|latest| {
+                        update_available(BINARY_VERSION, latest).unwrap_or(false)
+                    })
+                {
+                    println!();
+                    println!(
+                        "⚠ Binary update available: {}.",
+                        binary.channel.advisory_action()
+                    );
+                }
             }
             if let Some(outcome) = &outcome {
                 if outcome.status == OutcomeStatus::Failed {

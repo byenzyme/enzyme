@@ -10,6 +10,7 @@ mod errors;
 pub mod migrations;
 pub mod repository;
 pub mod schema;
+pub mod update_sentinel;
 
 pub use connection::Database;
 pub use errors::DbError;
@@ -388,7 +389,10 @@ mod tests {
     fn oversized_log_body() -> String {
         let mut s = String::new();
         for m in 1..=5 {
-            s.push_str(&format!("## 2026-0{m}-01\nentry {m} {}\n", "word ".repeat(120)));
+            s.push_str(&format!(
+                "## 2026-0{m}-01\nentry {m} {}\n",
+                "word ".repeat(120)
+            ));
         }
         s
     }
@@ -676,7 +680,10 @@ mod tests {
             assert_vectors_approx_eq(&decoded_packed[1], &legacy_cat_vec_b);
 
             let format_flag = db.get_config(quantize::VECTOR_FORMAT_CONFIG_KEY).unwrap();
-            assert_eq!(format_flag.as_deref(), Some(quantize::VECTOR_FORMAT_INT8_V1));
+            assert_eq!(
+                format_flag.as_deref(),
+                Some(quantize::VECTOR_FORMAT_INT8_V1)
+            );
 
             let migration_flag: Vec<String> = db
                 .query_read(
@@ -685,7 +692,11 @@ mod tests {
                     |row| row.get::<String>(0),
                 )
                 .unwrap();
-            assert_eq!(migration_flag.len(), 1, "migration flag should be set after running");
+            assert_eq!(
+                migration_flag.len(),
+                1,
+                "migration flag should be set after running"
+            );
 
             // Insert another legacy blob directly, bypassing the migration
             // path entirely, to verify the next open short-circuits.
@@ -1011,11 +1022,9 @@ mod tests {
         db.delete_catalysts_for_entity("projects", "tag").unwrap();
 
         let remaining: Vec<String> = db
-            .query_read(
-                "SELECT id FROM catalysts ORDER BY id",
-                vec![],
-                |row| row.get::<String>(0),
-            )
+            .query_read("SELECT id FROM catalysts ORDER BY id", vec![], |row| {
+                row.get::<String>(0)
+            })
             .unwrap();
         // The same-named folder entity's catalysts survive; the tag's own and
         // the untyped legacy row are replaced; unrelated entities untouched.
@@ -1175,7 +1184,9 @@ mod tests {
 
     #[test]
     fn test_chunk_entry_date_backfill_on_reopen() {
-        use crate::document::{DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log};
+        use crate::document::{
+            DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log,
+        };
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
@@ -1241,7 +1252,9 @@ mod tests {
 
     #[test]
     fn test_chunk_entry_date_backfill_rechunks_legacy_logs() {
-        use crate::document::{DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log};
+        use crate::document::{
+            DEFAULT_CHUNK_SIZE_CHARS, chunk_append_log_dated, detect_append_log,
+        };
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
@@ -1296,9 +1309,7 @@ mod tests {
         }
 
         let db = Database::open(&path).unwrap();
-        let chunks = db
-            .get_chunks_for_files(&["legacy.md".to_string()])
-            .unwrap();
+        let chunks = db.get_chunks_for_files(&["legacy.md".to_string()]).unwrap();
         assert_eq!(chunks.len(), derived.len(), "legacy chunks were rewritten");
         for (stored, expected) in chunks.iter().zip(&derived) {
             assert_eq!(stored.content, expected.content);

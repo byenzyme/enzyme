@@ -12,8 +12,7 @@ const INSTRUCTIONS_URL: &str =
     "https://raw.githubusercontent.com/useenzyme/enzyme/main/agent-instructions.md";
 const SKILL_URL: &str =
     "https://raw.githubusercontent.com/useenzyme/enzyme/main/agent-runtime-skill.md";
-const WORKSPACE_SETUP_SKILL_URL: &str =
-    "https://raw.githubusercontent.com/useenzyme/enzyme/main/skills/enzyme-workspace-setup/SKILL.md";
+const WORKSPACE_SETUP_SKILL_URL: &str = "https://raw.githubusercontent.com/useenzyme/enzyme/main/skills/enzyme-workspace-setup/SKILL.md";
 
 const LOCAL_INSTRUCTIONS: &str = include_str!("../../../../plugin/agent-instructions.md");
 const LOCAL_SKILL: &str = include_str!("../../../../plugin/agent-runtime-skill.md");

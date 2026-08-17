@@ -35,7 +35,7 @@ mod support;
 
 use enzyme_core::db::Database;
 
-use support::epoch::{build_epoch_id, wait_for_epoch_terminal, WORKER_TERMINAL_TIMEOUT};
+use support::epoch::{WORKER_TERMINAL_TIMEOUT, build_epoch_id, wait_for_epoch_terminal};
 use support::fixture::{CliOutput, VaultFixture};
 use support::mock::MockLlm;
 
@@ -420,7 +420,8 @@ fn epoch_bumps_on_stale_path_when_catalysts_fail() {
         refresh.stderr
     );
     assert_eq!(
-        status, "failed",
+        status,
+        "failed",
         "expected the forced catalyst epoch {epoch_id} to fail against a broken LLM, \
          but it ended in status {status:?}.\n--- refresh stdout ---\n{}\n--- refresh stderr ---\n{}\n\
          --- background_refresh.log ---\n{}",

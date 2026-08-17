@@ -25,6 +25,9 @@ const CONFIG_HEADER: &str = "\
 # mode = \"auto\"                    # auto, local, or hosted
 # local_model = \"catalyst-135m-v3\" # selected by `enzyme model use`
 #
+# [update]
+# auto = false                      # opt out of background binary updates
+#
 # Each vault gets its own section, keyed by absolute path:
 #
 # [vaults.\"/Users/you/notes\"]
@@ -173,7 +176,25 @@ struct GlobalTomlConfig {
     #[serde(default)]
     llm: CatalystLlmConfig,
     #[serde(default)]
+    update: UpdateTomlSection,
+    #[serde(default)]
     vaults: HashMap<String, VaultTomlSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateTomlSection {
+    #[serde(default = "default_true")]
+    auto: bool,
+}
+
+impl Default for UpdateTomlSection {
+    fn default() -> Self {
+        Self { auto: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Machine-wide catalyst-generation provider preference.
@@ -315,6 +336,20 @@ impl EnzymeConfig {
             return Ok(CatalystLlmConfig::default());
         }
         Ok(load_global_toml(&path)?.llm)
+    }
+
+    /// Whether background binary updates are enabled in the global config.
+    /// Missing config and missing `[update]` sections both default to enabled.
+    pub fn automatic_updates_enabled() -> Result<bool> {
+        let path = Self::config_path()?;
+        Self::automatic_updates_enabled_at(&path)
+    }
+
+    pub fn automatic_updates_enabled_at(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(true);
+        }
+        Ok(load_global_toml(path)?.update.auto)
     }
 
     /// Persist machine-wide catalyst provider preferences without changing vault settings.
@@ -802,6 +837,20 @@ local_model = "catalyst-135m-v3"
             configured.llm.local_model.as_deref(),
             Some("catalyst-135m-v3")
         );
+    }
+
+    #[test]
+    fn automatic_updates_default_on_and_support_global_opt_out() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("missing.toml");
+        assert!(EnzymeConfig::automatic_updates_enabled_at(&missing).unwrap());
+
+        let config = temp.path().join("config.toml");
+        fs::write(&config, "[update]\nauto = false\n").unwrap();
+        assert!(!EnzymeConfig::automatic_updates_enabled_at(&config).unwrap());
+
+        fs::write(&config, "[defaults]\nminimum_tags = 1\n").unwrap();
+        assert!(EnzymeConfig::automatic_updates_enabled_at(&config).unwrap());
     }
 
     #[test]

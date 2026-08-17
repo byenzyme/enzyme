@@ -16,4 +16,5 @@ pub mod scan;
 pub mod serve;
 pub mod status;
 pub mod target;
+pub mod update;
 pub mod vault_summary;

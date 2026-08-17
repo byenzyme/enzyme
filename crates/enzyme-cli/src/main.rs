@@ -144,6 +144,17 @@ enum Commands {
     /// Show vault status and configuration
     Status,
 
+    /// Check for and install Enzyme binary updates
+    Update {
+        /// Check only and emit a JSON result
+        #[arg(long, conflicts_with = "background")]
+        check: bool,
+
+        /// Internal silent background worker mode
+        #[arg(long, hide = true)]
+        background: bool,
+    },
+
     /// Sign in to memory.enzyme.garden
     Login {
         /// Do not try to open a browser automatically
@@ -491,6 +502,9 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             commands::status::run_status(&vault_path).await?;
+        }
+        Commands::Update { check, background } => {
+            commands::update::run_update(&vault_path, check, background).await?;
         }
         Commands::Scan { write_config } => {
             commands::scan::run_scan(&vault_path, write_config)?;

@@ -32,6 +32,9 @@ const SCRUBBED_ENV: &[&str] = &[
     "ENZYME_FREE_CONFIG_URL",
     "ENZYME_API_CACHE_PATH",
     "ENZYME_LOCAL_MODEL",
+    "ENZYME_UPDATE_API_BASE",
+    "ENZYME_UPDATE_RELEASE_BASE",
+    "ENZYME_UPDATE_DOWNLOAD_TIMEOUT_MS",
 ];
 
 /// Absolute path to `tests/fixtures/canary-vault` in the repo.
@@ -239,6 +242,7 @@ impl VaultFixture {
     /// and a scrubbed environment (no ambient `OPENAI_*` / `ENZYME_*` leakage).
     pub fn cli(&self) -> CliCommand {
         CliCommand {
+            executable: PathBuf::from(env!("CARGO_BIN_EXE_enzyme")),
             vault: self.vault_path(),
             envs: BTreeMap::from([
                 (
@@ -263,12 +267,21 @@ impl Default for VaultFixture {
 
 /// Builder for one `enzyme` subprocess invocation.
 pub struct CliCommand {
+    executable: PathBuf,
     vault: PathBuf,
     envs: BTreeMap<String, String>,
     args: Vec<String>,
 }
 
 impl CliCommand {
+    /// Invoke a specific `enzyme` executable instead of the Cargo-built test
+    /// binary. Update tests use this to exercise a copy installed under the
+    /// fixture's `~/.local/bin` without mutating the shared build artifact.
+    pub fn executable(mut self, path: impl Into<PathBuf>) -> Self {
+        self.executable = path.into();
+        self
+    }
+
     /// Append a single CLI argument.
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
@@ -322,7 +335,7 @@ impl CliCommand {
 
     /// Run the CLI to completion and capture stdout/stderr/exit code.
     pub fn run(self) -> CliOutput {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_enzyme"));
+        let mut cmd = Command::new(&self.executable);
         for var in SCRUBBED_ENV {
             cmd.env_remove(var);
         }
@@ -332,6 +345,15 @@ impl CliCommand {
         // test opted into the mock via `enzyme_api`.
         if !self.envs.contains_key("ENZYME_FREE_CONFIG_URL") {
             cmd.env("ENZYME_FREE_CONFIG_URL", "http://127.0.0.1:9/free-config");
+        }
+        // Detached updater children inherit this environment. Keep existing
+        // CLI tests offline and fast; updater black-box tests can override
+        // both seams with their mock server.
+        if !self.envs.contains_key("ENZYME_UPDATE_API_BASE") {
+            cmd.env("ENZYME_UPDATE_API_BASE", "http://127.0.0.1:9");
+        }
+        if !self.envs.contains_key("ENZYME_UPDATE_RELEASE_BASE") {
+            cmd.env("ENZYME_UPDATE_RELEASE_BASE", "http://127.0.0.1:9");
         }
         for (key, value) in &self.envs {
             cmd.env(key, value);
