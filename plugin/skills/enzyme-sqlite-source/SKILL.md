@@ -1,33 +1,34 @@
 ---
 name: enzyme-sqlite-source
-description: Explore an unfamiliar SQLite database, bind records to Enzyme's universal entity/timestamp/content/collection roles, show evidence for confirmation, freeze a deterministic per-workspace TOML source contract, and verify native init/refresh results. Use for email, message, CRM, archive, or other structured SQLite sources with no app-specific preset. Never modify source rows.
+description: Connect an unfamiliar SQLite database to Enzyme without changing the source data. Inspect the database, decide which query columns represent identity, people, time, content, and folders, show real examples for approval, save the mapping in TOML, and verify init and refresh. Use for email, message, CRM, archive, or other structured SQLite sources with no app-specific preset.
 ---
 
 # Enzyme SQLite Source
 
-The durable promise:
+The main rule:
 
-> Explore read-only. Show joined records and timestamp interpretation before writing anything. Once confirmed, freeze every judgment into a contract that `enzyme init` and `enzyme refresh` execute without an LLM.
+> Inspect the source without changing it. Before writing config, show the user real joined rows and explain the timestamps. After the user confirms the mapping, record it in config so `enzyme init` and `enzyme refresh` can repeat the same work without an LLM.
 
-The conceptual roles and TOML keys are:
+Enzyme needs these parts from each source row:
 
-- `entity` / `who`: repeated categorical values naming who or what.
-- `timestamp` / `when`: when the record happened.
-- `content` / `what`: the record body.
-- `collection` / `where`: optional thread, mailbox, folder, or comparable grouping.
+- `id`: a stable value that uniquely identifies the row.
+- `who`: people, organizations, or other named entities.
+- `when`: when the record happened.
+- `what`: the text to index.
+- `where`: an optional thread, mailbox, folder, or similar group.
 
-Never edit, migrate, vacuum, attach to, or create objects in the source database. Open it read-only. Do not write config, workspace files, or Enzyme data before the evidence gate.
+Never edit, migrate, vacuum, attach to, or create anything in the source database. Open it read-only. Do not write config, create workspace files, or initialize Enzyme until the user has seen and confirmed the proposed mapping.
 
 ## Inputs and workspace shapes
 
-The path keyed by `[vaults."path"]` is the **workspace home**: the directory holding `.enzyme` state, indexed documents, embeddings, catalysts, and native source sync state. It need not contain Markdown.
+The path in `[vaults."path"]` is the **workspace home**. Enzyme stores its local `.enzyme` database, embeddings, catalysts, and source-sync state there. The directory does not need to contain Markdown files.
 
 Every reference to the global `~/.enzyme` home in this skill resolves to `$ENZYME_HOME` when that environment variable is set. In particular, the global config is `$ENZYME_HOME/config.toml`; otherwise it is `~/.enzyme/config.toml`. This does not change the workspace-local `$WORKSPACE_HOME/.enzyme` state directory.
 
-Support both first-class shapes:
+There are two supported setups:
 
-1. **Existing Markdown workspace:** add a `sources.<name>` tributary beside its existing entity, log, and exclusion settings. Native source execution must preserve both Markdown and database documents.
-2. **Standalone SQLite workspace:** after confirmation, create or use an empty directory, add a vault section containing only `sources.<name>`, then initialize with zero Markdown files.
+1. **Existing Markdown workspace:** add `sources.<name>` beside the workspace's existing entity, log, and exclusion settings. Enzyme must keep both the Markdown documents and the database records.
+2. **Standalone SQLite workspace:** after confirmation, create or use an empty directory, add a vault section containing only `sources.<name>`, and initialize it with no Markdown files.
 
 Resolve absolute paths and tools:
 
@@ -47,13 +48,13 @@ test ! -e "$WORKSPACE_HOME" || test -d "$WORKSPACE_HOME"
 test ! -d "$WORKSPACE_HOME" || find "$WORKSPACE_HOME" -type f -name '*.md' -not -path '*/.enzyme/*' -print
 ```
 
-For standalone onboarding, create a missing directory only after confirmation. For a live database, use an application-safe snapshot or SQLite's backup API; do not copy a lone main file while a WAL may contain committed data.
+For a standalone workspace, create a missing directory only after the user confirms the mapping. If the application is actively using the database, work from a safe snapshot or use SQLite's backup API. Do not copy only the main database file because its WAL file may contain committed data.
 
-## 1. Explore read-only
+## 1. Inspect the database without changing it
 
-Evidence comes from values and joins, not names such as `date`, `from_id`, or `text`.
+Do not trust a column only because it is named `date`, `from_id`, or `text`. Check its values and joins.
 
-### Survey schema and volume
+### List the schema and count the rows
 
 ```bash
 sqlite3 -readonly "$SOURCE_DB" <<'SQL'
@@ -74,11 +75,11 @@ SQL
 sqlite3 -readonly "$SOURCE_DB" 'SELECT count(*) AS rows FROM "candidate_table";'
 ```
 
-Inspect views and triggers too. A view may encode canonical joins; triggers may explain timestamps or soft deletion. Many application databases omit declared foreign keys.
+Read views and triggers as well as tables. A view may contain the application's intended join. A trigger may explain how timestamps or soft deletion work. Do not assume foreign keys are declared; many application databases omit them.
 
-### Find entity candidates
+### Find possible `who` columns
 
-For every text or foreign-key candidate, measure coverage, cardinality, and common values:
+For each promising text column or foreign key, check how often it has a value, how many different values it has, and which values appear most often:
 
 ```sql
 SELECT count(*) AS rows,
@@ -95,9 +96,9 @@ ORDER BY occurrences DESC
 LIMIT 20;
 ```
 
-Prefer recurring human-readable names, addresses, handles, or organizations. Reject booleans, delivery states, MIME types, and opaque IDs as final entities. An opaque key may join to an entity.
+Good `who` values are repeated human-readable names, addresses, handles, or organizations. Do not use booleans, delivery states, MIME types, or opaque IDs as entities. An opaque ID is useful only when it joins to a readable name.
 
-Treat junk sentinels as evidence, not entities. During exploration, decide which values mean “missing” for this database, then freeze that exact cleanup in the contract SQL. For example:
+Some databases use values such as an empty string, `[]`, or `unknown` instead of NULL. Count and show these values during inspection. If the user agrees that they mean “missing,” turn only those confirmed values into NULL in the saved query. For example:
 
 ```sql
 NULLIF(
@@ -109,11 +110,11 @@ NULLIF(
 ) AS sender
 ```
 
-Do not add sentinels speculatively. Show their frequencies and get confirmation with the rest of the binding.
+Do not guess which values are junk. Show how often they occur and include the decision in the mapping the user approves.
 
-### Find timestamp candidates
+### Find the `when` column
 
-Measure storage and range before converting:
+First check how the candidate timestamp is stored and its minimum and maximum values:
 
 ```sql
 SELECT typeof(candidate) AS storage_type, count(*) AS rows
@@ -127,7 +128,7 @@ FROM "candidate_table"
 WHERE candidate IS NOT NULL;
 ```
 
-Use magnitude only to form hypotheses, then prove them on minimum, recent, maximum, and joined samples:
+The number of digits can suggest a unit, but it is not proof. Test the oldest, newest, and recent values, and compare them with joined record content:
 
 | Likely shape | SQL to Unix milliseconds |
 |---|---|
@@ -138,7 +139,7 @@ Use magnitude only to form hypotheses, then prove them on minimum, recent, maxim
 | Apple 2001 seconds | `CAST(value * 1000 AS INTEGER) + 978307200000` |
 | Apple 2001 nanoseconds | `CAST(value / 1000000 AS INTEGER) + 978307200000` |
 
-Apple epoch is `2001-01-01T00:00:00Z`; its Unix offset is `978307200000` ms. Never infer it from an Apple-looking schema. File mtime can reflect a copy, restore, or WAL checkpoint and is weak evidence. Prefer comparing converted dates with content-internal references and the source database's own `max(timestamp)`; use source-file recency only as a secondary cross-check. Handle mixed units, negative sentinels, local-time strings, timezone offsets, and Cocoa floating-point seconds explicitly.
+Apple's epoch starts at `2001-01-01T00:00:00Z`, which is `978307200000` milliseconds after the Unix epoch. Do not assume Apple time just because the schema looks Apple-related. A database file's modification time may reflect a copy, restore, or WAL checkpoint, so it is weak evidence. Prefer dates mentioned inside the records and the database's own maximum timestamp. Use file recency only as a secondary check. Investigate mixed units, negative sentinel values, local-time strings, timezone offsets, and Cocoa floating-point seconds instead of silently accepting them.
 
 ```sql
 SELECT candidate AS raw,
@@ -150,9 +151,9 @@ ORDER BY candidate
 LIMIT 10;
 ```
 
-Use these conversions for evidence display only. The frozen query outputs the timestamp column RAW; the contract's `timestamp` table declares its unit (`s`, `ms`, `us`, `ns`) and epoch, and native execution performs the conversion. Do not bake conversion arithmetic into the contract SQL. Native execution rejects null or invalid timestamps rather than silently substituting indexing time.
+Use these conversions only while showing evidence. The saved query must return the original timestamp value. Put its unit (`s`, `ms`, `us`, or `ns`) and optional epoch in the `timestamp` config table, and let Enzyme convert it. Do not put timestamp conversion arithmetic in the saved SQL. Enzyme rejects a row whose timestamp is NULL or invalid; it does not silently replace it with indexing time.
 
-### Find content candidates
+### Find the `what` column
 
 ```sql
 SELECT count(*) AS rows,
@@ -170,11 +171,11 @@ ORDER BY chars DESC
 LIMIT 12;
 ```
 
-Reject blobs, encoded payloads, and status fields. Bind multiple content columns only when their order is stable and intelligible.
+Do not index blobs, encoded payloads, or status fields as content. Use more than one content column only when joining them in a fixed order produces text a person can understand.
 
-### Discover normalized joins
+### Work out the joins
 
-Start with declared foreign keys, then test likely pairs:
+Start with declared foreign keys, then test likely relationships yourself. The first query below checks whether person IDs resolve to names. The second builds the exact kinds of rows you will show the user.
 
 ```sql
 SELECT count(*) AS base_rows,
@@ -225,11 +226,11 @@ FROM where_ranked
 WHERE where_rank <= 2 AND row_in_where = 1;
 ```
 
-Replace the illustrative columns with the proposed join. This union deliberately permits overlap: it guarantees auditable oldest and newest slices, NULL-`who` rows when they exist, and one row from each of at least two distinct `where` values when the data has them. If a required category has no rows, report that fact rather than implying it was sampled.
+Replace the example columns with the columns you are considering. The same row may appear in more than one part of this sample, which is fine. The query always asks for the oldest rows, newest rows, rows with no `who`, and examples from at least two `where` values when those rows exist. If the database has no rows in one of those groups, say so.
 
-A good join preserves base cardinality and resolves IDs to names. Investigate fan-out. Aggregate many-to-many values with SQLite JSON functions or a correlated subquery. Final SQL must return exactly one source record per row with unique aliases.
+A correct join keeps the same number of base records and turns IDs into readable names. If one base record becomes several result rows, find out why. Combine many-to-many values with SQLite JSON functions or a correlated subquery. The final query must return exactly one row for each source record, and every selected column must have a unique name.
 
-Prove identity separately:
+Next, prove that the proposed `id` is present and unique. This query should return the same number in all three columns:
 
 ```sql
 SELECT count(*) AS rows,
@@ -238,24 +239,24 @@ SELECT count(*) AS rows,
 FROM (<proposed single-row-per-record query>);
 ```
 
-Require all three counts to match. Prefer a declared `INTEGER PRIMARY KEY`. Bare `rowid` can change after `VACUUM` unless it aliases one.
+All three counts must match. Prefer a declared `INTEGER PRIMARY KEY`. A bare `rowid` may change after `VACUUM` unless it is an alias for that primary key.
 
-## 2. Bind and show evidence
+## 2. Show the proposed mapping and ask the user
 
-Before mutation, present:
+Before writing anything, show:
 
 1. Source path, base table/view, row count, and join coverage.
-2. Every output alias, universal role, source expression, null rate, relevant distinct count, and rationale.
+2. Every output column, its Enzyme role, its source expression, its NULL rate, its useful distinct-value count, and why it fits.
 3. The union sample above: at least 8 joined rows spanning oldest/newest, plus NULL-`who` rows and at least two distinct `where` values when present. Redact only the presentation; do not silently change SQL.
 4. Raw timestamp range, inferred unit/epoch, exact millisecond expression, and readable UTC samples.
 5. Stable identity result column(s) and uniqueness evidence.
 6. Workspace shape/path and whether `where` becomes a collection.
 
-Ask the user to confirm or correct. Correction returns to exploration. A yes authorizes only the config contract, optional standalone directory, and subsequent Enzyme state. It never authorizes source mutation.
+Ask the user to confirm or correct the mapping. If they correct it, inspect the database again and show new evidence. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
 
-## 3. Freeze the native contract
+## 3. Write the confirmed config
 
-After confirmation, create a missing standalone home with `mkdir -p "$WORKSPACE_HOME"`. Resolve the config location once:
+After confirmation, create a missing standalone workspace with `mkdir -p "$WORKSPACE_HOME"`. Then find the correct global config path:
 
 ```bash
 ENZYME_CONFIG_HOME="${ENZYME_HOME:-$HOME/.enzyme}"
@@ -263,7 +264,7 @@ CONFIG_PATH="$ENZYME_CONFIG_HOME/config.toml"
 mkdir -p "$ENZYME_CONFIG_HOME"
 ```
 
-Merge the contract under the canonical absolute workspace key without disturbing existing settings. If the vault section is new, append the reviewed stanza with a quoted heredoc so shell expansion cannot alter its SQL or TOML:
+Save the confirmed mapping under the workspace's absolute path without changing unrelated settings. If this workspace has no vault section yet, append the reviewed text with a quoted heredoc. The quotes stop the shell from changing characters inside the SQL or TOML:
 
 ```bash
 cat <<'TOML' >> "$CONFIG_PATH"
@@ -271,16 +272,16 @@ cat <<'TOML' >> "$CONFIG_PATH"
 TOML
 ```
 
-If the vault section or source name already exists, do not append a duplicate TOML table. Back up first with `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`, edit the existing section in place, and keep unrelated settings intact. After either the append or in-place edit, re-read the edited range and run a non-writing config parse check:
+If the vault section or source name already exists, do not add a second copy. First run `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`. Then edit the existing section and leave unrelated settings alone. After either kind of edit, print the result and ask Enzyme to read it without writing anything:
 
 ```bash
 sed -n '/\[vaults\."\/absolute\/path\/to\/workspace-home"\]/,$p' "$CONFIG_PATH"
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
 ```
 
-`scan` without `--write-config` is the dry run. Treat any TOML/config parse error as a failed merge and restore or correct from the backup before continuing. Its ordinary scan suggestions are not authorization to edit the confirmed contract.
+Here, `scan` is a dry run because it does not include `--write-config`. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
 
-The stanza shape is:
+Write the config in exactly this shape:
 
 ```toml
 [vaults."/absolute/path/to/workspace-home".sources.messages]
@@ -320,7 +321,7 @@ unit = "ns"
 epoch = "2001-01-01"
 ```
 
-This is the exact `enzyme.sqlite-source.v1` shape:
+The exact `enzyme.sqlite-source.v1` rules are:
 
 - Source root keys: `db` (absolute SQLite path), `query` (one read-only SQL statement), `roles`, and `timestamp`.
 - `roles.id`: one or more result columns forming a stable unique tuple (composite keys allowed).
@@ -333,21 +334,21 @@ This is the exact `enzyme.sqlite-source.v1` shape:
 - `timestamp.epoch`: optional `YYYY-MM-DD` origin for offset epochs (Apple = `2001-01-01`); absent means Unix epoch.
 - Human-readable conversion notes belong in TOML comments, not fields — unknown fields are dropped by programmatic config rewrites.
 
-`roles.id` exists so native execution can derive a stable deterministic document ID from source primary keys/rowids and refresh upserts rather than duplicates. It is declarative identity, not a sync cursor. Enzyme owns incremental cursor/state in `.enzyme/enzyme.db`; never add mutable cursor values to TOML.
+Enzyme uses `roles.id` to make the same document ID every time it sees a source record. That lets `refresh` update a document instead of creating a duplicate. `roles.id` describes identity; it is not the changing sync cursor. Enzyme stores that cursor in `.enzyme/enzyme.db`. Never copy cursor values into TOML.
 
-Additional invariants:
+The query must also follow these rules:
 
 - Query is one `SELECT` or `WITH ... SELECT` and returns one row per document.
 - Every configured column is uniquely aliased and present. On every returned row, every `id` component, `when`, and every configured `what` column must be non-null. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or collection.
-- `roles.id` tuple is stable and unique. The engine namespaces it by workspace source name before deriving document identity.
-- The engine performs timestamp conversion from the declared `unit`/`epoch`; the query emits the raw value.
-- No application-specific presets or hidden role inference remain.
+- The `roles.id` tuple is stable and unique. Enzyme combines it with the workspace source name before creating the document ID.
+- Enzyme converts time using the declared `unit` and `epoch`; the query returns the raw value.
+- The config contains every application-specific decision. Nothing depends on a hidden preset or later guessing.
 
-Show the exact stanza and config path after writing. Re-read it mechanically. Do not run `scan --write-config` afterward unless native config serialization is known to preserve `sources`.
+After writing, show the exact config path and the text you added. Read it back from disk. Do not run `scan --write-config` afterward unless you know that the installed Enzyme version preserves `sources` when it rewrites config.
 
-## 4. Initialize and verify
+## 4. Initialize the workspace and check the result
 
-Native source execution is the only ingestion path. Run `init` once for a workspace, then use `refresh` thereafter. Re-running `init` regenerates and **replaces** catalysts; their counts and wording may change even when the source contract did not. `refresh` is the stable re-sync path.
+Use this configured source as the only ingestion path. Run `init` once for a workspace. Use `refresh` after that. Running `init` again regenerates and **replaces** catalysts, so their wording and counts may change even when the config and source data did not. `refresh` is the normal, repeatable way to sync again.
 
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" init --quiet
@@ -355,9 +356,9 @@ Native source execution is the only ingestion path. Run `init` once for a worksp
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" petri
 ```
 
-For an existing Markdown workspace, init/refresh must preserve and update both filesystem and SQLite sources. For standalone, zero Markdown files is valid; the source contract supplies the corpus.
+In an existing Markdown workspace, `init` and `refresh` must keep and update both the Markdown files and SQLite records. In a standalone workspace, zero Markdown files is valid because the configured SQLite source supplies the documents.
 
-Verify without printing private bodies:
+The next queries count documents, embeddings, entities, and catalysts without printing private message bodies:
 
 ```bash
 sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
@@ -391,16 +392,18 @@ LIMIT 20;
 SQL
 ```
 
-Compare `source_documents` with the contract query row count, replacing `messages` with the configured source name. In a standalone workspace it should also equal total `documents`; in a mixed Markdown workspace, do not mistake the combined total for the SQLite-source count. The default `max_embedding_files = 1024` embeds only the newest bounded slice per run; `init --quiet` can therefore leave a large corpus partially embedded without making that obvious. Require `embedded = documents` and `awaiting_embedding = 0`. If not, run `refresh` and repeat the count until complete, or—with the user's approval and the same backup/parse-check discipline—set the parent vault section's `max_embedding_files` high enough (use `0` for unlimited):
+Replace `messages` with the configured source name. `source_documents` must match the number of rows returned by the saved source query. In a standalone workspace, it should also match total `documents`. In a mixed Markdown workspace, total `documents` includes both sources, so do not compare that combined number directly with the SQLite row count.
+
+By default, one run embeds at most the newest 1024 documents. With `--quiet`, a large corpus can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
 
 ```toml
 [vaults."/absolute/path/to/workspace-home"]
 max_embedding_files = 0
 ```
 
-Do not re-run `init` to drain the embedding backlog.
+Do not run `init` again to finish an embedding backlog.
 
-For an exact entity check, query the database directly. `petri --query` is semantic search and is useful as a behavior spot-check, but it does not prove that an exact entity name exists or owns the expected occurrences:
+To check an exact person name, query Enzyme's database directly. `petri --query` uses semantic search, so it cannot prove that an exact name exists or that its occurrences are correct. The following query proves both the exact match and the person's yearly and monthly coverage:
 
 ```bash
 sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
@@ -438,20 +441,20 @@ ORDER BY grain, era;
 SQL
 ```
 
-`effective_date` is Unix milliseconds. Replace `messages` with the configured source name. Use the yearly/monthly distribution to verify that a top person's throughline spans the eras supported by the source evidence.
+`effective_date` is Unix milliseconds. Replace `messages` with the configured source name. Compare the yearly and monthly counts with what you learned from the source. A top person should appear across the expected periods.
 
-Then run the semantic `petri --query` and `catalyze` spot-checks. The acceptance bar is that a query for a top person entity returns material predominantly about that entity, with a plausible throughline across the expected eras. If it instead returns substantial unrelated material, surface that as a finding rather than a pass; it can indicate entity pollution from an over-broad `who` binding or normalization rule.
+Now test the user-facing search. A query for a top person must return material that is mostly about that person and follows the expected time periods. If much of the result is unrelated, report that as a problem instead of calling the test successful. The `who` mapping or cleanup rule may be too broad and may have mixed unrelated records into the entity.
 
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one exact top person name>"
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
 ```
 
-Confirm expected people have occurrences, collection/folder entities have catalysts, and `petri` exposes catalysts. Catalyst work may be backgrounded; use `status` and verify after completion. If native source parsing/execution is unavailable, fails on an empty workspace, or drops either source shape, stop and report the Rust blocker. Do not fall back to `enzyme ingest` or a skill-managed extractor.
+Confirm that expected people have occurrences, folder entities from `where` have catalysts, and `petri` shows catalysts. Catalyst generation may continue in the background, so use `status` and check again after it finishes. If Enzyme cannot read the configured source, cannot initialize an empty standalone workspace, or loses either Markdown or SQLite documents, stop and report that the implementation needs a Rust fix. Do not switch to `enzyme ingest` or write a custom extractor in the skill.
 
-## 5. Re-sync
+## 5. Sync later changes
 
-Run:
+After the first `init`, use these commands whenever the source changes:
 
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
@@ -459,4 +462,4 @@ Run:
 sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
 ```
 
-Inspecting `source_cursors` confirms native cursor state without mistaking it for declarative config. Enzyme owns source cursors, replay, upsert state, embeddings, and catalyst scheduling in `.enzyme/enzyme.db`; the skill owns none of that mutable state. Re-open exploration only when refresh reports schema drift, a configured result alias disappears, join cardinality changes, or converted dates become implausible. Show new evidence and obtain confirmation before editing the frozen contract.
+The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages cursors, replay, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
