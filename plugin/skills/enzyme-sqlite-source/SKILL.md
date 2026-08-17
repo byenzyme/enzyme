@@ -284,13 +284,15 @@ This evidence is the technical appendix. Keep it in the working record and offer
 
 ### Reveal the archive in the user's terms
 
-Open with what the inspection found in language the user already uses: how much material there is, the years it covers, who is named, what text Enzyme will read, and which familiar mailboxes, threads, folders, or collections the entries belong to. Use real names and places from the source. Translate missing values into ordinary statements such as “1,403 entries do not name a person.”
+Assume the user has never heard of Enzyme, timelines, entities, eras, embeddings, or catalysts. Open with what the inspection found in language they already use: how much material there is, the years it covers, who is named, what text Enzyme will read, and which familiar mailboxes, threads, folders, or collections the entries belong to. Use real names and places from the source. Translate missing values into ordinary statements such as “1,403 entries do not name a person.”
 
-Then explain what this makes possible and name only the choices that need judgment. For example:
+Explain the significance before asking for approval. A date turns an entry into a moment that can be placed before or after other moments. A repeated person gathers those moments into the history of a relationship. A repeated mailbox, thread, or folder gathers them into the history of a place. Pair each important person or place you name with a concrete question that this structure is intended to answer. Make clear that confirmation sets up these capabilities and that you will test them after initialization before claiming they work.
 
-> Your 3,000 entries run from 2017 to 2026 across Books, inbox, work, and 28 other places. Enzyme will read the entry text, follow the people named in it, and keep each entry with its familiar place, so you can ask how a relationship or thread changed over time. Twelve entries use `[]` where a person would normally be named; I would treat those as “no person.” Does that match how you understand this archive?
+Then name only the choices that need the user's judgment. For example:
 
-Keep this reveal short enough to read aloud in under a minute. Add two or three representative examples only when they make the interpretation easier to judge. Do not call the mapping “healthy” or “valid” in place of showing what was found.
+> Your archive contains 3,000 entries from 2017 to 2026, naming 137 people across 31 familiar places such as Books, inbox, and work. If you confirm this reading, Enzyme will treat each entry as a dated moment. That sets it up to follow one person across years — “How did my work with [real person] change after 2021?” — or follow one place over time — “What was I collecting in Books during 2021?” Twelve entries use `[]` where a person would normally be named; I would treat those as “no person.” After setup I will test the example questions before saying they work. Does this match how you understand your archive?
+
+The example above shows the shape, not facts to copy. Build the real version from the source evidence. Keep it short enough to read aloud in under a minute. Add two or three representative entries only when they make the interpretation easier to judge. Do not call the mapping “healthy” or “valid” in place of showing what was found and why it matters.
 
 The confirmation still gates every write. If the user corrects the interpretation, return to inspection, update the technical evidence, and present a new reveal. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
 
@@ -533,10 +535,23 @@ Now test the user-facing search. A query for a top person must return material t
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
 ```
 
-After the private checks, close with what became possible in the user's language. Name the full span, a real person with verified dated entries, a few familiar places, and one question worth trying. For example:
+Build the post-init reveal from questions that work, not from generic promises. Choose two or three questions grounded in the actual names, places, and dates you verified. When the source has both, include at least one person question and one familiar-place question. Run each proposed question first, using the same `petri` and `catalyze` checks. Only offer a question when its results are predominantly about the named person or place and use the expected dates.
 
-> Your full archive is here. Enzyme can now follow Me across 781 dated entries from 2018 to 2026 and treat Books, inbox, and work as recurring places. Try asking: “What changed in my work with Will Ashby?”
+For a place question, adapt the same check:
 
-Use that positive reveal only when the example actually works. If it fails, say what happened in the same plain language: “The full archive is here, but that question returned mostly unrelated people, so person-focused search is not working well yet.” The reveal is the headline; document, embedding, occurrence, entity, and catalyst counts stay in the technical appendix unless the user asks for them.
+```bash
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one familiar collection name>"
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What was I collecting in <one familiar collection name> during <one supported year>?"
+```
+
+After the private checks, explain what became possible as an anchor paired with a question. Start by explaining the simple mechanism: dates put entries in order; repeated people and places gather those dated moments into histories. Then use the user's real data. For example:
+
+> Your archive is now a timeline of 3,000 moments from 2017 to 2026. Dates keep those moments in order; the people and places you already use gather them into histories you can ask about.
+>
+> [Verified person] appears across 86 entries from 2019 to this year. Ask: “What changed in my work with [verified person] after 2021?”
+>
+> Books is now a place with its own history. Ask: “What was I collecting in Books during 2021?”
+
+The example above shows the form. Replace every count, date, name, place, and question with evidence from the actual archive, and omit any line whose question did not pass. If a question fails, say what happened in the same plain language: “The full archive is here, but ‘What changed with Will?’ returned mostly unrelated people, so that person-focused question is not working well yet.” The reveal is the headline; document, embedding, occurrence, entity, and catalyst counts stay in the technical appendix unless the user asks for them.
 
 If the exact occurrence timeline contains unrelated records, the `who` mapping or cleanup rule may be mixing people together. If the exact timeline is correct but `petri` or `catalyze` still returns unrelated material, report a retrieval or ranking failure instead of reopening a proven mapping. If Enzyme cannot read the configured source, cannot initialize an empty standalone workspace, or loses either Markdown or SQLite documents, stop and report that the implementation needs a Rust fix. Do not switch to `enzyme ingest` or write a custom extractor in the skill.
