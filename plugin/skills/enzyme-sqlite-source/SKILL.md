@@ -186,14 +186,23 @@ LEFT JOIN people AS p ON p.rowid = m.person_id;
 
 WITH joined AS (
   SELECT m.rowid AS message_rowid,
-         p.display_name AS sender,
+         NULLIF(
+           CASE WHEN lower(trim(CAST(p.display_name AS TEXT))) IN ('[]', 'unknown') THEN ''
+                ELSE trim(CAST(p.display_name AS TEXT)) END,
+           ''
+         ) AS sender,
          m.sent_at AS sent_at,
          datetime(<millisecond_expression> / 1000, 'unixepoch') AS utc,
          substr(m.body, 1, 160) AS body,
-         t.name AS thread
+         NULLIF(
+           CASE WHEN lower(trim(CAST(t.name AS TEXT))) IN ('[]', 'unknown') THEN ''
+                ELSE trim(CAST(t.name AS TEXT)) END,
+           ''
+         ) AS thread
   FROM messages AS m
   LEFT JOIN people AS p ON p.rowid = m.person_id
   LEFT JOIN threads AS t ON t.rowid = m.thread_id
+  WHERE m.sent_at IS NOT NULL AND m.body IS NOT NULL
 ),
 where_ranked AS (
   SELECT joined.*,
@@ -262,10 +271,10 @@ cat <<'TOML' >> "$CONFIG_PATH"
 TOML
 ```
 
-If the vault section or source name already exists, do not append a duplicate TOML table. Back up first with `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`, edit the existing section in place, and keep unrelated settings intact. Then re-read the edited range and run a non-writing config parse check:
+If the vault section or source name already exists, do not append a duplicate TOML table. Back up first with `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`, edit the existing section in place, and keep unrelated settings intact. After either the append or in-place edit, re-read the edited range and run a non-writing config parse check:
 
 ```bash
-sed -n '/\[vaults\."\/absolute\/path\/to\/workspace-home"\]/,/^\[/p' "$CONFIG_PATH"
+sed -n '/\[vaults\."\/absolute\/path\/to\/workspace-home"\]/,$p' "$CONFIG_PATH"
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
 ```
 
@@ -295,6 +304,7 @@ SELECT
 FROM messages AS m
 LEFT JOIN people AS p ON p.rowid = m.person_id
 LEFT JOIN threads AS t ON t.rowid = m.thread_id
+WHERE m.sent_ns IS NOT NULL AND m.body IS NOT NULL
 ORDER BY m.rowid
 """
 
@@ -337,14 +347,12 @@ Show the exact stanza and config path after writing. Re-read it mechanically. Do
 
 ## 4. Initialize and verify
 
-Native source execution is the only ingestion path:
+Native source execution is the only ingestion path. Run `init` once for a workspace, then use `refresh` thereafter. Re-running `init` regenerates and **replaces** catalysts; their counts and wording may change even when the source contract did not. `refresh` is the stable re-sync path.
 
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" init --quiet
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" status
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" petri
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one real person or organization>"
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one real person or organization>?"
 ```
 
 For an existing Markdown workspace, init/refresh must preserve and update both filesystem and SQLite sources. For standalone, zero Markdown files is valid; the source contract supplies the corpus.
@@ -355,23 +363,91 @@ Verify without printing private bodies:
 sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
 .headers on
 .mode column
-SELECT count(*) AS documents FROM docs;
+SELECT count(*) AS documents,
+       coalesce(sum(CASE
+         WHEN embedded_at IS NOT NULL AND embedded_content_hash = content_hash THEN 1
+         ELSE 0
+       END), 0) AS embedded,
+       coalesce(sum(CASE
+         WHEN embedded_at IS NULL OR embedded_content_hash IS NULL OR embedded_content_hash <> content_hash THEN 1
+         ELSE 0
+       END), 0) AS awaiting_embedding
+FROM docs;
+SELECT count(*) AS source_documents
+FROM docs
+WHERE source_ref LIKE 'sqlite:messages/%';
 SELECT e.name, count(eo.id) AS occurrences
 FROM entities e JOIN entity_occurrences eo ON eo.entity_id = e.id
-WHERE e.entity_type = 'link'
+WHERE e.type = 'link'
 GROUP BY e.id, e.name
 ORDER BY occurrences DESC
 LIMIT 20;
 SELECT e.name, count(c.id) AS catalysts
 FROM entities e LEFT JOIN catalysts c ON c.entity = e.name
-WHERE e.entity_type = 'link'
+WHERE e.type IN ('link', 'folder')
 GROUP BY e.id, e.name
 ORDER BY catalysts DESC, e.name
 LIMIT 20;
 SQL
 ```
 
-Compare document counts with the contract query, confirm expected people have occurrences, and confirm `petri` exposes catalysts. Catalyst work may be backgrounded; use `status` and verify after completion. If native source parsing/execution is unavailable, fails on an empty workspace, or drops either source shape, stop and report the Rust blocker. Do not fall back to `enzyme ingest` or a skill-managed extractor.
+Compare `source_documents` with the contract query row count, replacing `messages` with the configured source name. In a standalone workspace it should also equal total `documents`; in a mixed Markdown workspace, do not mistake the combined total for the SQLite-source count. The default `max_embedding_files = 1024` embeds only the newest bounded slice per run; `init --quiet` can therefore leave a large corpus partially embedded without making that obvious. Require `embedded = documents` and `awaiting_embedding = 0`. If not, run `refresh` and repeat the count until complete, or—with the user's approval and the same backup/parse-check discipline—set the parent vault section's `max_embedding_files` high enough (use `0` for unlimited):
+
+```toml
+[vaults."/absolute/path/to/workspace-home"]
+max_embedding_files = 0
+```
+
+Do not re-run `init` to drain the embedding backlog.
+
+For an exact entity check, query the database directly. `petri --query` is semantic search and is useful as a behavior spot-check, but it does not prove that an exact entity name exists or owns the expected occurrences:
+
+```bash
+sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
+.headers on
+.mode column
+.parameter init
+.parameter set :entity 'Exact Person Name'
+SELECT e.id, e.name, e.type, count(eo.id) AS occurrences
+FROM entities AS e
+LEFT JOIN entity_occurrences AS eo
+  ON eo.entity_id = e.id AND eo.file_path LIKE 'sqlite:messages/%'
+WHERE e.name = :entity COLLATE NOCASE
+GROUP BY e.id, e.name, e.type;
+
+WITH person_occurrences AS (
+  SELECT eo.effective_date
+  FROM entity_occurrences AS eo
+  JOIN entities AS e ON e.id = eo.entity_id
+  WHERE e.name = :entity COLLATE NOCASE
+    AND eo.file_path LIKE 'sqlite:messages/%'
+    AND eo.effective_date IS NOT NULL
+)
+SELECT 'year' AS grain,
+       strftime('%Y', effective_date / 1000, 'unixepoch') AS era,
+       count(*) AS occurrences
+FROM person_occurrences
+GROUP BY era
+UNION ALL
+SELECT 'month',
+       strftime('%Y-%m', effective_date / 1000, 'unixepoch'),
+       count(*)
+FROM person_occurrences
+GROUP BY strftime('%Y-%m', effective_date / 1000, 'unixepoch')
+ORDER BY grain, era;
+SQL
+```
+
+`effective_date` is Unix milliseconds. Replace `messages` with the configured source name. Use the yearly/monthly distribution to verify that a top person's throughline spans the eras supported by the source evidence.
+
+Then run the semantic `petri --query` and `catalyze` spot-checks. The acceptance bar is that a query for a top person entity returns material predominantly about that entity, with a plausible throughline across the expected eras. If it instead returns substantial unrelated material, surface that as a finding rather than a pass; it can indicate entity pollution from an over-broad `who` binding or normalization rule.
+
+```bash
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one exact top person name>"
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
+```
+
+Confirm expected people have occurrences, collection/folder entities have catalysts, and `petri` exposes catalysts. Catalyst work may be backgrounded; use `status` and verify after completion. If native source parsing/execution is unavailable, fails on an empty workspace, or drops either source shape, stop and report the Rust blocker. Do not fall back to `enzyme ingest` or a skill-managed extractor.
 
 ## 5. Re-sync
 
@@ -380,6 +456,7 @@ Run:
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" status
+sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
 ```
 
-Enzyme owns source cursors, replay, upsert state, embeddings, and catalyst scheduling in `.enzyme/enzyme.db`. The skill owns none of that mutable state. Re-open exploration only when refresh reports schema drift, a configured result alias disappears, join cardinality changes, or converted dates become implausible. Show new evidence and obtain confirmation before editing the frozen contract.
+Inspecting `source_cursors` confirms native cursor state without mistaking it for declarative config. Enzyme owns source cursors, replay, upsert state, embeddings, and catalyst scheduling in `.enzyme/enzyme.db`; the skill owns none of that mutable state. Re-open exploration only when refresh reports schema drift, a configured result alias disappears, join cardinality changes, or converted dates become implausible. Show new evidence and obtain confirmation before editing the frozen contract.
