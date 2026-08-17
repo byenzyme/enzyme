@@ -22,6 +22,8 @@ Never edit, migrate, vacuum, attach to, or create objects in the source database
 
 The path keyed by `[vaults."path"]` is the **workspace home**: the directory holding `.enzyme` state, indexed documents, embeddings, catalysts, and native source sync state. It need not contain Markdown.
 
+Every reference to the global `~/.enzyme` home in this skill resolves to `$ENZYME_HOME` when that environment variable is set. In particular, the global config is `$ENZYME_HOME/config.toml`; otherwise it is `~/.enzyme/config.toml`. This does not change the workspace-local `$WORKSPACE_HOME/.enzyme` state directory.
+
 Support both first-class shapes:
 
 1. **Existing Markdown workspace:** add a `sources.<name>` tributary beside its existing entity, log, and exclusion settings. Native source execution must preserve both Markdown and database documents.
@@ -59,12 +61,12 @@ sqlite3 -readonly "$SOURCE_DB" <<'SQL'
 .mode column
 SELECT name, type
 FROM sqlite_schema
-WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'
+WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'
 ORDER BY type, name;
-SELECT name AS table_name, sql
+SELECT type, name, tbl_name, sql
 FROM sqlite_schema
-WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-ORDER BY name;
+WHERE type IN ('table','view','trigger') AND name NOT LIKE 'sqlite_%'
+ORDER BY type, name;
 PRAGMA foreign_key_list('candidate_table');
 PRAGMA index_list('candidate_table');
 PRAGMA table_info('candidate_table');
@@ -95,6 +97,20 @@ LIMIT 20;
 
 Prefer recurring human-readable names, addresses, handles, or organizations. Reject booleans, delivery states, MIME types, and opaque IDs as final entities. An opaque key may join to an entity.
 
+Treat junk sentinels as evidence, not entities. During exploration, decide which values mean “missing” for this database, then freeze that exact cleanup in the contract SQL. For example:
+
+```sql
+NULLIF(
+  CASE
+    WHEN lower(trim(CAST(p.display_name AS TEXT))) IN ('[]', 'unknown') THEN ''
+    ELSE trim(CAST(p.display_name AS TEXT))
+  END,
+  ''
+) AS sender
+```
+
+Do not add sentinels speculatively. Show their frequencies and get confirmation with the rest of the binding.
+
 ### Find timestamp candidates
 
 Measure storage and range before converting:
@@ -122,7 +138,7 @@ Use magnitude only to form hypotheses, then prove them on minimum, recent, maxim
 | Apple 2001 seconds | `CAST(value * 1000 AS INTEGER) + 978307200000` |
 | Apple 2001 nanoseconds | `CAST(value / 1000000 AS INTEGER) + 978307200000` |
 
-Apple epoch is `2001-01-01T00:00:00Z`; its Unix offset is `978307200000` ms. Never infer it from an Apple-looking schema. Compare converted values with known dates and source-file recency. Handle mixed units, negative sentinels, local-time strings, timezone offsets, and Cocoa floating-point seconds explicitly.
+Apple epoch is `2001-01-01T00:00:00Z`; its Unix offset is `978307200000` ms. Never infer it from an Apple-looking schema. File mtime can reflect a copy, restore, or WAL checkpoint and is weak evidence. Prefer comparing converted dates with content-internal references and the source database's own `max(timestamp)`; use source-file recency only as a secondary cross-check. Handle mixed units, negative sentinels, local-time strings, timezone offsets, and Cocoa floating-point seconds explicitly.
 
 ```sql
 SELECT candidate AS raw,
@@ -168,17 +184,39 @@ SELECT count(*) AS base_rows,
 FROM messages AS m
 LEFT JOIN people AS p ON p.rowid = m.person_id;
 
-SELECT m.rowid AS message_rowid,
-       p.display_name AS sender,
-       datetime(<millisecond_expression> / 1000, 'unixepoch') AS utc,
-       substr(m.body, 1, 160) AS body,
-       t.name AS thread
-FROM messages AS m
-LEFT JOIN people AS p ON p.rowid = m.person_id
-LEFT JOIN threads AS t ON t.rowid = m.thread_id
-ORDER BY m.rowid DESC
-LIMIT 12;
+WITH joined AS (
+  SELECT m.rowid AS message_rowid,
+         p.display_name AS sender,
+         m.sent_at AS sent_at,
+         datetime(<millisecond_expression> / 1000, 'unixepoch') AS utc,
+         substr(m.body, 1, 160) AS body,
+         t.name AS thread
+  FROM messages AS m
+  LEFT JOIN people AS p ON p.rowid = m.person_id
+  LEFT JOIN threads AS t ON t.rowid = m.thread_id
+),
+where_ranked AS (
+  SELECT joined.*,
+         dense_rank() OVER (ORDER BY thread) AS where_rank,
+         row_number() OVER (PARTITION BY thread ORDER BY sent_at, message_rowid) AS row_in_where
+  FROM joined
+  WHERE thread IS NOT NULL AND trim(CAST(thread AS TEXT)) <> ''
+)
+SELECT 'oldest' AS sample_kind, *
+FROM (SELECT * FROM joined ORDER BY sent_at, message_rowid LIMIT 4)
+UNION ALL
+SELECT 'newest', *
+FROM (SELECT * FROM joined ORDER BY sent_at DESC, message_rowid DESC LIMIT 4)
+UNION ALL
+SELECT 'null-who', *
+FROM (SELECT * FROM joined WHERE sender IS NULL ORDER BY sent_at, message_rowid LIMIT 2)
+UNION ALL
+SELECT 'distinct-where', message_rowid, sender, sent_at, utc, body, thread
+FROM where_ranked
+WHERE where_rank <= 2 AND row_in_where = 1;
 ```
+
+Replace the illustrative columns with the proposed join. This union deliberately permits overlap: it guarantees auditable oldest and newest slices, NULL-`who` rows when they exist, and one row from each of at least two distinct `where` values when the data has them. If a required category has no rows, report that fact rather than implying it was sampled.
 
 A good join preserves base cardinality and resolves IDs to names. Investigate fan-out. Aggregate many-to-many values with SQLite JSON functions or a correlated subquery. Final SQL must return exactly one source record per row with unique aliases.
 
@@ -199,7 +237,7 @@ Before mutation, present:
 
 1. Source path, base table/view, row count, and join coverage.
 2. Every output alias, universal role, source expression, null rate, relevant distinct count, and rationale.
-3. At least 8 joined rows spanning old/new, null edges, multiple entities or collections, and ordinary records. Redact only the presentation; do not silently change SQL.
+3. The union sample above: at least 8 joined rows spanning oldest/newest, plus NULL-`who` rows and at least two distinct `where` values when present. Redact only the presentation; do not silently change SQL.
 4. Raw timestamp range, inferred unit/epoch, exact millisecond expression, and readable UTC samples.
 5. Stable identity result column(s) and uniqueness evidence.
 6. Workspace shape/path and whether `where` becomes a collection.
@@ -208,7 +246,32 @@ Ask the user to confirm or correct. Correction returns to exploration. A yes aut
 
 ## 3. Freeze the native contract
 
-After confirmation, create a missing standalone home with `mkdir -p "$WORKSPACE_HOME"`. Merge the contract into `~/.enzyme/config.toml` under the canonical absolute workspace key without disturbing existing settings:
+After confirmation, create a missing standalone home with `mkdir -p "$WORKSPACE_HOME"`. Resolve the config location once:
+
+```bash
+ENZYME_CONFIG_HOME="${ENZYME_HOME:-$HOME/.enzyme}"
+CONFIG_PATH="$ENZYME_CONFIG_HOME/config.toml"
+mkdir -p "$ENZYME_CONFIG_HOME"
+```
+
+Merge the contract under the canonical absolute workspace key without disturbing existing settings. If the vault section is new, append the reviewed stanza with a quoted heredoc so shell expansion cannot alter its SQL or TOML:
+
+```bash
+cat <<'TOML' >> "$CONFIG_PATH"
+# Paste the exact confirmed stanza here.
+TOML
+```
+
+If the vault section or source name already exists, do not append a duplicate TOML table. Back up first with `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`, edit the existing section in place, and keep unrelated settings intact. Then re-read the edited range and run a non-writing config parse check:
+
+```bash
+sed -n '/\[vaults\."\/absolute\/path\/to\/workspace-home"\]/,/^\[/p' "$CONFIG_PATH"
+"$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
+```
+
+`scan` without `--write-config` is the dry run. Treat any TOML/config parse error as a failed merge and restore or correct from the backup before continuing. Its ordinary scan suggestions are not authorization to edit the confirmed contract.
+
+The stanza shape is:
 
 ```toml
 [vaults."/absolute/path/to/workspace-home".sources.messages]
@@ -217,10 +280,18 @@ db = "/absolute/path/to/source.sqlite"
 query = """
 SELECT
   m.rowid AS message_rowid,
-  p.name AS sender,
+  NULLIF(
+    CASE WHEN lower(trim(CAST(p.name AS TEXT))) IN ('[]', 'unknown') THEN ''
+         ELSE trim(CAST(p.name AS TEXT)) END,
+    ''
+  ) AS sender,
   m.sent_ns AS sent_ns,
   m.body AS body,
-  t.name AS thread
+  NULLIF(
+    CASE WHEN lower(trim(CAST(t.name AS TEXT))) IN ('[]', 'unknown') THEN ''
+         ELSE trim(CAST(t.name AS TEXT)) END,
+    ''
+  ) AS thread
 FROM messages AS m
 LEFT JOIN people AS p ON p.rowid = m.person_id
 LEFT JOIN threads AS t ON t.rowid = m.thread_id
@@ -246,7 +317,7 @@ This is the exact `enzyme.sqlite-source.v1` shape:
 - `roles.who`: optional array of result columns mapped to link entities.
 - `roles.when`: exactly one result column, emitted raw (integer or real).
 - `roles.what`: non-empty array of result columns concatenated in order.
-- `roles.where`: optional array of result columns mapped to collection/folder entities.
+- `roles.where`: optional array of result columns mapped to collection/folder entities. Non-null values become catalyst-bearing entities, just like Markdown folders.
 - Every array role also accepts a bare string as one-column shorthand; serialization emits arrays.
 - `timestamp.unit`: unit of the raw `when` value — one of `s`, `ms`, `us`, `ns`.
 - `timestamp.epoch`: optional `YYYY-MM-DD` origin for offset epochs (Apple = `2001-01-01`); absent means Unix epoch.
@@ -257,7 +328,7 @@ This is the exact `enzyme.sqlite-source.v1` shape:
 Additional invariants:
 
 - Query is one `SELECT` or `WITH ... SELECT` and returns one row per document.
-- Every configured column is uniquely aliased, present, and non-null where required.
+- Every configured column is uniquely aliased and present. On every returned row, every `id` component, `when`, and every configured `what` column must be non-null. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or collection.
 - `roles.id` tuple is stable and unique. The engine namespaces it by workspace source name before deriving document identity.
 - The engine performs timestamp conversion from the declared `unit`/`epoch`; the query emits the raw value.
 - No application-specific presets or hidden role inference remain.
