@@ -9,7 +9,7 @@ The main rule:
 
 > Inspect the source without changing it. Before writing config, show the user real joined rows and explain the timestamps. After the user confirms the mapping, record it in config so `enzyme init` and `enzyme refresh` can repeat the same work without an LLM.
 
-The first job of every user-facing message is revelation, not a report about the engine. Speak in the vocabulary of the archive: its people, dates, messages, mailboxes, threads, folders, and questions. Column names, SQL, NULL rates, embedding counts, entities, catalysts, and cursor state are evidence for the agent. Translate what they mean before speaking to the user, and keep the raw details in the technical appendix unless the user asks for them.
+The first job of every user-facing message is revelation, not a report about the engine. Speak in the vocabulary of the archive: its people, dates, messages, mailboxes, threads, folders, and questions. Column names, SQL, NULL rates, source row/bucket counts, embedding counts, entities, and catalysts are evidence for the agent. Translate what they mean before speaking to the user, and keep the raw details in the technical appendix unless the user asks for them.
 
 Follow this order:
 
@@ -377,19 +377,19 @@ The exact `enzyme.sqlite-source.v1` rules are:
 - `roles.who`: optional array of result columns mapped to link entities.
 - `roles.when`: exactly one result column, emitted raw (integer or real).
 - `roles.what`: non-empty array of result columns concatenated in order.
-- `roles.where`: optional array of result columns mapped to collection/folder entities. Non-null values become catalyst-bearing entities, just like Markdown folders.
+- `roles.where`: optional array of result columns mapped to thread/collection entities. Defining it automatically enables log mode: Enzyme groups rows by those values and UTC calendar month, producing one conversation document per thread-month. Rows whose `where` values are NULL share a per-month fallback bucket. Non-null values also become catalyst-bearing folder entities.
 - Every array role also accepts a bare string as one-column shorthand; serialization emits arrays.
 - `timestamp.unit`: unit of the raw `when` value — one of `s`, `ms`, `us`, `ns`.
 - `timestamp.epoch`: optional `YYYY-MM-DD` origin for offset epochs (Apple = `2001-01-01`); absent means Unix epoch.
 - Human-readable conversion notes belong in TOML comments, not fields — unknown fields are dropped by programmatic config rewrites.
 
-Enzyme uses `roles.id` to make the same document ID every time it sees a source record. That lets `refresh` update a document instead of creating a duplicate. `roles.id` describes identity; it is not the changing sync cursor. Enzyme stores that cursor in `.enzyme/enzyme.db`. Never copy cursor values into TOML.
+Without `roles.where`, Enzyme uses `roles.id` to make the same per-row document ID every time it sees a source record. With `roles.where`, document identity comes from the source name, thread values, and UTC month; `roles.id` is only the stable tie-breaker for messages with the same timestamp. Refresh compares deterministic content fingerprints and does not store a source cursor.
 
 The query must also follow these rules:
 
-- Query is one `SELECT` or `WITH ... SELECT` and returns one row per document.
+- Query is one `SELECT` or `WITH ... SELECT` and returns one row per record/message. A source with `roles.where` groups those rows into thread-month documents.
 - Every configured column is uniquely aliased and present. On every returned row, every `id` component, `when`, and every configured `what` column must be non-null. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or collection.
-- The `roles.id` tuple is stable and unique. Enzyme combines it with the workspace source name before creating the document ID.
+- The `roles.id` tuple is stable and unique. It identifies documents for sources without `roles.where` and deterministically orders equal-time entries in log mode.
 - Enzyme converts time using the declared `unit` and `epoch`; the query returns the raw value.
 - The config contains every application-specific decision. Nothing depends on a hidden preset or later guessing.
 
@@ -412,10 +412,9 @@ After the first `init`, use these commands whenever the source changes:
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" status
-sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
 ```
 
-The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages the cursor, reprocessing, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
+`status` reports each source's row count, bucket count, and last refresh time. Enzyme manages fingerprint comparison, document rebuilds/pruning, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
 
 ## 6. Verify document and embedding counts
 
