@@ -311,11 +311,18 @@ TOML
 If the vault section or source name already exists, do not add a second copy. First run `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`. Then edit the existing section and leave unrelated settings alone. After either kind of edit, print the result and ask Enzyme to read it without writing anything:
 
 ```bash
-sed -n '/\[vaults\."\/absolute\/path\/to\/workspace-home"\]/,$p' "$CONFIG_PATH"
+awk -v key="$WORKSPACE_HOME" '
+  /^\[vaults\."/ {
+    same_workspace = index($0, "[vaults.\"" key "\"") == 1
+    if (showing && !same_workspace) exit
+    if (same_workspace) showing = 1
+  }
+  showing { print }
+' "$CONFIG_PATH"
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
 ```
 
-Here, `scan` is a dry run because it does not include `--write-config`. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
+The `awk` command matches both a parent vault header and source-only headers such as `[vaults."<workspace>".sources.messages]`, then prints that workspace's tables until the next vault begins. Here, `scan` is a dry run because it does not include `--write-config`. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
 
 Write the config in exactly this shape:
 
@@ -437,6 +444,22 @@ WHERE e.type IN ('link', 'folder')
 GROUP BY e.id, e.name
 ORDER BY catalysts DESC, e.name
 LIMIT 20;
+SELECT e.name, e.type, count(eo.id) AS occurrences,
+       (SELECT count(*) FROM catalysts c WHERE c.entity = e.name) AS catalysts
+FROM entities e JOIN entity_occurrences eo ON eo.entity_id = e.id
+WHERE e.type IN ('link', 'folder')
+GROUP BY e.id, e.name, e.type
+ORDER BY occurrences DESC
+LIMIT 20;
+SELECT count(*) AS collections,
+       coalesce(sum(CASE WHEN EXISTS (
+         SELECT 1 FROM catalysts c WHERE c.entity = e.name
+       ) THEN 1 ELSE 0 END), 0) AS collections_with_catalysts,
+       coalesce(sum(CASE WHEN NOT EXISTS (
+         SELECT 1 FROM catalysts c WHERE c.entity = e.name
+       ) THEN 1 ELSE 0 END), 0) AS collections_without_catalysts
+FROM entities e
+WHERE e.type = 'folder';
 SQL
 ```
 
@@ -450,6 +473,12 @@ max_embedding_files = 0
 ```
 
 Do not run `init` again to finish an embedding backlog.
+
+Catalysts are generated selectively and may finish in the background, so not every collection is expected to receive one. Use this pass bar:
+
+1. `status` shows that catalyst generation completed successfully.
+2. The high-occurrence people and collections in the top-20 query have catalysts. A top entity with zero catalysts after completion is a finding to report.
+3. Record `collections_without_catalysts` in the technical appendix. A nonzero count is useful coverage information, not a failure by itself.
 
 ## 7. Test whether person searches are relevant
 
