@@ -1002,7 +1002,7 @@ pub async fn run_init(
     // so we just collect the stats here.
     let emb_stats = if let Some(handle) = embedding_handle {
         match handle.await.context("embedding task panicked")? {
-            Ok(stats) => Some((stats.documents_embedded, stats.documents_pruned)),
+            Ok(stats) => Some(stats),
             Err(e) => {
                 let msg = format!("Embedding failed: {}", e);
                 tx.send(DisplayEvent::EmbeddingFailed(msg.clone())).ok();
@@ -1119,6 +1119,18 @@ pub async fn run_init(
     // Wait for display thread to finish rendering
     display.finish();
 
+    if !quiet
+        && !json_progress
+        && let Some(message) = embedding_backlog_message(
+            emb_stats
+                .as_ref()
+                .map_or(0, |stats| stats.documents_skipped),
+            enzyme_config.effective_max_embedding_files(),
+        )
+    {
+        eprintln!("  {message}");
+    }
+
     if completion_status == CompletionStatus::Failed {
         anyhow::bail!(
             "{}",
@@ -1151,8 +1163,8 @@ pub async fn run_init(
             files_updated: idx_stats.files_updated,
             files_deleted: idx_stats.files_deleted,
             catalysts_generated: cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
-            embeddings_documents: emb_stats.map(|(docs, _)| docs),
-            embeddings_pruned: emb_stats.map(|(_, pruned)| pruned),
+            embeddings_documents: emb_stats.as_ref().map(|stats| stats.documents_embedded),
+            embeddings_pruned: emb_stats.as_ref().map(|stats| stats.documents_pruned),
             semantic_search: emb_completed,
             catalysts_available: cat_stats.is_some(),
             cache_epoch,
@@ -2235,6 +2247,13 @@ async fn run_refresh_interactive(
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    if let Some(message) = embedding_backlog_message(
+        local.embedding.documents_skipped,
+        enzyme_config.effective_max_embedding_files(),
+    ) {
+        eprintln!("{message}");
+    }
     db.reconcile_corpus_generation(now_ms())?;
     let contract = generation_contract(vault_path, &paths, use_env_llm).await?;
     db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
@@ -2267,6 +2286,20 @@ async fn run_refresh_interactive(
         }))?
     );
     Ok(())
+}
+
+fn embedding_backlog_message(
+    documents_skipped: usize,
+    max_embedding_files: Option<usize>,
+) -> Option<String> {
+    (documents_skipped > 0).then(|| {
+        let limit = max_embedding_files
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unlimited".to_string());
+        format!(
+            "{documents_skipped} documents not yet embedded (max_embedding_files={limit}); run refresh to continue, or raise max_embedding_files"
+        )
+    })
 }
 
 fn parse_entity_type(s: &str) -> enzyme_core::models::EntityType {
@@ -2368,6 +2401,17 @@ mod tests {
             embedding_refresh_plan(true),
             EmbeddingRefreshPlan::SinceIndexStart
         );
+    }
+
+    #[test]
+    fn embedding_backlog_message_renders_limit_and_next_steps() {
+        assert_eq!(
+            embedding_backlog_message(27, Some(1024)).as_deref(),
+            Some(
+                "27 documents not yet embedded (max_embedding_files=1024); run refresh to continue, or raise max_embedding_files"
+            )
+        );
+        assert_eq!(embedding_backlog_message(0, Some(1024)), None);
     }
 
     #[test]
