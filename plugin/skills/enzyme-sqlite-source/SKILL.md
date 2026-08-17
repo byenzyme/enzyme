@@ -29,7 +29,7 @@ Enzyme needs these parts from each source row:
 
 Never edit, migrate, vacuum, attach to, or create anything in the source database. Open it read-only. Do not write config, create workspace files, or initialize Enzyme until the user has seen and confirmed the proposed mapping.
 
-## Inputs and workspace shapes
+## Choose the source and workspace
 
 The path in `[vaults."path"]` is the **workspace home**. Enzyme stores its local `.enzyme` database, embeddings, catalysts, and source-sync state there. The directory does not need to contain Markdown files.
 
@@ -40,7 +40,7 @@ There are two supported setups:
 1. **Existing Markdown workspace:** add `sources.<name>` beside the workspace's existing entity, log, and exclusion settings. Enzyme must keep both the Markdown documents and the database records.
 2. **Standalone SQLite workspace:** after confirmation, create or use an empty directory, add a vault section containing only `sources.<name>`, and initialize it with no Markdown files.
 
-Resolve absolute paths and tools:
+Set absolute paths and check that the database and Enzyme command are available:
 
 ```bash
 SOURCE_DB="/absolute/path/to/source.sqlite"
@@ -51,7 +51,7 @@ sqlite3 -readonly "$SOURCE_DB" 'PRAGMA query_only; PRAGMA quick_check;'
 "$ENZYME_BIN" --version
 ```
 
-Before consent, inspect an existing workspace without changing it:
+Before the user confirms the mapping, inspect an existing workspace without changing it:
 
 ```bash
 test ! -e "$WORKSPACE_HOME" || test -d "$WORKSPACE_HOME"
@@ -386,7 +386,7 @@ After the first `init`, use these commands whenever the source changes:
 sqlite3 "$WORKSPACE_HOME/.enzyme/enzyme.db" "SELECT source_name, cursor_kind, cursor_value FROM source_cursors;"
 ```
 
-The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages cursors, replay, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
+The `source_cursors` query shows where Enzyme's incremental sync has reached. This value belongs in `.enzyme/enzyme.db`, not in the config. Enzyme manages the cursor, reprocessing, document updates, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
 
 ## 6. Verify document and embedding counts
 
@@ -426,7 +426,7 @@ SQL
 
 Replace `messages` with the configured source name. `source_documents` must match the number of rows returned by the saved source query. In a standalone workspace, it should also match total `documents`. In a mixed Markdown workspace, total `documents` includes both sources, so do not compare that combined number directly with the SQLite row count.
 
-By default, one run embeds at most the newest 1024 documents. With `--quiet`, a large corpus can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
+By default, one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
 
 ```toml
 [vaults."/absolute/path/to/workspace-home"]
