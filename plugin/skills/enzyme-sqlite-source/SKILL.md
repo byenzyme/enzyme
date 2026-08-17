@@ -134,7 +134,7 @@ ORDER BY candidate
 LIMIT 10;
 ```
 
-Make the final query output one integer Unix-millisecond column. Native execution must reject null or invalid timestamps rather than silently substituting indexing time.
+Use these conversions for evidence display only. The frozen query outputs the timestamp column RAW; the contract's `timestamp` table declares its unit (`s`, `ms`, `us`, `ns`) and epoch, and native execution performs the conversion. Do not bake conversion arithmetic into the contract SQL. Native execution rejects null or invalid timestamps rather than silently substituting indexing time.
 
 ### Find content candidates
 
@@ -213,11 +213,12 @@ After confirmation, create a missing standalone home with `mkdir -p "$WORKSPACE_
 ```toml
 [vaults."/absolute/path/to/workspace-home".sources.messages]
 db = "/absolute/path/to/source.sqlite"
+# m.sent_ns is Apple-epoch nanoseconds; declared below, converted by the engine.
 query = """
 SELECT
   m.rowid AS message_rowid,
   p.name AS sender,
-  CAST(m.sent_ns / 1000000 AS INTEGER) + 978307200000 AS sent_at_ms,
+  m.sent_ns AS sent_ns,
   m.body AS body,
   t.name AS thread
 FROM messages AS m
@@ -225,39 +226,40 @@ LEFT JOIN people AS p ON p.rowid = m.person_id
 LEFT JOIN threads AS t ON t.rowid = m.thread_id
 ORDER BY m.rowid
 """
-id = ["message_rowid"]
 
 [vaults."/absolute/path/to/workspace-home".sources.messages.roles]
+id = ["message_rowid"]
 who = ["sender"]
-when = "sent_at_ms"
+when = "sent_ns"
 what = ["body"]
 where = ["thread"]
 
 [vaults."/absolute/path/to/workspace-home".sources.messages.timestamp]
-unit = "milliseconds"
-epoch = "unix"
-conversion = "m.sent_ns is Apple-epoch nanoseconds; SQL divides by 1000000 and adds 978307200000"
+unit = "ns"
+epoch = "2001-01-01"
 ```
 
 This is the exact `enzyme.sqlite-source.v1` shape:
 
-- Source root keys: `db` (absolute SQLite path), `query` (one read-only SQL statement), and `id` (one or more result columns).
-- `roles.who`: non-empty array of result columns mapped to link entities.
-- `roles.when`: exactly one result column.
+- Source root keys: `db` (absolute SQLite path), `query` (one read-only SQL statement), `roles`, and `timestamp`.
+- `roles.id`: one or more result columns forming a stable unique tuple (composite keys allowed).
+- `roles.who`: optional array of result columns mapped to link entities.
+- `roles.when`: exactly one result column, emitted raw (integer or real).
 - `roles.what`: non-empty array of result columns concatenated in order.
 - `roles.where`: optional array of result columns mapped to collection/folder entities.
-- `timestamp.unit`: unit of the `when` result; freeze as `milliseconds`.
-- `timestamp.epoch`: epoch of the `when` result; freeze as `unix`.
-- `timestamp.conversion`: human-readable notes explaining the original unit/epoch and exact conversion already performed by SQL.
+- Every array role also accepts a bare string as one-column shorthand; serialization emits arrays.
+- `timestamp.unit`: unit of the raw `when` value — one of `s`, `ms`, `us`, `ns`.
+- `timestamp.epoch`: optional `YYYY-MM-DD` origin for offset epochs (Apple = `2001-01-01`); absent means Unix epoch.
+- Human-readable conversion notes belong in TOML comments, not fields — unknown fields are dropped by programmatic config rewrites.
 
-The `id` key is the one necessary addition beyond `db`, `query`, `roles`, and `timestamp`. Native execution needs it to derive a stable deterministic document ID from source primary keys/rowids so refresh upserts rather than duplicates. It is declarative identity, not a sync cursor. Enzyme owns incremental cursor/state in `.enzyme/enzyme.db`; never add mutable cursor values to TOML.
+`roles.id` exists so native execution can derive a stable deterministic document ID from source primary keys/rowids and refresh upserts rather than duplicates. It is declarative identity, not a sync cursor. Enzyme owns incremental cursor/state in `.enzyme/enzyme.db`; never add mutable cursor values to TOML.
 
 Additional invariants:
 
 - Query is one `SELECT` or `WITH ... SELECT` and returns one row per document.
 - Every configured column is uniquely aliased, present, and non-null where required.
-- `id` tuple is stable and unique. The engine namespaces it by workspace source name before deriving document identity.
-- SQL performs timestamp conversion; notes do not contain executable logic.
+- `roles.id` tuple is stable and unique. The engine namespaces it by workspace source name before deriving document identity.
+- The engine performs timestamp conversion from the declared `unit`/`epoch`; the query emits the raw value.
 - No application-specific presets or hidden role inference remain.
 
 Show the exact stanza and config path after writing. Re-read it mechanically. Do not run `scan --write-config` afterward unless native config serialization is known to preserve `sources`.
