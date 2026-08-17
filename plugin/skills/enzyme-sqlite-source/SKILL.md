@@ -263,7 +263,11 @@ All three counts must match. Prefer a declared `INTEGER PRIMARY KEY`. A bare `ro
 
 ## 3. Show real examples and ask the user to confirm
 
-Before writing anything, show:
+Keep two layers: a complete evidence record for the work, and a short confirmation message for the user. Do not make the user read the evidence record to understand the choice.
+
+### Keep the technical evidence
+
+Before writing anything, gather and retain:
 
 1. Source path, base table/view, row count, and join coverage.
 2. Every output column, its Enzyme role, its source expression, its NULL rate, its useful distinct-value count, and why it fits.
@@ -272,7 +276,19 @@ Before writing anything, show:
 5. Stable identity result column(s) and uniqueness evidence.
 6. Workspace shape/path and whether `where` becomes a collection.
 
-Ask the user to confirm or correct the mapping. If they correct it, inspect the database again and show new evidence. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
+This evidence is the technical appendix. Keep it in the working record and offer it if the user asks. Do not lead the confirmation message with column names, SQL expressions, NULL rates, units, epochs, or Enzyme role names.
+
+### Reveal the archive in the user's terms
+
+Open with what the inspection found in language the user already uses: how much material there is, the years it covers, who is named, what text Enzyme will read, and which familiar mailboxes, threads, folders, or collections the entries belong to. Use real names and places from the source. Translate missing values into ordinary statements such as “1,403 entries do not name a person.”
+
+Then explain what this makes possible and name only the choices that need judgment. For example:
+
+> Your 3,000 entries run from 2017 to 2026 across Books, inbox, work, and 28 other places. Enzyme will read the entry text, follow the people named in it, and keep each entry with its familiar place, so you can ask how a relationship or thread changed over time. Twelve entries use `[]` where a person would normally be named; I would treat those as “no person.” Does that match how you understand this archive?
+
+Keep this reveal short enough to read aloud in under a minute. Add two or three representative examples only when they make the interpretation easier to judge. Do not call the mapping “healthy” or “valid” in place of showing what was found.
+
+The confirmation still gates every write. If the user corrects the interpretation, return to inspection, update the technical evidence, and present a new reveal. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
 
 ## 4. Write the confirmed config
 
@@ -390,7 +406,7 @@ The `source_cursors` query shows where Enzyme's incremental sync has reached. Th
 
 ## 6. Verify document and embedding counts
 
-The next queries count documents, embeddings, entities, and catalysts without printing private message bodies:
+Verify the mechanics privately before describing success to the user. The next queries count documents, embeddings, entities, and catalysts without printing private message bodies. Keep their raw output in the technical record; do not make it the user-facing result.
 
 ```bash
 sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
@@ -437,7 +453,7 @@ Do not run `init` again to finish an embedding backlog.
 
 ## 7. Test whether person searches are relevant
 
-To check an exact person name, query Enzyme's database directly. `petri --query` uses semantic search, so it cannot prove that an exact name exists or that its occurrences are correct. The following query proves both the exact match and the person's yearly and monthly coverage:
+Keep the exact-name and timeline check private too. Query Enzyme's database directly because `petri --query` uses semantic search and cannot prove that an exact name exists or that its occurrences are correct. The following query proves both the exact match and the person's yearly and monthly coverage:
 
 ```bash
 sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
@@ -477,11 +493,17 @@ SQL
 
 `effective_date` is Unix milliseconds. Replace `messages` with the configured source name. Compare the yearly and monthly counts with what you learned from the source. A top person should appear across the expected periods.
 
-Now test the user-facing search. A query for a top person must return material that is mostly about that person and follows the expected time periods. If much of the result is unrelated, report that as a problem instead of calling the test successful. The `who` mapping or cleanup rule may be too broad and may have mixed unrelated records into the entity.
+Now test the user-facing search. A query for a top person must return material that is mostly about that person and follows the expected time periods. If much of the result is unrelated, report that as a problem instead of calling the test successful.
 
 ```bash
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one exact top person name>"
 "$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
 ```
 
-Confirm that expected people have occurrences, folder entities from `where` have catalysts, and `petri` shows catalysts. Catalyst generation may continue in the background, so use `status` and check again after it finishes. If Enzyme cannot read the configured source, cannot initialize an empty standalone workspace, or loses either Markdown or SQLite documents, stop and report that the implementation needs a Rust fix. Do not switch to `enzyme ingest` or write a custom extractor in the skill.
+After the private checks, close with what became possible in the user's language. Name the full span, a real person with verified dated entries, a few familiar places, and one question worth trying. For example:
+
+> Your full archive is here. Enzyme can now follow Me across 781 dated entries from 2018 to 2026 and treat Books, inbox, and work as recurring places. Try asking: “What changed in my work with Will Ashby?”
+
+Use that positive reveal only when the example actually works. If it fails, say what happened in the same plain language: “The full archive is here, but that question returned mostly unrelated people, so person-focused search is not working well yet.” The reveal is the headline; document, embedding, occurrence, entity, and catalyst counts stay in the technical appendix unless the user asks for them.
+
+If the exact occurrence timeline contains unrelated records, the `who` mapping or cleanup rule may be mixing people together. If the exact timeline is correct but `petri` or `catalyze` still returns unrelated material, report a retrieval or ranking failure instead of reopening a proven mapping. If Enzyme cannot read the configured source, cannot initialize an empty standalone workspace, or loses either Markdown or SQLite documents, stop and report that the implementation needs a Rust fix. Do not switch to `enzyme ingest` or write a custom extractor in the skill.
