@@ -705,7 +705,10 @@ impl<'a> ContextSearch<'a> {
                     let key = format!("{}:{}", sim.file_path, sim.chunk_index);
                     let weighted_score = sim.similarity * relevance;
                     let entry = chunk_scores.entry(key).or_insert(ChunkScore {
-                        max_weighted_score: 0.0,
+                        // Anchored catalysts can have a negative query cosine;
+                        // the first real contribution must still win and retain
+                        // its catalyst id instead of leaving an empty bridge.
+                        max_weighted_score: f64::NEG_INFINITY,
                         catalyst_count: 0,
                         best_catalyst_id: String::new(),
                     });
