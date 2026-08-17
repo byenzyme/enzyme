@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -6,9 +6,184 @@ use tracing::debug;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::Embedding;
+use crate::models::{Catalyst, Embedding, Entity};
+use crate::pipeline::eras::{Era, cluster_eras_periodic};
+use crate::pipeline::similarity::CATALYST_TOP_K;
 
 pub const TARGET_PROJECTION_NOT_READY: &str = "target projection is not ready for active epoch";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct EraKey {
+    entity_id: i64,
+    era_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ScoredChunk {
+    file_path: String,
+    chunk_index: i64,
+    score: f64,
+    best_catalyst_id: String,
+    content: String,
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn has_name_boundaries(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    before.is_none_or(|ch| !is_word_char(ch)) && after.is_none_or(|ch| !is_word_char(ch))
+}
+
+/// Detect complete known entity names in a query, preferring longer overlapping
+/// names so a known "Will Ashby" does not degrade into a match for "Will".
+fn match_query_entity_names(query: &str, entities: &[Entity]) -> Vec<String> {
+    let query = query.to_lowercase();
+    let mut names = entities
+        .iter()
+        .map(|entity| entity.name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort_by(|a, b| {
+        b.chars()
+            .count()
+            .cmp(&a.chars().count())
+            .then_with(|| a.cmp(b))
+    });
+    names.dedup();
+
+    let mut occupied = Vec::<(usize, usize)>::new();
+    let mut matched = Vec::new();
+    for name in names {
+        let found = query.match_indices(&name).find_map(|(start, _)| {
+            let end = start + name.len();
+            (has_name_boundaries(&query, start, end)
+                && occupied
+                    .iter()
+                    .all(|(used_start, used_end)| end <= *used_start || start >= *used_end))
+            .then_some((start, end))
+        });
+        if let Some(span) = found {
+            occupied.push(span);
+            matched.push(name);
+        }
+    }
+    matched
+}
+
+/// Keep the existing cosine order within both pools, but put every catalyst
+/// owned by an explicitly named entity before the global fill pool.
+fn prioritize_anchored_catalysts(
+    global_ranking: &[(usize, f32)],
+    catalysts: &[Catalyst],
+    matched_entity_names: &HashSet<String>,
+    limit: usize,
+) -> Vec<(usize, f32)> {
+    if matched_entity_names.is_empty() {
+        return global_ranking.iter().copied().take(limit).collect();
+    }
+
+    global_ranking
+        .iter()
+        .filter(|(idx, _)| matched_entity_names.contains(&catalysts[*idx].entity.to_lowercase()))
+        .chain(global_ranking.iter().filter(|(idx, _)| {
+            !matched_entity_names.contains(&catalysts[*idx].entity.to_lowercase())
+        }))
+        .copied()
+        .take(limit)
+        .collect()
+}
+
+fn era_index_for_timestamp(eras: &[Era], timestamp: i64) -> Option<usize> {
+    let month = chrono::DateTime::from_timestamp_millis(timestamp)?
+        .format("%Y-%m")
+        .to_string();
+    eras.iter()
+        .position(|era| month.as_str() >= era.start.as_str() && month.as_str() <= era.end.as_str())
+}
+
+fn build_anchored_era_index(
+    entities: &[&Entity],
+    occurrence_dates: &[(i64, String, i64)],
+    era_budget: usize,
+) -> (Vec<EraKey>, HashMap<String, Vec<EraKey>>) {
+    let entities = entities
+        .iter()
+        .filter_map(|entity| entity.id.map(|id| (id, *entity)))
+        .collect::<Vec<_>>();
+    let mut era_order = Vec::new();
+    let mut eras_by_entity = HashMap::<i64, Vec<Era>>::new();
+
+    for (position, (entity_id, entity)) in entities.iter().enumerate() {
+        let budget = if entities.is_empty() {
+            0
+        } else {
+            era_budget / entities.len() + usize::from(position < era_budget % entities.len())
+        };
+        if budget == 0 {
+            continue;
+        }
+        let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, budget);
+        era_order.extend((0..eras.len()).map(|era_index| EraKey {
+            entity_id: *entity_id,
+            era_index,
+        }));
+        eras_by_entity.insert(*entity_id, eras);
+    }
+
+    let mut path_eras = HashMap::<String, Vec<EraKey>>::new();
+    for (entity_id, file_path, timestamp) in occurrence_dates {
+        let Some(eras) = eras_by_entity.get(entity_id) else {
+            continue;
+        };
+        let Some(era_index) = era_index_for_timestamp(eras, *timestamp) else {
+            continue;
+        };
+        let key = EraKey {
+            entity_id: *entity_id,
+            era_index,
+        };
+        let keys = path_eras.entry(file_path.clone()).or_default();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    (era_order, path_eras)
+}
+
+/// Seed the best-scoring chunk for every era, then fill from the weighted
+/// ranking. The input must already be sorted by descending score.
+fn prioritize_era_chunks(
+    scored: Vec<ScoredChunk>,
+    era_order: &[EraKey],
+    path_eras: &HashMap<String, Vec<EraKey>>,
+) -> Vec<ScoredChunk> {
+    let mut selected = Vec::with_capacity(scored.len());
+    let mut used = HashSet::<(String, i64)>::new();
+
+    for era in era_order {
+        if let Some(chunk) = scored.iter().find(|chunk| {
+            !used.contains(&(chunk.file_path.clone(), chunk.chunk_index))
+                && path_eras
+                    .get(&chunk.file_path)
+                    .is_some_and(|keys| keys.contains(era))
+        }) {
+            used.insert((chunk.file_path.clone(), chunk.chunk_index));
+            selected.push(chunk);
+        }
+    }
+
+    for chunk in &scored {
+        if used.insert((chunk.file_path.clone(), chunk.chunk_index)) {
+            selected.push(chunk);
+        }
+    }
+
+    selected.into_iter().cloned().collect()
+}
 
 /// Structured response from catalyst-based search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +196,7 @@ pub struct CatalyzeResponse {
 mod tests {
     use super::*;
     use crate::embedding::EmbeddingBackend;
-    use crate::models::Catalyst;
+    use crate::models::{EntityTrends, EntityType};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -158,6 +333,122 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains(TARGET_PROJECTION_NOT_READY));
     }
+
+    fn entity(name: &str) -> Entity {
+        Entity {
+            id: None,
+            name: name.to_string(),
+            entity_type: EntityType::Link,
+            frequency: 1,
+            first_seen: None,
+            last_seen: None,
+            trends: EntityTrends::default(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn catalyst(id: &str, entity: &str) -> Catalyst {
+        Catalyst {
+            id: id.to_string(),
+            text: format!("question {id}"),
+            entity: entity.to_string(),
+            context: "default".to_string(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    fn scored_chunk(path: &str, score: f64) -> ScoredChunk {
+        ScoredChunk {
+            file_path: path.to_string(),
+            chunk_index: 0,
+            score,
+            best_catalyst_id: "cat".to_string(),
+            content: String::new(),
+        }
+    }
+
+    #[test]
+    fn entity_matching_is_case_insensitive_bounded_and_longest_first() {
+        let entities = vec![
+            entity("Will"),
+            entity("Will Ashby"),
+            entity("Ashby"),
+            entity("Books"),
+            entity("Art"),
+        ];
+
+        assert_eq!(
+            match_query_entity_names("What changed with WILL ASHBY in books?", &entities),
+            vec!["will ashby", "books"]
+        );
+        assert!(match_query_entity_names("articles about cartography", &entities).is_empty());
+    }
+
+    #[test]
+    fn anchored_catalysts_precede_higher_cosine_global_catalysts() {
+        let catalysts = vec![
+            catalyst("global-high", "Other"),
+            catalyst("anchor-high", "Will Ashby"),
+            catalyst("anchor-low", "Will Ashby"),
+            catalyst("global-low", "Another"),
+        ];
+        let global = vec![(0, 0.9), (1, 0.8), (2, 0.7), (3, 0.6)];
+        let matched = HashSet::from(["will ashby".to_string()]);
+
+        assert_eq!(
+            prioritize_anchored_catalysts(&global, &catalysts, &matched, 3),
+            vec![(1, 0.8), (2, 0.7), (0, 0.9)]
+        );
+    }
+
+    #[test]
+    fn era_stratified_selection_seeds_each_era_then_fills_by_score() {
+        let old = EraKey {
+            entity_id: 1,
+            era_index: 0,
+        };
+        let recent = EraKey {
+            entity_id: 1,
+            era_index: 1,
+        };
+        let scored = vec![
+            scored_chunk("recent-best", 0.9),
+            scored_chunk("old-best", 0.8),
+            scored_chunk("old-runner-up", 0.7),
+            scored_chunk("global", 0.6),
+        ];
+        let path_eras = HashMap::from([
+            ("recent-best".to_string(), vec![recent]),
+            ("old-best".to_string(), vec![old]),
+            ("old-runner-up".to_string(), vec![old]),
+        ]);
+
+        let selected = prioritize_era_chunks(scored, &[old, recent], &path_eras);
+        assert_eq!(
+            selected
+                .iter()
+                .take(3)
+                .map(|chunk| chunk.file_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old-best", "recent-best", "old-runner-up"]
+        );
+    }
+
+    #[test]
+    fn unanchored_catalyst_selection_preserves_global_fallthrough() {
+        let catalysts = vec![
+            catalyst("first", "One"),
+            catalyst("second", "Two"),
+            catalyst("third", "Three"),
+        ];
+        let global = vec![(2, 0.9), (0, 0.8), (1, 0.7)];
+
+        assert_eq!(
+            prioritize_anchored_catalysts(&global, &catalysts, &HashSet::new(), 2),
+            vec![(2, 0.9), (0, 0.8)]
+        );
+    }
 }
 
 /// A single result from catalyst-based search.
@@ -277,6 +568,18 @@ impl<'a> ContextSearch<'a> {
                 top_contributing_catalysts: Vec::new(),
             });
         }
+        let entities = self.db.get_all_entities()?;
+        let matched_entity_names = match_query_entity_names(query, &entities);
+        let matched_entity_name_set = matched_entity_names.iter().cloned().collect::<HashSet<_>>();
+        let matched_entities = matched_entity_names
+            .iter()
+            .flat_map(|name| {
+                entities
+                    .iter()
+                    .filter(move |entity| entity.name.eq_ignore_ascii_case(name))
+            })
+            .collect::<Vec<_>>();
+        let anchored = !matched_entity_name_set.is_empty();
 
         // Load cached catalyst embeddings from DB, falling back to re-embedding
         let emb_db = self.target_db.unwrap_or(self.db);
@@ -326,13 +629,18 @@ impl<'a> ContextSearch<'a> {
 
         // Find top relevant catalysts (top 10 — over-retrieve for better coverage)
         let max_catalysts = 10usize;
-        let mut cat_sims: Vec<(usize, f32)> = cat_embeddings
+        let mut global_cat_sims: Vec<(usize, f32)> = cat_embeddings
             .iter()
             .enumerate()
             .map(|(i, vec)| (i, Embedding::cosine_similarity(&query_vec, vec)))
             .collect();
-        cat_sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        cat_sims.truncate(max_catalysts);
+        global_cat_sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let cat_sims = prioritize_anchored_catalysts(
+            &global_cat_sims,
+            &catalysts,
+            &matched_entity_name_set,
+            max_catalysts,
+        );
 
         // Build catalyst metadata lookup for the top catalysts
         let catalyst_meta: HashMap<String, (&str, &str, f64)> = cat_sims
@@ -356,7 +664,11 @@ impl<'a> ContextSearch<'a> {
         }
 
         let mut chunk_scores: HashMap<String, ChunkScore> = HashMap::new();
-        let context_per_catalyst = (limit * 3 / max_catalysts.max(1)).max(10);
+        let context_per_catalyst = if anchored {
+            CATALYST_TOP_K
+        } else {
+            (limit * 3 / max_catalysts.max(1)).max(10)
+        };
 
         let sim_repo = self.target_db.unwrap_or(self.db);
 
@@ -406,27 +718,23 @@ impl<'a> ContextSearch<'a> {
             }
         }
 
-        // Score, rank, and build results
-        struct ScoredChunk {
-            file_path: String,
-            chunk_index: i64,
-            score: f64,
-            best_catalyst_id: String,
-            content: String,
-        }
-
         let mut scored: Vec<ScoredChunk> = Vec::new();
 
-        // Batch-fetch modified_at for recency boost
+        // Unanchored queries retain the existing modified_at recency behavior.
+        // Anchored queries use effective dates only for timeline stratification.
         let unique_paths: Vec<&str> = chunk_scores
             .keys()
             .filter_map(|key| key.rsplitn(2, ':').last())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let modified_at_map = sim_repo
-            .get_modified_at_batch(&unique_paths)
-            .unwrap_or_default();
+        let modified_at_map = if anchored {
+            HashMap::new()
+        } else {
+            sim_repo
+                .get_modified_at_batch(&unique_paths)
+                .unwrap_or_default()
+        };
         let now = chrono::Utc::now().timestamp_millis();
 
         for (key, cs) in &chunk_scores {
@@ -440,8 +748,11 @@ impl<'a> ContextSearch<'a> {
             // Multi-catalyst boost
             let multi_boost = 1.0 + (cs.catalyst_count as f64 - 1.0) * 0.2;
 
-            // Recency boost (from document modified_at)
-            let recency_boost = if let Some(&modified_at) = modified_at_map.get(&file_path) {
+            // Recency boost (from document modified_at) remains byte-for-byte
+            // equivalent for unanchored broad-topic queries.
+            let recency_boost = if anchored {
+                1.0
+            } else if let Some(&modified_at) = modified_at_map.get(&file_path) {
                 let age_days = ((now - modified_at) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
                 1.0 + (-0.693147 / 30.0 * age_days).exp()
             } else {
@@ -462,6 +773,17 @@ impl<'a> ContextSearch<'a> {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        if anchored {
+            let entity_ids = matched_entities
+                .iter()
+                .filter_map(|entity| entity.id)
+                .collect::<Vec<_>>();
+            let occurrence_dates = self.db.get_entity_occurrence_effective_dates(&entity_ids)?;
+            let (era_order, path_eras) =
+                build_anchored_era_index(&matched_entities, &occurrence_dates, limit);
+            scored = prioritize_era_chunks(scored, &era_order, &path_eras);
+        }
 
         // Fetch content for top limit*3 candidates BEFORE dedup/truncation
         let fetch_count = (limit * 3).min(scored.len());

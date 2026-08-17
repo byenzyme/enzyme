@@ -919,6 +919,45 @@ impl Database {
         Ok(rows)
     }
 
+    /// Fetch effective document dates for occurrences of the requested entities.
+    ///
+    /// Retrieval uses the occurrence's semantic date when present and falls back
+    /// to the owning document's creation date. The entity id is retained because
+    /// a path can belong to more than one anchored entity timeline.
+    pub fn get_entity_occurrence_effective_dates(
+        &self,
+        entity_ids: &[i64],
+    ) -> Result<Vec<(i64, String, i64)>> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = (1..=entity_ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT eo.entity_id, eo.file_path,
+                    COALESCE(eo.effective_date, d.created_at)
+             FROM entity_occurrences eo
+             JOIN docs d ON d.source_ref = eo.file_path
+             WHERE eo.entity_id IN ({placeholders})"
+        );
+        let params = entity_ids
+            .iter()
+            .copied()
+            .map(Value::Integer)
+            .collect::<Vec<_>>();
+
+        Ok(self.query_read(&sql, params, |row| {
+            Ok((
+                row.get::<i64>(0)?,
+                row.get::<String>(1)?,
+                row.get::<i64>(2)?,
+            ))
+        })?)
+    }
+
     /// Look up entities by their (name, type) pairs.
     pub fn get_entities_by_names(&self, names: &[(&str, EntityType)]) -> Result<Vec<Entity>> {
         if names.is_empty() {
