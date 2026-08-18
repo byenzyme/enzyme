@@ -5,3 +5,4 @@ pub mod notes;
 pub mod preview;
 pub mod steer;
 pub mod warm;
+pub mod version;

@@ -9,6 +9,7 @@ use tracing::{debug, info};
 use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig};
 use enzyme_core::config::paths::{EnzymePaths, ensure_dir_symlink_aware};
 use enzyme_core::db::Database;
+use enzyme_core::db::update_sentinel::{self, UpdateStatus};
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{
@@ -34,6 +35,131 @@ use super::lock::{acquire_projection_lock, acquire_refresh_lock, is_refresh_lock
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 use enzyme_core::config::auth::AuthToken;
+
+/// Version stamped into the vault DB's update sentinel (see
+/// `enzyme_core::db::update_sentinel`).
+pub(crate) const BINARY_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the auto-update policy did for a vault on an agent-facing path.
+#[derive(Debug, Clone)]
+pub enum UpdateOutcome {
+    UpToDate,
+    SentinelRefreshed,
+    RegenPerformed { reason: String },
+    RegenBlocked { reason: String },
+}
+
+impl UpdateOutcome {
+    /// Minimal two-state contract for agent-facing refresh JSON (`update` key).
+    pub fn to_json(
+        &self,
+        binary_outcome: Option<super::update::BinaryUpdateOutcome>,
+    ) -> serde_json::Value {
+        use super::update::{automatic_major_allowed, update_available, BinaryUpdateStatus};
+
+        if let UpdateOutcome::RegenBlocked { reason } = self {
+            return json!({
+                "status": "action_required",
+                "action": "ask the user before running `enzyme init --force`: the vault schema is outdated but holds data a rebuild would destroy",
+                "reason": reason,
+            });
+        }
+
+        if matches!(self, UpdateOutcome::RegenPerformed { .. }) {
+            return json!({
+                "status": "ok",
+                "note": "vault regenerated after a binary update",
+            });
+        }
+
+        if let Some(binary) = &binary_outcome {
+            if binary.status == BinaryUpdateStatus::Skipped {
+                let policy_skip = binary
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("update.auto"));
+                if !policy_skip {
+                    if let Some(latest) = binary.to.as_deref() {
+                        if update_available(BINARY_VERSION, latest).unwrap_or(false) {
+                            let reason = format!(
+                                "Enzyme {BINARY_VERSION} is running; version {latest} is available."
+                            );
+                            if automatic_major_allowed(BINARY_VERSION, latest).ok() == Some(false) {
+                                return json!({
+                                    "status": "action_required",
+                                    "action": "tell the user a major Enzyme update is available; it must be installed manually",
+                                    "reason": reason,
+                                });
+                            }
+                            if !binary.channel.is_self_swappable() {
+                                return json!({
+                                    "status": "action_required",
+                                    "action": binary.channel.advisory_action(),
+                                    "reason": reason,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        json!({ "status": "ok" })
+    }
+}
+
+/// Agent-facing update policy: read the sentinel, and when the binary changed
+/// underneath this vault decide between "advance the sentinel for free"
+/// (migrations reconciled the schema) and "regen via full init" (structural
+/// drift). Regen is preferred over authoring migrations; auth and global
+/// config live outside the vault DB and survive it. The vault DB must exist.
+pub async fn apply_update_policy(
+    vault_path: &Path,
+    paths: &EnzymePaths,
+    use_env_llm: bool,
+) -> Result<UpdateOutcome> {
+    let status = {
+        let db = Database::open(&paths.vault_db)?;
+        update_sentinel::check_and_mark(&db, BINARY_VERSION)?
+    };
+    match status {
+        UpdateStatus::UpToDate => Ok(UpdateOutcome::UpToDate),
+        UpdateStatus::SentinelRefreshed { previous_version } => {
+            info!(
+                previous_version = previous_version.as_deref().unwrap_or("unknown"),
+                "binary changed but vault schema is compatible; sentinel advanced without regen"
+            );
+            Ok(UpdateOutcome::SentinelRefreshed)
+        }
+        UpdateStatus::RegenRequired { reason } => {
+            // A DB-only corpus (no source files on disk) cannot be rebuilt
+            // from the vault; never destroy it over schema drift.
+            if should_preserve_db_only_corpus(paths, vault_path)? {
+                tracing::warn!(
+                    reason,
+                    "schema drift detected but vault is a DB-only corpus; skipping auto-regen"
+                );
+                return Ok(UpdateOutcome::RegenBlocked { reason });
+            }
+            info!(
+                reason,
+                "schema drift after binary update; regenerating index via full init"
+            );
+            run_init(
+                vault_path,
+                false,
+                true,
+                false,
+                None,
+                false,
+                use_env_llm,
+                true,
+            )
+            .await?;
+            Ok(UpdateOutcome::RegenPerformed { reason })
+        }
+    }
+}
 
 async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
     if use_env_llm {
@@ -553,6 +679,23 @@ pub async fn run_init(
     // catalyst generation are all incremental against it, which is what makes
     // a routine re-run finish in seconds instead of re-asking the model about
     // every entity. `--force` restores the clean-slate rebuild.
+    //
+    // Escalate to a clean-slate rebuild when the stored schema has drifted
+    // from what this binary produces (regen-over-migration policy — see
+    // `db::update_sentinel`). The sentinel is advanced here for free when
+    // migrations already reconciled the schema.
+    let force = force
+        || (paths.vault_db.exists() && {
+            let db = Database::open(&paths.vault_db)?;
+            let escalate = matches!(
+                update_sentinel::check_and_mark(&db, BINARY_VERSION)?,
+                UpdateStatus::RegenRequired { .. }
+            );
+            if escalate {
+                info!("schema drift detected; escalating init to a full clean-slate rebuild");
+            }
+            escalate
+        });
     if force && !should_preserve_db_only_corpus(&paths, vault_path)? {
         reset_vault_database(&paths)?;
     }
@@ -1109,6 +1252,14 @@ pub async fn run_init(
         CompletionStatus::Failed | CompletionStatus::Degraded => warnings.last().cloned(),
         CompletionStatus::Done => None,
     };
+    // Stamp the update sentinel so agent-facing paths take the cheap
+    // version-equality fast path until the next binary change. A failed run
+    // is not stamped: unresolved drift must keep re-triggering regen.
+    if completion_status != CompletionStatus::Failed {
+        if let Err(error) = update_sentinel::check_and_mark(&db, BINARY_VERSION) {
+            tracing::warn!(%error, "failed to advance the vault update sentinel");
+        }
+    }
     tracing::info!(
         status = ?completion_status,
         warnings = warnings.len(),
@@ -1193,6 +1344,14 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // Update sentinel first: a binary update with schema drift regens the
+    // whole vault via full init, which already does everything below.
+    if let UpdateOutcome::RegenPerformed { .. } =
+        apply_update_policy(vault_path, &paths, false).await?
+    {
+        return Ok(());
+    }
+
     let db = Database::open(&paths.vault_db)?;
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
     db.reconcile_corpus_generation(now_ms())?;
@@ -1247,7 +1406,18 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
         return Ok(());
     }
 
+    // Update sentinel before any incremental work: schema drift after a
+    // binary update means the incremental paths cannot be trusted, so the
+    // vault is regenerated via full init and the refresh continues against
+    // the rebuilt (already-fresh) database.
+    let update_outcome = apply_update_policy(vault_path, &paths, use_env_llm).await?;
+
     let db = Database::open(&paths.vault_db)?;
+    // Snapshot before spawning so the response describes state that existed at
+    // request start. A fast-failing detached check must not race this JSON from
+    // `null` to `failed` halfway through the refresh.
+    let binary_update_outcome = super::update::load_outcome(&db);
+    let _ = super::update::maybe_spawn_background(vault_path, &db);
     let _sync_guard = paths.sync_on_drop();
     let local = run_local_refresh_work(&db, vault_path, &paths)?;
     let collection_changed = local.collection_changed();
@@ -1280,6 +1450,7 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
         },
         "similarity": local.similarity,
         "epoch": epoch_metrics(&db, &schedule, now_ms())?,
+        "update": update_outcome.to_json(binary_update_outcome),
         "cache_epoch": cache_epoch,
         "collection_changed": collection_changed,
         "collection_change_reasons": collection_change_reasons,

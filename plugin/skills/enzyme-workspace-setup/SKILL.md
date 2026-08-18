@@ -173,4 +173,4 @@ The revert script must:
 - Compare only the user's notes that the repair owns; exclude app-owned state such as `.enzyme/`, `.git/`, product-specific state directories, caches, and the backup package itself.
 - Exit non-zero if any owned note failed to restore.
 
-After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and up to two capture habits from the coaching section that would help the handles you could not create.
+After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and up to two capture habits from the coaching section that would help the handles you could not create. If `enzyme refresh --quiet` returns `update.status == "action_required"`, perform or relay the `action` string before continuing.

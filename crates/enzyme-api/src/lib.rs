@@ -93,6 +93,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .merge(routes::health::router())
+        .merge(routes::version::router())
         .merge(routes::chunks::router())
         .merge(routes::explore::router())
         .merge(routes::warm::router())

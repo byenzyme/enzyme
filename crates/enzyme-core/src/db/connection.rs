@@ -39,6 +39,17 @@ impl Database {
     /// Open (or create) a database at `path`, apply all pending migrations, and
     /// return a ready-to-use `Database`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        Self::open_with_busy_timeout(path, 30_000)
+    }
+
+    /// Open a database with a caller-specific SQLite busy timeout.
+    ///
+    /// Best-effort background bookkeeping uses a short timeout so it cannot
+    /// inherit the maintenance-oriented 30-second wait from [`Self::open`].
+    pub fn open_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy_timeout_ms: u64,
+    ) -> Result<Self, DbError> {
         let path = path.as_ref().to_owned();
         info!(?path, "opening database");
         block_in_place_sync(async move {
@@ -50,7 +61,7 @@ impl Database {
                 .await
                 .map_err(DbError::Libsql)?;
             let conn = db.connect().map_err(DbError::Libsql)?;
-            apply_pragmas(&conn, true).await?;
+            apply_pragmas(&conn, true, busy_timeout_ms).await?;
             migrations::run_all_on_conn(&conn).await?;
             Ok(Self { _db: db, conn })
         })
@@ -65,7 +76,7 @@ impl Database {
                 .await
                 .map_err(DbError::Libsql)?;
             let conn = db.connect().map_err(DbError::Libsql)?;
-            apply_pragmas(&conn, false).await?;
+            apply_pragmas(&conn, false, 30_000).await?;
             migrations::run_all_on_conn(&conn).await?;
             Ok(Self { _db: db, conn })
         })
@@ -153,19 +164,17 @@ impl Database {
 
 // -- Pragma helpers -----------------------------------------------------------
 
-async fn apply_pragmas(conn: &Connection, wal: bool) -> Result<(), DbError> {
+async fn apply_pragmas(conn: &Connection, wal: bool, busy_timeout_ms: u64) -> Result<(), DbError> {
     // Pragmas that return a result row must use query() + drain.
     // execute_batch() fails on pragmas that produce output rows.
-    let mut pragmas: Vec<String> = Vec::new();
+    let mut pragmas: Vec<String> = vec![format!("PRAGMA busy_timeout = {busy_timeout_ms}")];
     if wal {
         pragmas.push("PRAGMA journal_mode = WAL".into());
     }
     pragmas.push("PRAGMA foreign_keys = ON".into());
     pragmas.push("PRAGMA synchronous = NORMAL".into());
-    // Generous: one-time maintenance inside another process's open (the
-    // context-slim migration + VACUUM takes ~4s at ~300MB and scales with
-    // file size) must stall concurrent opens, not hard-fail them.
-    pragmas.push("PRAGMA busy_timeout = 30000".into());
+    // The normal 30-second caller budget lets one-time maintenance stall
+    // behind concurrent work; best-effort callers can explicitly choose less.
     pragmas.push("PRAGMA cache_size = -20000".into());
     pragmas.push(format!("PRAGMA mmap_size = {}", 256 * 1024 * 1024));
 
