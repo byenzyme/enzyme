@@ -116,6 +116,7 @@ pub fn structured_log_document_to_processed_document(
     let mut chunk_entry_ranges = Vec::new();
     let mut range_start = 0usize;
     let mut range_len = 0usize;
+    let chunk_prefix_len = format!("# {}\n\n", input.title).chars().count();
 
     for index in 0..input.entries.len() {
         let entry_len = rendered_entries[index].chars().count();
@@ -125,8 +126,8 @@ pub fn structured_log_document_to_processed_document(
                 .created_at
                 .saturating_sub(input.entries[index - 1].created_at)
                 > STRUCTURED_LOG_GAP_MS;
-        let budget_split =
-            range_len > 0 && range_len + separator_len + entry_len > DEFAULT_CHUNK_SIZE_CHARS;
+        let budget_split = range_len > 0
+            && chunk_prefix_len + range_len + separator_len + entry_len > DEFAULT_CHUNK_SIZE_CHARS;
         if gap_split || budget_split {
             chunk_entry_ranges.push(range_start..index);
             range_start = index;
@@ -271,5 +272,35 @@ mod log_tests {
 
         assert_eq!(output.document.chunks.len(), 1);
         assert!(output.document.chunks[0].contains(&body));
+    }
+
+    #[test]
+    fn structured_log_splits_before_a_window_exceeds_the_character_budget() {
+        let first_body = "a".repeat(DEFAULT_CHUNK_SIZE_CHARS / 2 + 50);
+        let second_body = "b".repeat(DEFAULT_CHUNK_SIZE_CHARS / 2 + 50);
+        let output = structured_log_document_to_processed_document(input(vec![
+            StructuredLogEntry {
+                who: vec!["Alice".to_string()],
+                content: first_body.clone(),
+                created_at: 1_700_000_000_000,
+            },
+            StructuredLogEntry {
+                who: vec!["Bob".to_string()],
+                content: second_body.clone(),
+                created_at: 1_700_000_001_000,
+            },
+        ]));
+
+        assert_eq!(output.document.chunks.len(), 2);
+        assert!(output.document.chunks[0].contains(&first_body));
+        assert!(!output.document.chunks[0].contains(&second_body));
+        assert!(output.document.chunks[1].contains(&second_body));
+        assert!(
+            output
+                .document
+                .chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= DEFAULT_CHUNK_SIZE_CHARS)
+        );
     }
 }
