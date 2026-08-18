@@ -1,0 +1,4 @@
+interface:
+  display_name: "Enzyme SQLite Source"
+  short_description: "Bind SQLite records into Enzyme memory"
+  default_prompt: "Use $enzyme-sqlite-source to explore this SQLite database, show me the proposed binding, and freeze a reusable native source contract."

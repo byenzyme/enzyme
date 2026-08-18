@@ -27,6 +27,8 @@ The user prompt should provide:
 
 Treat the provided path as the workspace root unless the evidence or user says the notes live elsewhere.
 
+If the source is a SQLite database rather than a Markdown folder, use the `enzyme-sqlite-source` skill. It explores the schema read-only, obtains confirmation on a universal role binding, and preserves the resulting contract and workspace state.
+
 Existing setup is not a skip condition. If `.enzyme/`, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/`, or `.claude/skills/` already exist and the user asked for setup, re-setup, diagnosis, or repair, inspect them as evidence of the current state, then continue through the diagnosis flow. Overwrite stale Enzyme runtime instruction sections only by rerunning `enzyme install <runtime>` when the user is trying to update installed instructions; otherwise repair setup state through the diagnosis, config, init, refresh, and proof workflow below.
 
 ## Two Questions Carry The Skill
@@ -171,4 +173,4 @@ The revert script must:
 - Compare only the user's notes that the repair owns; exclude app-owned state such as `.enzyme/`, `.git/`, product-specific state directories, caches, and the backup package itself.
 - Exit non-zero if any owned note failed to restore.
 
-After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and up to two capture habits from the coaching section that would help the handles you could not create.
+After a successful repair, refresh Enzyme and report back using the same frame you opened with: what already worked, what changed, and up to two capture habits from the coaching section that would help the handles you could not create. If `enzyme refresh --quiet` returns `update.status == "action_required"`, perform or relay the `action` string before continuing.
