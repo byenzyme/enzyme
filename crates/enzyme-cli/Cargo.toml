@@ -38,6 +38,7 @@ wiremock = "0.6"
 serde_json = { workspace = true }
 tempfile = "3.26.0"
 tokio = { workspace = true }
+rusqlite = { workspace = true }
 
 [features]
 rten = ["enzyme-core/rten"]

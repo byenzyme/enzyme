@@ -25,7 +25,7 @@ pub struct SqliteSourceValidation {
     pub row_count: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SqliteSourceIndexingStats {
     pub sources_queried: usize,
     pub rows_seen: usize,
@@ -33,6 +33,8 @@ pub struct SqliteSourceIndexingStats {
     pub documents_rebuilt: usize,
     pub documents_skipped: usize,
     pub documents_pruned: usize,
+    /// Source rows dropped because every mapped `what` column was NULL/empty.
+    pub rows_skipped_empty: usize,
 }
 
 impl SqliteSourceIndexingStats {
@@ -47,6 +49,7 @@ impl SqliteSourceIndexingStats {
         self.documents_rebuilt += other.documents_rebuilt;
         self.documents_skipped += other.documents_skipped;
         self.documents_pruned += other.documents_pruned;
+        self.rows_skipped_empty += other.rows_skipped_empty;
     }
 }
 
@@ -76,15 +79,6 @@ impl CursorValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-enum FingerprintValue {
-    Null,
-    Integer(i64),
-    Real(f64),
-    Text(String),
-}
-
 #[derive(Debug, Clone)]
 struct SourceRow {
     id: Vec<CursorValue>,
@@ -93,7 +87,6 @@ struct SourceRow {
     where_labels: Vec<String>,
     where_key: Vec<Option<String>>,
     created_at: i64,
-    fingerprint_values: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -208,20 +201,26 @@ pub fn run_sqlite_source(
 
     let epoch_ms = timestamp_epoch_ms(&source.timestamp)?;
     let mut source_rows = Vec::new();
+    let mut rows_skipped_empty = 0usize;
     while let Some(row) = rows.next().context("failed to read source query row")? {
+        // Content-free rows (e.g. attachment-only or reaction messages whose
+        // body lives outside the mapped `what` columns) are skipped rather than
+        // aborting the whole index. Mapping `what` to a BLOB column is still a
+        // hard error via `scalar_text`.
+        let Some(what) = concatenated_text(row, &columns.what, "\n\n", "what")? else {
+            rows_skipped_empty += 1;
+            continue;
+        };
         let id = columns
             .id
             .iter()
             .map(|index| CursorValue::from_ref(row.get_ref(*index)?))
             .collect::<Result<Vec<_>>>()?;
         let who = role_text_values(row, &columns.who, "who")?;
-        let what = concatenated_text(row, &columns.what, "\n\n", true, "what")?
-            .expect("required text role returns Some");
         let where_labels = role_text_values(row, &columns.where_columns, "where")?;
         let created_at =
             timestamp_value_to_unix_ms(row.get_ref(columns.when)?, &source.timestamp, epoch_ms)?;
         let where_key = role_optional_text_values(row, &columns.where_columns, "where")?;
-        let fingerprint_values = fingerprint_record(row, &columns)?;
         source_rows.push(SourceRow {
             id,
             who,
@@ -229,7 +228,6 @@ pub fn run_sqlite_source(
             where_labels,
             where_key,
             created_at,
-            fingerprint_values,
         });
     }
     drop(rows);
@@ -299,6 +297,7 @@ pub fn run_sqlite_source(
         documents_rebuilt: rebuilt.len(),
         documents_skipped: skipped,
         documents_pruned,
+        rows_skipped_empty,
     })
 }
 
@@ -342,10 +341,12 @@ fn source_document_hashes(
 fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDocument> {
     rows.into_iter()
         .map(|row| {
-            let document = structured_document_to_processed_document(StructuredDocumentInput {
+            let created_at = row.created_at;
+            let who = row.who;
+            let where_labels = row.where_labels;
+            let mut document = structured_document_to_processed_document(StructuredDocumentInput {
                 source_ref: stable_source_ref(source_name, &row.id),
-                title: row
-                    .who
+                title: who
                     .first()
                     .cloned()
                     .unwrap_or_else(|| source_name.to_string()),
@@ -353,10 +354,17 @@ fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDo
                 notes: None,
                 source: Some(source_name.to_string()),
                 tags: Vec::new(),
-                links: row.who,
-                folders: row.where_labels,
-                created_at: row.created_at,
+                links: who.clone(),
+                folders: where_labels.clone(),
+                created_at,
             });
+            // The base content_hash only covers the rendered title/body. Row-mode
+            // reconciliation (below) compares on content_hash, so bind the rest of
+            // the record — `when`, every `who`, and `where` — into it. Otherwise an
+            // edit to a timestamp or a non-leading participant leaves the hash equal
+            // and the row is skipped, so stored dates/links/entity occurrences rot.
+            document.content_hash =
+                row_reconcile_hash(&document.content_hash, created_at, &who, &where_labels);
             let occurrences =
                 IndexingPipeline::collect_entity_entries(std::slice::from_ref(&document));
             PendingDocument {
@@ -365,6 +373,31 @@ fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDo
             }
         })
         .collect()
+}
+
+/// Fold a row's non-body record fields into its reconciliation hash so that
+/// edits to `when`/`who`/`where` (which the rendered content_hash misses) are
+/// detected on refresh.
+fn row_reconcile_hash(
+    base_content_hash: &str,
+    created_at: i64,
+    who: &[String],
+    where_labels: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(base_content_hash.as_bytes());
+    hasher.update(created_at.to_le_bytes());
+    hasher.update([b'\x1f']);
+    for value in who {
+        hasher.update(value.as_bytes());
+        hasher.update([b'\x1e']);
+    }
+    hasher.update([b'\x1d']);
+    for value in where_labels {
+        hasher.update(value.as_bytes());
+        hasher.update([b'\x1e']);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn build_bucket_documents(source_name: &str, rows: Vec<SourceRow>) -> Result<Vec<PendingDocument>> {
@@ -496,16 +529,22 @@ fn compare_cursor_values(left: &CursorValue, right: &CursorValue) -> Ordering {
 }
 
 fn bucket_fingerprint(rows: &[SourceRow]) -> String {
-    let mut records: Vec<&[u8]> = rows
+    // Hash the normalized fields that actually render the stored log. This is
+    // the determinism boundary for refresh: changes to raw query cells that
+    // normalize away do not churn the bucket, while every visible edit does.
+    let mut records: Vec<Vec<u8>> = rows
         .iter()
-        .map(|row| row.fingerprint_values.as_slice())
+        .map(|row| {
+            serde_json::to_vec(&(&row.who, row.created_at, &row.what))
+                .expect("serializing normalized SQLite roles cannot fail")
+        })
         .collect();
     records.sort_unstable();
     let mut hasher = Sha256::new();
-    hasher.update(b"enzyme-sqlite-bucket-v1\0");
+    hasher.update(b"enzyme-sqlite-bucket-v2\0");
     for record in records {
         hasher.update(record.len().to_le_bytes());
-        hasher.update(record);
+        hasher.update(&record);
     }
     format!("{:x}", hasher.finalize())
 }
@@ -570,7 +609,6 @@ fn concatenated_text(
     row: &rusqlite::Row<'_>,
     columns: &[usize],
     separator: &str,
-    required: bool,
     role: &str,
 ) -> Result<Option<String>> {
     let mut parts = Vec::new();
@@ -584,9 +622,6 @@ fn concatenated_text(
         }
     }
     if parts.is_empty() {
-        if required {
-            bail!("source role {role:?} is NULL or empty for a row");
-        }
         return Ok(None);
     }
     Ok(Some(parts.join(separator)))
@@ -619,44 +654,6 @@ fn role_optional_text_values(
                 .filter(|value| !value.is_empty()))
         })
         .collect()
-}
-
-fn fingerprint_record(row: &rusqlite::Row<'_>, columns: &ResolvedColumns) -> Result<Vec<u8>> {
-    #[derive(Serialize)]
-    struct Record {
-        who: Vec<FingerprintValue>,
-        when: FingerprintValue,
-        what: Vec<FingerprintValue>,
-    }
-
-    fn values(row: &rusqlite::Row<'_>, columns: &[usize]) -> Result<Vec<FingerprintValue>> {
-        columns
-            .iter()
-            .map(|index| fingerprint_value(row.get_ref(*index)?))
-            .collect()
-    }
-
-    serde_json::to_vec(&Record {
-        who: values(row, &columns.who)?,
-        when: fingerprint_value(row.get_ref(columns.when)?)?,
-        what: values(row, &columns.what)?,
-    })
-    .context("failed to serialize SQLite bucket fingerprint values")
-}
-
-fn fingerprint_value(value: ValueRef<'_>) -> Result<FingerprintValue> {
-    match value {
-        ValueRef::Null => Ok(FingerprintValue::Null),
-        ValueRef::Integer(value) => Ok(FingerprintValue::Integer(value)),
-        ValueRef::Real(value) if value.is_finite() => Ok(FingerprintValue::Real(value)),
-        ValueRef::Real(_) => bail!("fingerprinted role column contains a non-finite REAL"),
-        ValueRef::Text(value) => Ok(FingerprintValue::Text(
-            std::str::from_utf8(value)
-                .context("fingerprinted role column contains non-UTF-8 text")?
-                .to_string(),
-        )),
-        ValueRef::Blob(_) => bail!("fingerprinted role columns may not contain BLOB values"),
-    }
 }
 
 fn scalar_text(value: ValueRef<'_>, role: &str) -> Result<Option<String>> {
@@ -832,7 +829,6 @@ mod tests {
             where_labels: vec!["Thread".to_string()],
             where_key: vec![Some("Thread".to_string())],
             created_at,
-            fingerprint_values: format!("Alice|{created_at}|{body}").into_bytes(),
         }
     }
 
@@ -853,6 +849,17 @@ mod tests {
                 source_row(1, 1_700_000_000_000, "first"),
                 source_row(2, 1_700_000_001_000, "second"),
             ])
+        );
+    }
+
+    #[test]
+    fn bucket_fingerprint_changes_when_rendered_content_is_edited() {
+        let original = source_row(1, 1_700_000_000_000, "original");
+        let edited = source_row(1, 1_700_000_000_000, "edited in place");
+
+        assert_ne!(
+            bucket_fingerprint(&[original]),
+            bucket_fingerprint(&[edited])
         );
     }
 

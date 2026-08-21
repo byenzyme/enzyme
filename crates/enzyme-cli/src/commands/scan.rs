@@ -25,7 +25,12 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
 
     if write_config {
         let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-        if config.has_curated_entities() {
+        if EnzymeConfig::markdown_root(vault_path)?.is_none() {
+            append_message(
+                &mut suggestion.message,
+                "--write-config only derives settings from a configured Markdown source; SQLite source contracts are unchanged",
+            );
+        } else if config.has_curated_entities() {
             suggestion.status = ScanStatus::AlreadyConfigured;
             append_message(
                 &mut suggestion.message,
@@ -232,11 +237,14 @@ struct Metric {
 }
 
 fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
+    let Some(markdown_root) = EnzymeConfig::markdown_root(vault_path)? else {
+        return Ok(Vec::new());
+    };
     // Honor `exclude` so scan metrics/suggestions never count excluded folders.
-    let discovery = FileDiscovery::new(vault_path.to_path_buf())
+    let discovery = FileDiscovery::new(markdown_root.clone())
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path));
     let paths = discovery.discover()?;
-    let processor = DocumentProcessor::new(vault_path.to_path_buf());
+    let processor = DocumentProcessor::new(markdown_root);
     Ok(processor
         .process_all(&paths)
         .into_iter()

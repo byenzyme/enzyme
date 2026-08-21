@@ -228,7 +228,9 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
     // Honor `exclude` here too: "indexable files present" must be computed the
     // same way IndexingPipeline will index, or a vault whose only files live in
     // excluded folders would be judged non-empty and its DB-only corpus wiped.
-    let discovered_files = FileDiscovery::new(vault_path.to_path_buf())
+    let markdown_root =
+        EnzymeConfig::markdown_root(vault_path)?.unwrap_or_else(|| vault_path.to_path_buf());
+    let discovered_files = FileDiscovery::new(markdown_root)
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path))
         .discover()?;
     if !discovered_files.is_empty() {
@@ -237,6 +239,25 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
 
     let db = Database::open(&paths.vault_db)?;
     Ok(db.get_document_count().unwrap_or(0) > 0)
+}
+
+fn configured_indexing_pipeline<'a>(
+    db: &'a Database,
+    vault_path: &Path,
+) -> Result<IndexingPipeline<'a>> {
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let markdown_root =
+        EnzymeConfig::markdown_root(vault_path)?.unwrap_or_else(|| vault_path.to_path_buf());
+    let logs = config
+        .parse_preferences()
+        .entities
+        .into_iter()
+        .filter(|entity| entity.entity_type == enzyme_core::models::EntityType::AppendLog)
+        .map(|entity| entity.name)
+        .collect();
+    Ok(IndexingPipeline::new(db, markdown_root)
+        .with_excluded_folders(config.excluded_folders)
+        .with_configured_logs(logs))
 }
 
 fn index_configured_sqlite_sources(
@@ -479,7 +500,7 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     );
 
     // Run indexing
-    let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+    let indexing = configured_indexing_pipeline(&db, vault_path)?;
     let idx_stats = indexing.run(true, |_| {})?;
 
     debug!(
@@ -741,7 +762,7 @@ pub async fn run_init(
         let tx = idx_display.sender();
 
         tx.send(DisplayEvent::IndexingStart).ok();
-        let indexing = IndexingPipeline::new(&db, vault_path.to_path_buf());
+        let indexing = configured_indexing_pipeline(&db, vault_path)?;
         let tx_idx = tx.clone();
         // Incremental unless forced: on a fresh database every file is new
         // anyway, so full mode only ever costs a re-read of every note on a
@@ -777,16 +798,26 @@ pub async fn run_init(
     let tx = display.sender();
     let mut warnings: Vec<String> = Vec::new();
     let mut enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let named_workspace = EnzymePaths::bound_workspace(vault_path)?.is_some();
+    if named_workspace {
+        enzyme_config
+            .catalyst_format
+            .get_or_insert_with(|| DEFAULT_FORMAT_KEY.to_string());
+        enzyme_config
+            .max_embedding_files
+            .get_or_insert(enzyme_core::pipeline::embedding::MAX_EMBEDDING_FILES);
+    }
 
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
     // Only write entities to TOML on first init (shortlist). If the config
     // already has entities, those take precedence and are not overwritten.
-    if matches!(
+    let selected_from_coverage = matches!(
         sel_result.source,
         enzyme_core::pipeline::selection::SelectionSource::Coverage
-    ) {
+    );
+    if selected_from_coverage {
         let expanded_children: std::collections::HashSet<String> = sel_result
             .expandable_folders
             .values()
@@ -800,6 +831,11 @@ pub async fn run_init(
             .map(selected_entity_ref)
             .collect();
         enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
+    } else if named_workspace {
+        // Named workspace contracts contain only source decisions before init.
+        // Persist deterministic/defaulted workspace fields even when entities
+        // were already curated and selection therefore did not write config.
+        enzyme_config.save(vault_path)?;
     }
 
     tx.send(DisplayEvent::SelectionComplete {
@@ -1454,6 +1490,7 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
         "cache_epoch": cache_epoch,
         "collection_changed": collection_changed,
         "collection_change_reasons": collection_change_reasons,
+        "sources": local.sources,
         "indexing": {
             "files_discovered": local.indexing.files_discovered,
             "files_new": local.indexing.files_new,
@@ -1492,7 +1529,7 @@ fn run_local_refresh_work(
         pruned = source_stats.documents_pruned,
         "fast refresh: SQLite source indexing complete"
     );
-    let indexing = IndexingPipeline::new(db, vault_path.to_path_buf());
+    let indexing = configured_indexing_pipeline(db, vault_path)?;
     let idx_stats = indexing.run(false, |_msg| {})?;
     debug!(
         new = idx_stats.files_new,
@@ -2457,6 +2494,7 @@ async fn run_refresh_interactive(
                 "files_deleted": local.indexing.files_deleted,
                 "duration_ms": local.indexing.duration_ms,
             },
+            "sources": local.sources,
             "embedding": {
                 "documents_embedded": local.embedding.documents_embedded,
                 "chunks_embedded": local.embedding.chunks_embedded,

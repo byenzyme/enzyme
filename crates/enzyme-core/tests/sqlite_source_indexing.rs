@@ -331,3 +331,89 @@ fn source_without_where_keeps_one_document_per_row_with_full_scan_staleness() {
     assert_eq!(deleted.documents_pruned, 1);
     assert_eq!(enzyme_db.get_document_count().unwrap(), 1);
 }
+
+#[test]
+fn empty_what_rows_are_skipped_not_fatal() {
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("source.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    create_entries(&source_db);
+    // Two content-bearing rows and one content-free row (empty body, as with
+    // attachment-only / reaction messages). The empty row must be skipped and
+    // counted, never abort the whole index.
+    insert_entry(&source_db, 1, Some("Alice"), JAN_2024, "hello", Some("T"));
+    insert_entry(&source_db, 2, Some("Bob"), JAN_2024 + 1_000, "", Some("T"));
+    insert_entry(&source_db, 3, Some("Alice"), JAN_2024 + 2_000, "world", Some("T"));
+
+    let config = source_config(source_path);
+    let stats = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(stats.rows_skipped_empty, 1);
+    assert_eq!(stats.rows_seen, 2);
+    assert_eq!(stats.documents_rebuilt, 1);
+    assert_eq!(stats.documents_pruned, 0);
+}
+
+#[test]
+fn row_mode_detects_when_edit_not_just_body() {
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("source.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    create_entries(&source_db);
+    insert_entry(&source_db, 1, Some("A"), JAN_2024, "one", None);
+    insert_entry(&source_db, 2, Some("B"), JAN_2024 + 1_000, "two", None);
+    let mut config = source_config(source_path);
+    config.roles.r#where.clear();
+
+    assert_eq!(
+        run_sqlite_source(&enzyme_db, "messages", &config)
+            .unwrap()
+            .documents_rebuilt,
+        2
+    );
+
+    // Change ONLY the timestamp (`when`) of row 1; body is untouched. The
+    // rendered content_hash misses `when`, so without binding it into the
+    // reconciliation hash this edit is silently skipped and the stored date rots.
+    source_db
+        .execute("UPDATE entries SET ts = ?1 WHERE id = 1", params![JAN_2023])
+        .unwrap();
+    let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(edited.documents_rebuilt, 1);
+    assert_eq!(edited.documents_skipped, 1);
+}
+
+#[test]
+fn row_mode_detects_non_leading_who_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("source.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    create_entries(&source_db);
+    insert_entry(&source_db, 1, Some("A"), JAN_2024, "one", Some("second-who"));
+    insert_entry(&source_db, 2, Some("B"), JAN_2024 + 1_000, "two", Some("x"));
+    let mut config = source_config(source_path);
+    config.roles.r#where.clear();
+    // Two who columns; the leading who (sender) stays in the title, the second
+    // who (thread column) is non-leading and only reachable via the who list.
+    config.roles.who = vec!["who".to_string(), "where_label".to_string()];
+
+    assert_eq!(
+        run_sqlite_source(&enzyme_db, "messages", &config)
+            .unwrap()
+            .documents_rebuilt,
+        2
+    );
+
+    // Edit the non-leading who of row 1 only; title/body unchanged.
+    source_db
+        .execute(
+            "UPDATE entries SET thread = 'renamed' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
+    assert_eq!(edited.documents_rebuilt, 1);
+    assert_eq!(edited.documents_skipped, 1);
+}

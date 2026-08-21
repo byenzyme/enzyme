@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 /// Resolved filesystem paths for an Enzyme session.
 ///
 /// Respects `ENZYME_HOME` to override `~/.enzyme` for global state (auth, config).
-/// Vault data (DB, embeddings) lives at `<vault>/.enzyme/` on normal filesystems.
+/// Legacy vault data lives at `<vault>/.enzyme/`; named workspace data lives at
+/// `$ENZYME_HOME/workspaces/<name>/`.
 /// On FUSE mounts (Cowork VMs), data is redirected to a session-private cache
 /// because FUSE doesn't support SQLite's `xDelete` VFS operation, and concurrent
 /// sessions run as different users so a shared `/tmp/enzyme/` collides on perms.
@@ -99,22 +100,45 @@ impl EnzymePaths {
         })
     }
 
-    /// Resolve a collection ID to its database path.
+    /// Resolve a named workspace to its home-rooted storage directory.
     ///
-    /// Collections live at `~/.enzyme-sdk/collections/<id>/.enzyme/enzyme.db` by default,
-    /// overridable via `ENZYME_COLLECTIONS_DIR`.
-    pub fn collection_db_path(collection_id: &str) -> Result<PathBuf> {
-        let base = match env::var("ENZYME_COLLECTIONS_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
-        {
-            Some(d) => PathBuf::from(d),
-            None => {
-                let home_dir = dirs::home_dir().context("could not determine home directory")?;
-                home_dir.join(".enzyme-sdk").join("collections")
-            }
+    /// A collection ID is one filesystem component, never a path. This keeps
+    /// the CLI's named identity from escaping `$ENZYME_HOME/workspaces` and
+    /// makes the same name safe to persist as a workspace key.
+    pub fn workspace_root(name: &str) -> Result<PathBuf> {
+        anyhow::ensure!(
+            !name.is_empty()
+                && !name.contains('/')
+                && !name.contains('\\')
+                && matches!(
+                    Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                    [Component::Normal(_)]
+                ),
+            "workspace name must be a non-empty name, not a path: {name:?}"
+        );
+
+        Ok(Self::enzyme_home()?.join("workspaces").join(name))
+    }
+
+    /// Recover a named workspace from its home-rooted storage directory.
+    pub fn bound_workspace(vault_path: &Path) -> Result<Option<String>> {
+        Self::bound_workspace_with_home(vault_path, &Self::enzyme_home()?)
+    }
+
+    /// Variant used by embedded callers and tests with an explicit Enzyme home.
+    pub fn bound_workspace_with_home(
+        vault_path: &Path,
+        enzyme_home: &Path,
+    ) -> Result<Option<String>> {
+        let workspaces = enzyme_home.join("workspaces");
+        let Ok(relative) = vault_path.strip_prefix(&workspaces) else {
+            return Ok(None);
         };
-        Ok(base.join(collection_id).join(".enzyme").join("enzyme.db"))
+        let components: Vec<_> = relative.components().collect();
+        let [Component::Normal(name)] = components.as_slice() else {
+            return Ok(None);
+        };
+        Ok(Some(name.to_string_lossy().into_owned()))
     }
 
     /// Construct paths with explicit overrides (for testing without env var mutation).
@@ -143,8 +167,13 @@ impl EnzymePaths {
             }
         };
 
+        let db_origin = if Self::bound_workspace_with_home(vault_path, &home)?.is_some() {
+            vault_path.join("enzyme.db")
+        } else {
+            vault_path.join(".enzyme").join("enzyme.db")
+        };
         let (vault_db, vault_db_origin) = if Self::is_fuse_mount(vault_path) {
-            let origin = vault_path.join(".enzyme").join("enzyme.db");
+            let origin = db_origin;
             let mirror = Self::session_db_path(vault_path)?;
             tracing::info!(
                 "FUSE mount detected — mirroring DB at {} (origin: {})",
@@ -153,7 +182,7 @@ impl EnzymePaths {
             );
             (mirror, Some(origin))
         } else {
-            (vault_path.join(".enzyme").join("enzyme.db"), None)
+            (db_origin, None)
         };
 
         let config_file = config_file
@@ -392,6 +421,60 @@ mod tests {
         let paths = EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();
 
         assert_eq!(paths.global_config(), PathBuf::from("/tmp/eh/config.toml"));
+    }
+
+    #[test]
+    fn workspace_name_is_a_name_not_a_path() {
+        for invalid in ["", ".", "..", "nested/name", "nested\\name", "/absolute"] {
+            assert!(EnzymePaths::workspace_root(invalid).is_err(), "{invalid:?}");
+        }
+        let root = EnzymePaths::workspace_root("imessage").unwrap();
+        assert_eq!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some("imessage")
+        );
+    }
+
+    #[test]
+    fn bound_workspace_uses_the_home_rooted_directory_basename() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("workspaces/imessage");
+
+        assert_eq!(
+            EnzymePaths::bound_workspace_with_home(&store, temp.path())
+                .unwrap()
+                .as_deref(),
+            Some("imessage")
+        );
+        assert_eq!(
+            EnzymePaths::bound_workspace_with_home(
+                &temp.path().join("workspaces/imessage/nested"),
+                temp.path()
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            EnzymePaths::bound_workspace_with_home(
+                &temp.path().join("other/imessage"),
+                temp.path()
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn named_workspace_database_is_directly_under_its_store() {
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join("workspaces/imessage");
+        let paths = EnzymePaths::with_overrides(&store, home.path().to_str()).unwrap();
+
+        assert_eq!(paths.vault_db, store.join("enzyme.db"));
+        assert_eq!(
+            paths.target_db(Path::new("/target")).parent(),
+            Some(store.join("targets").as_path())
+        );
     }
 
     #[test]

@@ -14,10 +14,10 @@ const CONFIG_HEADER: &str = "\
 # Enzyme configuration
 # https://memory.enzyme.garden/docs/config
 #
-# This file configures how Enzyme processes your Obsidian vault(s).
+# This file configures how Enzyme processes your knowledge workspaces.
 # Edit it directly \u{2014} changes take effect on the next `enzyme refresh`.
 #
-# The [defaults] section below contains global settings used by every vault.
+# The [defaults] section below contains global settings used by every workspace.
 # max_embedding_files caps the number of docs embedded per run, newest first.
 # Set max_embedding_files = 0 to embed all docs.
 #
@@ -28,10 +28,15 @@ const CONFIG_HEADER: &str = "\
 # [update]
 # auto = false                      # opt out of background binary updates
 #
-# Each vault gets its own section, keyed by absolute path:
+# Named workspaces use the same name as `enzyme --collection <name>`.
+# Markdown is an optional source alongside SQLite and other structured sources:
 #
-# [vaults.\"/Users/you/notes\"]
+# [workspaces.notes]
 # entities = [\"folder:projects\", \"[[Design Principles]]\", \"log:journal\"]
+# [workspaces.notes.sources.notes]
+# path = \"/Users/you/notes\"
+#
+# Existing path-addressed Markdown vaults remain supported under [vaults].
 # # log: marks a single file of dated entries (a journal that grows by
 # # appending) as its own entity, so retrieval sees its internal timeline.
 # # `enzyme scan --write-config` records the logs it recognizes here; add or
@@ -79,6 +84,10 @@ pub struct EnzymeConfig {
     /// Read-only SQLite sources indexed alongside Markdown files.
     #[serde(default)]
     pub sources: HashMap<String, SqliteSourceConfig>,
+    /// Optional Markdown root for a named workspace. Path-addressed legacy
+    /// vaults implicitly use their vault path and therefore leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_path: Option<PathBuf>,
     /// Maximum number of documents to embed per run.
     /// `None` uses the built-in default (1024). `Some(0)` means unlimited.
     #[serde(default)]
@@ -240,6 +249,9 @@ struct GlobalTomlConfig {
     #[serde(default)]
     update: UpdateTomlSection,
     #[serde(default)]
+    workspaces: HashMap<String, WorkspaceTomlSection>,
+    /// Backward-compatible path-addressed Markdown vault configuration.
+    #[serde(default)]
     vaults: HashMap<String, VaultTomlSection>,
 }
 
@@ -341,6 +353,41 @@ struct VaultTomlSection {
     max_embedding_files: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct WorkspaceTomlSection {
+    #[serde(default)]
+    excluded_tags: Vec<String>,
+    #[serde(default)]
+    excluded_links: Vec<String>,
+    #[serde(default)]
+    excluded_folders: Vec<String>,
+    #[serde(default)]
+    min_top_catalysts: Option<usize>,
+    #[serde(default)]
+    entities: Vec<CatalyzedEntity>,
+    #[serde(default)]
+    targets: Vec<String>,
+    #[serde(default)]
+    sources: HashMap<String, WorkspaceSourceToml>,
+    #[serde(default)]
+    catalyst_format: Option<String>,
+    #[serde(default)]
+    max_embedding_files: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum WorkspaceSourceToml {
+    Notes(NotesSourceToml),
+    Sqlite(SqliteSourceConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotesSourceToml {
+    path: PathBuf,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyYamlConfig {
@@ -365,6 +412,9 @@ impl EnzymeConfig {
 
     /// Canonical key used for this vault in the global TOML config.
     pub fn vault_key(vault_path: &Path) -> String {
+        if let Ok(Some(name)) = EnzymePaths::bound_workspace(vault_path) {
+            return name;
+        }
         canonical_vault_key(vault_path)
     }
 
@@ -385,7 +435,11 @@ impl EnzymeConfig {
         }
 
         let global = load_global_toml(&config_path)?;
-        Ok(global.vaults.keys().cloned().collect())
+        let mut keys: Vec<_> = global.workspaces.keys().cloned().collect();
+        keys.extend(global.vaults.keys().cloned());
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
     }
 
     /// Load machine-wide catalyst provider preferences.
@@ -451,6 +505,10 @@ impl EnzymeConfig {
         if config_path.exists() {
             debug!(?config_path, "loading enzyme config from global TOML");
             let global = load_global_toml(&config_path)?;
+            let home = config_path.parent().unwrap_or_else(|| Path::new("."));
+            if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {
+                return Ok(Some(Self::from_workspace_config(&name, &global)));
+            }
             return Ok(Some(Self::from_global_config(vault_path, &global)));
         }
 
@@ -503,10 +561,73 @@ impl EnzymeConfig {
                 .unwrap_or_default(),
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
             sources: vault.map(|v| v.sources.clone()).unwrap_or_default(),
+            notes_path: None,
             max_embedding_files: vault
                 .and_then(|v| v.max_embedding_files)
                 .or(global.defaults.max_embedding_files),
         }
+    }
+
+    fn from_workspace_config(name: &str, global: &GlobalTomlConfig) -> Self {
+        let workspace = global.workspaces.get(name);
+        let trending = SelectionConfig {
+            minimum_tags: global.defaults.minimum_tags,
+            minimum_links: global.defaults.minimum_links,
+            minimum_folders: global.defaults.minimum_folders,
+            total_limit: global.defaults.total_limit,
+            min_top_catalysts: workspace.and_then(|w| w.min_top_catalysts),
+        };
+
+        let notes_path = workspace.and_then(|w| match w.sources.get("notes") {
+            Some(WorkspaceSourceToml::Notes(notes)) => Some(notes.path.clone()),
+            _ => None,
+        });
+        let sources = workspace
+            .map(|w| {
+                w.sources
+                    .iter()
+                    .filter_map(|(source_name, source)| match source {
+                        WorkspaceSourceToml::Sqlite(sqlite) => {
+                            Some((source_name.clone(), sqlite.clone()))
+                        }
+                        WorkspaceSourceToml::Notes(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Self {
+            catalyzed_entities: workspace.map(|w| w.entities.clone()).unwrap_or_default(),
+            trending: Some(trending),
+            catalyst_format: workspace
+                .and_then(|w| w.catalyst_format.clone())
+                .or_else(|| global.defaults.catalyst_format.clone()),
+            excluded_tags: workspace
+                .map(|w| w.excluded_tags.clone())
+                .unwrap_or_default(),
+            excluded_links: workspace
+                .map(|w| w.excluded_links.clone())
+                .unwrap_or_default(),
+            excluded_folders: workspace
+                .map(|w| w.excluded_folders.clone())
+                .unwrap_or_default(),
+            targets: workspace.map(|w| w.targets.clone()).unwrap_or_default(),
+            sources,
+            notes_path,
+            max_embedding_files: workspace
+                .and_then(|w| w.max_embedding_files)
+                .or(global.defaults.max_embedding_files),
+        }
+    }
+
+    /// Markdown root for this target. Named workspaces only have Markdown
+    /// when they declare `[workspaces.<name>.sources.notes]`; legacy vaults
+    /// implicitly use the path by which they were addressed.
+    pub fn markdown_root(vault_path: &Path) -> Result<Option<PathBuf>> {
+        if EnzymePaths::bound_workspace(vault_path)?.is_some() {
+            return Ok(Self::load(vault_path)?.and_then(|config| config.notes_path));
+        }
+        Ok(Some(vault_path.to_path_buf()))
     }
 
     fn load_legacy_yaml(vault_path: &Path) -> Result<Option<Self>> {
@@ -537,6 +658,7 @@ impl EnzymeConfig {
             excluded_folders: legacy.excluded_folders,
             targets: Vec::new(),
             sources: HashMap::new(),
+            notes_path: None,
             max_embedding_files: None,
         }))
     }
@@ -643,7 +765,6 @@ impl EnzymeConfig {
             GlobalTomlConfig::default()
         };
 
-        global.defaults.catalyst_format = self.catalyst_format.clone();
         if let Some(ref trending) = self.trending {
             global.defaults.minimum_tags = trending.minimum_tags;
             global.defaults.minimum_links = trending.minimum_links;
@@ -655,29 +776,162 @@ impl EnzymeConfig {
                 Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES);
         }
 
-        let entry = global
-            .vaults
-            .entry(canonical_vault_key(vault_path))
-            .or_default();
-        entry.excluded_tags = self.excluded_tags.clone();
-        entry.excluded_links = self.excluded_links.clone();
-        entry.excluded_folders = self.excluded_folders.clone();
-        entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
-        entry.entities = self.catalyzed_entities.clone();
-        entry.targets = self.targets.clone();
-        entry.sources = self.sources.clone();
-        entry.max_embedding_files = self.max_embedding_files;
+        if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
+            let entry = global.workspaces.entry(name).or_default();
+            entry.excluded_tags = self.excluded_tags.clone();
+            entry.excluded_links = self.excluded_links.clone();
+            entry.excluded_folders = self.excluded_folders.clone();
+            entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
+            entry.entities = self.catalyzed_entities.clone();
+            entry.targets = self.targets.clone();
+            entry.sources = self
+                .sources
+                .iter()
+                .map(|(source_name, source)| {
+                    (
+                        source_name.clone(),
+                        WorkspaceSourceToml::Sqlite(source.clone()),
+                    )
+                })
+                .collect();
+            if let Some(path) = &self.notes_path {
+                entry.sources.insert(
+                    "notes".to_string(),
+                    WorkspaceSourceToml::Notes(NotesSourceToml { path: path.clone() }),
+                );
+            }
+            entry.catalyst_format = self.catalyst_format.clone();
+            entry.max_embedding_files = self.max_embedding_files;
+        } else {
+            global.defaults.catalyst_format = self.catalyst_format.clone();
+            let entry = global
+                .vaults
+                .entry(canonical_vault_key(vault_path))
+                .or_default();
+            entry.excluded_tags = self.excluded_tags.clone();
+            entry.excluded_links = self.excluded_links.clone();
+            entry.excluded_folders = self.excluded_folders.clone();
+            entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
+            entry.entities = self.catalyzed_entities.clone();
+            entry.targets = self.targets.clone();
+            entry.sources = self.sources.clone();
+            entry.max_embedding_files = self.max_embedding_files;
+        }
 
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let body = toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
-        let contents = format!("{CONFIG_HEADER}{body}");
+        // Fresh file: nothing to preserve, emit the canonical typed serialization.
+        if !config_path.exists() {
+            let body =
+                toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
+            fs::write(&config_path, format!("{CONFIG_HEADER}{body}"))
+                .with_context(|| format!("failed to write {}", config_path.display()))?;
+            debug!(?config_path, "saved enzyme config");
+            return Ok(());
+        }
+
+        // Existing file: apply only the engine-managed keys in place, so user
+        // comments, formatting, unknown keys, and authored `sources` tables (and
+        // their comments) survive. Sources round-trip unchanged, so they are not
+        // rewritten here; only the derived `notes` markdown source is ensured.
+        let original = fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        let mut doc: toml_edit::DocumentMut = original
+            .parse()
+            .with_context(|| format!("failed to parse {} for in-place update", config_path.display()))?;
+
+        {
+            let defaults = ensure_table(doc.as_table_mut(), "defaults");
+            set_optional(defaults, "catalyst_format", &global.defaults.catalyst_format)?;
+            set_value(defaults, "minimum_tags", &global.defaults.minimum_tags)?;
+            set_value(defaults, "minimum_links", &global.defaults.minimum_links)?;
+            set_value(defaults, "minimum_folders", &global.defaults.minimum_folders)?;
+            set_value(defaults, "total_limit", &global.defaults.total_limit)?;
+            set_optional(
+                defaults,
+                "max_embedding_files",
+                &global.defaults.max_embedding_files,
+            )?;
+        }
+
+        if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
+            let ws = global
+                .workspaces
+                .get(&name)
+                .expect("workspace entry was just populated");
+            let workspaces = ensure_table(doc.as_table_mut(), "workspaces");
+            workspaces.set_implicit(true);
+            let entry = ensure_table(workspaces, &name);
+            apply_common_entry(
+                entry,
+                &ws.excluded_tags,
+                &ws.excluded_links,
+                &ws.excluded_folders,
+                &ws.min_top_catalysts,
+                &ws.entities,
+                &ws.targets,
+                &ws.max_embedding_files,
+            )?;
+            set_optional(entry, "catalyst_format", &ws.catalyst_format)?;
+            if !self.sources.is_empty() || self.notes_path.is_some() {
+                let sources = ensure_table(entry, "sources");
+                for (source_name, source) in &self.sources {
+                    // Only write sources absent from the file; an authored contract
+                    // already present is left untouched so its comments survive.
+                    if !sources.contains_key(source_name) {
+                        set_value(
+                            sources,
+                            source_name,
+                            &WorkspaceSourceToml::Sqlite(source.clone()),
+                        )?;
+                    }
+                }
+                if let Some(path) = &self.notes_path {
+                    let notes = ensure_table(sources, "notes");
+                    set_value(notes, "path", path)?;
+                }
+            }
+        } else {
+            let key = canonical_vault_key(vault_path);
+            let vault = global
+                .vaults
+                .get(&key)
+                .expect("vault entry was just populated");
+            let vaults = ensure_table(doc.as_table_mut(), "vaults");
+            vaults.set_implicit(true);
+            let entry = ensure_table(vaults, &key);
+            apply_common_entry(
+                entry,
+                &vault.excluded_tags,
+                &vault.excluded_links,
+                &vault.excluded_folders,
+                &vault.min_top_catalysts,
+                &vault.entities,
+                &vault.targets,
+                &vault.max_embedding_files,
+            )?;
+            if !self.sources.is_empty() {
+                let sources = ensure_table(entry, "sources");
+                for (source_name, source) in &self.sources {
+                    if !sources.contains_key(source_name) {
+                        set_value(sources, source_name, source)?;
+                    }
+                }
+            }
+        }
+
+        let rendered = doc.to_string();
+        let contents = if rendered.starts_with("# Enzyme configuration") {
+            rendered
+        } else {
+            format!("{CONFIG_HEADER}{rendered}")
+        };
         fs::write(&config_path, contents)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
-        debug!(?config_path, "saved enzyme config");
+        debug!(?config_path, "saved enzyme config (in place)");
         Ok(())
     }
 }
@@ -697,6 +951,77 @@ fn canonical_vault_key(vault_path: &Path) -> String {
         .unwrap_or_else(|_| vault_path.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+#[derive(Serialize)]
+struct SaveWrap<'a, T> {
+    v: &'a T,
+}
+
+/// Serialize a serde value into a standalone `toml_edit` item, so a single
+/// managed key can be replaced in place without reserializing the whole file.
+fn serialized_item<T: Serialize>(value: &T) -> Result<toml_edit::Item> {
+    let rendered = toml::to_string(&SaveWrap { v: value }).context("serialize config value")?;
+    let doc: toml_edit::DocumentMut = rendered.parse().context("reparse config value")?;
+    Ok(doc
+        .as_table()
+        .get("v")
+        .cloned()
+        .unwrap_or(toml_edit::Item::None))
+}
+
+/// Fetch or create a child table, preserving any existing table (and its
+/// comments/formatting) at that key.
+fn ensure_table<'a>(table: &'a mut toml_edit::Table, key: &str) -> &'a mut toml_edit::Table {
+    if !table.contains_key(key) {
+        table.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    table
+        .get_mut(key)
+        .and_then(toml_edit::Item::as_table_mut)
+        .expect("ensured key holds a table")
+}
+
+fn set_value<T: Serialize>(table: &mut toml_edit::Table, key: &str, value: &T) -> Result<()> {
+    table.insert(key, serialized_item(value)?);
+    Ok(())
+}
+
+fn set_optional<T: Serialize>(
+    table: &mut toml_edit::Table,
+    key: &str,
+    value: &Option<T>,
+) -> Result<()> {
+    match value {
+        Some(inner) => {
+            table.insert(key, serialized_item(inner)?);
+        }
+        None => {
+            table.remove(key);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_common_entry(
+    entry: &mut toml_edit::Table,
+    excluded_tags: &[String],
+    excluded_links: &[String],
+    excluded_folders: &[String],
+    min_top_catalysts: &Option<usize>,
+    entities: &[CatalyzedEntity],
+    targets: &[String],
+    max_embedding_files: &Option<usize>,
+) -> Result<()> {
+    set_value(entry, "excluded_tags", &excluded_tags.to_vec())?;
+    set_value(entry, "excluded_links", &excluded_links.to_vec())?;
+    set_value(entry, "excluded_folders", &excluded_folders.to_vec())?;
+    set_optional(entry, "min_top_catalysts", min_top_catalysts)?;
+    set_value(entry, "entities", &entities.to_vec())?;
+    set_value(entry, "targets", &targets.to_vec())?;
+    set_optional(entry, "max_embedding_files", max_embedding_files)?;
+    Ok(())
 }
 
 fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
@@ -753,6 +1078,63 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn in_place_entry_update_preserves_comments_and_authored_sources() {
+        // A hand-authored workspace config: top comment, an unknown key, and a
+        // commented source contract as a subtable of the workspace.
+        let authored = r#"# Enzyme configuration — do not delete this line
+[workspaces.imessage]
+# curated by hand
+mystery_key = "keep me"
+
+[workspaces.imessage.sources.messages]
+# this contract was written by the skill
+db = "/tmp/x.db"
+query = "SELECT id, ts, body FROM messages"
+roles = { id = "id", when = "ts", what = "body" }
+timestamp = { unit = "ms" }
+"#;
+        let mut doc: toml_edit::DocumentMut = authored.parse().unwrap();
+        let workspaces = ensure_table(doc.as_table_mut(), "workspaces");
+        workspaces.set_implicit(true);
+        let entry = ensure_table(workspaces, "imessage");
+        apply_common_entry(
+            entry,
+            &[],
+            &[],
+            &[],
+            &None,
+            &[CatalyzedEntity::Simple("alice".to_string())],
+            &[],
+            &Some(1024),
+        )
+        .unwrap();
+        set_optional(entry, "catalyst_format", &Some("dialectical".to_string())).unwrap();
+
+        let out = doc.to_string();
+        // Must remain valid TOML even though leaf keys were added to a table that
+        // already owned a subtable (ordering hazard).
+        let _: toml_edit::DocumentMut = out.parse().expect("valid toml after in-place edit");
+        let typed: GlobalTomlConfig = toml::from_str(&out).expect("typed parse still works");
+
+        assert!(out.contains("# Enzyme configuration"), "header lost:\n{out}");
+        assert!(out.contains("mystery_key = \"keep me\""), "unknown key lost:\n{out}");
+        assert!(
+            out.contains("# this contract was written by the skill"),
+            "source comment lost:\n{out}"
+        );
+        assert!(
+            out.contains("SELECT id, ts, body FROM messages"),
+            "source contract lost:\n{out}"
+        );
+        assert!(out.contains("alice"), "entity not written:\n{out}");
+
+        // The authored contract still round-trips through the typed model.
+        let ws = typed.workspaces.get("imessage").expect("workspace present");
+        assert!(ws.sources.contains_key("messages"), "source dropped");
+        assert_eq!(ws.entities.len(), 1);
+    }
 
     #[test]
     fn test_parse_entity_ref_tag() {
@@ -844,6 +1226,7 @@ excludedTags:
             excluded_folders: config.excluded_folders,
             targets: Vec::new(),
             sources: HashMap::new(),
+            notes_path: None,
             max_embedding_files: None,
         };
         let prefs = merged.parse_preferences();
@@ -943,6 +1326,69 @@ timestamp = { unit = "ns" }
             SqliteTimestampUnit::Ns
         );
     }
+
+    #[test]
+    fn named_workspace_parses_notes_and_sqlite_as_peer_sources() {
+        let global: GlobalTomlConfig = toml::from_str(
+            r#"
+[workspaces.imessage]
+entities = ["folder:conversations"]
+
+[workspaces.imessage.sources.notes]
+path = "/Users/alice/notes"
+
+[workspaces.imessage.sources.messages]
+db = "/Users/alice/Library/Messages/chat.db"
+query = "SELECT id, ts, body FROM messages"
+roles = { id = "id", when = "ts", what = "body" }
+timestamp = { unit = "s" }
+"#,
+        )
+        .unwrap();
+
+        let config = EnzymeConfig::from_workspace_config("imessage", &global);
+        assert_eq!(config.notes_path, Some(PathBuf::from("/Users/alice/notes")));
+        assert_eq!(config.sources.len(), 1);
+        assert_eq!(
+            config.sources.get("messages").unwrap().db,
+            PathBuf::from("/Users/alice/Library/Messages/chat.db")
+        );
+        assert_eq!(config.catalyzed_entities.len(), 1);
+    }
+
+    #[test]
+    fn home_rooted_workspace_selects_named_config_over_legacy_path_config() {
+        let temp = TempDir::new().unwrap();
+        let store = temp.path().join("workspaces/imessage");
+        fs::create_dir_all(&store).unwrap();
+        let config_path = temp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+[workspaces.imessage.sources.notes]
+path = "/named/notes"
+
+[vaults."{}"]
+excluded_tags = ["legacy"]
+"#,
+                store.display()
+            ),
+        )
+        .unwrap();
+
+        let config = EnzymeConfig::load_at(&store, &config_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.notes_path, Some(PathBuf::from("/named/notes")));
+        assert!(config.excluded_tags.is_empty());
+        assert_eq!(
+            EnzymePaths::bound_workspace_with_home(&store, temp.path())
+                .unwrap()
+                .as_deref(),
+            Some("imessage")
+        );
+    }
     #[test]
     fn catalyst_llm_config_defaults_and_parses() {
         let defaults: GlobalTomlConfig = toml::from_str("").unwrap();
@@ -1030,6 +1476,7 @@ local_model = "catalyst-135m-v3"
                     },
                 },
             )]),
+            notes_path: None,
             max_embedding_files: None,
         };
 

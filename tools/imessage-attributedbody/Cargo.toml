@@ -1,0 +1,23 @@
+# Standalone workspace root so this helper stays decoupled from the enzyme
+# workspace (members = ["crates/*"]) and its build.
+[workspace]
+
+[package]
+name = "imessage-attributedbody"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+# Standalone preprocessing helper: decodes iMessage `attributedBody` typedstream
+# blobs into plaintext and materializes a `message_text` sidecar table that a
+# generic enzyme SQLite source contract can read via COALESCE. Intentionally NOT
+# a workspace member — it keeps Apple-specific decoding out of the generic engine.
+
+[[bin]]
+name = "imessage-attributedbody"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }

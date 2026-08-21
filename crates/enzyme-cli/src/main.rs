@@ -19,8 +19,8 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
-    /// Collection ID (resolves to ~/.enzyme-sdk/collections/<id>/.enzyme/enzyme.db)
-    #[arg(long, global = true)]
+    /// Named workspace/collection (home-rooted; configured under [workspaces.<name>])
+    #[arg(long, global = true, conflicts_with = "vault")]
     collection: Option<String>,
 
     /// Verbosity level
@@ -307,10 +307,13 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter));
 
-    // Try to log to .enzyme/enzyme.log when a vault path is available.
-    // Only use the file logger if .enzyme/ already exists (don't create it).
+    // Named workspace logs live beside their DB; legacy vault logs retain the
+    // historic `.enzyme/enzyme.log` location.
     if let Some(vault) = vault_path {
-        let enzyme_dir = vault.join(".enzyme");
+        let enzyme_dir = match enzyme_core::config::paths::EnzymePaths::bound_workspace(vault) {
+            Ok(Some(_)) => vault.to_path_buf(),
+            _ => vault.join(".enzyme"),
+        };
         if enzyme_dir.is_dir() {
             if let Ok(file) = std::fs::OpenOptions::new()
                 .create(true)
@@ -383,17 +386,7 @@ async fn main() -> Result<()> {
     }
 
     let vault_path = if let Some(ref collection_id) = cli.collection {
-        let db_path = enzyme_core::config::paths::EnzymePaths::collection_db_path(collection_id)?;
-        let vault = db_path
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow::anyhow!("invalid collection DB path"))?
-            .to_path_buf();
-        std::fs::create_dir_all(&vault)?;
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        vault
+        enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)?
     } else {
         resolve_vault_path(cli.vault)?
     };

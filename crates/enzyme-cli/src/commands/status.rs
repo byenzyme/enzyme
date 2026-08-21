@@ -39,6 +39,7 @@ struct SourceStatus {
 /// Returns None if the vault is not initialized.
 pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::Value>> {
     let paths = EnzymePaths::new(vault_path)?;
+    let workspace = EnzymePaths::bound_workspace(vault_path)?;
 
     if !paths.vault_db.exists() {
         return Ok(None);
@@ -105,6 +106,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     });
 
     Ok(Some(json!({
+        "workspace": workspace,
         "vault": vault_path.display().to_string(),
         "database": paths.vault_db.display().to_string(),
         "documents": doc_count,
@@ -186,7 +188,12 @@ fn format_finished_at(finished_at_ms: i64) -> String {
 pub async fn run_status(vault_path: &Path) -> Result<()> {
     match build_status_json(vault_path).await? {
         None => {
-            println!("Vault: {}", vault_path.display());
+            if let Some(workspace) = EnzymePaths::bound_workspace(vault_path)? {
+                println!("Workspace: {workspace}");
+                println!("Store: {}", vault_path.display());
+            } else {
+                println!("Vault: {}", vault_path.display());
+            }
             println!("Status: not initialized");
             println!();
             println!("Run 'enzyme init' to initialize.");
@@ -197,7 +204,12 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
             let binary_update: Option<BinaryUpdateOutcome> =
                 serde_json::from_value(json["update"]["binary"]["last_outcome"].clone()).ok();
 
-            println!("Vault: {}", json["vault"].as_str().unwrap_or(""));
+            if let Some(workspace) = json["workspace"].as_str() {
+                println!("Workspace: {workspace}");
+                println!("Store: {}", json["vault"].as_str().unwrap_or(""));
+            } else {
+                println!("Vault: {}", json["vault"].as_str().unwrap_or(""));
+            }
             println!("Database: {}", json["database"].as_str().unwrap_or(""));
             println!();
             println!("Documents:  {}", json["documents"]);

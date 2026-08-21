@@ -14,12 +14,13 @@ The first job of every user-facing message is revelation, not a report about the
 Follow this order:
 
 1. Inspect the database read-only.
-2. Identify the person, date, message, folder, and ID columns.
+2. Identify the person, date, message, folder, and ID columns and choose a workspace name.
 3. Show real examples and ask the user to confirm the mapping.
-4. Write the confirmed config.
-5. Run `init` once, then use `refresh`.
-6. Verify document and embedding counts.
-7. Test whether searches for a person are actually about that person.
+4. Write only the confirmed source contract under `[workspaces.<name>.sources.<source>]`.
+5. Validate it with `enzyme scan --collection <name>`.
+6. Build it with `enzyme --collection <name> init`, then use `refresh`.
+7. Verify document and embedding counts.
+8. Test whether searches for a person are actually about that person.
 
 Enzyme needs these parts from each source row:
 
@@ -29,24 +30,19 @@ Enzyme needs these parts from each source row:
 - `what`: the text to index.
 - `where`: an optional thread, mailbox, folder, or similar group.
 
-Never edit, migrate, vacuum, attach to, or create anything in the source database. Open it read-only. Do not write config, create workspace files, or initialize Enzyme until the user has seen and confirmed the proposed mapping.
+Never edit, migrate, vacuum, attach to, or create anything in the source database. Open it read-only. Do not write config or initialize Enzyme until the user has seen and confirmed the proposed mapping.
 
 ## Choose the source and workspace
 
-The path in `[vaults."path"]` is the **workspace home**. Enzyme stores its local `.enzyme` database, embeddings, catalysts, and source-sync state there. The directory does not need to contain Markdown files.
+Choose a short workspace name such as `imessage`, `mail`, or `crm`. It must be one filesystem component, not a path. Address it only as `--collection <name>`. Enzyme owns its index at `$ENZYME_HOME/workspaces/<name>/enzyme.db` (default `~/.enzyme/workspaces/<name>/enzyme.db`); the skill never chooses, creates, or writes that storage path.
 
-Every reference to the global `~/.enzyme` home in this skill resolves to `$ENZYME_HOME` when that environment variable is set. In particular, the global config is `$ENZYME_HOME/config.toml`; otherwise it is `~/.enzyme/config.toml`. This does not change the workspace-local `$WORKSPACE_HOME/.enzyme` state directory.
-
-There are two supported setups:
-
-1. **Existing Markdown workspace:** add `sources.<name>` beside the workspace's existing entity, log, and exclusion settings. Enzyme must keep both the Markdown documents and the database records.
-2. **Standalone SQLite workspace:** after confirmation, create or use an empty directory, add a vault section containing only `sources.<name>`, and initialize it with no Markdown files.
+The global config is `$ENZYME_HOME/config.toml` when `ENZYME_HOME` is set and `~/.enzyme/config.toml` otherwise. The skill writes one source contract under `[workspaces.<name>.sources.<source>]`. It never writes `entities`, `excluded_*`, `catalyst_format`, `max_embedding_files`, targets, or storage paths. `init` derives or defaults those fields and persists them. For SQLite sources, mapped `who` values deterministically become people and mapped `where` values become threads/folders during indexing; there is no agent task to enumerate them.
 
 Set absolute paths and check that the database and Enzyme command are available:
 
 ```bash
 SOURCE_DB="/absolute/path/to/source.sqlite"
-WORKSPACE_HOME="/absolute/path/to/workspace-home"
+WORKSPACE_NAME="imessage"
 ENZYME_BIN=enzyme
 test -f "$SOURCE_DB"
 sqlite3 -readonly "$SOURCE_DB" 'PRAGMA query_only; PRAGMA quick_check;'
@@ -55,14 +51,7 @@ sqlite3 -readonly "$SOURCE_DB" 'PRAGMA query_only; PRAGMA quick_check;'
 
 `sqlite3 -readonly` is the safeguard that prevents source writes. The displayed `PRAGMA query_only` value may be `0`; do not present that value as proof that the source was writable or read-only. `PRAGMA quick_check` checks database integrity, not write protection.
 
-Before the user confirms the mapping, inspect an existing workspace without changing it:
-
-```bash
-test ! -e "$WORKSPACE_HOME" || test -d "$WORKSPACE_HOME"
-test ! -d "$WORKSPACE_HOME" || find "$WORKSPACE_HOME" -type f -name '*.md' -not -path '*/.enzyme/*' -print
-```
-
-For a standalone workspace, create a missing directory only after the user confirms the mapping. If the application is actively using the database, work from a safe snapshot or use SQLite's backup API. Do not copy only the main database file because its WAL file may contain committed data.
+If the application is actively using the database, work from a safe snapshot or use SQLite's backup API. Do not copy only the main database file because its WAL file may contain committed data.
 
 ## 1. Inspect the database without changing it
 
@@ -278,7 +267,7 @@ Before writing anything, gather and retain:
 3. The union sample above: at least 8 joined rows spanning oldest/newest, plus NULL-`who` rows and at least two distinct `where` values when present. Redact only the presentation; do not silently change SQL.
 4. Raw timestamp range, inferred unit/epoch, exact millisecond expression, and readable UTC samples.
 5. Stable identity result column(s) and uniqueness evidence.
-6. Workspace shape/path and whether `where` becomes a collection.
+6. Workspace name and whether `where` becomes a thread/folder.
 
 This evidence is the technical appendix. Keep it in the working record and offer it if the user asks. Do not lead the confirmation message with column names, SQL expressions, NULL rates, units, epochs, or Enzyme role names.
 
@@ -294,11 +283,11 @@ Then name only the choices that need the user's judgment. For example:
 
 The example above shows the shape, not facts to copy. Build the real version from the source evidence. Keep it short enough to read aloud in under a minute. Add two or three representative entries only when they make the interpretation easier to judge. Do not call the mapping “healthy” or “valid” in place of showing what was found and why it matters.
 
-The confirmation still gates every write. If the user corrects the interpretation, return to inspection, update the technical evidence, and present a new reveal. If they approve it, you may write the config, create the standalone workspace directory if needed, and let Enzyme create its own local state. Approval never allows changes to the source database.
+The confirmation still gates every write. If the user corrects the interpretation, return to inspection, update the technical evidence, and present a new reveal. If they approve it, write the source contract and let Enzyme create its own local state. Approval never allows changes to the source database.
 
 ## 4. Write the confirmed config
 
-After confirmation, create a missing standalone workspace with `mkdir -p "$WORKSPACE_HOME"`. Then find the correct global config path:
+After confirmation, find the correct global config path:
 
 ```bash
 ENZYME_CONFIG_HOME="${ENZYME_HOME:-$HOME/.enzyme}"
@@ -306,7 +295,7 @@ CONFIG_PATH="$ENZYME_CONFIG_HOME/config.toml"
 mkdir -p "$ENZYME_CONFIG_HOME"
 ```
 
-Save the confirmed mapping under the workspace's absolute path without changing unrelated settings. If this workspace has no vault section yet, append the reviewed text with a quoted heredoc. The quotes stop the shell from changing characters inside the SQL or TOML:
+Save the confirmed mapping under the chosen workspace name without changing unrelated settings. The only durable output from this skill is the source contract: `db`, `query`, `roles`, and `timestamp`. If this source section does not exist, append the reviewed text. If it exists, back up the config and edit that section in place; never add a duplicate and never replace the rest of `[workspaces.<name>]`.
 
 ```bash
 cat <<'TOML' >> "$CONFIG_PATH"
@@ -314,26 +303,26 @@ cat <<'TOML' >> "$CONFIG_PATH"
 TOML
 ```
 
-If the vault section or source name already exists, do not add a second copy. First run `cp -- "$CONFIG_PATH" "$CONFIG_PATH.bak"`. Then edit the existing section and leave unrelated settings alone. After either kind of edit, re-read the written section and ask Enzyme to read it without writing anything. Record the exact config path and the section's full text in the technical appendix; do not show raw TOML to the user unless they ask:
+After the edit, re-read the written section and validate it read-only. Record the exact config path and the source contract's full text in the technical appendix; do not show raw TOML to the user unless they ask:
 
 ```bash
-awk -v key="$WORKSPACE_HOME" '
-  /^\[vaults\."/ {
-    same_workspace = index($0, "[vaults.\"" key "\"") == 1
+awk -v key="$WORKSPACE_NAME" '
+  /^\[workspaces\./ {
+    same_workspace = index($0, "[workspaces." key) == 1
     if (showing && !same_workspace) exit
     if (same_workspace) showing = 1
   }
   showing { print }
 ' "$CONFIG_PATH"
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" scan
+"$ENZYME_BIN" scan --collection "$WORKSPACE_NAME"
 ```
 
-The `awk` command matches both a parent vault header and source-only headers such as `[vaults."<workspace>".sources.messages]`, then prints that workspace's tables until the next vault begins. Here, `scan` is a dry run because it does not include `--write-config`. It proves that Enzyme can parse the TOML; it does not execute or validate the SQLite query. `init` is the first end-to-end source validation. If Enzyme reports a TOML or config error, stop and either fix it or restore the backup. Scan suggestions do not give permission to change the mapping the user approved.
+`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. Never use `scan --write-config` for SQLite: it is a Markdown-structure heuristic, not a SQLite contract author.
 
 Write the config in exactly this shape:
 
 ```toml
-[vaults."/absolute/path/to/workspace-home".sources.messages]
+[workspaces.imessage.sources.messages]
 db = "/absolute/path/to/source.sqlite"
 # m.sent_ns is Apple-epoch nanoseconds; declared below, converted by the engine.
 query = """
@@ -358,14 +347,14 @@ WHERE m.sent_ns IS NOT NULL AND m.body IS NOT NULL
 ORDER BY m.rowid
 """
 
-[vaults."/absolute/path/to/workspace-home".sources.messages.roles]
+[workspaces.imessage.sources.messages.roles]
 id = ["message_rowid"]
 who = ["sender"]
 when = "sent_ns"
 what = ["body"]
 where = ["thread"]
 
-[vaults."/absolute/path/to/workspace-home".sources.messages.timestamp]
+[workspaces.imessage.sources.messages.timestamp]
 unit = "ns"
 epoch = "2001-01-01"
 ```
@@ -388,30 +377,30 @@ Without `roles.where`, Enzyme uses `roles.id` to make the same per-row document 
 The query must also follow these rules:
 
 - Query is one `SELECT` or `WITH ... SELECT` and returns one row per record/message. A source with `roles.where` groups those rows into thread-month documents.
-- Every configured column is uniquely aliased and present. On every returned row, every `id` component, `when`, and every configured `what` column must be non-null. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or collection.
+- Every configured column is uniquely aliased and present. On every returned row, every `id` component and `when` must be non-null. A row whose mapped `what` values are all NULL/empty is skipped and counted. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or thread.
 - The `roles.id` tuple is stable and unique. It identifies documents for sources without `roles.where` and deterministically orders equal-time entries in log mode.
 - Enzyme converts time using the declared `unit` and `epoch`; the query returns the raw value.
-- The config contains every application-specific decision. Nothing depends on a hidden preset or later guessing.
+- The source contract contains every application-specific schema decision. Derived entity/exclusion/format/default fields are deliberately owned by `init`, not by this skill.
 
-After writing, show the exact config path and the text you added. Read it back from disk. Do not run `scan --write-config` afterward unless you know that the installed Enzyme version preserves `sources` when it rewrites config.
+After writing, show the exact config path and the source contract you added. Read it back from disk and require the read-only scan to pass.
 
 ## 5. Initialize once, then use refresh
 
 Use this configured source as the only ingestion path. Run `init` once for a workspace. Use `refresh` after that. Running `init` again regenerates and **replaces** catalysts, so their wording and counts may change even when the config and source data did not. `refresh` is the normal, repeatable way to sync again.
 
 ```bash
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" init --quiet
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" init --quiet
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" status
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri
 ```
 
-In an existing Markdown workspace, `init` and `refresh` must keep and update both the Markdown files and SQLite records. In a standalone workspace, zero Markdown files is valid because the configured SQLite source supplies the documents.
+Zero Markdown files is valid because the configured SQLite source supplies the documents. If another setup flow already configured a `sources.notes` path in this named workspace, `init` and `refresh` must keep and update both Markdown and SQLite documents; this skill does not author that notes contract.
 
 After the first `init`, use these commands whenever the source changes:
 
 ```bash
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" refresh --quiet
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" status
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" refresh --quiet
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" status
 ```
 
 `status` reports each source's row count, bucket count, and last refresh time. Enzyme manages fingerprint comparison, document rebuilds/pruning, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
@@ -421,7 +410,8 @@ After the first `init`, use these commands whenever the source changes:
 Verify the mechanics privately before describing success to the user. The next queries count documents, embeddings, entities, and catalysts without printing private message bodies. Keep their raw output in the technical record; do not make it the user-facing result.
 
 ```bash
-sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
+WORKSPACE_DB="${ENZYME_HOME:-$HOME/.enzyme}/workspaces/$WORKSPACE_NAME/enzyme.db"
+sqlite3 -readonly "$WORKSPACE_DB" <<'SQL'
 .headers on
 .mode column
 SELECT count(*) AS documents,
@@ -470,14 +460,7 @@ SQL
 
 Replace `messages` with the configured source name. For a source without `roles.where`, `source_documents` must match the number of rows returned by the saved source query. For a source with `roles.where` (log mode), `source_documents` is the bucket count — one document per thread-month — so it will be far smaller than the row count; compare it with the row and bucket counts that `status` reports for the source instead. In a standalone workspace, `source_documents` should also match total `documents`. In a mixed Markdown workspace, total `documents` includes both sources, so do not compare that combined number directly with the source's own counts.
 
-The default is `max_embedding_files = 1024`, so one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Alternatively, with the user's approval, back up and edit the config as described above and raise `max_embedding_files` for this vault. Set it to `0` to remove the limit:
-
-```toml
-[vaults."/absolute/path/to/workspace-home"]
-max_embedding_files = 0
-```
-
-Do not run `init` again to finish an embedding backlog.
+The default is `max_embedding_files = 1024`, so one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Do not author or change `max_embedding_files` in this skill, and do not run `init` again to finish an embedding backlog.
 
 Catalysts are generated selectively and may finish in the background, so not every collection is expected to receive one. Use this pass bar:
 
@@ -490,7 +473,7 @@ Catalysts are generated selectively and may finish in the background, so not eve
 Keep the exact-name and timeline check private too. Query Enzyme's database directly because `petri --query` uses semantic search and cannot prove that an exact name exists or that its occurrences are correct. The following query proves both the exact match and the person's yearly and monthly coverage:
 
 ```bash
-sqlite3 -readonly "$WORKSPACE_HOME/.enzyme/enzyme.db" <<'SQL'
+sqlite3 -readonly "$WORKSPACE_DB" <<'SQL'
 .headers on
 .mode column
 .parameter init
@@ -530,8 +513,8 @@ SQL
 Now test the user-facing search. A query for a top person must return material that is mostly about that person and follows the expected time periods. If much of the result is unrelated, report that as a problem instead of calling the test successful.
 
 ```bash
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one exact top person name>"
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What changed with <one exact top person name>?"
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri --query "<one exact top person name>"
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" catalyze "What changed with <one exact top person name>?"
 ```
 
 Build the post-init reveal from questions that work, not from generic promises. Choose two or three questions grounded in the actual names, places, and dates you verified. When the source has both people and places, pre-test at least one person question and one familiar-place question; include each in the reveal only if it passes, and disclose the failure plainly if it does not. Run each proposed question first, using the same `petri` and `catalyze` checks. Only offer a question when its results are predominantly about the named person or place and use the expected dates.
@@ -541,8 +524,8 @@ If every focused person or place question fails, run a positive control before w
 For a place question, adapt the same check:
 
 ```bash
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" petri --query "<one familiar collection name>"
-"$ENZYME_BIN" -p "$WORKSPACE_HOME" catalyze "What was I collecting in <one familiar collection name> during <one supported year>?"
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri --query "<one familiar collection name>"
+"$ENZYME_BIN" --collection "$WORKSPACE_NAME" catalyze "What was I collecting in <one familiar collection name> during <one supported year>?"
 ```
 
 After the private checks, explain what became possible as an anchor paired with a question. Start by explaining the simple mechanism: dates put entries in order; repeated people and places gather those dated moments into histories. Then use the user's real data. For example:
