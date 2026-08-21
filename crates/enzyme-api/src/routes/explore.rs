@@ -44,6 +44,18 @@ async fn explore(
     // the SSE stream immediately. The task sends events through the channel.
     tokio::spawn(async move {
         let vault_path = state.vault_path.clone();
+        let generation = match state.generation() {
+            Ok(generation) => generation,
+            Err(message) => {
+                let event = ExploreEvent::Error {
+                    message: format!(
+                        "LLM generation was not configured at server setup: {message}"
+                    ),
+                };
+                let _ = tx.send(Ok(event_to_sse(&event))).await;
+                return;
+            }
+        };
 
         // Check if pool is loaded and fresh
         let use_fast_path = {
@@ -54,9 +66,9 @@ async fn explore(
         let events = if use_fast_path {
             let pool_guard = state.pool.read().await;
             let pool = pool_guard.as_ref().unwrap();
-            explore_pipeline::run_fast_pipeline(&vault_path, pool, &request).await
+            explore_pipeline::run_fast_pipeline(&vault_path, pool, generation, &request).await
         } else {
-            explore_pipeline::run_standard_pipeline(&vault_path, &request).await
+            explore_pipeline::run_standard_pipeline(&vault_path, generation, &request).await
         };
 
         for event in &events {

@@ -8,9 +8,10 @@ use tracing::{debug, warn};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{GenerationParams, LlmClient, Message, resolve_llm_client};
+use enzyme_core::llm::{GenerationParams, LlmClient, Message};
 use enzyme_core::search::context::ContextSearch;
 
+use crate::GenerationContext;
 use crate::explore_pool::ExplorePool;
 use crate::prompts;
 use crate::segment_parser::SegmentExtractor;
@@ -246,6 +247,7 @@ async fn run_synthesis(
 /// Run the standard explore pipeline (no pool / pool stale).
 pub async fn run_standard_pipeline(
     vault_path: &std::path::Path,
+    generation: &GenerationContext,
     request: &ExploreRequest,
 ) -> Vec<ExploreEvent> {
     let mut events = Vec::new();
@@ -265,19 +267,10 @@ pub async fn run_standard_pipeline(
         }
     };
 
-    // 2. Resolve API config and client (async, no DB)
-    let (api_config, client) = match resolve_llm_client().await {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            events.push(ExploreEvent::Error {
-                message: format!("Failed to resolve API config: {e}"),
-            });
-            return events;
-        }
-    };
-    let model = api_config.model.clone();
+    let client = &generation.client;
+    let model = &generation.model;
 
-    // 3. LLM decomposition (async, no DB)
+    // 2. LLM decomposition (async, no DB)
     events.push(ExploreEvent::Thinking {
         message: "Decomposing query into sub-queries...".to_string(),
     });
@@ -289,7 +282,7 @@ pub async fn run_standard_pipeline(
 
     let sub_queries = match client
         .chat_completion(
-            &model,
+            model,
             vec![
                 Message::text("system", prompts::DECOMPOSITION_SYSTEM_PROMPT),
                 Message::text("user", &decomp_prompt),
@@ -319,7 +312,7 @@ pub async fn run_standard_pipeline(
 
     debug!("Decomposed into {} sub-queries", sub_queries.len());
 
-    // 4. Fan-out search per sub-query (sync DB operations — scoped so DB is dropped before synthesis)
+    // 3. Fan-out search per sub-query (sync DB operations — scoped so DB is dropped before synthesis)
     let search_result = {
         let paths = match EnzymePaths::new(vault_path) {
             Ok(p) => p,
@@ -410,7 +403,7 @@ pub async fn run_standard_pipeline(
         return events;
     }
 
-    // 5. Build findings context with doc IDs (matching Python format)
+    // 4. Build findings context with doc IDs (matching Python format)
     let findings_context = build_findings_context(&sub_queries, &all_results, &doc_index_map);
 
     let id_to_path: HashMap<String, String> = doc_index_map
@@ -418,10 +411,10 @@ pub async fn run_standard_pipeline(
         .map(|(path, id)| (id.clone(), path.clone()))
         .collect();
 
-    // 6. Streaming synthesis (async, no DB — fully Send-safe)
+    // 5. Streaming synthesis (async, no DB — fully Send-safe)
     let synthesis_events = run_synthesis(
-        &client,
-        &model,
+        client,
+        model,
         &request.query,
         &findings_context,
         &id_to_path,
@@ -438,6 +431,7 @@ pub async fn run_standard_pipeline(
 pub async fn run_fast_pipeline(
     vault_path: &std::path::Path,
     pool: &ExplorePool,
+    generation: &GenerationContext,
     request: &ExploreRequest,
 ) -> Vec<ExploreEvent> {
     let mut events = Vec::new();
@@ -598,20 +592,9 @@ pub async fn run_fast_pipeline(
         .map(|(path, id)| (id.clone(), path.clone()))
         .collect();
 
-    // Resolve API config and run synthesis (async, no DB)
-    let (api_config, client) = match resolve_llm_client().await {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            events.push(ExploreEvent::Error {
-                message: format!("Failed to resolve API config: {e}"),
-            });
-            return events;
-        }
-    };
-
     let synthesis_events = run_synthesis(
-        &client,
-        &api_config.model,
+        &generation.client,
+        &generation.model,
         &request.query,
         &findings_context,
         &id_to_path,

@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::info;
+use tracing::{info, warn};
 
 mod explore_pipeline;
 mod explore_pool;
@@ -17,7 +17,28 @@ mod prompts;
 pub mod routes;
 mod segment_parser;
 
+use enzyme_core::llm::{LlmClient, resolve_llm_client};
+
 use explore_pool::ExplorePool;
+
+pub(crate) struct GenerationContext {
+    pub client: LlmClient,
+    pub model: String,
+}
+
+enum GenerationSetup {
+    Ready(GenerationContext),
+    Unavailable(String),
+}
+
+impl GenerationSetup {
+    fn get(&self) -> Result<&GenerationContext, &str> {
+        match self {
+            Self::Ready(generation) => Ok(generation),
+            Self::Unavailable(message) => Err(message),
+        }
+    }
+}
 
 #[derive(Embed)]
 #[folder = "../../ui/dist"]
@@ -27,6 +48,13 @@ pub struct AppState {
     pub vault_path: PathBuf,
     pub paths: enzyme_core::config::paths::EnzymePaths,
     pub pool: RwLock<Option<ExplorePool>>,
+    generation: GenerationSetup,
+}
+
+impl AppState {
+    pub(crate) fn generation(&self) -> Result<&GenerationContext, &str> {
+        self.generation.get()
+    }
 }
 
 fn mime_for_path(path: &str) -> &'static str {
@@ -107,11 +135,26 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 pub async fn serve(vault_path: PathBuf, port: u16) -> Result<()> {
     let paths = enzyme_core::config::paths::EnzymePaths::new(&vault_path)?;
+    let generation = match resolve_llm_client().await {
+        Ok((config, client)) => {
+            info!(model = config.model, "LLM generation configured");
+            GenerationSetup::Ready(GenerationContext {
+                client,
+                model: config.model,
+            })
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            warn!("LLM generation unavailable at server setup: {message}");
+            GenerationSetup::Unavailable(message)
+        }
+    };
 
     let state = Arc::new(AppState {
         vault_path,
         paths,
         pool: RwLock::new(None),
+        generation,
     });
 
     let app = build_router(state);

@@ -5,7 +5,8 @@
 //! so their default build never includes lease minting, bootstrap identity, or
 //! credential-cache access.
 
-use std::sync::{Arc, RwLock};
+#[cfg(feature = "local-llm")]
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -21,8 +22,8 @@ use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/llm/free-config";
-const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Enzyme-Bootstrap-Id";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
+const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
 const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
 const FREE_CONFIG_CACHE_PROFILE_VERSION: &str = "enzyme-llm-v1";
@@ -92,10 +93,6 @@ impl ResolvedConfig {
             ConfigProvider::ServerFallback => DEFAULT_MODEL,
             _ => &self.model,
         }
-    }
-
-    pub fn is_free_tier(&self) -> bool {
-        matches!(self.provider, ConfigProvider::ServerFallback)
     }
 }
 
@@ -235,45 +232,18 @@ fn local_backend(base_url: &str) -> Result<Backend> {
 }
 
 impl LlmClient {
-    /// Create a client from a resolved config, preserving free-tier refresh.
+    /// Create a client from a config that setup already resolved.
     pub fn from_config(config: &ResolvedConfig) -> Result<Self> {
         Ok(Self {
             client: completion_http_client(),
-            api_key: Arc::new(RwLock::new(config.api_key.clone())),
+            api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
-            free_tier: config.is_free_tier(),
             backend: local_backend(&config.base_url)?,
         })
     }
-
-    pub(super) async fn try_refresh_key(&self) -> bool {
-        if !self.free_tier {
-            return false;
-        }
-        info!("free-tier key returned 401, refreshing from server");
-        let identity = match hosted_identity() {
-            Ok(identity) => identity,
-            Err(e) => {
-                warn!("failed to resolve hosted identity for key refresh: {e}");
-                return false;
-            }
-        };
-        invalidate_hosted_llm_config_cache();
-        match fetch_free_config(&identity).await {
-            Ok(fetched) => {
-                *self.api_key.write().unwrap() = fetched.config.api_key.clone();
-                write_free_config_cache(&api_cache_path(), &fetched.config, &fetched.cache_profile);
-                true
-            }
-            Err(e) => {
-                warn!("failed to refresh free-tier key: {e}");
-                false
-            }
-        }
-    }
 }
 
-/// Remove the cached hosted lease, for example after logout or a lease 401.
+/// Remove the cached hosted lease after logout or an account identity change.
 pub fn invalidate_hosted_llm_config_cache() {
     let _ = std::fs::remove_file(api_cache_path());
 }
@@ -714,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn enzyme_free_config_contract_accepts_missing_or_epoch_expiry() {
+    fn margins_free_config_contract_accepts_missing_or_epoch_expiry() {
         let persistent: FreeConfigResponse = serde_json::from_str(
             r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture"}"#,
         )
@@ -726,7 +696,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expiring.expires_at, Some(1_800_000_000));
-        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Enzyme-Bootstrap-Id");
+        assert_eq!(
+            FREE_CONFIG_URL,
+            "https://api.enzyme.garden/margins/free-config"
+        );
+        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Margins-Bootstrap-Id");
     }
 
     #[test]
