@@ -20,8 +20,8 @@
 //! PART (a) — TESTABLE NOW (green). Drive the *current* `enzyme` binary
 //! (`env!("CARGO_BIN_EXE_enzyme")`, the fixed "old CLI" artifact) as a
 //! subprocess through every flow that could plausibly want a refund or an
-//! account probe — a healthy hosted init, a deduct-then-LLM-failure, a key
-//! re-mint on 401, and a BYOK run — and assert that `POST /v1/credits/refund`
+//! account probe — a healthy hosted init, a deduct-then-LLM-failure, a
+//! completion 401, and a BYOK run — and assert that `POST /v1/credits/refund`
 //! and `GET /v1/account` are hit exactly ZERO times. This is a clean OLD-CLI x
 //! NEW-SERVER guarantee: because the old CLI never calls these routes, ADDING
 //! them to the new server cannot possibly break it. The mock mounts both routes
@@ -216,15 +216,12 @@ fn deduct_then_llm_failure_never_refunds() {
     );
 }
 
-/// Key re-mint path: the LLM rejects the first lease with 401, the CLI calls
-/// `try_refresh_key` (re-fetch free-config, replay with the new key). This is
-/// the flow that mutates credential state mid-run; a new CLI reconciling
-/// entitlement or refunding a superseded lease would be tempted to hit the new
-/// endpoints here. The current CLI must not.
+/// A completion 401 must not re-enter credential setup or call account endpoints.
+/// The initially resolved lease is the only credential generation may use.
 #[test]
-fn key_refresh_401_never_calls_new_endpoints() {
+fn completion_401_never_reresolves_or_calls_new_endpoints() {
     const KEY_INITIAL: &str = "enz-lease-initial";
-    const KEY_REMINTED: &str = "enz-lease-reminted";
+    const KEY_FORBIDDEN: &str = "enz-lease-after-setup";
 
     let fixture = VaultFixture::new();
     fixture.login("enz-account-token");
@@ -244,7 +241,7 @@ fn key_refresh_401_never_calls_new_endpoints() {
     };
     api.set_free_config_replies(vec![
         free_config_reply(KEY_INITIAL),
-        free_config_reply(KEY_REMINTED),
+        free_config_reply(KEY_FORBIDDEN),
     ]);
 
     // First request 401s (dead lease); everything after succeeds.
@@ -265,16 +262,22 @@ fn key_refresh_401_never_calls_new_endpoints() {
         .enzyme_api(&api)
         .run();
 
-    let diag = diagnostics("key-refresh-401", &api, &llm, &out);
+    let diag = diagnostics("completion-401", &api, &llm, &out);
 
-    // Sanity: the re-mint actually happened (free-config hit twice, re-minted
-    // key reached the LLM) so this run really exercised the credential-mutating
-    // path we care about.
+    assert_eq!(
+        api.free_config_calls(),
+        1,
+        "completion re-entered setup and fetched free-config again.{diag}"
+    );
     assert!(
-        api.free_config_calls() >= 2
-            && llm.auth_headers().iter().any(|h| h == &bearer(KEY_REMINTED)),
-        "TEST IS VACUOUS: the 401 lease re-mint never happened, so the \
-         credential-mutating path this test guards was not exercised.{diag}"
+        llm.auth_headers().iter().any(|h| h == &bearer(KEY_INITIAL)),
+        "TEST IS VACUOUS: the configured lease never reached the LLM.{diag}"
+    );
+    assert!(
+        llm.auth_headers()
+            .iter()
+            .all(|h| h != &bearer(KEY_FORBIDDEN)),
+        "completion replayed with a lease minted after setup.{diag}"
     );
 
     assert_no_new_cli_endpoints(&api, &diag);

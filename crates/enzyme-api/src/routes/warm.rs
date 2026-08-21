@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::llm::{GenerationParams, Message, resolve_llm_client};
+use enzyme_core::llm::{GenerationParams, Message};
 
 use crate::AppState;
 use crate::explore_pool::ExplorePool;
@@ -63,10 +63,11 @@ async fn warm(
             if let Ok(query_vec) = service.embed_query(query) {
                 if let Ok(top_catalysts) = pool.search_catalysts(&query_vec, 12) {
                     // Send a minimal request to warm the provider cache
-                    if let Ok((api_config, client)) = resolve_llm_client().await {
-                        let _ = client
+                    if let Ok(generation) = state.generation() {
+                        let _ = generation
+                            .client
                             .chat_completion(
-                                &api_config.model,
+                                &generation.model,
                                 vec![Message::text("user", "warmup")],
                                 GenerationParams {
                                     max_tokens: 1,

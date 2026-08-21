@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+#[cfg(feature = "local-llm")]
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -32,7 +34,9 @@ fn grammar_for(response_format: Option<&ResponseFormat>) -> Option<String> {
             match super::gbnf::json_schema_to_gbnf(&json_schema.schema) {
                 Ok(grammar) => Some(grammar),
                 Err(e) => {
-                    warn!("could not convert response schema to GBNF, decoding unconstrained: {e:#}");
+                    warn!(
+                        "could not convert response schema to GBNF, decoding unconstrained: {e:#}"
+                    );
                     None
                 }
             }
@@ -266,12 +270,8 @@ enum Backend {
 #[derive(Clone)]
 pub struct LlmClient {
     client: reqwest::Client,
-    api_key: Arc<RwLock<String>>,
+    api_key: String,
     base_url: String,
-    /// Whether this client was created from the free-tier server fallback.
-    /// When true, 401 errors trigger an automatic key refresh.
-    #[cfg(feature = "hosted-credentials")]
-    free_tier: bool,
     /// Only read on the `local-llm` paths; always `Http` otherwise.
     #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
     backend: Backend,
@@ -583,10 +583,8 @@ impl LlmClient {
     pub fn new(api_key: &str) -> Self {
         Self {
             client: completion_http_client(),
-            api_key: Arc::new(RwLock::new(api_key.to_string())),
+            api_key: api_key.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            #[cfg(feature = "hosted-credentials")]
-            free_tier: false,
             backend: Backend::Http,
         }
     }
@@ -594,10 +592,8 @@ impl LlmClient {
     pub fn with_base_url(api_key: &str, base_url: &str) -> Self {
         Self {
             client: completion_http_client(),
-            api_key: Arc::new(RwLock::new(api_key.to_string())),
+            api_key: api_key.to_string(),
             base_url: base_url.to_string(),
-            #[cfg(feature = "hosted-credentials")]
-            free_tier: false,
             backend: Backend::Http,
         }
     }
@@ -622,10 +618,8 @@ impl LlmClient {
         })?;
         Ok(Self {
             client: completion_http_client(),
-            api_key: Arc::new(RwLock::new(String::new())),
+            api_key: String::new(),
             base_url: format!("{LOCAL_BASE_URL_SCHEME}{model}"),
-            #[cfg(feature = "hosted-credentials")]
-            free_tier: false,
             backend: Backend::Local(Arc::new(engine)),
         })
     }
@@ -662,11 +656,6 @@ impl LlmClient {
     /// Detect structured output support for this client's provider.
     pub fn structured_output_support(&self) -> StructuredOutputSupport {
         ProviderKind::detect(&self.base_url).structured_output_support()
-    }
-
-    /// Read the current API key.
-    fn current_api_key(&self) -> String {
-        self.api_key.read().unwrap().clone()
     }
 
     /// Send a single chat completion request with the given API key.
@@ -788,23 +777,12 @@ impl LlmClient {
             url, model
         );
 
-        let api_key = self.current_api_key();
+        let api_key = &self.api_key;
         match self
-            .send_chat_completion(&url, &api_key, &request_body)
+            .send_chat_completion(&url, api_key, &request_body)
             .await
         {
             Ok(content) => Ok(content),
-            #[cfg(feature = "hosted-credentials")]
-            Err(e) if self.free_tier && e.to_string().contains("401") => {
-                // Key likely rotated — refresh and retry once
-                if self.try_refresh_key().await {
-                    let new_key = self.current_api_key();
-                    self.send_chat_completion(&url, &new_key, &request_body)
-                        .await
-                } else {
-                    Err(e)
-                }
-            }
             Err(e) if should_retry_without_sampling(&request_body, &e) => {
                 // The provider rejected a sampling parameter this model no
                 // longer accepts (a model id missing from the hardcoded omit
@@ -816,7 +794,7 @@ impl LlmClient {
                 );
                 memoize_sampling_rejection(&self.base_url, model);
                 request_body.strip_sampling_parameters();
-                self.send_chat_completion(&url, &api_key, &request_body)
+                self.send_chat_completion(&url, api_key, &request_body)
                     .await
             }
             Err(e) => Err(e),
@@ -852,20 +830,10 @@ impl LlmClient {
             url, model
         );
 
-        let api_key = self.current_api_key();
+        let api_key = &self.api_key;
         let mut response = self
-            .send_streaming_request(&url, &api_key, &request_body)
+            .send_streaming_request(&url, api_key, &request_body)
             .await?;
-
-        #[cfg(feature = "hosted-credentials")]
-        if self.free_tier && response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if self.try_refresh_key().await {
-                let new_key = self.current_api_key();
-                response = self
-                    .send_streaming_request(&url, &new_key, &request_body)
-                    .await?;
-            }
-        }
 
         let status = response.status();
         if !status.is_success() {
@@ -888,7 +856,7 @@ impl LlmClient {
                 memoize_sampling_rejection(&self.base_url, model);
                 request_body.strip_sampling_parameters();
                 response = self
-                    .send_streaming_request(&url, &self.current_api_key(), &request_body)
+                    .send_streaming_request(&url, &self.api_key, &request_body)
                     .await?;
 
                 let retry_status = response.status();
@@ -1248,7 +1216,10 @@ mod tests {
             None,
         );
         sampling_free.strip_sampling_parameters();
-        assert!(!should_retry_without_sampling(&sampling_free, &sampling_400));
+        assert!(!should_retry_without_sampling(
+            &sampling_free,
+            &sampling_400
+        ));
 
         // Untyped errors (transport failures etc.) are never retried here.
         let untyped = anyhow::anyhow!("temperature 400 mentioned in a non-API error");

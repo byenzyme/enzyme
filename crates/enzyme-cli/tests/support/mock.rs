@@ -105,10 +105,10 @@ struct EnzymeApiState {
     credits_get_replies: Option<ReplyQueue>,
     /// `Authorization` header of every free-config request, in order.
     free_config_auth_headers: Vec<String>,
-    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
     free_config_bootstrap_ids: Vec<String>,
     /// When true, free-config answers 400 `Missing bootstrap id` if neither an
-    /// `Authorization` nor an `X-Enzyme-Bootstrap-Id` header is present
+    /// `Authorization` nor an `X-Margins-Bootstrap-Id` header is present
     /// (emulates the deployed unauthenticated contract, matrix config 7).
     free_config_require_bootstrap: bool,
     /// When present, select the response from request identity instead of a
@@ -206,7 +206,7 @@ impl Respond for FreeConfigResponder {
                 .to_string()
         };
         let auth = header("authorization");
-        let bootstrap = header("x-enzyme-bootstrap-id");
+        let bootstrap = header("x-margins-bootstrap-id");
         state.free_config_auth_headers.push(auth.clone());
         state.free_config_bootstrap_ids.push(bootstrap.clone());
 
@@ -215,7 +215,7 @@ impl Respond for FreeConfigResponder {
         if state.free_config_require_bootstrap && auth.is_empty() && bootstrap.is_empty() {
             let body = serde_json::json!({
                 "error": "Missing bootstrap id",
-                "message": "Unauthenticated free-config requests must include x-enzyme-bootstrap-id.",
+                "message": "Unauthenticated free-config requests must include x-margins-bootstrap-id.",
             });
             return template(&Reply::new(400, body.to_string()));
         }
@@ -268,7 +268,7 @@ impl Respond for CountingResponder {
 
 impl MockEnzymeApi {
     /// Path the free-config endpoint is mounted at.
-    pub const FREE_CONFIG_PATH: &'static str = "/llm/free-config";
+    pub const FREE_CONFIG_PATH: &'static str = "/margins/free-config";
 
     /// Start a fake Enzyme API with a default balance of 100.0 credits and a
     /// free-config endpoint that hands back key `enz-free-test` pointing at
@@ -494,7 +494,7 @@ impl MockEnzymeApi {
     }
 
     /// Select an authenticated vs anonymous lease from the actual request
-    /// headers, modeling `/llm/free-config` rather than preselecting a tier.
+    /// headers, modeling `/margins/free-config` rather than preselecting a tier.
     pub fn set_free_config_by_auth(
         &self,
         expected_token: &str,
@@ -664,7 +664,7 @@ impl MockEnzymeApi {
         self.state.lock().unwrap().free_config_auth_headers.clone()
     }
 
-    /// `X-Enzyme-Bootstrap-Id` header of every free-config request, in order.
+    /// `X-Margins-Bootstrap-Id` header of every free-config request, in order.
     /// Empty string when absent. Proves an anonymous CLI sends a bootstrap id
     /// (matrix config 7) instead of a Bearer token.
     pub fn free_config_bootstrap_ids(&self) -> Vec<String> {
@@ -673,7 +673,7 @@ impl MockEnzymeApi {
 
     /// When enabled, free-config answers `400 { error: 'Missing bootstrap id' }`
     /// for a request carrying neither `Authorization` nor
-    /// `X-Enzyme-Bootstrap-Id` (hosted broker contract, config 7).
+    /// `X-Margins-Bootstrap-Id` (hosted broker contract, config 7).
     pub fn set_free_config_require_bootstrap(&self, require: bool) {
         self.state.lock().unwrap().free_config_require_bootstrap = require;
     }
@@ -874,7 +874,7 @@ impl MockLlm {
     }
 
     /// `Authorization` header of every chat-completion request, in order.
-    /// Useful for asserting a key was (or was not) re-minted mid-run.
+    /// Useful for asserting generation uses only its configured key.
     pub fn auth_headers(&self) -> Vec<String> {
         self.state.lock().unwrap().auth_headers.clone()
     }
