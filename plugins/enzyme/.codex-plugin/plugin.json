@@ -4,10 +4,10 @@
   "version": "0.8.1",
   "author": {
     "name": "Joshua Pham",
-    "url": "https://github.com/useenzyme"
+    "url": "https://github.com/byenzyme"
   },
   "homepage": "https://memory.enzyme.garden",
-  "repository": "https://github.com/useenzyme/enzyme",
+  "repository": "https://github.com/byenzyme/enzyme",
   "license": "MIT",
   "keywords": ["obsidian", "knowledge-management", "semantic-search", "pkm"],
   "skills": "./skills/",
