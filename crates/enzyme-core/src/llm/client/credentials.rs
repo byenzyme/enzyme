@@ -2,9 +2,9 @@
 //!
 //! Account login and credit billing live behind the separate `account` feature.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-
-#[cfg(feature = "local-llm")]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +25,8 @@ const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
 const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
 const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
+/// Leave enough lease life for broker/request latency and modest clock skew.
+const FREE_CONFIG_EXPIRY_SAFETY_MARGIN_SECS: u64 = 30;
 const FREE_CONFIG_CACHE_PROFILE_VERSION: &str = "enzyme-llm-v1";
 
 /// Where the resolved API configuration came from.
@@ -42,6 +44,7 @@ pub struct ResolvedConfig {
     pub base_url: String,
     pub model: String,
     pub provider: ConfigProvider,
+    pub expires_at: Option<i64>,
 }
 
 /// Which LLM credentials the caller explicitly wants to use.
@@ -110,6 +113,8 @@ struct CachedFreeConfig {
     base_url: String,
     model: String,
     #[serde(default)]
+    expires_at: Option<i64>,
+    #[serde(default)]
     cached_at: u64,
     profile: String,
 }
@@ -128,6 +133,29 @@ struct HostedIdentity {
 struct FetchedFreeConfig {
     config: ResolvedConfig,
     cache_profile: String,
+}
+
+pub(super) struct HostedRefresh {
+    enzyme_home: PathBuf,
+    cache_path: PathBuf,
+    cache_profile: String,
+    free_config_url: String,
+}
+
+impl HostedRefresh {
+    pub(super) async fn refresh_after_unauthorized(
+        &self,
+        rejected_key: &str,
+    ) -> Result<ResolvedConfig> {
+        invalidate_cache_if_owned(&self.cache_path, &self.cache_profile, rejected_key);
+        let identity = hosted_identity_in(&self.enzyme_home)?;
+        resolve_hosted_api_config_with_from(
+            identity,
+            self.cache_path.clone(),
+            &self.free_config_url,
+        )
+        .await
+    }
 }
 
 impl FetchedFreeConfig {
@@ -234,6 +262,7 @@ fn local_model_config_inner() -> Option<ResolvedConfig> {
         base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
         model: name,
         provider: ConfigProvider::Local,
+        expires_at: None,
     })
 }
 
@@ -250,6 +279,7 @@ fn local_model_config_inner_at(models_dir: &Path, config_path: &Path) -> Option<
         base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
         model: name,
         provider: ConfigProvider::Local,
+        expires_at: None,
     })
 }
 
@@ -298,6 +328,7 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
+            hosted_refresh: None,
             backend: local_backend(&config.base_url)?,
         })
     }
@@ -306,8 +337,14 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
+            hosted_refresh: None,
             backend: local_backend_in(&config.base_url, models_dir)?,
         })
+    }
+
+    fn with_hosted_refresh(mut self, refresh: HostedRefresh) -> Self {
+        self.hosted_refresh = Some(Arc::new(refresh));
+        self
     }
 }
 
@@ -316,7 +353,7 @@ pub fn invalidate_hosted_llm_config_cache() {
     let _ = std::fs::remove_file(api_cache_path());
 }
 
-fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig, profile: &str) {
+fn write_free_config_cache(path: &Path, cfg: &ResolvedConfig, profile: &str) -> Result<()> {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -325,12 +362,88 @@ fn write_free_config_cache(path: &std::path::Path, cfg: &ResolvedConfig, profile
         api_key: cfg.api_key.clone(),
         base_url: cfg.base_url.clone(),
         model: cfg.model.clone(),
+        expires_at: cfg.expires_at,
         cached_at: now_secs,
         profile: profile.to_string(),
     };
-    if let Ok(json) = serde_json::to_string(&cached) {
-        let _ = std::fs::write(path, json);
+    let json = serde_json::to_vec(&cached).context("failed to serialize hosted config cache")?;
+    atomic_write_secret(path, &json)
+}
+
+fn atomic_write_secret(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create cache directory {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("hosted-config");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("failed to create temporary cache in {}", parent.display()))?;
+        file.write_all(contents)
+            .context("failed to write temporary hosted config cache")?;
+        file.sync_all()
+            .context("failed to sync temporary hosted config cache")?;
+        drop(file);
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to publish hosted config cache {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+                format!("failed to secure hosted config cache {}", path.display())
+            })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
     }
+    result
+}
+
+fn invalidate_cache_if_owned(path: &Path, profile: &str, rejected_key: &str) {
+    let cached = fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<CachedFreeConfig>(&contents).ok());
+    if cached
+        .as_ref()
+        .is_some_and(|cached| cached.profile == profile && cached.api_key == rejected_key)
+    {
+        if let Err(error) = fs::remove_file(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "failed to invalidate hosted config cache {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+fn cache_entry_expired(cached: &CachedFreeConfig, now_secs: u64) -> bool {
+    let age_secs = now_secs.saturating_sub(cached.cached_at);
+    let ttl_expired = cached.cached_at == 0 || age_secs >= FREE_CONFIG_CACHE_TTL_SECS;
+    let lease_expired = cached.expires_at.is_some_and(|expires_at| {
+        let Ok(expires_at) = u64::try_from(expires_at) else {
+            return true;
+        };
+        now_secs >= expires_at.saturating_sub(FREE_CONFIG_EXPIRY_SAFETY_MARGIN_SECS)
+    });
+    ttl_expired || lease_expired
 }
 
 fn identity_cache_profile(kind: &str, value: &str) -> String {
@@ -418,11 +531,6 @@ fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
 }
 
 /// Fetch an account-selected or anonymous bootstrap config from the Margins broker.
-async fn fetch_free_config(identity: &HostedIdentity) -> Result<FetchedFreeConfig> {
-    let free_config_url = free_config_url();
-    fetch_free_config_from(identity, &free_config_url).await
-}
-
 async fn fetch_free_config_from(
     identity: &HostedIdentity,
     free_config_url: &str,
@@ -463,8 +571,6 @@ async fn fetch_free_config_from(
         .json()
         .await
         .context("failed to parse Margins free-config response")?;
-    let _ = resp.expires_at;
-
     info!(
         "Resolved API config from Margins free-config broker (model={})",
         resp.model
@@ -476,6 +582,7 @@ async fn fetch_free_config_from(
             base_url: resp.base_url,
             model: resp.model,
             provider: ConfigProvider::ServerFallback,
+            expires_at: resp.expires_at,
         },
         identity,
     ))
@@ -507,6 +614,7 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
             base_url,
             model,
             provider: ConfigProvider::Env,
+            expires_at: None,
         }));
     }
 
@@ -521,6 +629,7 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
             base_url,
             model,
             provider: ConfigProvider::Env,
+            expires_at: None,
         }));
     }
 
@@ -554,6 +663,15 @@ async fn resolve_hosted_api_config_with(
     identity: HostedIdentity,
     cache_path: PathBuf,
 ) -> Result<ResolvedConfig> {
+    let endpoint = free_config_url();
+    resolve_hosted_api_config_with_from(identity, cache_path, &endpoint).await
+}
+
+async fn resolve_hosted_api_config_with_from(
+    identity: HostedIdentity,
+    cache_path: PathBuf,
+    endpoint: &str,
+) -> Result<ResolvedConfig> {
     let cache_path = cache_path.as_path();
     if cache_path.exists() {
         let cached: Option<CachedFreeConfig> = std::fs::read_to_string(cache_path)
@@ -567,7 +685,7 @@ async fn resolve_hosted_api_config_with(
                     .unwrap_or_default()
                     .as_secs();
                 let age_secs = now_secs.saturating_sub(cached.cached_at);
-                let expired = cached.cached_at == 0 || age_secs > FREE_CONFIG_CACHE_TTL_SECS;
+                let expired = cache_entry_expired(&cached, now_secs);
 
                 let wrong_profile = cached.profile != identity.cache_profile;
 
@@ -582,6 +700,7 @@ async fn resolve_hosted_api_config_with(
                         base_url: cached.base_url,
                         model: cached.model,
                         provider: ConfigProvider::ServerFallback,
+                        expires_at: cached.expires_at,
                     });
                 }
                 if expired {
@@ -603,9 +722,16 @@ async fn resolve_hosted_api_config_with(
         }
     }
 
-    match fetch_free_config(&identity).await {
+    match fetch_free_config_from(&identity, endpoint).await {
         Ok(fetched) => {
-            write_free_config_cache(cache_path, &fetched.config, &fetched.cache_profile);
+            if let Err(error) =
+                write_free_config_cache(cache_path, &fetched.config, &fetched.cache_profile)
+            {
+                warn!(
+                    "failed to publish hosted config cache {}: {error:#}",
+                    cache_path.display()
+                );
+            }
             Ok(fetched.config)
         }
         Err(e) => {
@@ -701,8 +827,33 @@ pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
 
 pub async fn resolve_llm_client_in(enzyme_home: &Path) -> Result<(ResolvedConfig, LlmClient)> {
     let config = resolve_api_config_in(enzyme_home).await?;
-    let client = LlmClient::from_config_in(&config, &enzyme_home.join("models"))?;
+    let refresh = hosted_refresh_for(
+        enzyme_home,
+        enzyme_home.join("llm-config-cache.json"),
+        &config,
+    )?;
+    let mut client = LlmClient::from_config_in(&config, &enzyme_home.join("models"))?;
+    if let Some(refresh) = refresh {
+        client = client.with_hosted_refresh(refresh);
+    }
     Ok((config, client))
+}
+
+fn hosted_refresh_for(
+    enzyme_home: &Path,
+    cache_path: PathBuf,
+    config: &ResolvedConfig,
+) -> Result<Option<HostedRefresh>> {
+    if !matches!(config.provider, ConfigProvider::ServerFallback) {
+        return Ok(None);
+    }
+    let identity = hosted_identity_in(enzyme_home)?;
+    Ok(Some(HostedRefresh {
+        enzyme_home: enzyme_home.to_path_buf(),
+        cache_path,
+        cache_profile: identity.cache_profile,
+        free_config_url: free_config_url(),
+    }))
 }
 
 pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, LlmClient)>> {
@@ -918,5 +1069,130 @@ mod tests {
         let config =
             resolved_env_config(env(&[("OPENAI_BASE_URL", "https://llm.example/v1")])).unwrap();
         assert!(config.is_none());
+    }
+    fn cached_fixture(cached_at: u64, expires_at: Option<i64>) -> CachedFreeConfig {
+        CachedFreeConfig {
+            api_key: "leased-key".to_string(),
+            base_url: "https://llm.invalid/v1".to_string(),
+            model: "fixture-model".to_string(),
+            expires_at,
+            cached_at,
+            profile: "fixture-profile".to_string(),
+        }
+    }
+
+    fn resolved_fixture(api_key: &str, expires_at: Option<i64>) -> ResolvedConfig {
+        ResolvedConfig {
+            api_key: api_key.to_string(),
+            base_url: "https://llm.invalid/v1".to_string(),
+            model: "fixture-model".to_string(),
+            provider: ConfigProvider::ServerFallback,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn cache_expires_at_earlier_of_ttl_and_lease_margin() {
+        let now = 1_800_000_000_u64;
+        assert!(!cache_entry_expired(
+            &cached_fixture(now - 10, Some((now + 31) as i64)),
+            now,
+        ));
+        assert!(cache_entry_expired(
+            &cached_fixture(now - 10, Some((now + 30) as i64)),
+            now,
+        ));
+        assert!(cache_entry_expired(
+            &cached_fixture(now - FREE_CONFIG_CACHE_TTL_SECS, Some((now + 3_600) as i64)),
+            now,
+        ));
+        assert!(!cache_entry_expired(&cached_fixture(now - 10, None), now,));
+    }
+
+    #[test]
+    fn cache_publication_is_parseable_atomic_and_owner_only() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("llm-config-cache.json");
+        let config = resolved_fixture("secret-key", Some(1_900_000_000));
+        write_free_config_cache(&path, &config, "profile-a").unwrap();
+
+        let cached: CachedFreeConfig =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(cached.api_key, "secret-key");
+        assert_eq!(cached.expires_at, Some(1_900_000_000));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(std::fs::read_dir(home.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn concurrent_cache_publication_never_exposes_partial_json() {
+        let home = tempfile::tempdir().unwrap();
+        let path = Arc::new(home.path().join("llm-config-cache.json"));
+        let writers: Vec<_> = (0..12)
+            .map(|index| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    write_free_config_cache(
+                        &path,
+                        &resolved_fixture(&format!("secret-{index}"), Some(1_900_000_000)),
+                        "profile-a",
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let cached: CachedFreeConfig =
+            serde_json::from_slice(&std::fs::read(path.as_ref()).unwrap()).unwrap();
+        assert!(cached.api_key.starts_with("secret-"));
+        assert_eq!(cached.profile, "profile-a");
+    }
+
+    #[test]
+    fn cache_failures_do_not_include_secret_material() {
+        let home = tempfile::tempdir().unwrap();
+        let secret = "must-not-appear-in-errors";
+        let error = write_free_config_cache(
+            home.path(),
+            &resolved_fixture(secret, Some(1_900_000_000)),
+            "profile-a",
+        )
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains(secret));
+    }
+
+    #[test]
+    fn unauthorized_invalidation_requires_profile_and_rejected_key_ownership() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("llm-config-cache.json");
+        write_free_config_cache(
+            &path,
+            &resolved_fixture("rejected-key", Some(1_900_000_000)),
+            "profile-a",
+        )
+        .unwrap();
+
+        invalidate_cache_if_owned(&path, "profile-b", "rejected-key");
+        assert!(path.exists());
+        invalidate_cache_if_owned(&path, "profile-a", "other-key");
+        assert!(path.exists());
+        invalidate_cache_if_owned(&path, "profile-a", "rejected-key");
+        assert!(!path.exists());
     }
 }

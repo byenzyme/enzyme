@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
+use libsql::Value;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
@@ -170,7 +171,59 @@ pub fn run_configured_sqlite_sources(
             .with_context(|| format!("failed to index SQLite source {name:?}"))?;
         stats.add_assign(&source_stats);
     }
+    stats.documents_pruned += reconcile_removed_source_namespaces(db, sources)?;
     Ok(stats)
+}
+
+/// Remove documents and refresh orientation for SQLite source names no longer
+/// present in the active configuration. Comparing the escaped namespace in
+/// every stored source_ref also catches legacy documents that predate
+/// source_refreshes tracking.
+fn reconcile_removed_source_namespaces(
+    db: &Database,
+    sources: &HashMap<String, SqliteSourceConfig>,
+) -> Result<usize> {
+    let configured_namespaces: HashSet<String> = sources
+        .keys()
+        .map(|name| escape_source_name(name))
+        .collect();
+    let stale_paths: Vec<String> = db
+        .get_all_document_hashes()?
+        .into_keys()
+        .filter(|source_ref| {
+            let Some(rest) = source_ref.strip_prefix("sqlite:") else {
+                return false;
+            };
+            let Some((namespace, _)) = rest.split_once('/') else {
+                return false;
+            };
+            !configured_namespaces.contains(namespace)
+        })
+        .collect();
+
+    if !stale_paths.is_empty() {
+        db.remove_occurrences_for_paths(&stale_paths)?;
+    }
+    let documents_pruned = db.delete_documents_by_paths(&stale_paths)?;
+
+    let configured_names: HashSet<&str> = sources.keys().map(String::as_str).collect();
+    let stale_refreshes = db.query_read(
+        "SELECT source_name FROM source_refreshes",
+        Vec::<Value>::new(),
+        |row| row.get::<String>(0),
+    )?;
+    for source_name in stale_refreshes {
+        if !configured_names.contains(source_name.as_str()) {
+            db.execute_write(
+                "DELETE FROM source_refreshes WHERE source_name = ?1",
+                vec![Value::Text(source_name)],
+            )?;
+        }
+    }
+    if documents_pruned > 0 {
+        db.prune_entities_without_occurrences()?;
+    }
+    Ok(documents_pruned)
 }
 
 /// Execute one configured source as a complete fingerprint reconciliation.

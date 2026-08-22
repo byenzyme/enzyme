@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::pin::Pin;
-#[cfg(feature = "local-llm")]
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -270,6 +269,9 @@ pub struct LlmClient {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// Setup-owned resolver state used only for a single hosted 401 retry.
+    /// Explicit/BYOK clients never carry this context.
+    hosted_refresh: Option<Arc<credentials::HostedRefresh>>,
     /// Only read on the `local-llm` paths; always `Http` otherwise.
     #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
     backend: Backend,
@@ -537,6 +539,12 @@ fn chat_completions_url(base_url: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
+fn is_unauthorized(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<LlmApiError>()
+        .is_some_and(|error| error.status == reqwest::StatusCode::UNAUTHORIZED.as_u16())
+}
+
 #[derive(Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<Choice>,
@@ -583,6 +591,7 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: api_key.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
+            hosted_refresh: None,
             backend: Backend::Http,
         }
     }
@@ -592,6 +601,7 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
+            hosted_refresh: None,
             backend: Backend::Http,
         }
     }
@@ -744,27 +754,53 @@ impl LlmClient {
             url, model
         );
 
-        let api_key = &self.api_key;
-        match self
-            .send_chat_completion(&url, api_key, &request_body)
-            .await
-        {
-            Ok(content) => Ok(content),
-            Err(e) if should_retry_without_sampling(&request_body, &e) => {
-                // The provider rejected a sampling parameter this model no
-                // longer accepts (a model id missing from the hardcoded omit
-                // list). Retry once with all sampling parameters removed and
-                // remember the outcome so subsequent calls omit them up front.
-                warn!(
-                    model,
-                    "provider rejected sampling parameters; retrying without them: {e}"
-                );
-                memoize_sampling_rejection(&self.base_url, model);
-                request_body.strip_sampling_parameters();
-                self.send_chat_completion(&url, api_key, &request_body)
-                    .await
+        let mut active_api_key = self.api_key.clone();
+        let mut refreshed_once = false;
+        let mut retried_without_sampling = false;
+        loop {
+            match self
+                .send_chat_completion(&url, &active_api_key, &request_body)
+                .await
+            {
+                Ok(content) => return Ok(content),
+                Err(error)
+                    if !refreshed_once
+                        && is_unauthorized(&error)
+                        && self.hosted_refresh.is_some() =>
+                {
+                    let refresh = self
+                        .hosted_refresh
+                        .as_ref()
+                        .expect("guarded by is_some above");
+                    match refresh.refresh_after_unauthorized(&active_api_key).await {
+                        Ok(refreshed) => {
+                            active_api_key = refreshed.api_key;
+                            refreshed_once = true;
+                        }
+                        Err(refresh_error) => {
+                            warn!("hosted credential refresh after 401 failed: {refresh_error:#}");
+                            return Err(error);
+                        }
+                    }
+                }
+                Err(error)
+                    if !retried_without_sampling
+                        && should_retry_without_sampling(&request_body, &error) =>
+                {
+                    // The provider rejected a sampling parameter this model no
+                    // longer accepts (a model id missing from the hardcoded omit
+                    // list). Retry once with all sampling parameters removed and
+                    // remember the outcome so subsequent calls omit them up front.
+                    warn!(
+                        model,
+                        "provider rejected sampling parameters; retrying without them: {error}"
+                    );
+                    memoize_sampling_rejection(&self.base_url, model);
+                    request_body.strip_sampling_parameters();
+                    retried_without_sampling = true;
+                }
+                Err(error) => return Err(error),
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -797,59 +833,63 @@ impl LlmClient {
             url, model
         );
 
-        let api_key = &self.api_key;
-        let mut response = self
-            .send_streaming_request(&url, api_key, &request_body)
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
+        let mut active_api_key = self.api_key.clone();
+        let mut refreshed_once = false;
+        let mut retried_without_sampling = false;
+        let response = loop {
+            let response = self
+                .send_streaming_request(&url, &active_api_key, &request_body)
+                .await?;
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
             let error_body = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             warn!("LLM API returned error status {}: {}", status, error_body);
 
-            if request_body.has_sampling_parameters()
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                && !refreshed_once
+                && self.hosted_refresh.is_some()
+            {
+                let refresh = self
+                    .hosted_refresh
+                    .as_ref()
+                    .expect("guarded by is_some above");
+                match refresh.refresh_after_unauthorized(&active_api_key).await {
+                    Ok(refreshed) => {
+                        active_api_key = refreshed.api_key;
+                        refreshed_once = true;
+                        continue;
+                    }
+                    Err(refresh_error) => {
+                        warn!(
+                            "hosted credential refresh after streaming 401 failed: {refresh_error:#}"
+                        );
+                    }
+                }
+            } else if !retried_without_sampling
+                && request_body.has_sampling_parameters()
                 && is_sampling_parameter_rejection(status.as_u16(), &error_body)
             {
-                // Same reactive fallback as the non-streaming path: rebuild
-                // the request with all sampling parameters omitted, retry
-                // once, and memoize so subsequent calls omit them up front.
                 warn!(
                     model,
                     "provider rejected sampling parameters; retrying stream without them"
                 );
                 memoize_sampling_rejection(&self.base_url, model);
                 request_body.strip_sampling_parameters();
-                response = self
-                    .send_streaming_request(&url, &self.api_key, &request_body)
-                    .await?;
-
-                let retry_status = response.status();
-                if !retry_status.is_success() {
-                    let retry_body = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Failed to read error body".to_string());
-                    warn!(
-                        "LLM API returned error status {} on sampling-free retry: {}",
-                        retry_status, retry_body
-                    );
-                    return Err(LlmApiError {
-                        status: retry_status.as_u16(),
-                        body: retry_body,
-                    }
-                    .into());
-                }
-            } else {
-                return Err(LlmApiError {
-                    status: status.as_u16(),
-                    body: error_body,
-                }
-                .into());
+                retried_without_sampling = true;
+                continue;
             }
-        }
+
+            return Err(LlmApiError {
+                status: status.as_u16(),
+                body: error_body,
+            }
+            .into());
+        };
 
         let byte_stream = response.bytes_stream();
 
