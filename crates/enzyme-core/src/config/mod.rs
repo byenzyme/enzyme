@@ -1,6 +1,6 @@
-#[cfg(feature = "hosted-credentials")]
+#[cfg(feature = "account")]
 pub mod auth;
-#[cfg(feature = "hosted-credentials")]
+#[cfg(feature = "account")]
 pub mod credits;
 pub mod enzyme_config;
 pub mod paths;

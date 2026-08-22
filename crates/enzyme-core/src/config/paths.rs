@@ -344,6 +344,7 @@ impl EnzymePaths {
     }
 
     /// Path to the authentication token file.
+    #[cfg(feature = "account")]
     pub fn auth_token(&self) -> PathBuf {
         self.home.join("auth.json")
     }
@@ -523,6 +524,7 @@ mod tests {
         assert_ne!(db_path, db_path3);
     }
 
+    #[cfg(feature = "account")]
     #[test]
     fn test_auth_token_path() {
         let paths = EnzymePaths::with_overrides("/dummy", Some("/tmp/eh")).unwrap();

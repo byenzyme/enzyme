@@ -5,7 +5,7 @@ edition.workspace = true
 description = "HTTP API server for Enzyme"
 
 [dependencies]
-enzyme-core = { path = "../enzyme-core", features = ["hosted-credentials"] }
+enzyme-core = { path = "../enzyme-core" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
