@@ -5,14 +5,12 @@ use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-#[cfg(feature = "hosted-credentials")]
 mod credentials;
-#[cfg(feature = "hosted-credentials")]
 pub use credentials::*;
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -596,37 +594,6 @@ impl LlmClient {
             base_url: base_url.to_string(),
             backend: Backend::Http,
         }
-    }
-
-    /// Bind the in-process engine to one explicit GGUF file.
-    ///
-    /// This bypasses config, environment, registry selection, and every hosted
-    /// resolver. It is the local-model entry point for embedded search users.
-    #[cfg(feature = "local-llm")]
-    pub fn from_local_model(path: &std::path::Path, model: &str) -> Result<Self> {
-        let engine = super::local_engine::LocalEngine::load(
-            path,
-            model,
-            super::model_registry::context_window(model),
-        )
-        .with_context(|| {
-            format!(
-                "failed to load local model '{}' from {}",
-                model,
-                path.display()
-            )
-        })?;
-        Ok(Self {
-            client: completion_http_client(),
-            api_key: String::new(),
-            base_url: format!("{LOCAL_BASE_URL_SCHEME}{model}"),
-            backend: Backend::Local(Arc::new(engine)),
-        })
-    }
-
-    #[cfg(not(feature = "local-llm"))]
-    pub fn from_local_model(_path: &std::path::Path, _model: &str) -> Result<Self> {
-        bail!("this Enzyme build does not include local-model support")
     }
 
     /// Whether this client targets OpenRouter (enables prompt caching via cache_control).

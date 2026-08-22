@@ -1,9 +1,8 @@
-//! CLI-only credential, account, and hosted free-tier resolution.
+//! Shared environment, local-model, and anonymous hosted credential resolution.
 //!
-//! This module is compiled only with `hosted-credentials`. Embedded search
-//! callers construct [`LlmClient`] or [`super::super::Generator`] explicitly,
-//! so their default build never includes lease minting, bootstrap identity, or
-//! credential-cache access.
+//! Account login and credit billing live behind the separate `account` feature.
+
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "local-llm")]
 use std::sync::Arc;
@@ -167,14 +166,28 @@ fn configured_catalyst_mode() -> Result<CatalystMode> {
     Ok(EnzymeConfig::catalyst_llm_config()?.mode)
 }
 
+fn configured_catalyst_mode_at(config_path: &Path) -> Result<CatalystMode> {
+    Ok(EnzymeConfig::catalyst_llm_config_at(config_path)?.mode)
+}
+fn local_engine_disabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "0" || value.eq_ignore_ascii_case("false"))
+}
+
+fn local_engine_enabled(required: bool) -> Result<bool> {
+    let local_engine = env_value("ENZYME_LOCAL_ENGINE");
+    if !local_engine_disabled(local_engine.as_deref()) {
+        return Ok(true);
+    }
+    if required {
+        bail!(
+            "local catalyst mode is enabled but ENZYME_LOCAL_ENGINE disables it; unset the variable or run `enzyme model disable`"
+        );
+    }
+    Ok(false)
+}
+
 fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
-    if env_value("ENZYME_LOCAL_ENGINE").is_some_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-    {
-        if required {
-            bail!(
-                "local catalyst mode is enabled but ENZYME_LOCAL_ENGINE disables it; unset the variable or run `enzyme model disable`"
-            );
-        }
+    if !local_engine_enabled(required)? {
         return Ok(None);
     }
     match local_model_config_inner() {
@@ -184,6 +197,26 @@ fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
             super::super::model_registry::selected_name(),
             super::super::model_registry::selected_name()
         ),
+        None => Ok(None),
+    }
+}
+
+fn local_model_config_at(
+    models_dir: &Path,
+    config_path: &Path,
+    required: bool,
+) -> Result<Option<ResolvedConfig>> {
+    if !local_engine_enabled(required)? {
+        return Ok(None);
+    }
+    match local_model_config_inner_at(models_dir, config_path) {
+        Some(config) => Ok(Some(config)),
+        None if required => {
+            let name = super::super::model_registry::selected_name_at(config_path);
+            bail!(
+                "local catalyst mode requires model '{name}', but it is not installed; run `enzyme model install {name}`"
+            )
+        }
         None => Ok(None),
     }
 }
@@ -205,6 +238,22 @@ fn local_model_config_inner() -> Option<ResolvedConfig> {
 }
 
 #[cfg(not(feature = "local-llm"))]
+fn local_model_config_inner_at(_models_dir: &Path, _config_path: &Path) -> Option<ResolvedConfig> {
+    None
+}
+
+#[cfg(feature = "local-llm")]
+fn local_model_config_inner_at(models_dir: &Path, config_path: &Path) -> Option<ResolvedConfig> {
+    let (name, _path) = super::super::model_registry::active_in(models_dir, config_path)?;
+    Some(ResolvedConfig {
+        api_key: String::new(),
+        base_url: format!("{LOCAL_BASE_URL_SCHEME}{name}"),
+        model: name,
+        provider: ConfigProvider::Local,
+    })
+}
+
+#[cfg(not(feature = "local-llm"))]
 fn local_backend(base_url: &str) -> Result<Backend> {
     if base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
         bail!("this Enzyme binary was built without local-model support");
@@ -214,10 +263,21 @@ fn local_backend(base_url: &str) -> Result<Backend> {
 
 #[cfg(feature = "local-llm")]
 fn local_backend(base_url: &str) -> Result<Backend> {
+    let models_dir = super::super::model_registry::models_dir()?;
+    local_backend_in(base_url, &models_dir)
+}
+
+#[cfg(not(feature = "local-llm"))]
+fn local_backend_in(base_url: &str, _models_dir: &Path) -> Result<Backend> {
+    local_backend(base_url)
+}
+
+#[cfg(feature = "local-llm")]
+fn local_backend_in(base_url: &str, models_dir: &Path) -> Result<Backend> {
     let Some(name) = base_url.strip_prefix(LOCAL_BASE_URL_SCHEME) else {
         return Ok(Backend::Http);
     };
-    let path = super::super::model_registry::model_path(name)?;
+    let path = models_dir.join(format!("{name}.gguf"));
     let engine = super::super::local_engine::LocalEngine::load(
         &path,
         name,
@@ -239,6 +299,14 @@ impl LlmClient {
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
             backend: local_backend(&config.base_url)?,
+        })
+    }
+    fn from_config_in(config: &ResolvedConfig, models_dir: &Path) -> Result<Self> {
+        Ok(Self {
+            client: completion_http_client(),
+            api_key: config.api_key.clone(),
+            base_url: config.base_url.clone(),
+            backend: local_backend_in(&config.base_url, models_dir)?,
         })
     }
 }
@@ -272,29 +340,40 @@ fn identity_cache_profile(kind: &str, value: &str) -> String {
     )
 }
 
-fn hosted_identity() -> Result<HostedIdentity> {
-    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
-        .context("failed to resolve enzyme home for hosted identity")?;
-    let auth_path = enzyme_home.join("auth.json");
-    if let Ok(token) = crate::config::auth::AuthToken::load(&auth_path) {
-        let account_identity = if token.user_id.trim().is_empty() {
-            token.api_key.as_str()
-        } else {
-            token.user_id.as_str()
-        };
-        return Ok(HostedIdentity {
-            authorization: Some(format!("Bearer {}", token.api_key)),
-            bootstrap_id: None,
-            cache_profile: identity_cache_profile("account", account_identity),
-        });
-    }
-
+fn anonymous_hosted_identity(enzyme_home: &std::path::Path) -> Result<HostedIdentity> {
     let bootstrap_id = load_or_create_bootstrap_id(&enzyme_home.join("bootstrap.json"))?;
     Ok(HostedIdentity {
         authorization: None,
         cache_profile: identity_cache_profile("bootstrap", &bootstrap_id),
         bootstrap_id: Some(bootstrap_id),
     })
+}
+
+fn hosted_identity() -> Result<HostedIdentity> {
+    let enzyme_home = crate::config::paths::EnzymePaths::enzyme_home()
+        .context("failed to resolve enzyme home for hosted identity")?;
+    hosted_identity_in(&enzyme_home)
+}
+
+fn hosted_identity_in(enzyme_home: &Path) -> Result<HostedIdentity> {
+    #[cfg(feature = "account")]
+    {
+        let auth_path = enzyme_home.join("auth.json");
+        if let Ok(token) = crate::config::auth::AuthToken::load(&auth_path) {
+            let account_identity = if token.user_id.trim().is_empty() {
+                token.api_key.as_str()
+            } else {
+                token.user_id.as_str()
+            };
+            return Ok(HostedIdentity {
+                authorization: Some(format!("Bearer {}", token.api_key)),
+                bootstrap_id: None,
+                cache_profile: identity_cache_profile("account", account_identity),
+            });
+        }
+    }
+
+    anonymous_hosted_identity(enzyme_home)
 }
 
 fn classify_free_config_402(body: FreeConfigErrorResponse) -> anyhow::Error {
@@ -338,17 +417,24 @@ fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
     Ok(identity.bootstrap_id)
 }
 
-/// Fetch an account-selected or anonymous bootstrap config from Enzyme.
+/// Fetch an account-selected or anonymous bootstrap config from the Margins broker.
 async fn fetch_free_config(identity: &HostedIdentity) -> Result<FetchedFreeConfig> {
+    let free_config_url = free_config_url();
+    fetch_free_config_from(identity, &free_config_url).await
+}
+
+async fn fetch_free_config_from(
+    identity: &HostedIdentity,
+    free_config_url: &str,
+) -> Result<FetchedFreeConfig> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .context("failed to build HTTP client")?;
 
-    let free_config_url = free_config_url();
     debug!("Fetching free config from {}", free_config_url);
 
-    let mut request = client.get(&free_config_url);
+    let mut request = client.get(free_config_url);
     if let Some(authorization) = &identity.authorization {
         request = request.header("Authorization", authorization);
     } else if let Some(bootstrap_id) = &identity.bootstrap_id {
@@ -358,11 +444,11 @@ async fn fetch_free_config(identity: &HostedIdentity) -> Result<FetchedFreeConfi
     let resp = request
         .send()
         .await
-        .context("failed to reach Enzyme server for free config")?;
+        .context("failed to reach the Margins free-config broker")?;
 
     if identity.authorization.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
         bail!(
-            "Enzyme hosted bootstrap is unavailable without login. Run `enzyme login` and retry, or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
+            "Margins anonymous hosted bootstrap is unavailable; retry later or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
         );
     }
 
@@ -373,14 +459,14 @@ async fn fetch_free_config(identity: &HostedIdentity) -> Result<FetchedFreeConfi
 
     let resp: FreeConfigResponse = resp
         .error_for_status()
-        .context("Enzyme server returned an error for free config")?
+        .context("Margins free-config broker returned an error")?
         .json()
         .await
-        .context("failed to parse free config response")?;
+        .context("failed to parse Margins free-config response")?;
     let _ = resp.expires_at;
 
     info!(
-        "Resolved API config from Enzyme server (model={})",
+        "Resolved API config from Margins free-config broker (model={})",
         resp.model
     );
 
@@ -453,8 +539,21 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
 }
 
 async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
-    let identity = hosted_identity()?;
-    let cache_path = api_cache_path();
+    resolve_hosted_api_config_with(hosted_identity()?, api_cache_path()).await
+}
+
+async fn resolve_hosted_api_config_in(enzyme_home: &Path) -> Result<ResolvedConfig> {
+    resolve_hosted_api_config_with(
+        hosted_identity_in(enzyme_home)?,
+        enzyme_home.join("llm-config-cache.json"),
+    )
+    .await
+}
+
+async fn resolve_hosted_api_config_with(
+    identity: HostedIdentity,
+    cache_path: PathBuf,
+) -> Result<ResolvedConfig> {
     let cache_path = cache_path.as_path();
     if cache_path.exists() {
         let cached: Option<CachedFreeConfig> = std::fs::read_to_string(cache_path)
@@ -526,21 +625,49 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
 
 /// Resolve the API key, base URL, and model for LLM requests.
 pub async fn resolve_api_config() -> Result<ResolvedConfig> {
-    let mode = match configured_catalyst_mode()? {
-        CatalystMode::Auto => LlmCredentialMode::Auto,
-        CatalystMode::Local => LlmCredentialMode::Local,
-        CatalystMode::Hosted => LlmCredentialMode::Hosted,
-    };
-    if !matches!(mode, LlmCredentialMode::Auto) {
-        return resolve_api_config_for_mode(mode).await;
-    }
-    if let Some(config) = local_model_config(false)? {
-        return Ok(config);
-    }
     if let Some(config) = resolved_env_config(env_value)? {
         return Ok(config);
     }
+    match configured_catalyst_mode()? {
+        CatalystMode::Auto => {
+            if let Some(config) = local_model_config(false)? {
+                return Ok(config);
+            }
+        }
+        CatalystMode::Local => {
+            return local_model_config(true)?
+                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable"));
+        }
+        CatalystMode::Hosted => {}
+    }
     resolve_hosted_api_config().await
+}
+
+/// Resolve credentials and model selection relative to an embedder-owned home.
+///
+/// The home contains `config.toml`, `models/`, `bootstrap.json`, and the
+/// anonymous hosted lease cache. Account files are considered only when the
+/// `account` feature is enabled.
+pub async fn resolve_api_config_in(enzyme_home: &Path) -> Result<ResolvedConfig> {
+    if let Some(config) = resolved_env_config(env_value)? {
+        return Ok(config);
+    }
+
+    let config_path = enzyme_home.join("config.toml");
+    let models_dir = enzyme_home.join("models");
+    match configured_catalyst_mode_at(&config_path)? {
+        CatalystMode::Auto => {
+            if let Some(config) = local_model_config_at(&models_dir, &config_path, false)? {
+                return Ok(config);
+            }
+        }
+        CatalystMode::Local => {
+            return local_model_config_at(&models_dir, &config_path, true)?
+                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable"));
+        }
+        CatalystMode::Hosted => {}
+    }
+    resolve_hosted_api_config_in(enzyme_home).await
 }
 
 pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<ResolvedConfig> {
@@ -569,6 +696,12 @@ pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<Reso
 pub async fn resolve_llm_client() -> Result<(ResolvedConfig, LlmClient)> {
     let config = resolve_api_config().await?;
     let client = LlmClient::from_config(&config)?;
+    Ok((config, client))
+}
+
+pub async fn resolve_llm_client_in(enzyme_home: &Path) -> Result<(ResolvedConfig, LlmClient)> {
+    let config = resolve_api_config_in(enzyme_home).await?;
+    let client = LlmClient::from_config_in(&config, &enzyme_home.join("models"))?;
     Ok((config, client))
 }
 
@@ -617,54 +750,74 @@ mod tests {
         move |key| values.get(key).cloned()
     }
 
-    fn account_identity(token: &str, user_id: &str) -> HostedIdentity {
-        HostedIdentity {
-            authorization: Some(format!("Bearer {token}")),
-            bootstrap_id: None,
-            cache_profile: identity_cache_profile("account", user_id),
-        }
-    }
-
-    fn server_config(api_key: &str) -> ResolvedConfig {
-        ResolvedConfig {
-            api_key: api_key.to_string(),
-            base_url: "https://llm.invalid/v1".to_string(),
-            model: "test-model".to_string(),
-            provider: ConfigProvider::ServerFallback,
-        }
-    }
-
-    fn assert_fetched_cache_profile(
-        captured: &HostedIdentity,
-        transitioned: &HostedIdentity,
-        api_key: &str,
-    ) {
-        assert_ne!(captured.cache_profile, transitioned.cache_profile);
-        let fetched = FetchedFreeConfig::new(server_config(api_key), captured);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hosted-cache.json");
-        write_free_config_cache(&path, &fetched.config, &fetched.cache_profile);
-        let cached: CachedFreeConfig =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(cached.profile, captured.cache_profile);
-        assert_ne!(cached.profile, transitioned.cache_profile);
-        assert_eq!(cached.api_key, api_key);
+    #[test]
+    fn local_engine_legacy_opt_out_accepts_only_zero_or_false() {
+        assert!(local_engine_disabled(Some("0")));
+        assert!(local_engine_disabled(Some("false")));
+        assert!(local_engine_disabled(Some("FALSE")));
+        assert!(!local_engine_disabled(None));
+        assert!(!local_engine_disabled(Some("")));
+        assert!(!local_engine_disabled(Some("disabled")));
+        assert!(!local_engine_disabled(Some("1")));
     }
 
     #[test]
-    fn resolve_cache_keeps_identity_captured_before_account_transition() {
-        let captured_a = account_identity("token-a", "account-a");
-        let transitioned_b = account_identity("token-b", "account-b");
-        assert_eq!(captured_a.authorization.as_deref(), Some("Bearer token-a"));
-        assert_fetched_cache_profile(&captured_a, &transitioned_b, "lease-for-a");
+    fn anonymous_identity_is_stable_and_account_free() {
+        let home = tempfile::tempdir().unwrap();
+        let first = anonymous_hosted_identity(home.path()).unwrap();
+        let second = anonymous_hosted_identity(home.path()).unwrap();
+        assert_eq!(first.bootstrap_id, second.bootstrap_id);
+        assert!(first.authorization.is_none());
+        assert_eq!(first.cache_profile, second.cache_profile);
+        assert!(home.path().join("bootstrap.json").is_file());
     }
 
-    #[test]
-    fn refresh_cache_keeps_identity_captured_before_inverse_transition() {
-        let captured_b = account_identity("token-b", "account-b");
-        let transitioned_a = account_identity("token-a", "account-a");
-        assert_eq!(captured_b.authorization.as_deref(), Some("Bearer token-b"));
-        assert_fetched_cache_profile(&captured_b, &transitioned_a, "refreshed-lease-for-b");
+    #[tokio::test]
+    async fn lean_build_fetches_anonymous_config_with_margins_header() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = [0_u8; 8192];
+            let read = stream.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..read]).into_owned();
+            let body = r#"{"api_key":"anonymous-key","base_url":"https://llm.invalid/v1","model":"anonymous-model"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request
+        });
+
+        let home = tempfile::tempdir().unwrap();
+        let identity = anonymous_hosted_identity(home.path()).unwrap();
+        let bootstrap_id = identity.bootstrap_id.clone().unwrap();
+        let fetched =
+            fetch_free_config_from(&identity, &format!("http://{addr}/margins/free-config"))
+                .await
+                .unwrap();
+        let request = server.join().unwrap().to_ascii_lowercase();
+
+        assert_eq!(fetched.config.api_key, "anonymous-key");
+        assert_eq!(fetched.config.model, "anonymous-model");
+        assert!(matches!(
+            fetched.config.provider,
+            ConfigProvider::ServerFallback
+        ));
+        assert!(request.starts_with("get /margins/free-config "));
+        assert!(request.contains(&format!(
+            "\r\nx-margins-bootstrap-id: {}\r\n",
+            bootstrap_id.to_ascii_lowercase()
+        )));
+        assert!(!request.contains("authorization:"));
     }
 
     #[test]

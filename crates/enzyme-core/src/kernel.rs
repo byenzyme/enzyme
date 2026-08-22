@@ -1,9 +1,8 @@
 //! Embedder-facing orchestration for building and querying a local search index.
 //!
-//! This module deliberately contains no CLI, account, hosted-service, or global
-//! path resolution. Callers choose the vault and database paths, provide the
-//! indexing/selection policy, and explicitly supply a generator when thematic
-//! bridges are desired.
+//! Search-index paths and selection policy remain caller-owned. Catalyst generation
+//! is optional; embedders that want it call [`Generator::resolve`] so environment,
+//! configured local inference, and anonymous hosted fallback share one policy.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

@@ -9,7 +9,7 @@ name = "enzyme"
 path = "src/main.rs"
 
 [dependencies]
-enzyme-core = { path = "../enzyme-core", features = ["hosted-credentials"] }
+enzyme-core = { path = "../enzyme-core", features = ["account"] }
 reqwest = { workspace = true, features = ["multipart", "stream"] }
 flate2 = "1"
 tar = "0.4"

@@ -177,6 +177,36 @@ fn cell1_free_with_credits_gets_free_lease_and_proceeds() {
     );
     assert_no_new_cli_endpoints(&api, &diag);
 }
+/// Normal CLI Auto mode must not silently consume inherited provider keys.
+#[test]
+fn normal_auto_ignores_inherited_provider_keys() {
+    let fixture = VaultFixture::new();
+    fixture.login("k-auto-user");
+
+    let api = MockEnzymeApi::start();
+    api.set_credit_balance(100.0);
+    let hosted_llm = MockLlm::start();
+    hosted_llm.set_ok_content(&catalyst_content());
+    api.set_free_config_free_tier("enz-hosted-auto-key", &hosted_llm.base_url(), "test-model");
+
+    let inherited_env_llm = MockLlm::start();
+    inherited_env_llm.set_ok_content(&catalyst_content());
+    let out = fixture
+        .cli()
+        .args(["init", "--quiet"])
+        .enzyme_api(&api)
+        .env_llm(&inherited_env_llm)
+        .run();
+
+    assert!(out.success);
+    assert!(api.free_config_calls() > 0);
+    assert!(hosted_llm.request_count() > 0);
+    assert_eq!(
+        inherited_env_llm.request_count(),
+        0,
+        "normal Auto consumed inherited OPENAI_* config without --use-env-llm"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Cell 2 — free account, credits=0.

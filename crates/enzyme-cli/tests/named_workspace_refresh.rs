@@ -69,7 +69,6 @@ timestamp = {{ unit = "ms" }}
         command
             .args(args)
             .env("ENZYME_HOME", &self.enzyme_home)
-            .env("ENZYME_LOCAL_ENGINE", "disabled")
             .env_remove("OPENAI_API_KEY")
             .env_remove("OPENROUTER_API_KEY");
         for (key, value) in env {
