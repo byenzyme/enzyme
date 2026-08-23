@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enzyme_core::kernel::Generator;
@@ -96,145 +97,225 @@ fn respond(stream: &mut std::net::TcpStream, status: &str, content_type: &str, b
     .unwrap();
 }
 
-fn start_rotation_server(
-    streaming: bool,
-) -> (String, Arc<Mutex<Vec<String>>>, std::thread::JoinHandle<()>) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
-    let handle = std::thread::spawn(move || {
-        let mut broker_calls = 0;
-        for _ in 0..4 {
-            let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
-            captured.lock().unwrap().push(request.clone());
-            let first_line = request.lines().next().unwrap_or_default();
-            if first_line.contains("/margins/free-config") {
-                broker_calls += 1;
-                let key = if broker_calls == 1 {
-                    "lease-old"
-                } else {
-                    "lease-new"
-                };
-                let body = serde_json::json!({
-                    "api_key": key,
-                    "base_url": format!("http://{address}/v1"),
-                    "model": "rotation-model",
-                    "expires_at": 4_102_444_800_i64,
-                })
-                .to_string();
-                respond(&mut stream, "200 OK", "application/json", &body);
-            } else if request
-                .to_ascii_lowercase()
-                .contains("\r\nauthorization: bearer lease-old\r\n")
-            {
-                respond(
-                    &mut stream,
-                    "401 Unauthorized",
-                    "application/json",
-                    r#"{"error":"expired lease"}"#,
-                );
-            } else if streaming {
-                respond(
-                    &mut stream,
-                    "200 OK",
-                    "text/event-stream",
-                    r#"data: {"choices":[{"delta":{"content":"rotated"}}]}
-
-data: [DONE]
-
-"#,
-                );
-            } else {
-                respond(
-                    &mut stream,
-                    "200 OK",
-                    "application/json",
-                    r#"{"choices":[{"message":{"content":"rotated"},"finish_reason":"stop"}]}"#,
-                );
-            }
-        }
-    });
-    (
-        format!("http://{address}/margins/free-config"),
-        requests,
-        handle,
-    )
+struct HttpResponse {
+    status: &'static str,
+    content_type: &'static str,
+    body: String,
 }
 
-async fn assert_owned_401_rotation(streaming: bool) {
-    let _lock = env_lock().lock().unwrap();
-    let (broker_url, requests, server) = start_rotation_server(streaming);
-    let _env = HostedEnv::install(&broker_url);
-    let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join("config.toml"),
-        r#"[llm]
-mode = "hosted"
-"#,
-    )
-    .unwrap();
+struct RecordingServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
-    let generator = Generator::resolve_in(home.path()).await.unwrap();
+impl RecordingServer {
+    fn start(handler: impl Fn(&str) -> HttpResponse + Send + Sync + 'static) -> RecordingServer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let handler = Arc::new(handler);
+        let thread = std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            while !stopped.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let captured = Arc::clone(&captured);
+                        let handler = Arc::clone(&handler);
+                        connections.push(std::thread::spawn(move || {
+                            let request = read_request(&mut stream);
+                            captured.lock().unwrap().push(request.clone());
+                            let response = handler(&request);
+                            respond(
+                                &mut stream,
+                                response.status,
+                                response.content_type,
+                                &response.body,
+                            );
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("test server accept failed: {error}"),
+                }
+            }
+            for connection in connections {
+                connection.join().unwrap();
+            }
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+impl Drop for RecordingServer {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (candidate, value) = line.split_once(':')?;
+        candidate.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+fn request_model(request: &str) -> String {
+    let body = request.split_once("\r\n\r\n").unwrap().1;
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    body["model"].as_str().unwrap().to_string()
+}
+
+fn completion_response(request: &str) -> HttpResponse {
+    let body = request.split_once("\r\n\r\n").unwrap().1;
+    let body: serde_json::Value = serde_json::from_str(body).unwrap();
+    if body["stream"].as_bool() == Some(true) {
+        HttpResponse {
+            status: "200 OK",
+            content_type: "text/event-stream",
+            body: "data: {\"choices\":[{\"delta\":{\"content\":\"rotated\"}}]}\n\ndata: [DONE]\n\n"
+                .to_string(),
+        }
+    } else {
+        HttpResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: r#"{"choices":[{"message":{"content":"rotated"},"finish_reason":"stop"}]}"#
+                .to_string(),
+        }
+    }
+}
+
+fn start_broker(old_base_url: String, new_base_url: String) -> (RecordingServer, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured_calls = Arc::clone(&calls);
+    let server = RecordingServer::start(move |request| {
+        assert!(request.starts_with("GET /margins/free-config "));
+        assert!(request_header(request, "X-Margins-Bootstrap-Id").is_some());
+        assert!(request_header(request, "Authorization").is_none());
+        let call = captured_calls.fetch_add(1, Ordering::SeqCst);
+        let (api_key, base_url, model) = if call == 0 {
+            ("lease-old", old_base_url.as_str(), "old-model")
+        } else {
+            ("lease-new", new_base_url.as_str(), "new-model")
+        };
+        HttpResponse {
+            status: "200 OK",
+            content_type: "application/json",
+            body: serde_json::json!({
+                "api_key": api_key,
+                "base_url": format!("{base_url}/v1"),
+                "model": model,
+                "expires_at": 4_102_444_800_i64,
+            })
+            .to_string(),
+        }
+    });
+    (server, calls)
+}
+
+fn rejected_response() -> HttpResponse {
+    HttpResponse {
+        status: "401 Unauthorized",
+        content_type: "application/json",
+        body: r#"{"error":"expired lease"}"#.to_string(),
+    }
+}
+
+async fn complete(generator: &Generator, streaming: bool) -> String {
+    let model = generator.model();
     let messages = vec![Message::text("user", "rotate")];
     if streaming {
         let stream = generator
             .client()
-            .chat_completion_streaming(generator.model(), messages, GenerationParams::default())
+            .chat_completion_streaming(&model, messages, GenerationParams::default())
             .await
             .unwrap();
-        let chunks: Vec<_> = stream.collect::<Vec<_>>().await;
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].as_ref().unwrap(), "rotated");
+        stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect()
     } else {
-        let response = generator
+        generator
             .client()
-            .chat_completion(generator.model(), messages, GenerationParams::default())
+            .chat_completion(&model, messages, GenerationParams::default())
             .await
-            .unwrap();
-        assert_eq!(response, "rotated");
+            .unwrap()
     }
-    server.join().unwrap();
+}
 
+fn assert_requests(
+    requests: &Arc<Mutex<Vec<String>>>,
+    expected_count: usize,
+    key: &str,
+    model: &str,
+) {
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(
-        requests
-            .iter()
-            .filter(|request| request.starts_with("GET /margins/free-config "))
-            .count(),
-        2,
-    );
-    let broker_requests: Vec<_> = requests
-        .iter()
-        .filter(|request| request.starts_with("GET /margins/free-config "))
-        .collect();
-    assert!(broker_requests.iter().all(|request| {
-        request
-            .to_ascii_lowercase()
-            .contains("\r\nx-margins-bootstrap-id: ")
-    }));
-    assert!(
-        broker_requests
-            .iter()
-            .all(|request| { !request.to_ascii_lowercase().contains("\r\nauthorization:") })
-    );
-    assert!(requests.iter().any(|request| {
-        request
-            .to_ascii_lowercase()
-            .contains("\r\nauthorization: bearer lease-old\r\n")
-    }));
-    assert!(requests.iter().any(|request| {
-        request
-            .to_ascii_lowercase()
-            .contains("\r\nauthorization: bearer lease-new\r\n")
-    }));
+    assert_eq!(requests.len(), expected_count, "requests: {requests:#?}");
+    let authorization = format!("Bearer {key}");
+    for request in requests.iter() {
+        assert_eq!(
+            request_header(request, "Authorization"),
+            Some(authorization.as_str())
+        );
+        assert_eq!(request_model(request), model);
+    }
+}
 
+async fn assert_sequential_rotation(streaming: bool) {
+    let _lock = env_lock().lock().unwrap();
+    let mut old = RecordingServer::start(|_| rejected_response());
+    let mut new = RecordingServer::start(completion_response);
+    let (mut broker, broker_calls) = start_broker(old.base_url.clone(), new.base_url.clone());
+    let _env = HostedEnv::install(&format!("{}/margins/free-config", broker.base_url));
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[llm]\nmode = \"hosted\"\n",
+    )
+    .unwrap();
+
+    let generator = Generator::resolve_in(home.path()).await.unwrap();
+    assert_eq!(generator.model(), "old-model");
+    assert_eq!(complete(&generator, streaming).await, "rotated");
+    assert_eq!(generator.model(), "new-model");
+    assert_eq!(complete(&generator, streaming).await, "rotated");
+
+    old.finish();
+    new.finish();
+    broker.finish();
+    assert_eq!(broker_calls.load(Ordering::SeqCst), 2);
+    assert_requests(&old.requests, 1, "lease-old", "old-model");
+    assert_requests(&new.requests, 2, "lease-new", "new-model");
     let cache: serde_json::Value =
         serde_json::from_slice(&std::fs::read(home.path().join("llm-config-cache.json")).unwrap())
             .unwrap();
     assert_eq!(cache["api_key"], "lease-new");
+    assert_eq!(cache["base_url"], format!("{}/v1", new.base_url));
+    assert_eq!(cache["model"], "new-model");
 }
 
 fn start_near_expiry_server() -> (String, std::thread::JoinHandle<()>) {
@@ -301,13 +382,64 @@ async fn explicit_home_env_credentials_win_over_persisted_local_mode() {
 }
 
 #[tokio::test]
-async fn resolve_in_retries_non_streaming_401_with_home_owned_rotation() {
-    assert_owned_401_rotation(false).await;
+async fn sequential_non_streaming_calls_publish_rotated_endpoint_key_and_model() {
+    assert_sequential_rotation(false).await;
 }
 
 #[tokio::test]
-async fn resolve_in_retries_streaming_401_with_home_owned_rotation() {
-    assert_owned_401_rotation(true).await;
+async fn sequential_streaming_calls_publish_rotated_endpoint_key_and_model() {
+    assert_sequential_rotation(true).await;
+}
+
+#[tokio::test]
+async fn concurrent_non_streaming_401s_singleflight_one_broker_refresh() {
+    const CALLERS: usize = 8;
+    let _lock = env_lock().lock().unwrap();
+    let gate = Arc::new((Mutex::new(0_usize), Condvar::new()));
+    let handler_gate = Arc::clone(&gate);
+    let mut old = RecordingServer::start(move |_| {
+        let (count, ready) = &*handler_gate;
+        let mut count = count.lock().unwrap();
+        *count += 1;
+        if *count == CALLERS {
+            ready.notify_all();
+        }
+        while *count < CALLERS {
+            let (next, timeout) = ready.wait_timeout(count, Duration::from_secs(5)).unwrap();
+            count = next;
+            assert!(
+                !timeout.timed_out(),
+                "concurrent callers did not reach old endpoint"
+            );
+        }
+        rejected_response()
+    });
+    let mut new = RecordingServer::start(completion_response);
+    let (mut broker, broker_calls) = start_broker(old.base_url.clone(), new.base_url.clone());
+    let _env = HostedEnv::install(&format!("{}/margins/free-config", broker.base_url));
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[llm]\nmode = \"hosted\"\n",
+    )
+    .unwrap();
+    let generator = Arc::new(Generator::resolve_in(home.path()).await.unwrap());
+
+    let results = futures::future::join_all((0..CALLERS).map(|_| {
+        let generator = Arc::clone(&generator);
+        async move { complete(&generator, false).await }
+    }))
+    .await;
+    assert!(results.iter().all(|result| result == "rotated"));
+    assert_eq!(generator.model(), "new-model");
+    assert_eq!(complete(&generator, false).await, "rotated");
+
+    old.finish();
+    new.finish();
+    broker.finish();
+    assert_eq!(broker_calls.load(Ordering::SeqCst), 2);
+    assert_requests(&old.requests, CALLERS, "lease-old", "old-model");
+    assert_requests(&new.requests, CALLERS + 1, "lease-new", "new-model");
 }
 
 #[tokio::test]

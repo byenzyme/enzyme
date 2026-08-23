@@ -372,8 +372,9 @@ fn ensure_searchable_owned(
         if entities.is_empty() {
             Bridged::NoEntities
         } else {
+            let model = generator.model();
             let config = CatalystConfig {
-                model: generator.model(),
+                model: &model,
                 entity_profiles: &selection.entity_profiles,
                 ..Default::default()
             };

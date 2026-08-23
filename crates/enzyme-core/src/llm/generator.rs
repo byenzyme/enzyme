@@ -28,8 +28,13 @@ impl Generator {
         &self.client
     }
 
-    pub fn model(&self) -> &str {
-        &self.config.model
+    /// Current model for this generator.
+    ///
+    /// Hosted `resolve_in` generators may rotate model and endpoint after a
+    /// rejected lease, so the value is an owned coherent snapshot rather than
+    /// a reference to the initial resolution.
+    pub fn model(&self) -> String {
+        self.client.resolved_model(&self.config.model)
     }
 
     pub fn provider(&self) -> &ConfigProvider {

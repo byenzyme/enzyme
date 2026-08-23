@@ -269,12 +269,30 @@ pub struct LlmClient {
     client: reqwest::Client,
     api_key: String,
     base_url: String,
-    /// Setup-owned resolver state used only for a single hosted 401 retry.
-    /// Explicit/BYOK clients never carry this context.
-    hosted_refresh: Option<Arc<credentials::HostedRefresh>>,
+    /// Shared per-client hosted configuration and singleflight refresh state.
+    /// Explicit/BYOK/local clients never carry this context.
+    hosted_state: Option<Arc<credentials::HostedClientState>>,
     /// Only read on the `local-llm` paths; always `Http` otherwise.
     #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
     backend: Backend,
+}
+
+struct CompletionConfigSnapshot {
+    api_key: String,
+    base_url: String,
+    model: String,
+    hosted: Option<credentials::HostedConfigSnapshot>,
+}
+
+impl CompletionConfigSnapshot {
+    fn hosted(snapshot: credentials::HostedConfigSnapshot) -> Self {
+        Self {
+            api_key: snapshot.config.api_key.clone(),
+            base_url: snapshot.config.base_url.clone(),
+            model: snapshot.config.model.clone(),
+            hosted: Some(snapshot),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -591,7 +609,7 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: api_key.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
-            hosted_refresh: None,
+            hosted_state: None,
             backend: Backend::Http,
         }
     }
@@ -601,14 +619,40 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
-            hosted_refresh: None,
+            hosted_state: None,
             backend: Backend::Http,
         }
     }
 
+    fn completion_config_snapshot(&self, requested_model: &str) -> CompletionConfigSnapshot {
+        match &self.hosted_state {
+            Some(state) => CompletionConfigSnapshot::hosted(state.snapshot()),
+            None => CompletionConfigSnapshot {
+                api_key: self.api_key.clone(),
+                base_url: self.base_url.clone(),
+                model: requested_model.to_string(),
+                hosted: None,
+            },
+        }
+    }
+
+    fn active_base_url(&self) -> String {
+        self.hosted_state
+            .as_ref()
+            .map(|state| state.snapshot().config.base_url)
+            .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    pub(super) fn resolved_model(&self, initial_model: &str) -> String {
+        self.hosted_state
+            .as_ref()
+            .map(|state| state.snapshot().config.model)
+            .unwrap_or_else(|| initial_model.to_string())
+    }
+
     /// Whether this client targets OpenRouter (enables prompt caching via cache_control).
     pub fn is_openrouter(&self) -> bool {
-        self.base_url.contains("openrouter.ai")
+        self.active_base_url().contains("openrouter.ai")
     }
 
     /// Whether this client targets a local/fine-tuned model server.
@@ -616,7 +660,8 @@ impl LlmClient {
     /// True for localhost URLs, or when `ENZYME_LOCAL_MODEL=1` is set
     /// (e.g. a fine-tuned model hosted remotely that uses the compact prompt format).
     pub fn is_local(&self) -> bool {
-        if self.base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
+        let active_base_url = self.active_base_url();
+        if active_base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
             return true;
         }
         if std::env::var("ENZYME_LOCAL_MODEL")
@@ -626,13 +671,13 @@ impl LlmClient {
         {
             return true;
         }
-        let url = self.base_url.to_lowercase();
+        let url = active_base_url.to_lowercase();
         url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
     }
 
     /// Detect structured output support for this client's provider.
     pub fn structured_output_support(&self) -> StructuredOutputSupport {
-        ProviderKind::detect(&self.base_url).structured_output_support()
+        ProviderKind::detect(&self.active_base_url()).structured_output_support()
     }
 
     /// Send a single chat completion request with the given API key.
@@ -744,37 +789,42 @@ impl LlmClient {
             return Self::local_chat_completion(Arc::clone(engine), messages, params).await;
         }
 
-        let url = chat_completions_url(&self.base_url)?;
-
-        let mut request_body =
-            chat_completion_request(&self.base_url, model, messages, params, None);
-
-        debug!(
-            "Sending chat completion request to {} with model {}",
-            url, model
-        );
-
-        let mut active_api_key = self.api_key.clone();
+        let mut active = self.completion_config_snapshot(model);
         let mut refreshed_once = false;
         let mut retried_without_sampling = false;
         loop {
+            let url = chat_completions_url(&active.base_url)?;
+            let mut request_body = chat_completion_request(
+                &active.base_url,
+                &active.model,
+                messages.clone(),
+                params.clone(),
+                None,
+            );
+            if retried_without_sampling {
+                request_body.strip_sampling_parameters();
+            }
+            debug!(
+                "Sending chat completion request to {} with model {}",
+                url, active.model
+            );
+
             match self
-                .send_chat_completion(&url, &active_api_key, &request_body)
+                .send_chat_completion(&url, &active.api_key, &request_body)
                 .await
             {
                 Ok(content) => return Ok(content),
                 Err(error)
                     if !refreshed_once
                         && is_unauthorized(&error)
-                        && self.hosted_refresh.is_some() =>
+                        && self.hosted_state.is_some()
+                        && active.hosted.is_some() =>
                 {
-                    let refresh = self
-                        .hosted_refresh
-                        .as_ref()
-                        .expect("guarded by is_some above");
-                    match refresh.refresh_after_unauthorized(&active_api_key).await {
+                    let state = self.hosted_state.as_ref().expect("guarded above");
+                    let rejected = active.hosted.as_ref().expect("guarded above");
+                    match state.refresh_after_unauthorized(rejected).await {
                         Ok(refreshed) => {
-                            active_api_key = refreshed.api_key;
+                            active = CompletionConfigSnapshot::hosted(refreshed);
                             refreshed_once = true;
                         }
                         Err(refresh_error) => {
@@ -787,16 +837,11 @@ impl LlmClient {
                     if !retried_without_sampling
                         && should_retry_without_sampling(&request_body, &error) =>
                 {
-                    // The provider rejected a sampling parameter this model no
-                    // longer accepts (a model id missing from the hardcoded omit
-                    // list). Retry once with all sampling parameters removed and
-                    // remember the outcome so subsequent calls omit them up front.
                     warn!(
-                        model,
+                        model = active.model,
                         "provider rejected sampling parameters; retrying without them: {error}"
                     );
-                    memoize_sampling_rejection(&self.base_url, model);
-                    request_body.strip_sampling_parameters();
+                    memoize_sampling_rejection(&active.base_url, &active.model);
                     retried_without_sampling = true;
                 }
                 Err(error) => return Err(error),
@@ -823,22 +868,28 @@ impl LlmClient {
             return Ok(Box::pin(futures::stream::once(async move { Ok(text) })));
         }
 
-        let url = chat_completions_url(&self.base_url)?;
-
-        let mut request_body =
-            chat_completion_request(&self.base_url, model, messages, params, Some(true));
-
-        debug!(
-            "Sending streaming chat completion request to {} with model {}",
-            url, model
-        );
-
-        let mut active_api_key = self.api_key.clone();
+        let mut active = self.completion_config_snapshot(model);
         let mut refreshed_once = false;
         let mut retried_without_sampling = false;
         let response = loop {
+            let url = chat_completions_url(&active.base_url)?;
+            let mut request_body = chat_completion_request(
+                &active.base_url,
+                &active.model,
+                messages.clone(),
+                params.clone(),
+                Some(true),
+            );
+            if retried_without_sampling {
+                request_body.strip_sampling_parameters();
+            }
+            debug!(
+                "Sending streaming chat completion request to {} with model {}",
+                url, active.model
+            );
+
             let response = self
-                .send_streaming_request(&url, &active_api_key, &request_body)
+                .send_streaming_request(&url, &active.api_key, &request_body)
                 .await?;
             let status = response.status();
             if status.is_success() {
@@ -852,15 +903,14 @@ impl LlmClient {
 
             if status == reqwest::StatusCode::UNAUTHORIZED
                 && !refreshed_once
-                && self.hosted_refresh.is_some()
+                && self.hosted_state.is_some()
+                && active.hosted.is_some()
             {
-                let refresh = self
-                    .hosted_refresh
-                    .as_ref()
-                    .expect("guarded by is_some above");
-                match refresh.refresh_after_unauthorized(&active_api_key).await {
+                let state = self.hosted_state.as_ref().expect("guarded above");
+                let rejected = active.hosted.as_ref().expect("guarded above");
+                match state.refresh_after_unauthorized(rejected).await {
                     Ok(refreshed) => {
-                        active_api_key = refreshed.api_key;
+                        active = CompletionConfigSnapshot::hosted(refreshed);
                         refreshed_once = true;
                         continue;
                     }
@@ -875,11 +925,10 @@ impl LlmClient {
                 && is_sampling_parameter_rejection(status.as_u16(), &error_body)
             {
                 warn!(
-                    model,
+                    model = active.model,
                     "provider rejected sampling parameters; retrying stream without them"
                 );
-                memoize_sampling_rejection(&self.base_url, model);
-                request_body.strip_sampling_parameters();
+                memoize_sampling_rejection(&active.base_url, &active.model);
                 retried_without_sampling = true;
                 continue;
             }

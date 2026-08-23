@@ -5,7 +5,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -143,10 +143,7 @@ pub(super) struct HostedRefresh {
 }
 
 impl HostedRefresh {
-    pub(super) async fn refresh_after_unauthorized(
-        &self,
-        rejected_key: &str,
-    ) -> Result<ResolvedConfig> {
+    async fn refresh_after_unauthorized(&self, rejected_key: &str) -> Result<ResolvedConfig> {
         invalidate_cache_if_owned(&self.cache_path, &self.cache_profile, rejected_key);
         let identity = hosted_identity_in(&self.enzyme_home)?;
         resolve_hosted_api_config_with_from(
@@ -155,6 +152,102 @@ impl HostedRefresh {
             &self.free_config_url,
         )
         .await
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct HostedConfigSnapshot {
+    pub(super) config: ResolvedConfig,
+    revision: u64,
+}
+
+struct HostedConfigState {
+    config: ResolvedConfig,
+    revision: u64,
+    last_refresh_error: Option<String>,
+}
+
+/// Per-client hosted configuration. The async mutex makes 401 refresh a
+/// singleflight operation; the synchronous lock only protects short snapshots.
+pub(super) struct HostedClientState {
+    current: RwLock<HostedConfigState>,
+    refresh_lock: tokio::sync::Mutex<()>,
+    refresh: HostedRefresh,
+}
+
+impl HostedClientState {
+    pub(super) fn new(config: ResolvedConfig, refresh: HostedRefresh) -> Self {
+        Self {
+            current: RwLock::new(HostedConfigState {
+                config,
+                revision: 0,
+                last_refresh_error: None,
+            }),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            refresh,
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> HostedConfigSnapshot {
+        let state = self
+            .current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        HostedConfigSnapshot {
+            config: state.config.clone(),
+            revision: state.revision,
+        }
+    }
+
+    pub(super) async fn refresh_after_unauthorized(
+        &self,
+        rejected: &HostedConfigSnapshot,
+    ) -> Result<HostedConfigSnapshot> {
+        let _refresh_guard = self.refresh_lock.lock().await;
+        {
+            let state = self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.revision != rejected.revision {
+                if let Some(error) = &state.last_refresh_error {
+                    return Err(anyhow::anyhow!(error.clone()));
+                }
+                return Ok(HostedConfigSnapshot {
+                    config: state.config.clone(),
+                    revision: state.revision,
+                });
+            }
+        }
+
+        let refreshed = match self
+            .refresh
+            .refresh_after_unauthorized(&rejected.config.api_key)
+            .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                let shared_error = format!("{error:#}");
+                let mut state = self
+                    .current
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.revision = state.revision.wrapping_add(1);
+                state.last_refresh_error = Some(shared_error);
+                return Err(error);
+            }
+        };
+        let mut state = self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.config = refreshed;
+        state.revision = state.revision.wrapping_add(1);
+        state.last_refresh_error = None;
+        Ok(HostedConfigSnapshot {
+            config: state.config.clone(),
+            revision: state.revision,
+        })
     }
 }
 
@@ -328,7 +421,7 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
-            hosted_refresh: None,
+            hosted_state: None,
             backend: local_backend(&config.base_url)?,
         })
     }
@@ -337,13 +430,13 @@ impl LlmClient {
             client: completion_http_client(),
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
-            hosted_refresh: None,
+            hosted_state: None,
             backend: local_backend_in(&config.base_url, models_dir)?,
         })
     }
 
-    fn with_hosted_refresh(mut self, refresh: HostedRefresh) -> Self {
-        self.hosted_refresh = Some(Arc::new(refresh));
+    fn with_hosted_refresh(mut self, config: ResolvedConfig, refresh: HostedRefresh) -> Self {
+        self.hosted_state = Some(Arc::new(HostedClientState::new(config, refresh)));
         self
     }
 }
@@ -834,7 +927,7 @@ pub async fn resolve_llm_client_in(enzyme_home: &Path) -> Result<(ResolvedConfig
     )?;
     let mut client = LlmClient::from_config_in(&config, &enzyme_home.join("models"))?;
     if let Some(refresh) = refresh {
-        client = client.with_hosted_refresh(refresh);
+        client = client.with_hosted_refresh(config.clone(), refresh);
     }
     Ok((config, client))
 }
