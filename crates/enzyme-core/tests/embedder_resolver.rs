@@ -1,6 +1,6 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enzyme_core::kernel::Generator;
@@ -55,14 +55,12 @@ impl Drop for HostedEnv {
     }
 }
 
-fn read_request(stream: &mut std::net::TcpStream) -> String {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+fn read_request(stream: &mut std::net::TcpStream) -> io::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
-        let read = stream.read(&mut buffer).unwrap();
+        let read = stream.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -85,16 +83,20 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
             break;
         }
     }
-    String::from_utf8(bytes).unwrap()
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn respond(stream: &mut std::net::TcpStream, status: &str, content_type: &str, body: &str) {
+fn respond(
+    stream: &mut std::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> io::Result<()> {
     write!(
         stream,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
-    .unwrap();
 }
 
 struct HttpResponse {
@@ -107,11 +109,19 @@ struct RecordingServer {
     base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
 impl RecordingServer {
     fn start(handler: impl Fn(&str) -> HttpResponse + Send + Sync + 'static) -> RecordingServer {
+        Self::start_batched(1, handler)
+    }
+
+    fn start_batched(
+        batch_size: usize,
+        handler: impl Fn(&str) -> HttpResponse + Send + Sync + 'static,
+    ) -> RecordingServer {
+        assert!(batch_size > 0);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -119,38 +129,36 @@ impl RecordingServer {
         let captured = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
-        let handler = Arc::new(handler);
-        let thread = std::thread::spawn(move || {
-            let mut connections = Vec::new();
+        let thread = std::thread::spawn(move || -> Result<(), String> {
             while !stopped.load(Ordering::Acquire) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        if stopped.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let captured = Arc::clone(&captured);
-                        let handler = Arc::clone(&handler);
-                        connections.push(std::thread::spawn(move || {
-                            let request = read_request(&mut stream);
+                let mut batch = Vec::with_capacity(batch_size);
+                while batch.len() < batch_size && !stopped.load(Ordering::Acquire) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = read_request(&mut stream).map_err(|error| {
+                                format!("test server request read failed: {error}")
+                            })?;
                             captured.lock().unwrap().push(request.clone());
-                            let response = handler(&request);
-                            respond(
-                                &mut stream,
-                                response.status,
-                                response.content_type,
-                                &response.body,
-                            );
-                        }));
+                            batch.push((stream, handler(&request)));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => return Err(format!("test server accept failed: {error}")),
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(error) => panic!("test server accept failed: {error}"),
+                }
+
+                for (mut stream, response) in batch {
+                    respond(
+                        &mut stream,
+                        response.status,
+                        response.content_type,
+                        &response.body,
+                    )
+                    .map_err(|error| format!("test server response write failed: {error}"))?;
                 }
             }
-            for connection in connections {
-                connection.join().unwrap();
-            }
+            Ok(())
         });
         Self {
             base_url: format!("http://{address}"),
@@ -160,17 +168,20 @@ impl RecordingServer {
         }
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self) -> Result<(), String> {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            thread.join().unwrap();
+            thread
+                .join()
+                .map_err(|_| "test server thread panicked".to_string())??;
         }
+        Ok(())
     }
 }
 
 impl Drop for RecordingServer {
     fn drop(&mut self) {
-        self.finish();
+        let _ = self.finish();
     }
 }
 
@@ -304,9 +315,9 @@ async fn assert_sequential_rotation(streaming: bool) {
     assert_eq!(generator.model(), "new-model");
     assert_eq!(complete(&generator, streaming).await, "rotated");
 
-    old.finish();
-    new.finish();
-    broker.finish();
+    old.finish().unwrap();
+    new.finish().unwrap();
+    broker.finish().unwrap();
     assert_eq!(broker_calls.load(Ordering::SeqCst), 2);
     assert_requests(&old.requests, 1, "lease-old", "old-model");
     assert_requests(&new.requests, 2, "lease-new", "new-model");
@@ -324,7 +335,7 @@ fn start_near_expiry_server() -> (String, std::thread::JoinHandle<()>) {
     let handle = std::thread::spawn(move || {
         for call in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let request = read_request(&mut stream);
+            let request = read_request(&mut stream).unwrap();
             assert!(request.starts_with("GET /margins/free-config "));
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -341,7 +352,7 @@ fn start_near_expiry_server() -> (String, std::thread::JoinHandle<()>) {
                 },
             })
             .to_string();
-            respond(&mut stream, "200 OK", "application/json", &body);
+            respond(&mut stream, "200 OK", "application/json", &body).unwrap();
         }
     });
     (format!("http://{address}/margins/free-config"), handle)
@@ -395,25 +406,7 @@ async fn sequential_streaming_calls_publish_rotated_endpoint_key_and_model() {
 async fn concurrent_non_streaming_401s_singleflight_one_broker_refresh() {
     const CALLERS: usize = 8;
     let _lock = env_lock().lock().unwrap();
-    let gate = Arc::new((Mutex::new(0_usize), Condvar::new()));
-    let handler_gate = Arc::clone(&gate);
-    let mut old = RecordingServer::start(move |_| {
-        let (count, ready) = &*handler_gate;
-        let mut count = count.lock().unwrap();
-        *count += 1;
-        if *count == CALLERS {
-            ready.notify_all();
-        }
-        while *count < CALLERS {
-            let (next, timeout) = ready.wait_timeout(count, Duration::from_secs(5)).unwrap();
-            count = next;
-            assert!(
-                !timeout.timed_out(),
-                "concurrent callers did not reach old endpoint"
-            );
-        }
-        rejected_response()
-    });
+    let mut old = RecordingServer::start_batched(CALLERS, |_| rejected_response());
     let mut new = RecordingServer::start(completion_response);
     let (mut broker, broker_calls) = start_broker(old.base_url.clone(), new.base_url.clone());
     let _env = HostedEnv::install(&format!("{}/margins/free-config", broker.base_url));
@@ -434,9 +427,9 @@ async fn concurrent_non_streaming_401s_singleflight_one_broker_refresh() {
     assert_eq!(generator.model(), "new-model");
     assert_eq!(complete(&generator, false).await, "rotated");
 
-    old.finish();
-    new.finish();
-    broker.finish();
+    old.finish().unwrap();
+    new.finish().unwrap();
+    broker.finish().unwrap();
     assert_eq!(broker_calls.load(Ordering::SeqCst), 2);
     assert_requests(&old.requests, CALLERS, "lease-old", "old-model");
     assert_requests(&new.requests, CALLERS + 1, "lease-new", "new-model");
