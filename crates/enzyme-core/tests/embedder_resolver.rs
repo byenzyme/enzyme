@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use enzyme_core::kernel::Generator;
@@ -53,6 +53,10 @@ impl Drop for HostedEnv {
             }
         }
     }
+}
+
+fn set_accepted_stream_blocking(stream: &std::net::TcpStream) -> io::Result<()> {
+    stream.set_nonblocking(false)
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> io::Result<String> {
@@ -135,6 +139,9 @@ impl RecordingServer {
                 while batch.len() < batch_size && !stopped.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            set_accepted_stream_blocking(&stream).map_err(|error| {
+                                format!("test server accepted stream setup failed: {error}")
+                            })?;
                             let request = read_request(&mut stream).map_err(|error| {
                                 format!("test server request read failed: {error}")
                             })?;
@@ -183,6 +190,38 @@ impl Drop for RecordingServer {
     fn drop(&mut self) {
         let _ = self.finish();
     }
+}
+
+#[test]
+fn accepted_stream_setup_blocks_until_delayed_request() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted, wait_for_accept) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        wait_for_accept.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        stream
+            .write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+
+    let (mut stream, _) = loop {
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("delayed request accept failed: {error}"),
+        }
+    };
+    set_accepted_stream_blocking(&stream).unwrap();
+    accepted.send(()).unwrap();
+
+    let request = read_request(&mut stream).unwrap();
+    assert!(request.starts_with("GET /delayed HTTP/1.1\r\n"));
+    client.join().unwrap();
 }
 
 fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
