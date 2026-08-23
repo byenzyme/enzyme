@@ -109,7 +109,10 @@ fn parse_iso_header(s: &str) -> Option<NaiveDate> {
         return None;
     }
     // Reject a longer digit run (e.g. `2026-12-3456`), which is not a date.
-    if s[10..].starts_with(|c: char| c.is_ascii_digit()) {
+    // Use `get` so byte offset 10 is never sliced inside a multibyte scalar.
+    if s.get(10..)
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    {
         return None;
     }
     let year: i32 = s.get(0..4)?.parse().ok()?;
@@ -463,6 +466,23 @@ mod tests {
     fn rejects_all_same_date() {
         let body = log_body(&["2026-01-01", "2026-01-01", "2026-01-01"], 20);
         assert!(detect_append_log(&body).is_none());
+    }
+
+    #[test]
+    fn iso_header_rejects_multibyte_at_byte_ten_without_panic() {
+        // Date-shaped separators at bytes 4 and 7, but byte 10 lands inside
+        // a multibyte scalar — must not panic and must not match.
+        assert!(parse_iso_header("2026-01-0é").is_none());
+        assert!(parse_header_date("## 2026-01-0é note").is_none());
+    }
+
+    #[test]
+    fn iso_header_ascii_dates_unchanged() {
+        let expect = NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        assert_eq!(parse_iso_header("2026-07-28"), Some(expect));
+        assert_eq!(parse_iso_header("2026/07/28"), Some(expect));
+        // Longer digit run after the day still rejects.
+        assert!(parse_iso_header("2026-12-3456").is_none());
     }
 
     #[test]
