@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use enzyme_core::initialize_sqlite_runtime;
 use enzyme_core::kernel::{Bridged, SearchOptions, ensure_searchable, ensure_searchable_sync};
 use enzyme_core::models::{Catalyst, CatalystSimilarity};
 use rusqlite::Connection;
@@ -52,6 +53,7 @@ fn fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
 #[test]
 fn sync_consumer_uses_explicit_paths_without_a_generator() {
     let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    initialize_sqlite_runtime().unwrap();
     let (_root, vault, db_path, config_path) = fixture();
 
     let mut options = SearchOptions::new(&vault, &db_path);
@@ -78,6 +80,7 @@ fn sync_consumer_uses_explicit_paths_without_a_generator() {
 #[test]
 fn typed_catalyst_response_retains_result_provenance_and_contributors() {
     let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    initialize_sqlite_runtime().unwrap();
     let (_root, vault, db_path, config_path) = fixture();
     let mut options = SearchOptions::new(vault, db_path);
     options.config_path = Some(config_path);
@@ -134,6 +137,7 @@ fn typed_catalyst_response_retains_result_provenance_and_contributors() {
 #[test]
 fn async_consumer_works_on_a_current_thread_runtime() {
     let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    initialize_sqlite_runtime().unwrap();
     let (_root, vault, db_path, config_path) = fixture();
     let mut options = SearchOptions::new(vault, db_path);
     options.config_path = Some(config_path);
@@ -189,6 +193,7 @@ fn sqlite_document_count(db_path: &std::path::Path, namespace: &str) -> i64 {
 #[test]
 fn production_kernel_runs_sources_before_embedding_and_reconciles_renames() {
     let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    initialize_sqlite_runtime().unwrap();
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");
     std::fs::create_dir_all(&vault).unwrap();

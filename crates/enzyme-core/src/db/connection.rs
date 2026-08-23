@@ -28,6 +28,9 @@ static SQLITE_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 /// libsql 0.9.30 and libsql-rusqlite 0.9.30 share native SQLite globals but
 /// keep independent Rust initialization state. Opening a tiny libsql database
 /// here deliberately triggers the libsql serialized runtime initializer first.
+/// Embedders that combine both wrappers must call this synchronously during
+/// process startup, before opening any SQLite connection or starting background
+/// work that could open one.
 pub fn initialize_sqlite_runtime() -> Result<(), DbError> {
     match SQLITE_RUNTIME_INIT.get_or_init(|| {
         #[allow(deprecated)]
