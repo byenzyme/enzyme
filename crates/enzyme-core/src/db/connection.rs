@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use libsql::{Builder, Connection, Database as LibsqlDb};
 use tracing::{debug, info};
@@ -17,6 +18,26 @@ use super::migrations;
 pub struct Database {
     _db: LibsqlDb,
     pub(crate) conn: Connection,
+}
+
+static SQLITE_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Initialize the process-wide SQLite runtime before either of the two Enzyme
+/// libsql-backed Rust wrappers opens a connection.
+///
+/// libsql 0.9.30 and libsql-rusqlite 0.9.30 share native SQLite globals but
+/// keep independent Rust initialization state. Opening a tiny libsql database
+/// here deliberately triggers the libsql serialized runtime initializer first.
+pub fn initialize_sqlite_runtime() -> Result<(), DbError> {
+    match SQLITE_RUNTIME_INIT.get_or_init(|| {
+        #[allow(deprecated)]
+        libsql::Database::open_in_memory()
+            .map(drop)
+            .map_err(|error| format!("libsql initializer database open failed: {error}"))
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(DbError::Initialization(error.clone())),
+    }
 }
 
 /// Drive a future to completion from any thread context.
@@ -50,6 +71,7 @@ impl Database {
         path: impl AsRef<Path>,
         busy_timeout_ms: u64,
     ) -> Result<Self, DbError> {
+        initialize_sqlite_runtime()?;
         let path = path.as_ref().to_owned();
         info!(?path, "opening database");
         block_in_place_sync(async move {
@@ -69,6 +91,7 @@ impl Database {
 
     /// Open an **in-memory** database — useful for tests and ephemeral sessions.
     pub fn open_in_memory() -> Result<Self, DbError> {
+        initialize_sqlite_runtime()?;
         debug!("opening in-memory database");
         block_in_place_sync(async {
             let db = Builder::new_local(":memory:")
@@ -87,6 +110,7 @@ impl Database {
     /// Connects to a Turso database via HTTP. No local file is created.
     /// Pragmas and migrations are skipped (the DB was uploaded pre-migrated).
     pub fn open_remote(url: &str, auth_token: &str) -> Result<Self, DbError> {
+        initialize_sqlite_runtime()?;
         info!(url, "opening remote database");
         block_in_place_sync(async move {
             let db = Builder::new_remote(url.to_string(), auth_token.to_string())

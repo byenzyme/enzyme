@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{
     SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
 };
-use crate::db::Database;
+use crate::db::{Database, initialize_sqlite_runtime};
 use crate::document::{
     ProcessedDocument, StructuredDocumentInput, StructuredLogDocumentInput, StructuredLogEntry,
     structured_document_to_processed_document, structured_log_document_to_processed_document,
@@ -145,6 +145,7 @@ fn ensure_source_path_exists(path: &Path) -> Result<()> {
 }
 
 fn open_source_read_only(path: &Path) -> Result<Connection> {
+    initialize_sqlite_runtime()?;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let source_db = Connection::open_with_flags(path, flags)
         .with_context(|| format!("failed to open {} read-only", path.display()))?;

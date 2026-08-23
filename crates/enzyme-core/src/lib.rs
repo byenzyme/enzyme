@@ -10,3 +10,5 @@ pub mod pipeline;
 pub mod query;
 pub mod search;
 pub mod sqlite_source;
+
+pub use db::initialize_sqlite_runtime;
