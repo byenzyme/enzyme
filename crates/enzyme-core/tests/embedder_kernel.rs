@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use enzyme_core::kernel::{Bridged, SearchOptions, ensure_searchable, ensure_searchable_sync};
+use enzyme_core::models::{Catalyst, CatalystSimilarity};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -72,6 +73,62 @@ fn sync_consumer_uses_explicit_paths_without_a_generator() {
             .expect("direct search")
             .is_empty()
     );
+}
+
+#[test]
+fn typed_catalyst_response_retains_result_provenance_and_contributors() {
+    let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    let (_root, vault, db_path, config_path) = fixture();
+    let mut options = SearchOptions::new(vault, db_path);
+    options.config_path = Some(config_path);
+    let index = ensure_searchable_sync(options, None).expect("offline provisioning");
+    let (file_path, chunk_index, embedding) = index
+        .database()
+        .get_all_chunk_embeddings()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("indexed chunk");
+    let catalyst = Catalyst {
+        id: "bridge-1".to_string(),
+        text: "dependable semantic bridge".to_string(),
+        entity: "[[Search Boundary]]".to_string(),
+        context: "default".to_string(),
+        generated_at: chrono::Utc::now(),
+        metadata: serde_json::json!({}),
+    };
+    index.database().insert_catalysts(&[catalyst]).unwrap();
+    index
+        .database()
+        .upsert_catalyst_embeddings(&[("bridge-1", embedding.as_slice())])
+        .unwrap();
+    index
+        .database()
+        .upsert_catalyst_similarities(&[CatalystSimilarity {
+            id: None,
+            catalyst_id: "bridge-1".to_string(),
+            catalyst_text: "dependable semantic bridge".to_string(),
+            file_path: file_path.clone(),
+            chunk_index: i64::from(chunk_index),
+            similarity: 0.95,
+            chunk_metadata: serde_json::json!({}),
+            timeline_data: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+        }])
+        .unwrap();
+
+    let response = index
+        .catalyst_search_response("semantic bridge", 5)
+        .unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].file_path, file_path);
+    assert_eq!(
+        response.results[0].via_catalyst_id.as_deref(),
+        Some("bridge-1")
+    );
+    assert_eq!(response.top_contributing_catalysts.len(), 1);
+    assert_eq!(response.top_contributing_catalysts[0].id, "bridge-1");
+    assert_eq!(response.top_contributing_catalysts[0].contribution_count, 1);
 }
 
 #[test]

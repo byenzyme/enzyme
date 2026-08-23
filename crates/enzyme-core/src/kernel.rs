@@ -24,7 +24,7 @@ use crate::pipeline::embedding::EmbeddingPipeline;
 use crate::pipeline::indexing::IndexingPipeline;
 use crate::pipeline::selection::SelectionPipeline;
 use crate::pipeline::similarity::SimilarityPipeline;
-use crate::search::ContextSearch;
+use crate::search::{CatalyzeResponse, ContextSearch};
 use crate::sqlite_source::run_configured_sqlite_sources;
 
 /// Caller-owned policy for indexing and selecting catalyst entities.
@@ -112,9 +112,8 @@ impl SearchIndex {
     }
 
     pub fn catalyst_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        Ok(ContextSearch::new(&self.db, self.service)
-            .catalyze_search(query, limit)
-            .context("catalyst search")?
+        Ok(self
+            .catalyst_search_response(query, limit)?
             .results
             .into_iter()
             .map(|hit| Hit {
@@ -123,6 +122,14 @@ impl SearchIndex {
                 content: hit.content,
             })
             .collect())
+    }
+
+    /// Catalyst search with contributing bridge metadata and per-result
+    /// catalyst provenance retained for embedding applications.
+    pub fn catalyst_search_response(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
+        ContextSearch::new(&self.db, self.service)
+            .catalyze_search(query, limit)
+            .context("catalyst search")
     }
 
     pub fn direct_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
