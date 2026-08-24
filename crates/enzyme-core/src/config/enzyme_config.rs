@@ -757,8 +757,31 @@ impl EnzymeConfig {
         self.save(vault_path)
     }
 
+    /// Persist automatically selected entities to a caller-owned config file.
+    ///
+    /// The explicit path is also the ownership root for named workspaces, and
+    /// `header` is used when initializing a file. This path never consults or
+    /// mutates `ENZYME_HOME`.
+    pub fn set_auto_selected_entities_at(
+        &mut self,
+        vault_path: &Path,
+        config_path: &Path,
+        entity_refs: Vec<String>,
+        header: &str,
+    ) -> Result<()> {
+        self.catalyzed_entities = entity_refs
+            .into_iter()
+            .map(CatalyzedEntity::Simple)
+            .collect();
+        self.save_at(vault_path, config_path, header)
+    }
+
     pub fn save(&self, vault_path: &Path) -> Result<()> {
         let config_path = Self::config_path()?;
+        self.save_at(vault_path, &config_path, CONFIG_HEADER)
+    }
+
+    fn save_at(&self, vault_path: &Path, config_path: &Path, header: &str) -> Result<()> {
         let mut global = if config_path.exists() {
             load_global_toml(&config_path)?
         } else {
@@ -776,7 +799,10 @@ impl EnzymeConfig {
                 Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES);
         }
 
-        if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
+        let config_home = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let workspace = EnzymePaths::bound_workspace_with_home(vault_path, config_home)?;
+
+        if let Some(name) = workspace.clone() {
             let entry = global.workspaces.entry(name).or_default();
             entry.excluded_tags = self.excluded_tags.clone();
             entry.excluded_links = self.excluded_links.clone();
@@ -827,7 +853,7 @@ impl EnzymeConfig {
         if !config_path.exists() {
             let body =
                 toml::to_string_pretty(&global).context("failed to serialize enzyme config")?;
-            fs::write(&config_path, format!("{CONFIG_HEADER}{body}"))
+            fs::write(config_path, format!("{header}{body}"))
                 .with_context(|| format!("failed to write {}", config_path.display()))?;
             debug!(?config_path, "saved enzyme config");
             return Ok(());
@@ -839,16 +865,27 @@ impl EnzymeConfig {
         // rewritten here; only the derived `notes` markdown source is ensured.
         let original = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let mut doc: toml_edit::DocumentMut = original
-            .parse()
-            .with_context(|| format!("failed to parse {} for in-place update", config_path.display()))?;
+        let mut doc: toml_edit::DocumentMut = original.parse().with_context(|| {
+            format!(
+                "failed to parse {} for in-place update",
+                config_path.display()
+            )
+        })?;
 
         {
             let defaults = ensure_table(doc.as_table_mut(), "defaults");
-            set_optional(defaults, "catalyst_format", &global.defaults.catalyst_format)?;
+            set_optional(
+                defaults,
+                "catalyst_format",
+                &global.defaults.catalyst_format,
+            )?;
             set_value(defaults, "minimum_tags", &global.defaults.minimum_tags)?;
             set_value(defaults, "minimum_links", &global.defaults.minimum_links)?;
-            set_value(defaults, "minimum_folders", &global.defaults.minimum_folders)?;
+            set_value(
+                defaults,
+                "minimum_folders",
+                &global.defaults.minimum_folders,
+            )?;
             set_value(defaults, "total_limit", &global.defaults.total_limit)?;
             set_optional(
                 defaults,
@@ -857,7 +894,7 @@ impl EnzymeConfig {
             )?;
         }
 
-        if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
+        if let Some(name) = workspace {
             let ws = global
                 .workspaces
                 .get(&name)
@@ -924,10 +961,10 @@ impl EnzymeConfig {
         }
 
         let rendered = doc.to_string();
-        let contents = if rendered.starts_with("# Enzyme configuration") {
+        let contents = if original.trim_start().starts_with('#') {
             rendered
         } else {
-            format!("{CONFIG_HEADER}{rendered}")
+            format!("{header}{rendered}")
         };
         fs::write(&config_path, contents)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
@@ -983,7 +1020,17 @@ fn ensure_table<'a>(table: &'a mut toml_edit::Table, key: &str) -> &'a mut toml_
 }
 
 fn set_value<T: Serialize>(table: &mut toml_edit::Table, key: &str, value: &T) -> Result<()> {
-    table.insert(key, serialized_item(value)?);
+    let mut replacement = serialized_item(value)?;
+    if let Some(existing) = table.get_mut(key) {
+        if let (Some(old_value), Some(new_value)) =
+            (existing.as_value(), replacement.as_value_mut())
+        {
+            *new_value.decor_mut() = old_value.decor().clone();
+        }
+        *existing = replacement;
+    } else {
+        table.insert(key, replacement);
+    }
     Ok(())
 }
 
@@ -994,7 +1041,7 @@ fn set_optional<T: Serialize>(
 ) -> Result<()> {
     match value {
         Some(inner) => {
-            table.insert(key, serialized_item(inner)?);
+            set_value(table, key, inner)?;
         }
         None => {
             table.remove(key);
@@ -1118,8 +1165,14 @@ timestamp = { unit = "ms" }
         let _: toml_edit::DocumentMut = out.parse().expect("valid toml after in-place edit");
         let typed: GlobalTomlConfig = toml::from_str(&out).expect("typed parse still works");
 
-        assert!(out.contains("# Enzyme configuration"), "header lost:\n{out}");
-        assert!(out.contains("mystery_key = \"keep me\""), "unknown key lost:\n{out}");
+        assert!(
+            out.contains("# Enzyme configuration"),
+            "header lost:\n{out}"
+        );
+        assert!(
+            out.contains("mystery_key = \"keep me\""),
+            "unknown key lost:\n{out}"
+        );
         assert!(
             out.contains("# this contract was written by the skill"),
             "source comment lost:\n{out}"

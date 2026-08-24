@@ -10,6 +10,7 @@ use serde::Serialize;
 use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::document::{DocumentProcessor, FileDiscovery, parse_frontmatter};
+use enzyme_core::initialize_sqlite_runtime;
 
 // Human-mode truncation limit for long lists.
 const HUMAN_LIST_LIMIT: usize = 20;
@@ -149,6 +150,7 @@ struct DoctorReport {
 /// Open a SQLite database in strictly read-only mode.
 /// No WAL pragma, no migrations, no sidecar files created.
 async fn open_read_only_conn(path: &Path) -> Result<Connection> {
+    initialize_sqlite_runtime()?;
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 database path"))?;

@@ -4,11 +4,9 @@
 //! is optional; embedders that want it call [`Generator::resolve`] so environment,
 //! configured local inference, and anonymous hosted fallback share one policy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-#[cfg(feature = "embedder-compat")]
-use std::collections::HashMap;
 #[cfg(feature = "embedder-compat")]
 use std::path::Path;
 
@@ -26,7 +24,8 @@ use crate::pipeline::embedding::EmbeddingPipeline;
 use crate::pipeline::indexing::IndexingPipeline;
 use crate::pipeline::selection::SelectionPipeline;
 use crate::pipeline::similarity::SimilarityPipeline;
-use crate::search::ContextSearch;
+use crate::search::{CatalyzeResponse, ContextSearch};
+use crate::sqlite_source::run_configured_sqlite_sources;
 
 /// Caller-owned policy for indexing and selecting catalyst entities.
 #[derive(Debug, Clone)]
@@ -113,9 +112,8 @@ impl SearchIndex {
     }
 
     pub fn catalyst_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        Ok(ContextSearch::new(&self.db, self.service)
-            .catalyze_search(query, limit)
-            .context("catalyst search")?
+        Ok(self
+            .catalyst_search_response(query, limit)?
             .results
             .into_iter()
             .map(|hit| Hit {
@@ -124,6 +122,14 @@ impl SearchIndex {
                 content: hit.content,
             })
             .collect())
+    }
+
+    /// Catalyst search with contributing bridge metadata and per-result
+    /// catalyst provenance retained for embedding applications.
+    pub fn catalyst_search_response(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
+        ContextSearch::new(&self.db, self.service)
+            .catalyze_search(query, limit)
+            .context("catalyst search")
     }
 
     pub fn direct_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
@@ -316,13 +322,16 @@ fn ensure_searchable_owned(
         full_reindex,
         max_bridged_entities,
     } = options;
+    let mut configured_sources = None;
     if let Some(config_path) = config_path {
+        configured_sources = Some(HashMap::new());
         let loaded = EnzymeConfig::load_at(&vault_path, &config_path)
             .with_context(|| format!("loading search config {}", config_path.display()))?;
         if selection_config.is_none() {
             selection_config = loaded.clone();
         }
         if let Some(config) = loaded {
+            configured_sources = Some(config.sources.clone());
             if excluded_folders.is_empty() {
                 excluded_folders = config.excluded_folders.clone();
             }
@@ -339,6 +348,10 @@ fn ensure_searchable_owned(
     }
     let db = Database::open(&db_path)
         .with_context(|| format!("opening search index {}", db_path.display()))?;
+    if let Some(sources) = configured_sources {
+        run_configured_sqlite_sources(&db, &sources)
+            .context("indexing configured SQLite sources")?;
+    }
     IndexingPipeline::new(&db, vault_path.clone())
         .with_excluded_folders(excluded_folders)
         .with_configured_logs(configured_logs)
@@ -359,8 +372,9 @@ fn ensure_searchable_owned(
         if entities.is_empty() {
             Bridged::NoEntities
         } else {
+            let model = generator.model();
             let config = CatalystConfig {
-                model: generator.model(),
+                model: &model,
                 entity_profiles: &selection.entity_profiles,
                 ..Default::default()
             };

@@ -5,6 +5,7 @@ use enzyme_core::config::{
     SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
 };
 use enzyme_core::db::Database;
+use enzyme_core::initialize_sqlite_runtime;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::sqlite_source::{run_configured_sqlite_sources, run_sqlite_source};
 use libsql::Value;
@@ -73,6 +74,7 @@ fn mark_all_embedded(db: &Database) {
 
 #[test]
 fn log_bucket_fingerprints_rebuild_skip_and_prune_exactly() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
@@ -183,6 +185,7 @@ fn log_bucket_fingerprints_rebuild_skip_and_prune_exactly() {
 
 #[test]
 fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let vault = temp.path().join("workspace");
@@ -274,6 +277,7 @@ fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
 
 #[test]
 fn null_where_rows_share_the_monthly_fallback_bucket() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
@@ -306,6 +310,7 @@ fn null_where_rows_share_the_monthly_fallback_bucket() {
 
 #[test]
 fn source_without_where_keeps_one_document_per_row_with_full_scan_staleness() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
@@ -334,6 +339,7 @@ fn source_without_where_keeps_one_document_per_row_with_full_scan_staleness() {
 
 #[test]
 fn empty_what_rows_are_skipped_not_fatal() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
@@ -356,6 +362,7 @@ fn empty_what_rows_are_skipped_not_fatal() {
 
 #[test]
 fn row_mode_detects_when_edit_not_just_body() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");
@@ -386,6 +393,7 @@ fn row_mode_detects_when_edit_not_just_body() {
 
 #[test]
 fn row_mode_detects_non_leading_who_edit() {
+    initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let enzyme_db = Database::open_in_memory().unwrap();
     let source_path = temp.path().join("source.db");

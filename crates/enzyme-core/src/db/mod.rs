@@ -12,7 +12,7 @@ pub mod repository;
 pub mod schema;
 pub mod update_sentinel;
 
-pub use connection::Database;
+pub use connection::{Database, initialize_sqlite_runtime};
 pub use errors::DbError;
 pub use repository::{
     DocumentForEmbedding, EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats,
