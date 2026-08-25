@@ -1638,7 +1638,7 @@ pub(super) async fn generation_contract(
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
     Ok(GenerationContract {
         schema_version: "catalyst-epoch.v2".to_string(),
-        prompt_version: "catalyst-prompts.2026-08-anchors".to_string(),
+        prompt_version: "catalyst-prompts.2026-08-grounded-participants".to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()

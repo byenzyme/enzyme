@@ -254,6 +254,53 @@ fn occurrence_anchor(
     }
 }
 
+/// Extract only one participant's entries from a structured shared-log chunk.
+/// Ordinary Markdown occurrence contexts are already entity-local spans and
+/// pass through unchanged.
+fn participant_span(context: &str, entity_name: &str) -> Option<String> {
+    let mut blocks = Vec::<(String, Vec<String>)>::new();
+    let mut heading: Option<String> = None;
+    let mut body = Vec::new();
+    for line in context.lines() {
+        if line.starts_with("## ") {
+            if let Some(previous) = heading.replace(line.to_string()) {
+                blocks.push((previous, std::mem::take(&mut body)));
+            }
+        } else if heading.is_some() {
+            body.push(line.to_string());
+        }
+    }
+    if let Some(previous) = heading {
+        blocks.push((previous, body));
+    }
+
+    if blocks.is_empty() {
+        return (!context.trim().is_empty()).then(|| context.to_string());
+    }
+    let selected = blocks
+        .into_iter()
+        .filter(|(heading, _)| {
+            heading
+                .split_once(" — ")
+                .map(|(_, participants)| {
+                    participants
+                        .split(',')
+                        .any(|name| name.trim().eq_ignore_ascii_case(entity_name))
+                })
+                .unwrap_or(false)
+        })
+        .map(|(heading, body)| {
+            let body = body.join("\n").trim().to_string();
+            if body.is_empty() {
+                heading
+            } else {
+                format!("{heading}\n\n{body}")
+            }
+        })
+        .collect::<Vec<_>>();
+    (!selected.is_empty()).then(|| selected.join("\n\n"))
+}
+
 fn substantive_token_count(text: &str) -> usize {
     const BOILERPLATE: &[&str] = &[
         "unsubscribe",
@@ -371,6 +418,7 @@ fn era_audits(
 fn validate_grounded_catalysts(
     catalysts: Vec<ParsedCatalyst>,
     anchors: &[EvidenceAnchor],
+    required_subject: Option<&str>,
 ) -> (Vec<ParsedCatalyst>, usize) {
     let valid_ids = anchors
         .iter()
@@ -385,10 +433,56 @@ fn validate_grounded_catalysts(
                     .anchor_ids
                     .iter()
                     .all(|id| valid_ids.contains(id.as_str()))
+                && required_subject
+                    .is_none_or(|subject| catalyst_names_subject(&catalyst.text, subject))
         })
         .collect::<Vec<_>>();
     let rejected = before - kept.len();
     (kept, rejected)
+}
+
+fn catalyst_names_subject(text: &str, subject: &str) -> bool {
+    let text = text.to_lowercase();
+    let subject = subject.trim().to_lowercase();
+    if subject.is_empty() {
+        return false;
+    }
+    const SUBJECT_OPENERS: &[&str] = &[
+        "",
+        "could",
+        "does",
+        "has",
+        "how could",
+        "how did",
+        "how does",
+        "how is",
+        "how might",
+        "is",
+        "might",
+        "what are",
+        "what could",
+        "what did",
+        "what does",
+        "what is",
+        "what might",
+        "what would",
+        "when does",
+        "where does",
+        "which of",
+        "why does",
+        "would",
+    ];
+    text.match_indices(&subject).any(|(start, _)| {
+        let end = start + subject.len();
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        let prefix = text[..start]
+            .trim_matches(|ch: char| !ch.is_alphanumeric() && !ch.is_whitespace())
+            .trim();
+        SUBJECT_OPENERS.contains(&prefix)
+            && before.is_none_or(|ch| !ch.is_alphanumeric())
+            && after.is_none_or(|ch| !ch.is_alphanumeric())
+    })
 }
 
 fn occurrence_timestamp(occ: &EntityOccurrence) -> i64 {
@@ -838,7 +932,7 @@ fn build_chunk_candidates(
 /// different canonicalization), so every entity is treated as dirty once after
 /// an upgrade rather than silently keeping catalysts the new inputs disagree
 /// with.
-const CONTEXT_HASH_VERSION: &str = "catalyst-context-v2-evidence-anchors";
+const CONTEXT_HASH_VERSION: &str = "catalyst-context-v3-participant-scope";
 
 /// Fold one labelled, length-prefixed field into the fingerprint. The label and
 /// explicit length keep concatenation unambiguous, so no combination of field
@@ -1017,6 +1111,7 @@ struct EntityJob {
     context_hash: String,
     evidence_anchors: Vec<EvidenceAnchor>,
     era_audits: Vec<EraAuditRecord>,
+    participant_scoped: bool,
 }
 
 #[derive(Clone)]
@@ -1048,6 +1143,7 @@ struct EntityResult {
     error: Option<String>,
     evidence_anchors: Vec<EvidenceAnchor>,
     era_audits: Vec<EraAuditRecord>,
+    participant_scoped: bool,
     rejected: usize,
 }
 
@@ -1058,6 +1154,7 @@ struct PartialCatalystEvent {
     catalyst: ParsedCatalyst,
     evidence_anchors: Vec<EvidenceAnchor>,
     era_audits: Vec<EraAuditRecord>,
+    participant_scoped: bool,
 }
 
 fn catalyst_era(
@@ -1103,6 +1200,7 @@ fn catalyst_from_parsed(
     era_audits: &[EraAuditRecord],
     generation_run_id: &str,
     epoch_id: Option<&str>,
+    participant_scoped: bool,
     provisional: bool,
 ) -> Catalyst {
     let era = catalyst_era(&parsed, available_anchors, era_audits);
@@ -1117,6 +1215,9 @@ fn catalyst_from_parsed(
     metadata["generation_run_id"] = serde_json::json!(generation_run_id);
     if let Some(epoch_id) = epoch_id {
         metadata["epoch_id"] = serde_json::json!(epoch_id);
+    }
+    if participant_scoped {
+        metadata["participant_scoped"] = serde_json::json!(true);
     }
     let cited = available_anchors
         .iter()
@@ -1489,6 +1590,8 @@ impl<'a> CatalystPipeline<'a> {
             let entity_name = &entity.name;
 
             let occurrences = self.db.get_entity_occurrences(entity_id)?;
+            let participant_scoped = entity.entity_type == EntityType::Link
+                && self.db.link_entity_has_shared_documents(entity_id)?;
 
             let profile: &CatalystProfile = config
                 .entity_profiles
@@ -1502,31 +1605,56 @@ impl<'a> CatalystPipeline<'a> {
                 .unwrap_or(config.catalysts_per_entity);
 
             let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
-            let selected_context = match self.build_chunk_context(
-                entity,
-                &occurrences,
-                &eras,
-                num_catalysts,
-                max_samples,
-                max_context_chars,
-                chunk_preload.as_ref(),
-                entity_idx,
-            )? {
-                Some(ctx) => ctx,
-                None => {
-                    // Chunkless fallback. Occurrence rows carry NULL contexts
-                    // for long notes (their bodies are no longer duplicated
-                    // into entity_occurrences), so rehydrate from `docs`
-                    // before sampling — otherwise long-note entities would be
-                    // skipped as having no context at all.
-                    let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
-                    build_occurrence_context(
-                        &eras,
-                        &occurrences,
-                        num_catalysts,
-                        max_samples,
-                        max_context_chars,
-                    )
+            let selected_context = if participant_scoped {
+                // Shared conversations produce one document/chunk stream for
+                // all speakers, but SQLite-source occurrences retain the span
+                // for the participant that created it. Keep link generation on
+                // those own spans; hydrating NULLs here would reintroduce the
+                // whole shared thread and erase the participant boundary.
+                let own_spans = occurrences
+                    .iter()
+                    .filter_map(|occurrence| {
+                        let mut occurrence = occurrence.clone();
+                        occurrence.context =
+                            participant_span(occurrence.context.as_deref()?, entity_name);
+                        occurrence.context.as_ref()?;
+                        Some(occurrence)
+                    })
+                    .collect::<Vec<_>>();
+                build_occurrence_context(
+                    &eras,
+                    &own_spans,
+                    num_catalysts,
+                    max_samples,
+                    max_context_chars,
+                )
+            } else {
+                match self.build_chunk_context(
+                    entity,
+                    &occurrences,
+                    &eras,
+                    num_catalysts,
+                    max_samples,
+                    max_context_chars,
+                    chunk_preload.as_ref(),
+                    entity_idx,
+                )? {
+                    Some(ctx) => ctx,
+                    None => {
+                        // Chunkless fallback. Occurrence rows carry NULL contexts
+                        // for long notes (their bodies are no longer duplicated
+                        // into entity_occurrences), so rehydrate from `docs`
+                        // before sampling — otherwise long-note entities would be
+                        // skipped as having no context at all.
+                        let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
+                        build_occurrence_context(
+                            &eras,
+                            &occurrences,
+                            num_catalysts,
+                            max_samples,
+                            max_context_chars,
+                        )
+                    }
                 }
             };
             let era_context = selected_context.era_context;
@@ -1578,7 +1706,7 @@ impl<'a> CatalystPipeline<'a> {
                 continue;
             }
 
-            let user_prompt = if is_local {
+            let mut user_prompt = if is_local {
                 build_local_user_prompt(
                     entity_name,
                     context_samples,
@@ -1597,6 +1725,11 @@ impl<'a> CatalystPipeline<'a> {
                     era_context.as_ref(),
                 )
             };
+            if participant_scoped {
+                user_prompt.push_str(&format!(
+                    "\n\nPARTICIPANT SCOPE: These are {entity_name}'s own spans from shared conversations. Every catalyst must use {entity_name} as its explicit grammatical subject and must name {entity_name}. Start with {entity_name}, or put {entity_name} immediately after the question opener (for example, ‘What does {entity_name}…?’). Other participants are context only, never the subject of a hypothesis."
+                ));
+            }
 
             debug!(
                 entity_name = entity_name.as_str(),
@@ -1622,6 +1755,7 @@ impl<'a> CatalystPipeline<'a> {
                 context_hash,
                 evidence_anchors: selected_context.evidence_anchors,
                 era_audits: audits,
+                participant_scoped,
             });
         }
 
@@ -1860,6 +1994,7 @@ impl<'a> CatalystPipeline<'a> {
                 let context_hash = job.context_hash.clone();
                 let evidence_anchors = job.evidence_anchors.clone();
                 let era_audits = job.era_audits.clone();
+                let participant_scoped = job.participant_scoped;
 
                 if credits_exhausted.load(Ordering::SeqCst) {
                     return EntityResult {
@@ -1870,6 +2005,7 @@ impl<'a> CatalystPipeline<'a> {
                         error: Some("skipped: provider payment-required (402)".to_string()),
                         evidence_anchors,
                         era_audits,
+                        participant_scoped,
                         rejected: 0,
                     };
                 }
@@ -1938,6 +2074,7 @@ impl<'a> CatalystPipeline<'a> {
                                                         catalyst,
                                                         evidence_anchors: evidence_anchors.clone(),
                                                         era_audits: era_audits.clone(),
+                                                        participant_scoped,
                                                     });
                                                 }
                                             }
@@ -1996,17 +2133,20 @@ impl<'a> CatalystPipeline<'a> {
                                 let (grounded, rejected) = validate_grounded_catalysts(
                                     parsed.catalysts,
                                     &evidence_anchors,
+                                    participant_scoped.then_some(entity_name.as_str()),
                                 );
                                 if !grounded.is_empty() {
                                     return Ok((grounded, rejected));
                                 }
                                 last_error = format!(
-                                    "all {} hypotheses lacked valid evidence anchors",
+                                    "all {} hypotheses failed evidence grounding or participant-subject validation",
                                     rejected
                                 );
                                 debug!(
                                     entity_name = entity_name.as_str(),
-                                    attempt, rejected, "ungrounded catalysts rejected; retrying"
+                                    attempt,
+                                    rejected,
+                                    "ungrounded or off-subject catalysts rejected; retrying"
                                 );
                             }
                             Ok(_) => {
@@ -2046,6 +2186,7 @@ impl<'a> CatalystPipeline<'a> {
                         error: None,
                         evidence_anchors,
                         era_audits,
+                        participant_scoped,
                         rejected,
                     },
                     Ok(Err(e)) => EntityResult {
@@ -2056,6 +2197,7 @@ impl<'a> CatalystPipeline<'a> {
                         error: Some(e.to_string()),
                         evidence_anchors,
                         era_audits,
+                        participant_scoped,
                         rejected: 0,
                     },
                     Err(_) => {
@@ -2072,6 +2214,7 @@ impl<'a> CatalystPipeline<'a> {
                             error: Some(format!("timed out after {}s", entity_timeout_secs)),
                             evidence_anchors,
                             era_audits,
+                            participant_scoped,
                             rejected: 0,
                         }
                     }
@@ -2095,6 +2238,9 @@ impl<'a> CatalystPipeline<'a> {
                         let (mut grounded, _) = validate_grounded_catalysts(
                             vec![partial.catalyst],
                             &partial.evidence_anchors,
+                            partial
+                                .participant_scoped
+                                .then_some(partial.entity_name.as_str()),
                         );
                         let Some(grounded) = grounded.pop() else {
                             continue;
@@ -2121,6 +2267,7 @@ impl<'a> CatalystPipeline<'a> {
                             &partial.era_audits,
                             generation_run_id.as_str(),
                             config.epoch_id,
+                            partial.participant_scoped,
                             true,
                         );
                         self.db.insert_catalysts(&[catalyst])?;
@@ -2164,6 +2311,23 @@ impl<'a> CatalystPipeline<'a> {
                         if is_rate_limited {
                             stats.rate_limited += 1;
                         }
+                        if entity_result.participant_scoped
+                            && error.contains("participant-subject validation")
+                        {
+                            // Do not preserve a previous whole-thread catalyst
+                            // set when the replacement model output cannot pass
+                            // the participant boundary. A transport failure may
+                            // keep last-known-good data; a proven off-subject
+                            // result may not.
+                            self.db.delete_catalysts_for_entity(
+                                &entity_result.entity_name,
+                                &entity_result.entity_type,
+                            )?;
+                            self.db.delete_catalyst_entity_hash(
+                                &entity_result.entity_name,
+                                &entity_result.entity_type,
+                            )?;
+                        }
                         on_event(CatalystEvent::EntityFailed {
                             entity_name: entity_result.entity_name.clone(),
                             entity_type: entity_result.entity_type.clone(),
@@ -2201,6 +2365,7 @@ impl<'a> CatalystPipeline<'a> {
                                     &entity_result.era_audits,
                                     generation_run_id.as_str(),
                                     config.epoch_id,
+                                    entity_result.participant_scoped,
                                     false,
                                 )
                             })
@@ -2717,6 +2882,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn structured_shared_context_keeps_only_named_participant_entries() {
+        let context = "# shared\n\n## 2026-01-01 00:00:00 UTC — Alice\n\nALICE_ONLY\n\n## 2026-01-01 00:01:00 UTC — Bob, Carol\n\nBOB_CAROL_ONLY";
+        let bob = participant_span(context, "Bob").unwrap();
+        assert!(bob.contains("BOB_CAROL_ONLY"));
+        assert!(!bob.contains("ALICE_ONLY"));
+        assert!(participant_span(context, "Nobody").is_none());
+        assert!(catalyst_names_subject(
+            "What does Bob's migration boundary leave unresolved?",
+            "Bob"
+        ));
+        assert!(!catalyst_names_subject(
+            "What does Carol's role tell Bob about the migration?",
+            "Bob"
+        ));
+    }
+
     /// Regression: a single high-frequency entity whose occurrences are long
     /// notes (each carrying a full body, as the Tier-2 chunkless fallback sees
     /// after `hydrate_occurrence_contexts`) must not emit an unbounded prompt.
@@ -2874,6 +3056,7 @@ mod tests {
             context_hash: hash.to_string(),
             evidence_anchors: Vec::new(),
             era_audits: Vec::new(),
+            participant_scoped: false,
         }
     }
 

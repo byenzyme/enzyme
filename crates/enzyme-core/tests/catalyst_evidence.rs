@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use enzyme_core::config::{
+    SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+};
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
@@ -11,7 +14,9 @@ use enzyme_core::pipeline::epoch::{GenerationContract, now_ms};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::search::ContextSearch;
-use wiremock::matchers::{method, path};
+use enzyme_core::sqlite_source::run_sqlite_source;
+use rusqlite::{Connection, params};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn write_evidence(vault: &std::path::Path, documents: usize, boilerplate: bool) {
@@ -41,7 +46,7 @@ fn focus_entity(db: &Database) -> enzyme_core::models::Entity {
 fn contract(service: &enzyme_core::embedding::EmbeddingService) -> GenerationContract {
     GenerationContract {
         schema_version: "catalyst-epoch.v2".into(),
-        prompt_version: "catalyst-prompts.2026-08-anchors".into(),
+        prompt_version: "catalyst-prompts.2026-08-grounded-participants".into(),
         catalyst_format: DEFAULT_FORMAT_KEY.into(),
         catalyst_profile: DEFAULT_PROFILE_KEY.into(),
         model: "fixture-model".into(),
@@ -212,4 +217,152 @@ async fn thin_evidence_skips_llm_and_records_reason() {
         .unwrap();
     assert_eq!(reasons[0].0, "thin_evidence");
     assert!(reasons[0].1.contains("distinct documents"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped() {
+    enzyme_core::initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("mail.db");
+    let source = Connection::open(&source_path).unwrap();
+    source
+        .execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                sender TEXT NOT NULL,
+                sent_at INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                thread TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    let participants = [
+        ("Alice", "ALICE_PRIVATE_SPAN", "Bob"),
+        ("Bob", "BOB_PRIVATE_SPAN", "Carol"),
+        ("Carol", "CAROL_PRIVATE_SPAN", "Alice"),
+    ];
+    for (index, (name, marker, _)) in participants.iter().enumerate() {
+        source
+            .execute(
+                "INSERT INTO messages (id, sender, sent_at, body, thread)
+                 VALUES (?1, ?2, ?3, ?4, 'shared-thread')",
+                params![
+                    index as i64 + 1,
+                    name,
+                    1_775_000_000_000i64 + index as i64 * 1_000,
+                    format!(
+                        "{marker}: {name} proposes a concrete migration boundary and records the evidence needed to audit it."
+                    ),
+                ],
+            )
+            .unwrap();
+    }
+    drop(source);
+
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    let source_config = SqliteSourceConfig {
+        db: source_path,
+        query: "SELECT id, sender, sent_at, body, thread FROM messages".to_string(),
+        roles: SqliteSourceRoles {
+            id: vec!["id".to_string()],
+            who: vec!["sender".to_string()],
+            when: "sent_at".to_string(),
+            what: vec!["body".to_string()],
+            r#where: vec!["thread".to_string()],
+        },
+        timestamp: SqliteTimestampConfig {
+            unit: SqliteTimestampUnit::Ms,
+            epoch: None,
+        },
+    };
+    run_sqlite_source(&db, "mail", &source_config).unwrap();
+
+    let entities = db
+        .get_all_entities()
+        .unwrap()
+        .into_iter()
+        .filter(|entity| participants.iter().any(|(name, _, _)| entity.name == *name))
+        .collect::<Vec<_>>();
+    assert_eq!(entities.len(), 3);
+
+    let server = MockServer::start().await;
+    for (name, _, wrong_subject) in participants {
+        let response = serde_json::json!({
+            "catalysts": [
+                format!("What does {name}'s concrete migration boundary leave unresolved?"),
+                format!("What does {wrong_subject}'s role tell {name} about the migration?")
+            ],
+            "topicNames": ["owned migration boundary", "wrong participant"],
+            "anchorIds": [["E1"], ["E1"]]
+        });
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains(format!("Focus entity: {name}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": response.to_string()}, "finish_reason": "stop"}]
+            })))
+            .mount(&server)
+            .await;
+    }
+
+    let llm = LlmClient::with_base_url("fixture-key", &server.uri());
+    let profiles = HashMap::new();
+    let config = CatalystConfig {
+        entity_profiles: &profiles,
+        catalysts_per_entity: 1,
+        model: "fixture-model",
+        min_evidence_documents: 1,
+        min_evidence_tokens: 1,
+        ..Default::default()
+    };
+    let stats = CatalystPipeline::new(&db, &llm, None)
+        .run(&entities, &config, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(stats.catalysts_generated, 3);
+    assert_eq!(stats.hypotheses_rejected, 3);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    for (name, own_marker, _) in participants {
+        let request = requests
+            .iter()
+            .map(|request| String::from_utf8_lossy(&request.body))
+            .find(|body| body.contains(&format!("Focus entity: {name}")))
+            .expect("request for participant");
+        assert!(request.contains(own_marker));
+        for (_, other_marker, _) in participants {
+            if other_marker != own_marker {
+                assert!(!request.contains(other_marker));
+            }
+        }
+    }
+
+    let catalysts = db.get_all_catalysts().unwrap();
+    assert_eq!(catalysts.len(), 3);
+    for catalyst in &catalysts {
+        assert!(catalyst.text.contains(&catalyst.entity));
+        assert_eq!(catalyst.metadata["participant_scoped"], true);
+    }
+
+    let service = get_embedding_service(temp.path()).unwrap();
+    EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
+    SimilarityPipeline::new(&db, service)
+        .run(|_, _| {})
+        .unwrap();
+    for (name, _, _) in participants {
+        let response = ContextSearch::new(&db, service)
+            .catalyze_search(&format!("What should I recall about {name}?"), 8)
+            .unwrap();
+        assert_eq!(response.top_contributing_catalysts[0].entity, name);
+        let routed_id = response.results[0].via_catalyst_id.as_deref().unwrap();
+        assert_eq!(
+            catalysts
+                .iter()
+                .find(|catalyst| catalyst.id == routed_id)
+                .unwrap()
+                .entity,
+            name
+        );
+    }
 }

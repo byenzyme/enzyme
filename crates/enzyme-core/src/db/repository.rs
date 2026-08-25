@@ -886,6 +886,27 @@ impl Database {
         Ok(rows)
     }
 
+    /// Whether a link entity occurs in at least one document that also has a
+    /// different link entity. Catalyst generation uses this to avoid feeding a
+    /// participant every speaker's spans from a shared conversation.
+    pub fn link_entity_has_shared_documents(&self, entity_id: i64) -> Result<bool> {
+        let shared = self.query_read(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM entity_occurrences own
+                 JOIN entity_occurrences other
+                   ON other.file_path = own.file_path
+                  AND other.entity_id != own.entity_id
+                 JOIN entities participant ON participant.id = other.entity_id
+                 WHERE own.entity_id = ?1
+                   AND participant.type = 'link'
+             )",
+            vec![Value::Integer(entity_id)],
+            |row| row.get::<i64>(0),
+        )?;
+        Ok(shared.first().copied().unwrap_or(0) != 0)
+    }
+
     /// Load all chunks for the given file paths.
     pub fn get_chunks_for_files(&self, file_paths: &[String]) -> Result<Vec<FileChunk>> {
         if file_paths.is_empty() {

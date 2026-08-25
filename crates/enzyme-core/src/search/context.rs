@@ -73,14 +73,33 @@ fn match_query_entity_names(query: &str, entities: &[Entity]) -> Vec<String> {
     matched
 }
 
-/// Keep the existing cosine order within both pools, but put every catalyst
-/// owned by an explicitly named entity before the global fill pool.
+/// Route an explicit link-entity (person) query through that identity's own
+/// catalysts when available. For other named entities, keep cosine order
+/// within the owned and global pools while putting owned catalysts first.
 fn prioritize_anchored_catalysts(
     global_ranking: &[(usize, f32)],
     catalysts: &[Catalyst],
     matched_entity_names: &HashSet<String>,
+    matched_identity_names: &HashSet<String>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
+    if !matched_identity_names.is_empty() {
+        let owned = global_ranking
+            .iter()
+            .filter(|(idx, _)| {
+                matched_identity_names.contains(&catalysts[*idx].entity.to_lowercase())
+            })
+            .copied()
+            .take(limit)
+            .collect::<Vec<_>>();
+        // An explicit person query routes through that person's own catalyst
+        // set when it exists. Other catalysts remain a fallback only when the
+        // identity has no catalysts at all, rather than winning because they
+        // happen to mention the person in higher-cosine generic prose.
+        if !owned.is_empty() {
+            return owned;
+        }
+    }
     if matched_entity_names.is_empty() {
         return global_ranking.iter().copied().take(limit).collect();
     }
@@ -397,8 +416,24 @@ mod tests {
         let matched = HashSet::from(["will ashby".to_string()]);
 
         assert_eq!(
-            prioritize_anchored_catalysts(&global, &catalysts, &matched, 3),
+            prioritize_anchored_catalysts(&global, &catalysts, &matched, &HashSet::new(), 3),
             vec![(1, 0.8), (2, 0.7), (0, 0.9)]
+        );
+    }
+
+    #[test]
+    fn person_routes_only_through_owned_catalysts_when_available() {
+        let catalysts = vec![
+            catalyst("mention-high", "Other"),
+            catalyst("own-high", "Will Ashby"),
+            catalyst("own-low", "Will Ashby"),
+        ];
+        let global = vec![(0, 0.99), (1, 0.7), (2, 0.4)];
+        let matched = HashSet::from(["will ashby".to_string()]);
+
+        assert_eq!(
+            prioritize_anchored_catalysts(&global, &catalysts, &matched, &matched, 10),
+            vec![(1, 0.7), (2, 0.4)]
         );
     }
 
@@ -445,7 +480,13 @@ mod tests {
         let global = vec![(2, 0.9), (0, 0.8), (1, 0.7)];
 
         assert_eq!(
-            prioritize_anchored_catalysts(&global, &catalysts, &HashSet::new(), 2),
+            prioritize_anchored_catalysts(
+                &global,
+                &catalysts,
+                &HashSet::new(),
+                &HashSet::new(),
+                2,
+            ),
             vec![(2, 0.9), (0, 0.8)]
         );
     }
@@ -584,6 +625,11 @@ impl<'a> ContextSearch<'a> {
                     .filter(move |entity| entity.name.eq_ignore_ascii_case(name))
             })
             .collect::<Vec<_>>();
+        let matched_identity_name_set = matched_entities
+            .iter()
+            .filter(|entity| entity.entity_type == crate::models::EntityType::Link)
+            .map(|entity| entity.name.to_lowercase())
+            .collect::<HashSet<_>>();
         let anchored = !matched_entity_name_set.is_empty();
 
         // Load cached catalyst embeddings from DB, falling back to re-embedding
@@ -644,6 +690,7 @@ impl<'a> ContextSearch<'a> {
             &global_cat_sims,
             &catalysts,
             &matched_entity_name_set,
+            &matched_identity_name_set,
             max_catalysts,
         );
 
