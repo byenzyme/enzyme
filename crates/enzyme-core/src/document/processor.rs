@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
 
+use super::DiscoveredFile;
 use super::appendlog::{
     AppendLog, MIN_LOG_ENTRIES, chunk_append_log_dated, detect_append_log, entries_with_body,
 };
@@ -237,6 +238,34 @@ impl DocumentProcessor {
             .par_iter()
             .map(|path| self.process_file(path))
             .collect()
+    }
+
+    /// Process a file returned by named-root discovery. The configured root
+    /// name becomes the leading textual folder only when source refs are
+    /// namespaced (multi-root mode); single-root behavior stays byte-compatible.
+    pub fn process_discovered(file: &DiscoveredFile) -> Result<ProcessedDocument> {
+        let mut document = Self::new(file.root_path.clone()).process_file(&file.relative_path)?;
+        let relative = file.relative_path.to_string_lossy().replace('\\', "/");
+        if document.source_ref != file.source_ref {
+            let prefix = file
+                .source_ref
+                .strip_suffix(&relative)
+                .unwrap_or("")
+                .trim_end_matches('/');
+            if !prefix.is_empty() {
+                document.folders = if document.folders.is_empty() {
+                    vec![prefix.to_string()]
+                } else {
+                    document
+                        .folders
+                        .into_iter()
+                        .map(|folder| format!("{prefix}/{folder}"))
+                        .collect()
+                };
+            }
+            document.source_ref = file.source_ref.clone();
+        }
+        Ok(document)
     }
 }
 

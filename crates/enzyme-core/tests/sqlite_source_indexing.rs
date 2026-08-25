@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use enzyme_core::config::{
-    SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+    OneOrManyStrings, SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceRoles,
+    SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
 };
 use enzyme_core::db::Database;
 use enzyme_core::initialize_sqlite_runtime;
+use enzyme_core::models::EntityType;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::sqlite_source::{run_configured_sqlite_sources, run_sqlite_source};
+use enzyme_core::sqlite_source::{
+    run_configured_sqlite_sources, run_sqlite_source, source_refresh_staleness,
+};
 use libsql::Value;
 use rusqlite::{Connection, params};
 
@@ -24,10 +28,11 @@ fn source_config(path: PathBuf) -> SqliteSourceConfig {
             .to_string(),
         roles: SqliteSourceRoles {
             id: vec!["id".to_string()],
-            who: vec!["who".to_string()],
+            who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["who".to_string()])),
             when: "when_ts".to_string(),
             what: vec!["body".to_string()],
             r#where: vec!["where_label".to_string()],
+            weight: None,
         },
         timestamp: SqliteTimestampConfig {
             unit: SqliteTimestampUnit::Ms,
@@ -405,7 +410,10 @@ fn row_mode_detects_non_leading_who_edit() {
     config.roles.r#where.clear();
     // Two who columns; the leading who (sender) stays in the title, the second
     // who (thread column) is non-leading and only reachable via the who list.
-    config.roles.who = vec!["who".to_string(), "where_label".to_string()];
+    config.roles.who = SqliteWhoRole::Columns(OneOrManyStrings::Many(vec![
+        "who".to_string(),
+        "where_label".to_string(),
+    ]));
 
     assert_eq!(
         run_sqlite_source(&enzyme_db, "messages", &config)
@@ -424,4 +432,120 @@ fn row_mode_detects_non_leading_who_edit() {
     let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
     assert_eq!(edited.documents_rebuilt, 1);
     assert_eq!(edited.documents_skipped, 1);
+}
+
+#[test]
+fn multi_value_who_and_weight_emit_additive_participant_occurrences() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("participants.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                participants TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                importance REAL
+             );
+             INSERT INTO messages VALUES
+                (1, '[\"Alice\",\"Bob\",\"Alice\"]', 1705276800000, 'json row', 2.5);",
+        )
+        .unwrap();
+
+    let mut config = source_config(source_path.clone());
+    config.query = "SELECT id, participants, ts AS when_ts, body, importance FROM messages".into();
+    config.roles.who = SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::JsonArray {
+        column: "participants".into(),
+    });
+    config.roles.r#where.clear();
+    config.roles.weight = Some("importance".into());
+    run_sqlite_source(&enzyme_db, "json", &config).unwrap();
+
+    for name in ["Alice", "Bob"] {
+        let entity = enzyme_db
+            .get_entities_by_names(&[(name, EntityType::Link)])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            entity.frequency, 1,
+            "duplicates within one array are collapsed"
+        );
+        assert_eq!(entity.ranking_weight, 2.5);
+        assert_eq!(
+            enzyme_db
+                .get_entity_occurrences(entity.id.unwrap())
+                .unwrap()[0]
+                .weight,
+            2.5
+        );
+    }
+
+    source_db
+        .execute(
+            "UPDATE messages SET participants = 'Carol | Dave', importance = NULL WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    config.roles.who = SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::Delimited {
+        column: "participants".into(),
+        delimiter: "|".into(),
+    });
+    run_sqlite_source(&enzyme_db, "delimited", &config).unwrap();
+    for name in ["Carol", "Dave"] {
+        let entity = enzyme_db
+            .get_entities_by_names(&[(name, EntityType::Link)])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            entity.ranking_weight, 1.0,
+            "NULL weight uses the additive default"
+        );
+    }
+}
+
+#[test]
+fn source_refresh_staleness_uses_engine_owned_success_watermark() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source.db");
+    Connection::open(&source_path).unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+
+    let never = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(never.stale);
+    assert_eq!(never.reason.as_deref(), Some("never_refreshed"));
+
+    enzyme_db
+        .set_source_refresh_status("messages", 0, 0, 0)
+        .unwrap();
+    let changed = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(changed.stale);
+    assert_eq!(
+        changed.reason.as_deref(),
+        Some("source_modified_after_refresh")
+    );
+
+    enzyme_db
+        .set_source_refresh_status(
+            "messages",
+            0,
+            0,
+            chrono::Utc::now().timestamp_millis() + 1_000,
+        )
+        .unwrap();
+    assert!(
+        !source_refresh_staleness(&enzyme_db, "messages", &source_path)
+            .unwrap()
+            .stale
+    );
+
+    std::fs::remove_file(&source_path).unwrap();
+    let unavailable = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(unavailable.stale);
+    assert_eq!(unavailable.reason.as_deref(), Some("source_unavailable"));
 }

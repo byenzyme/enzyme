@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS entity_occurrences (
     context        TEXT,
     created_at     INTEGER,
     effective_date INTEGER,
-    date_source    TEXT    DEFAULT 'filesystem'
+    date_source    TEXT    DEFAULT 'filesystem',
+    weight         REAL    NOT NULL DEFAULT 1.0
 );
 CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity ON entity_occurrences(entity_id);
 CREATE INDEX IF NOT EXISTS idx_entity_occurrences_file   ON entity_occurrences(file_path);
