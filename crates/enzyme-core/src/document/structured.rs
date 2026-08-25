@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
@@ -9,28 +9,8 @@ use super::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
 /// current window still fits within the character budget.
 pub const STRUCTURED_LOG_GAP_MS: i64 = 6 * 60 * 60 * 1_000;
 
-/// Versioned text contract for speaker-attributed structured-log spans.
-pub const STRUCTURED_SPEAKER_SPAN_FORMAT_VERSION: &str = "enzyme-speaker-span.v1";
-pub const STRUCTURED_SPEAKER_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S UTC";
-const STRUCTURED_SPEAKER_HEADING_PREFIX: &str = "## ";
-const STRUCTURED_SPEAKER_SEPARATOR: &str = " — ";
-const STRUCTURED_SPEAKER_LIST_SEPARATOR: &str = ", ";
-
-/// Parse an exact `enzyme-speaker-span.v1` heading. Participant tokens are
-/// canonical link-entity keys and therefore may not contain commas.
-pub fn structured_speaker_participants(heading: &str) -> Option<Vec<&str>> {
-    let rest = heading.strip_prefix(STRUCTURED_SPEAKER_HEADING_PREFIX)?;
-    let (timestamp, participants) = rest.split_once(STRUCTURED_SPEAKER_SEPARATOR)?;
-    NaiveDateTime::parse_from_str(timestamp, STRUCTURED_SPEAKER_TIMESTAMP_FORMAT).ok()?;
-    let participants = participants
-        .split(STRUCTURED_SPEAKER_LIST_SEPARATOR)
-        .collect::<Vec<_>>();
-    (!participants.is_empty()
-        && participants
-            .iter()
-            .all(|participant| !participant.is_empty() && !participant.contains(',')))
-    .then_some(participants)
-}
+pub const STRUCTURED_LOG_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S UTC";
+const STRUCTURED_LOG_HEADING_PREFIX: &str = "## ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredLogEntry {
@@ -236,15 +216,10 @@ pub fn structured_log_document_to_processed_document(
 
 fn render_log_entry(entry: &StructuredLogEntry) -> String {
     let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.created_at)
-        .map(|date| date.format(STRUCTURED_SPEAKER_TIMESTAMP_FORMAT).to_string())
+        .map(|date| date.format(STRUCTURED_LOG_TIMESTAMP_FORMAT).to_string())
         .unwrap_or_else(|| format!("{} ms", entry.created_at));
-    let who = if entry.who.is_empty() {
-        "Unknown".to_string()
-    } else {
-        entry.who.join(STRUCTURED_SPEAKER_LIST_SEPARATOR)
-    };
     format!(
-        "{STRUCTURED_SPEAKER_HEADING_PREFIX}{timestamp}{STRUCTURED_SPEAKER_SEPARATOR}{who}\n\n{}",
+        "{STRUCTURED_LOG_HEADING_PREFIX}{timestamp}\n\n{}",
         entry.content
     )
 }
@@ -265,20 +240,36 @@ mod log_tests {
     }
 
     #[test]
-    fn speaker_heading_v1_is_exact_and_versioned() {
+    fn structured_log_who_becomes_document_links_not_rendered_speaker_headings() {
+        let output = structured_log_document_to_processed_document(input(vec![
+            StructuredLogEntry {
+                who: vec!["alice@example.com".to_string(), "Bob".to_string()],
+                content: "Alice and Bob discuss the migration boundary.".to_string(),
+                created_at: 1_700_000_000_000,
+            },
+            StructuredLogEntry {
+                who: vec!["Carol".to_string()],
+                content: "Carol follows up with rollout constraints.".to_string(),
+                created_at: 1_700_000_001_000,
+            },
+        ]));
+
         assert_eq!(
-            STRUCTURED_SPEAKER_SPAN_FORMAT_VERSION,
-            "enzyme-speaker-span.v1"
+            output.document.links,
+            vec!["Bob", "Carol", "alice@example.com"]
         );
-        assert_eq!(
-            structured_speaker_participants("## 2026-08-25 07:30:00 UTC — alice@example.com, Bob"),
-            Some(vec!["alice@example.com", "Bob"])
-        );
-        assert!(structured_speaker_participants("### 2026-08-25 07:30:00 UTC — Bob").is_none());
-        assert!(structured_speaker_participants("## 2026-08-25T07:30:00Z — Bob").is_none());
-        assert!(structured_speaker_participants("## 2026-08-25 07:30:00 UTC - Bob").is_none());
+        assert!(!output.document.content.contains(" — alice@example.com"));
+        assert!(!output.document.content.contains(" — Bob"));
+        assert!(!output.document.content.contains(" — Carol"));
+        let first_timestamp = DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .format(STRUCTURED_LOG_TIMESTAMP_FORMAT)
+            .to_string();
         assert!(
-            structured_speaker_participants("## 2026-08-25 07:30:00 UTC — Bob,Carol").is_none()
+            output
+                .document
+                .content
+                .contains(&format!("## {first_timestamp}"))
         );
     }
 

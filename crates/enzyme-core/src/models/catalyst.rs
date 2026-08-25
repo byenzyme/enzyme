@@ -52,8 +52,6 @@ pub struct CatalystTextHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub epoch_id: Option<String>,
     pub generated_at_ms: i64,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub participant_scoped: bool,
     /// All era allocations for this entity/run, duplicated deliberately so the
     /// derived era index can be rebuilt from any surviving catalyst chunk.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -154,7 +152,6 @@ mod canonical_text_tests {
             generation_run_id: "run-1".into(),
             epoch_id: Some("epoch-1".into()),
             generated_at_ms: 1_777_000_000_000,
-            participant_scoped: true,
             eras: vec![],
         };
         let receipt = EvidenceAnchor {
