@@ -272,7 +272,7 @@ async fn thin_evidence_skips_llm_and_records_reason() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped() {
+async fn shared_document_link_entities_each_see_full_conversation() {
     enzyme_core::initialize_sqlite_runtime().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let source_path = temp.path().join("mail.db");
@@ -289,11 +289,11 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
         )
         .unwrap();
     let participants = [
-        ("Alice", "ALICE_PRIVATE_SPAN", "Bob"),
-        ("Bob", "BOB_PRIVATE_SPAN", "Carol"),
-        ("Carol", "CAROL_PRIVATE_SPAN", "Alice"),
+        ("Alice", "ALICE_PRIVATE_SPAN"),
+        ("Bob", "BOB_PRIVATE_SPAN"),
+        ("Carol", "CAROL_PRIVATE_SPAN"),
     ];
-    for (index, (name, marker, _)) in participants.iter().enumerate() {
+    for (index, (name, marker)) in participants.iter().enumerate() {
         source
             .execute(
                 "INSERT INTO messages (id, sender, sent_at, body, thread)
@@ -335,19 +335,18 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
         .get_all_entities()
         .unwrap()
         .into_iter()
-        .filter(|entity| participants.iter().any(|(name, _, _)| entity.name == *name))
+        .filter(|entity| ["Alice", "Bob"].contains(&entity.name.as_str()))
         .collect::<Vec<_>>();
-    assert_eq!(entities.len(), 3);
+    assert_eq!(entities.len(), 2);
 
     let server = MockServer::start().await;
-    for (name, _, wrong_subject) in participants {
+    for (name, _) in [participants[0], participants[1]] {
         let response = serde_json::json!({
             "catalysts": [
-                format!("What does {name}'s concrete migration boundary leave unresolved?"),
-                format!("What does {wrong_subject}'s role tell {name} about the migration?")
+                format!("What does the shared migration boundary leave unresolved for {name}?")
             ],
-            "topicNames": ["owned migration boundary", "wrong participant"],
-            "anchorIds": [["E1"], ["E1"]]
+            "topicNames": ["shared migration boundary"],
+            "anchorIds": [["E1"]]
         });
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -373,31 +372,34 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
         .run(&entities, &config, |_| {})
         .await
         .unwrap();
-    assert_eq!(stats.catalysts_generated, 3);
-    assert_eq!(stats.hypotheses_rejected, 3);
+    assert_eq!(stats.catalysts_generated, 2);
+    assert_eq!(stats.hypotheses_rejected, 0);
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 3);
-    for (name, own_marker, _) in participants {
+    assert_eq!(requests.len(), 2);
+    let all_markers = [
+        "ALICE_PRIVATE_SPAN",
+        "BOB_PRIVATE_SPAN",
+        "CAROL_PRIVATE_SPAN",
+    ];
+    for (name, _) in [participants[0], participants[1]] {
         let request = requests
             .iter()
             .map(|request| String::from_utf8_lossy(&request.body))
             .find(|body| body.contains(&format!("Focus entity: {name}")))
-            .expect("request for participant");
-        assert!(request.contains(own_marker));
-        for (_, other_marker, _) in participants {
-            if other_marker != own_marker {
-                assert!(!request.contains(other_marker));
-            }
+            .expect("request for link entity");
+        for marker in all_markers {
+            assert!(
+                request.contains(marker),
+                "{name} prompt should include the full shared conversation via document/chunk association"
+            );
         }
     }
 
     let catalysts = db.get_all_catalysts().unwrap();
-    assert_eq!(catalysts.len(), 3);
+    assert_eq!(catalysts.len(), 2);
     for catalyst in &catalysts {
-        assert!(catalyst.text.contains(&catalyst.entity));
         let canonical = parse_catalyst_text(&catalyst.text).unwrap();
-        assert!(canonical.header.participant_scoped);
         assert!(
             canonical
                 .receipts
@@ -411,7 +413,7 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
     SimilarityPipeline::new(&db, service)
         .run(|_, _| {})
         .unwrap();
-    for (name, _, _) in participants {
+    for (name, _) in [participants[0], participants[1]] {
         let response = ContextSearch::new(&db, service)
             .catalyze_search(&format!("What should I recall about {name}?"), 8)
             .unwrap();

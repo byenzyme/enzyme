@@ -463,7 +463,9 @@ fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
             .iter()
             .all(|doc| doc.0.matches('/').count() == 2)
     );
-    assert!(source_docs.iter().all(|doc| doc.1.contains("Alice")));
+    assert!(source_docs.iter().all(|doc| !doc.1.contains(" — Alice")));
+    assert!(source_docs.iter().any(|doc| doc.1.contains("Met Will")));
+    assert!(source_docs.iter().any(|doc| doc.1.contains("Saw Will again")));
     assert!(source_docs.iter().all(|doc| doc.2.len() == 64));
 
     let chunk_dates = enzyme_db

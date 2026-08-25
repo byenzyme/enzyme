@@ -510,7 +510,6 @@ mod tests {
             generation_run_id: "run-1".into(),
             epoch_id: None,
             generated_at_ms: 1,
-            participant_scoped: false,
             eras: vec![],
         };
         let receipt = EvidenceAnchor {
