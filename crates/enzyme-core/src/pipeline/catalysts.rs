@@ -23,8 +23,9 @@ use crate::llm::{
     streaming_entries_instruction,
 };
 use crate::models::{
-    Catalyst, Embedding, Entity, EntityOccurrence, EntityType, EvidenceAnchor,
-    INLINE_CONTEXT_MAX_WORDS,
+    CATALYST_TEXT_FORMAT_VERSION, Catalyst, CatalystTextEra, CatalystTextHeader, Embedding, Entity,
+    EntityOccurrence, EntityType, EvidenceAnchor, INLINE_CONTEXT_MAX_WORDS, parse_catalyst_text,
+    render_catalyst_text,
 };
 use crate::pipeline::eras::{
     Era, allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
@@ -932,7 +933,7 @@ fn build_chunk_candidates(
 /// different canonicalization), so every entity is treated as dirty once after
 /// an upgrade rather than silently keeping catalysts the new inputs disagree
 /// with.
-const CONTEXT_HASH_VERSION: &str = "catalyst-context-v3-participant-scope";
+const CONTEXT_HASH_VERSION: &str = "catalyst-context-v4-canonical-receipts";
 
 /// Fold one labelled, length-prefixed field into the fingerprint. The label and
 /// explicit length keep concatenation unambiguous, so no combination of field
@@ -1204,33 +1205,55 @@ fn catalyst_from_parsed(
     provisional: bool,
 ) -> Catalyst {
     let era = catalyst_era(&parsed, available_anchors, era_audits);
+    let generated_at = Utc::now();
     let mut metadata = if provisional {
         serde_json::json!({"era": era, "generation_phase": "stream"})
     } else {
         serde_json::json!({"era": era})
     };
-    // Disambiguates same-named entities of different types (tag vs folder) so
-    // replacement deletes only this entity's catalysts.
+    // Legacy/cache fields only. Canonical provenance lives in `text` and every
+    // machine-facing receipt/era row is rebuilt by parsing it.
     metadata["entity_type"] = serde_json::json!(entity_type);
-    metadata["generation_run_id"] = serde_json::json!(generation_run_id);
-    if let Some(epoch_id) = epoch_id {
-        metadata["epoch_id"] = serde_json::json!(epoch_id);
-    }
-    if participant_scoped {
-        metadata["participant_scoped"] = serde_json::json!(true);
-    }
     let cited = available_anchors
         .iter()
         .filter(|anchor| parsed.anchor_ids.contains(&anchor.anchor_id))
         .cloned()
         .collect::<Vec<_>>();
-    metadata["evidence_anchors"] = serde_json::to_value(cited).unwrap_or_default();
+    let header = CatalystTextHeader {
+        format_version: CATALYST_TEXT_FORMAT_VERSION,
+        entity_id: entity_name.to_string(),
+        entity_type: entity_type.to_string(),
+        era,
+        generation_run_id: generation_run_id.to_string(),
+        epoch_id: epoch_id.map(str::to_string),
+        generated_at_ms: generated_at.timestamp_millis(),
+        participant_scoped,
+        eras: era_audits
+            .iter()
+            .map(|audit| CatalystTextEra {
+                label: audit.label.clone(),
+                start_month: audit.start.clone(),
+                end_month: audit.end.clone(),
+                distinct_documents: audit.distinct_documents,
+                substantive_tokens: audit.substantive_tokens,
+                occurrence_count: audit.occurrence_count,
+                catalyst_budget: audit.catalyst_budget,
+                status: audit.status.to_string(),
+                reason: audit.reason.clone(),
+            })
+            .collect(),
+    };
+    let text = render_catalyst_text(&header, &parsed.text, &cited)
+        .expect("grounded catalyst must render canonical provenance text");
+    let canonical =
+        parse_catalyst_text(&text).expect("rendered catalyst must pass the text grounding guard");
+    assert!(!canonical.receipts.is_empty(), "ungrounded catalyst text");
     Catalyst {
         id: Uuid::new_v4().to_string(),
-        text: parsed.text,
+        text,
         entity: entity_name.to_string(),
         context: parsed.topic,
-        generated_at: Utc::now(),
+        generated_at,
         metadata,
     }
 }
@@ -1271,7 +1294,6 @@ impl<'a> CatalystPipeline<'a> {
                 reason: era.reason.as_deref(),
                 created_at_ms: now,
             };
-            self.db.record_catalyst_era_audit(&audit)?;
             if let Some(code) = skip_reason_code
                 && era.reason.is_some()
             {

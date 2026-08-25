@@ -105,8 +105,8 @@ CREATE TABLE IF NOT EXISTS catalyst_entity_hashes (
     PRIMARY KEY (entity, entity_type)
 );
 
--- Evidence-era audit rows for every catalyst generation run. Rows are retained
--- for skipped thin eras as well as generated eras so absence is explainable.
+-- Rebuildable era index parsed from canonical catalyst text. Catalyst text is
+-- the source of truth; this table may be dropped and reconstructed at any time.
 CREATE TABLE IF NOT EXISTS catalyst_eras (
     generation_run_id  TEXT NOT NULL,
     epoch_id           TEXT,
@@ -126,7 +126,26 @@ CREATE TABLE IF NOT EXISTS catalyst_eras (
 );
 CREATE INDEX IF NOT EXISTS idx_catalyst_eras_epoch ON catalyst_eras(epoch_id);
 
--- Durable reasons why an entity/era did not reach or survive generation.
+-- Rebuildable receipt index parsed from canonical catalyst text. One row is
+-- stored per receipt occurrence (or ordinal zero with a NULL occurrence_id).
+CREATE TABLE IF NOT EXISTS catalyst_receipts (
+    catalyst_id        TEXT NOT NULL,
+    anchor_id          TEXT NOT NULL,
+    occurrence_ordinal INTEGER NOT NULL,
+    source_ref         TEXT NOT NULL,
+    occurrence_id      INTEGER,
+    timestamp_ms       INTEGER NOT NULL,
+    chunk_index        INTEGER,
+    quote              TEXT NOT NULL,
+    PRIMARY KEY (catalyst_id, anchor_id, occurrence_ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_receipts_source
+    ON catalyst_receipts(source_ref);
+CREATE INDEX IF NOT EXISTS idx_catalyst_receipts_occurrence
+    ON catalyst_receipts(occurrence_id);
+
+-- Append-only operational log: unlike receipt/era indexes, a skipped catalyst
+-- has no canonical text to parse, so this table is intentionally not derived.
 CREATE TABLE IF NOT EXISTS catalyst_generation_skips (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     generation_run_id   TEXT NOT NULL,
@@ -287,6 +306,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "catalysts",
     "catalyst_entity_hashes",
     "catalyst_eras",
+    "catalyst_receipts",
     "catalyst_generation_skips",
     "catalyst_similarities",
     "context_cache",
@@ -310,6 +330,8 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_catalysts_entity",
     "idx_catalysts_context",
     "idx_catalyst_eras_epoch",
+    "idx_catalyst_receipts_source",
+    "idx_catalyst_receipts_occurrence",
     "idx_catalyst_generation_skips_run",
     "idx_entity_occurrences_entity",
     "idx_entity_occurrences_file",

@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Catalyst, CatalystSimilarity, Embedding};
+use crate::models::{Catalyst, CatalystSimilarity, Embedding, catalyst_embedding_text};
 
 /// Compute a stable SHA-256 fingerprint over catalyst ids and texts.
 ///
@@ -98,8 +98,16 @@ impl<'a> SimilarityPipeline<'a> {
             .delete_catalyst_similarities_for_catalysts(&catalyst_ids)?;
         self.db.prune_catalyst_similarities_except(&catalyst_ids)?;
 
-        // Embed all catalyst texts
-        let catalyst_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+        // Provenance stays in the returned chunk, but does not distort semantic
+        // similarity: only hypothesis prose enters the embedding backend.
+        let catalyst_embedding_texts: Vec<String> = catalysts
+            .iter()
+            .map(|c| catalyst_embedding_text(&c.text))
+            .collect();
+        let catalyst_texts: Vec<&str> = catalyst_embedding_texts
+            .iter()
+            .map(String::as_str)
+            .collect();
         let catalyst_vecs = self.service.embed_documents(&catalyst_texts)?;
 
         // Cache catalyst embeddings to DB for fast reuse in catalyze_search
@@ -412,9 +420,13 @@ impl<'a> SimilarityPipeline<'a> {
 mod tests {
     use super::*;
     use crate::embedding::{EmbeddingBackend, EmbeddingService};
-    use crate::models::Catalyst;
+    use crate::models::{
+        CATALYST_TEXT_FORMAT_VERSION, Catalyst, CatalystTextHeader, EvidenceAnchor,
+        render_catalyst_text,
+    };
     use chrono::Utc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct AxisBackend;
 
@@ -429,6 +441,26 @@ mod tests {
 
         fn name(&self) -> &str {
             "axis-test"
+        }
+    }
+
+    struct RecordingBackend(Arc<Mutex<Vec<String>>>);
+
+    impl EmbeddingBackend for RecordingBackend {
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.0
+                .lock()
+                .unwrap()
+                .extend(texts.iter().map(|text| (*text).to_string()));
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            2
+        }
+
+        fn name(&self) -> &str {
+            "recording-test"
         }
     }
 
@@ -463,6 +495,41 @@ mod tests {
         let cats1 = vec![make_catalyst("a", "foo")];
         let cats2 = vec![make_catalyst("a", "bar")];
         assert_ne!(catalysts_fingerprint(&cats1), catalysts_fingerprint(&cats2));
+    }
+
+    #[test]
+    fn full_similarity_embedding_excludes_header_and_receipts() {
+        let db = Database::open_in_memory().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let service = EmbeddingService::new(Box::new(RecordingBackend(recorded.clone())));
+        let header = CatalystTextHeader {
+            format_version: CATALYST_TEXT_FORMAT_VERSION,
+            entity_id: "Alice".into(),
+            entity_type: "link".into(),
+            era: "2026-08".into(),
+            generation_run_id: "run-1".into(),
+            epoch_id: None,
+            generated_at_ms: 1,
+            participant_scoped: false,
+            eras: vec![],
+        };
+        let receipt = EvidenceAnchor {
+            anchor_id: "E1".into(),
+            source_ref: "SECRET_SOURCE_REF".into(),
+            occurrence_ids: vec![1],
+            timestamp_ms: 1,
+            chunk_index: None,
+            quote: "SECRET_RECEIPT_QUOTE".into(),
+        };
+        let text = render_catalyst_text(&header, "Hypothesis prose [E1].", &[receipt]).unwrap();
+        let catalyst = make_catalyst("canonical", &text);
+        SimilarityPipeline::new(&db, &service)
+            .run_with_catalysts(&[catalyst], |_, _| {})
+            .unwrap();
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            ["Hypothesis prose [E1]."]
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use enzyme_core::config::{
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
+use enzyme_core::models::{catalyst_embedding_text, parse_catalyst_text};
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystPipeline, DEFAULT_MIN_EVIDENCE_DOCUMENTS, DEFAULT_MIN_EVIDENCE_TOKENS,
 };
@@ -46,7 +47,7 @@ fn focus_entity(db: &Database) -> enzyme_core::models::Entity {
 fn contract(service: &enzyme_core::embedding::EmbeddingService) -> GenerationContract {
     GenerationContract {
         schema_version: "catalyst-epoch.v2".into(),
-        prompt_version: "catalyst-prompts.2026-08-grounded-participants".into(),
+        prompt_version: "catalyst-prompts.2026-08-canonical-receipts".into(),
         catalyst_format: DEFAULT_FORMAT_KEY.into(),
         catalyst_profile: DEFAULT_PROFILE_KEY.into(),
         model: "fixture-model".into(),
@@ -118,27 +119,65 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
     assert_eq!(stats.hypotheses_rejected, 1);
 
     let catalyst = db.get_all_catalysts().unwrap().pop().unwrap();
-    let anchors = catalyst.metadata["evidence_anchors"].as_array().unwrap();
-    assert!(
-        !catalyst.metadata["era"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty()
-    );
+    let canonical = parse_catalyst_text(&catalyst.text).unwrap();
+    let anchors = &canonical.receipts;
+    assert!(!canonical.header.era.is_empty());
     assert_eq!(
-        catalyst.metadata["epoch_id"].as_str(),
+        canonical.header.epoch_id.as_deref(),
         Some(epoch_id.as_str())
     );
     assert_eq!(anchors.len(), 1);
-    assert!(
-        anchors[0]["source_ref"]
-            .as_str()
-            .unwrap()
-            .contains("evidence-")
-    );
-    assert!(!anchors[0]["occurrence_ids"].as_array().unwrap().is_empty());
-    assert!(anchors[0]["timestamp_ms"].as_i64().is_some());
-    assert!(!anchors[0]["quote"].as_str().unwrap().is_empty());
+    assert!(anchors[0].source_ref.contains("evidence-"));
+    assert!(!anchors[0].occurrence_ids.is_empty());
+    assert!(!anchors[0].quote.is_empty());
+    assert!(catalyst.text.contains("```receipts\n"));
+    assert!(!catalyst_embedding_text(&catalyst.text).contains(&anchors[0].source_ref));
+
+    let derived_snapshot = || {
+        let receipts = db
+            .query_read(
+                "SELECT catalyst_id,anchor_id,occurrence_ordinal,source_ref,occurrence_id,
+                        timestamp_ms,chunk_index,quote FROM catalyst_receipts
+                 ORDER BY catalyst_id,anchor_id,occurrence_ordinal",
+                vec![],
+                |row| {
+                    Ok((
+                        row.get::<String>(0)?,
+                        row.get::<String>(1)?,
+                        row.get::<i64>(2)?,
+                        row.get::<String>(3)?,
+                        row.get::<Option<i64>>(4)?,
+                        row.get::<i64>(5)?,
+                        row.get::<Option<i64>>(6)?,
+                        row.get::<String>(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let eras = db
+            .query_read(
+                "SELECT generation_run_id,epoch_id,entity,entity_type,era_label,start_month,
+                        end_month,distinct_documents,substantive_tokens,occurrence_count,
+                        catalyst_budget,status,reason,created_at_ms FROM catalyst_eras
+                 ORDER BY generation_run_id,entity,entity_type,era_label",
+                vec![],
+                |row| {
+                    Ok((0..14)
+                        .map(|index| format!("{:?}", row.get_value(index).unwrap()))
+                        .collect::<Vec<_>>())
+                },
+            )
+            .unwrap();
+        (receipts, eras)
+    };
+    let before_rebuild = derived_snapshot();
+    db.execute_write("DELETE FROM catalyst_receipts", vec![])
+        .unwrap();
+    db.execute_write("DELETE FROM catalyst_eras", vec![])
+        .unwrap();
+    let rebuilt = db.rebuild_catalyst_derived_indexes().unwrap();
+    assert!(rebuilt.0 > 0 && rebuilt.1 > 0);
+    assert_eq!(derived_snapshot(), before_rebuild);
 
     EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
     SimilarityPipeline::new(&db, service)
@@ -154,6 +193,18 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
         !response.top_contributing_catalysts[0]
             .evidence_anchors
             .is_empty()
+    );
+    assert!(
+        response.top_contributing_catalysts[0]
+            .text
+            .contains("```receipts\n")
+    );
+    assert!(
+        response.results[0]
+            .via_catalyst_text
+            .as_deref()
+            .unwrap()
+            .contains("```receipts\n")
     );
 
     let (eras, epochs): (i64, i64) = (
@@ -342,7 +393,14 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
     assert_eq!(catalysts.len(), 3);
     for catalyst in &catalysts {
         assert!(catalyst.text.contains(&catalyst.entity));
-        assert_eq!(catalyst.metadata["participant_scoped"], true);
+        let canonical = parse_catalyst_text(&catalyst.text).unwrap();
+        assert!(canonical.header.participant_scoped);
+        assert!(
+            canonical
+                .receipts
+                .iter()
+                .all(|receipt| receipt.source_ref.starts_with("sqlite:mail/"))
+        );
     }
 
     let service = get_embedding_service(temp.path()).unwrap();

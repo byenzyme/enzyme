@@ -390,7 +390,7 @@ fn ensure_searchable_owned(
             )?;
             let contract = GenerationContract {
                 schema_version: "catalyst-epoch.v2".into(),
-                prompt_version: "catalyst-prompts.2026-08-grounded-participants".into(),
+                prompt_version: "catalyst-prompts.2026-08-canonical-receipts".into(),
                 catalyst_format: crate::llm::DEFAULT_FORMAT_KEY.into(),
                 catalyst_profile: crate::llm::DEFAULT_PROFILE_KEY.into(),
                 model: model.clone(),
@@ -474,6 +474,7 @@ mod tests {
     use super::*;
     use crate::config::enzyme_config::CatalyzedEntity;
     use crate::llm::LlmClient;
+    use crate::models::parse_catalyst_text;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -632,22 +633,13 @@ mod tests {
             .unwrap();
         assert_eq!(epochs.len(), 1);
         let catalyst = index.database().get_all_catalysts().unwrap().pop().unwrap();
-        assert!(
-            !catalyst.metadata["era"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty()
-        );
+        let canonical = parse_catalyst_text(&catalyst.text).unwrap();
+        assert!(!canonical.header.era.is_empty());
         assert_eq!(
-            catalyst.metadata["epoch_id"].as_str(),
+            canonical.header.epoch_id.as_deref(),
             Some(epochs[0].as_str())
         );
-        assert!(
-            !catalyst.metadata["evidence_anchors"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!canonical.receipts.is_empty());
 
         let era_rows = index
             .database()
