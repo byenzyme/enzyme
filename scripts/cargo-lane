@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run build commands in Enzyme's shared or ephemeral per-thread Cargo lane."""
+"""Run Enzyme builds in durable shared or lifecycle-owned disposable lanes."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
 import socket
@@ -29,9 +28,11 @@ USAGE = """usage:
   scripts/cargo-lane status
   scripts/cargo-lane target-dir
   scripts/cargo-lane cargo-config
+  scripts/cargo-lane prune
   scripts/cargo-lane sccache-stats
   scripts/cargo-lane shared -- <command> [args...]
   scripts/cargo-lane isolated -- <command> [args...]
+  scripts/cargo-lane disposable -- <command> [args...]
 """
 
 
@@ -198,23 +199,56 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
     os.replace(temporary, path)
 
 
-def isolated_slot_paths(state_dir: Path, slot: int) -> tuple[Path, Path]:
-    return state_dir / f"slot-{slot}.lock", state_dir / f"slot-{slot}-owner.json"
+def scratch_slot_paths(state_dir: Path, slot: int) -> tuple[Path, Path, Path]:
+    return (
+        state_dir / f"slot-{slot}.lock",
+        state_dir / f"slot-{slot}-owner.json",
+        state_dir / f"slot-{slot}-target",
+    )
+
+
+def remove_scratch_target(state_dir: Path, slot: int, target_dir: Path) -> bool:
+    expected = state_dir / f"slot-{slot}-target"
+    if target_dir.resolve() != expected.resolve():
+        fail(f"refusing to remove unexpected scratch target {target_dir}")
+    existed = target_dir.exists()
+    if existed:
+        shutil.rmtree(target_dir)
+    return existed
+
+
+def recover_scratch_slots(state_dir: Path, *, announce: bool) -> int:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    recovered = 0
+    for slot in range(1, ISOLATED_SLOT_COUNT + 1):
+        lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
+        with lock_path.open("a+") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            if remove_scratch_target(state_dir, slot, target_dir):
+                recovered += 1
+                if announce:
+                    print(f"cargo-lane: recovered abandoned scratch target {target_dir}")
+            owner_path.unlink(missing_ok=True)
+    return recovered
 
 
 def isolated_status(state_dir: Path) -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     busy = 0
     for slot in range(1, ISOLATED_SLOT_COUNT + 1):
-        lock_path, owner_path = isolated_slot_paths(state_dir, slot)
+        lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
         with lock_path.open("a+") as lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 busy += 1
-                print(f"cargo-lane: isolated slot {slot} busy ({owner_summary(owner_path)})")
+                print(f"cargo-lane: scratch slot {slot} busy ({owner_summary(owner_path)})")
             else:
-                print(f"cargo-lane: isolated slot {slot} free")
+                residue = f"; abandoned target {target_dir}" if target_dir.exists() else ""
+                print(f"cargo-lane: scratch slot {slot} free{residue}")
     return busy
 
 
@@ -239,13 +273,13 @@ def command_text(command: list[str]) -> str:
     return " ".join(command)
 
 
-def validate_isolated(command: list[str]) -> None:
+def validate_disposable(command: list[str]) -> None:
     lowered = [part.lower() for part in command]
     executable = Path(lowered[0]).name
     script_basenames = {Path(part).name for part in lowered}
 
     if executable in {"tauri", "cargo-tauri"}:
-        fail("isolated mode is not allowed for Tauri release/install workflows")
+        fail("disposable lanes are not allowed for Tauri release/install workflows")
     if script_basenames.intersection(
         {
             "10-install-matrix.sh",
@@ -254,16 +288,40 @@ def validate_isolated(command: list[str]) -> None:
             "40-agentic-setup.sh",
         }
     ):
-        fail("isolated mode is not allowed for release-check workflows")
+        fail("disposable lanes are not allowed for release-check workflows")
     if executable == "cargo":
         cargo_words = {word for word in lowered[1:] if not word.startswith("-")}
         if cargo_words.intersection({"install", "package", "publish"}):
-            fail("isolated mode is not allowed for cargo install/package/publish")
+            fail("disposable lanes are not allowed for cargo install/package/publish")
+
+
+def validate_isolated(command: list[str]) -> None:
+    validate_disposable(command)
+    lowered = [part.lower() for part in command]
+    executable = Path(lowered[0]).name
+    if executable == "cargo":
         if "--release" in lowered:
             fail("isolated mode is reserved for narrow development checks and tests")
         for index, part in enumerate(lowered[:-1]):
             if part == "--profile" and lowered[index + 1] == "release":
                 fail("isolated mode is reserved for narrow development checks and tests")
+
+
+def validate_shared(command: list[str]) -> None:
+    lowered = [part.lower() for part in command]
+    if Path(lowered[0]).name != "cargo":
+        return
+    cargo_words = [
+        word
+        for word in lowered[1:]
+        if not word.startswith("-") and not word.startswith("+")
+    ]
+    action = cargo_words[0] if cargo_words else ""
+    if action in {"test", "bench"} or "--example" in lowered or "--examples" in lowered:
+        fail(
+            "high-churn Cargo tests, benches, and examples belong in the disposable "
+            "lane; use scripts/cargo-lane disposable -- <command>"
+        )
 
 
 def run_command(command: list[str], env: dict[str, str]) -> int:
@@ -344,14 +402,14 @@ def require_isolated_capacity(target_dir: Path, state_dir: Path) -> None:
 
 
 def acquire_isolated_slot(
-    state_dir: Path, command: list[str]
-) -> tuple[object, Path, str, int]:
+    state_dir: Path, command: list[str], mode: str
+) -> tuple[object, Path, str, int, Path]:
     state_dir.mkdir(parents=True, exist_ok=True)
     announced_wait = False
     while True:
         busy_owners = []
         for slot in range(1, ISOLATED_SLOT_COUNT + 1):
-            lock_path, owner_path = isolated_slot_paths(state_dir, slot)
+            lock_path, owner_path, target_dir = scratch_slot_paths(state_dir, slot)
             lock_file = lock_path.open("a+")
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -359,21 +417,30 @@ def acquire_isolated_slot(
                 lock_file.close()
                 busy_owners.append(owner_summary(owner_path))
                 continue
+            if remove_scratch_target(state_dir, slot, target_dir):
+                print(
+                    f"cargo-lane: recovered abandoned scratch target {target_dir}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            target_dir.mkdir(parents=True)
             token = uuid.uuid4().hex
             write_json_atomic(
                 owner_path,
                 {
                     "token": token,
                     "slot": slot,
+                    "mode": mode,
                     "thread_id": os.environ.get("BB_THREAD_ID"),
                     "environment_id": os.environ.get("BB_ENVIRONMENT_ID"),
                     "pid": os.getpid(),
                     "host": socket.gethostname(),
                     "started_at": int(time.time()),
                     "command": command_text(command),
+                    "target_dir": str(target_dir),
                 },
             )
-            return lock_file, owner_path, token, slot
+            return lock_file, owner_path, token, slot, target_dir
         if not announced_wait:
             print(
                 "cargo-lane: waiting for an isolated slot "
@@ -404,6 +471,8 @@ def shared(
     owner_path: Path,
     isolated_state_dir: Path,
 ) -> int:
+    validate_shared(command)
+    recover_scratch_slots(isolated_state_dir, announce=False)
     target_dir.mkdir(parents=True, exist_ok=True)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
@@ -444,21 +513,22 @@ def shared(
             (isolated_state_dir / "shared-target-size.json").unlink(missing_ok=True)
 
 
-def isolated(command: list[str], target_dir: Path, state_dir: Path) -> int:
-    validate_isolated(command)
-    lock_file, owner_path, token, slot = acquire_isolated_slot(state_dir, command)
+def scratch(command: list[str], target_dir: Path, state_dir: Path, mode: str) -> int:
+    if mode == "isolated":
+        validate_isolated(command)
+    else:
+        validate_disposable(command)
+    lock_file, owner_path, token, slot, scratch_dir = acquire_isolated_slot(
+        state_dir, command, mode
+    )
     try:
         require_isolated_capacity(target_dir, state_dir)
-        thread = os.environ.get("BB_THREAD_ID", "manual")
-        safe_thread = re.sub(r"[^A-Za-z0-9_.-]+", "-", thread)[:80]
-        prefix = f"enzyme-rust-cargo-{safe_thread}-"
-        isolated_dir = Path(tempfile.mkdtemp(prefix=prefix))
         env = os.environ.copy()
-        env["CARGO_TARGET_DIR"] = str(isolated_dir)
+        env["CARGO_TARGET_DIR"] = str(scratch_dir)
         env["CARGO_INCREMENTAL"] = "0"
         apply_sccache(env)
         print(
-            f"cargo-lane: isolated slot {slot}/{ISOLATED_SLOT_COUNT}; target {isolated_dir} "
+            f"cargo-lane: {mode} scratch slot {slot}/{ISOLATED_SLOT_COUNT}; target {scratch_dir} "
             f"(shared target remains {target_dir})",
             file=sys.stderr,
             flush=True,
@@ -466,13 +536,26 @@ def isolated(command: list[str], target_dir: Path, state_dir: Path) -> int:
         try:
             return run_command(command, env)
         finally:
-            shutil.rmtree(isolated_dir, ignore_errors=True)
-            if isolated_dir.exists():
-                print(f"cargo-lane: warning: cleanup incomplete for {isolated_dir}", file=sys.stderr)
+            try:
+                remove_scratch_target(state_dir, slot, scratch_dir)
+            except OSError as exc:
+                print(
+                    f"cargo-lane: warning: cleanup incomplete for {scratch_dir}: {exc}",
+                    file=sys.stderr,
+                )
+            if scratch_dir.exists():
+                print(f"cargo-lane: warning: cleanup incomplete for {scratch_dir}", file=sys.stderr)
             else:
-                print(f"cargo-lane: removed isolated target {isolated_dir}", file=sys.stderr)
+                print(f"cargo-lane: removed scratch target {scratch_dir}", file=sys.stderr)
     finally:
         release_isolated_slot(lock_file, owner_path, token)
+
+
+def prune_scratch(state_dir: Path) -> int:
+    recovered = recover_scratch_slots(state_dir, announce=True)
+    if recovered == 0:
+        print("cargo-lane: no abandoned scratch targets to remove")
+    return 0
 
 
 def main() -> int:
@@ -494,16 +577,20 @@ def main() -> int:
         if len(sys.argv) != 2:
             fail(USAGE.rstrip())
         return sccache_stats()
+    if mode == "prune":
+        if len(sys.argv) != 2:
+            fail(USAGE.rstrip())
+        return prune_scratch(isolated_state_dir)
     if mode == "status":
         if len(sys.argv) != 2:
             fail(USAGE.rstrip())
         return status(lock_path, owner_path, target_dir, isolated_state_dir)
-    if mode not in {"shared", "isolated"} or len(sys.argv) < 4 or sys.argv[2] != "--":
+    if mode not in {"shared", "isolated", "disposable"} or len(sys.argv) < 4 or sys.argv[2] != "--":
         fail(USAGE.rstrip())
     command = sys.argv[3:]
     if mode == "shared":
         return shared(command, target_dir, lock_path, owner_path, isolated_state_dir)
-    return isolated(command, target_dir, isolated_state_dir)
+    return scratch(command, target_dir, isolated_state_dir, mode)
 
 
 if __name__ == "__main__":

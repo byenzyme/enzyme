@@ -58,8 +58,8 @@ actual_target="$(cd "$worktree" && scripts/cargo-lane target-dir)"
 
 status_output="$(cd "$worktree" && scripts/cargo-lane status)"
 [[ "$status_output" == *"cargo-lane: shared target $expected_target"* ]] || fail "status did not report expected target"
-[[ "$status_output" == *"cargo-lane: isolated slot 1 free"* ]] || fail "status did not report isolated slot 1"
-[[ "$status_output" == *"cargo-lane: isolated slot 2 free"* ]] || fail "status did not report isolated slot 2"
+[[ "$status_output" == *"cargo-lane: scratch slot 1 free"* ]] || fail "status did not report scratch slot 1"
+[[ "$status_output" == *"cargo-lane: scratch slot 2 free"* ]] || fail "status did not report scratch slot 2"
 
 (cd "$worktree" && env bash .bb-env-setup.sh) >/dev/null
 config_path="$worktree/.cargo/config.toml"
@@ -167,6 +167,49 @@ actual_order="$(cat "$serialization_log")"
 success_stderr="$tmp_root/isolated-success.stderr"
 (cd "$worktree" && scripts/cargo-lane isolated -- sh -c 'test "$CARGO_INCREMENTAL" = 0 && test -d "$CARGO_TARGET_DIR" && touch "$CARGO_TARGET_DIR/probe"') >/dev/null 2>"$success_stderr"
 assert_removed_isolated_target "$success_stderr"
+
+first_isolated_target="$(sed -n 's/.*; target \([^ ]*\) .*/\1/p' "$success_stderr" | tail -1)"
+expected_scratch_target="$tmp_root/.enzyme-rust-cargo-isolated/slot-1-target"
+[[ "$first_isolated_target" == "$expected_scratch_target" ]] || fail "isolated target is not the fixed slot path"
+
+disposable_stderr="$tmp_root/disposable-success.stderr"
+(cd "$worktree" && scripts/cargo-lane disposable -- sh -c 'test "$CARGO_INCREMENTAL" = 0 && touch "$CARGO_TARGET_DIR/probe"') >/dev/null 2>"$disposable_stderr"
+assert_removed_isolated_target "$disposable_stderr"
+grep -q "disposable scratch slot" "$disposable_stderr" || fail "disposable lane diagnostic missing"
+
+mkdir -p "$expected_scratch_target"
+touch "$expected_scratch_target/orphan"
+recovery_stderr="$tmp_root/disposable-recovery.stderr"
+(cd "$worktree" && scripts/cargo-lane disposable -- sh -c 'test ! -e "$CARGO_TARGET_DIR/orphan"') >/dev/null 2>"$recovery_stderr"
+grep -q "recovered abandoned scratch target" "$recovery_stderr" || fail "abandoned target recovery missing"
+assert_removed_isolated_target "$recovery_stderr"
+
+shared_test_stderr="$tmp_root/shared-test-rejected.stderr"
+set +e
+(cd "$worktree" && scripts/cargo-lane shared -- cargo test --workspace) >/dev/null 2>"$shared_test_stderr"
+shared_test_code=$?
+set -e
+[[ "$shared_test_code" -eq 2 ]] || fail "shared cargo test returned $shared_test_code, expected 2"
+grep -q "belong in the disposable lane" "$shared_test_stderr" || fail "shared cargo test routing diagnostic missing"
+
+toolchain_test_stderr="$tmp_root/shared-toolchain-test-rejected.stderr"
+set +e
+(cd "$worktree" && scripts/cargo-lane shared -- cargo +stable test) >/dev/null 2>"$toolchain_test_stderr"
+toolchain_test_code=$?
+set -e
+[[ "$toolchain_test_code" -eq 2 ]] || fail "shared cargo +toolchain test returned $toolchain_test_code, expected 2"
+grep -q "belong in the disposable lane" "$toolchain_test_stderr" || fail "shared cargo +toolchain routing diagnostic missing"
+
+mkdir -p "$expected_scratch_target"
+touch "$expected_scratch_target/orphan"
+prune_output="$(cd "$worktree" && scripts/cargo-lane prune)"
+[[ "$prune_output" == *"recovered abandoned scratch target"* ]] || fail "prune did not report abandoned target"
+[[ ! -e "$expected_scratch_target" ]] || fail "prune left abandoned scratch target"
+
+mkdir -p "$expected_scratch_target"
+touch "$expected_scratch_target/orphan"
+(cd "$worktree" && scripts/cargo-lane shared -- sh -c true) >/dev/null 2>"$tmp_root/shared-recovery.stderr"
+[[ ! -e "$expected_scratch_target" ]] || fail "next shared build did not recover abandoned scratch target"
 
 failure_stderr="$tmp_root/isolated-failure.stderr"
 set +e

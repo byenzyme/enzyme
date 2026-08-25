@@ -4,6 +4,10 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# A killed agent can leave a fixed scratch target behind. The lane pruner only
+# removes slots whose advisory lock is free, so it is safe during bb startup.
+"$repo_root/scripts/cargo-lane" prune >/dev/null
+
 sentinel="# enzyme-rust-bb-cargo-config-v1"
 config_dir="$repo_root/.cargo"
 config_toml="$config_dir/config.toml"
