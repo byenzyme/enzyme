@@ -317,6 +317,7 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
         query: "SELECT id, sender, sent_at, body, thread FROM messages".to_string(),
         roles: SqliteSourceRoles {
             id: vec!["id".to_string()],
+            document_ref: None,
             who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["sender".to_string()])),
             when: "sent_at".to_string(),
             what: vec!["body".to_string()],

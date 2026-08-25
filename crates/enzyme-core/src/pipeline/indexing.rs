@@ -38,10 +38,11 @@ pub struct IndexingPipeline<'a> {
 /// entries are kept, and the drop is logged.
 const MAX_LOG_OCCURRENCES: usize = 1000;
 fn is_markdown_source_ref(source_ref: &str) -> bool {
-    std::path::Path::new(source_ref)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+    !source_ref.starts_with("sqlite:")
+        && std::path::Path::new(source_ref)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
 /// Summary statistics from an indexing run.
@@ -833,12 +834,14 @@ mod tests {
             NotesRootConfig {
                 name: "sessions".into(),
                 path: sessions.path().to_path_buf(),
+                document_ref_prefix: None,
                 exclusions: Vec::new(),
                 writable: true,
             },
             NotesRootConfig {
                 name: "references".into(),
                 path: references.path().to_path_buf(),
+                document_ref_prefix: None,
                 exclusions: Vec::new(),
                 writable: false,
             },

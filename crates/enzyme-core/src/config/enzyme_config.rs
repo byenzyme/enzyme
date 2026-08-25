@@ -128,6 +128,11 @@ pub struct SqliteSourceConfig {
 pub struct SqliteSourceRoles {
     #[serde(deserialize_with = "deserialize_one_or_many")]
     pub id: Vec<String>,
+    /// Optional exact document identity supplied by a trusted query result.
+    /// The value must stay inside this source's `sqlite:<source-name>/`
+    /// namespace. Omitted sources retain Enzyme's hash-derived identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_ref: Option<String>,
     #[serde(default)]
     pub who: SqliteWhoRole,
     pub when: String,
@@ -146,6 +151,11 @@ pub struct SqliteSourceRoles {
 pub struct NotesRootConfig {
     pub name: String,
     pub path: PathBuf,
+    /// Optional stable document namespace, separate from the display/root name.
+    /// When set, every document ref is `<prefix>/<relative-path>` regardless of
+    /// how many roots are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_ref_prefix: Option<String>,
     #[serde(default)]
     pub exclusions: Vec<String>,
     #[serde(default = "default_true")]
@@ -471,6 +481,8 @@ enum WorkspaceSourceToml {
 struct NotesSourceToml {
     path: PathBuf,
     #[serde(default)]
+    document_ref_prefix: Option<String>,
+    #[serde(default)]
     exclusions: Vec<String>,
     #[serde(default = "default_true")]
     writable: bool,
@@ -675,6 +687,7 @@ impl EnzymeConfig {
                         WorkspaceSourceToml::Notes(notes) => Some(NotesRootConfig {
                             name: name.clone(),
                             path: notes.path.clone(),
+                            document_ref_prefix: notes.document_ref_prefix.clone(),
                             exclusions: notes.exclusions.clone(),
                             writable: notes.writable,
                         }),
@@ -749,6 +762,7 @@ impl EnzymeConfig {
         Ok(vec![NotesRootConfig {
             name: "notes".to_string(),
             path: vault_path.to_path_buf(),
+            document_ref_prefix: None,
             exclusions: Vec::new(),
             writable: true,
         }])
@@ -952,6 +966,7 @@ impl EnzymeConfig {
                     "notes".to_string(),
                     WorkspaceSourceToml::Notes(NotesSourceToml {
                         path: path.clone(),
+                        document_ref_prefix: None,
                         exclusions: Vec::new(),
                         writable: true,
                     }),
@@ -962,6 +977,7 @@ impl EnzymeConfig {
                     root.name.clone(),
                     WorkspaceSourceToml::Notes(NotesSourceToml {
                         path: root.path.clone(),
+                        document_ref_prefix: root.document_ref_prefix.clone(),
                         exclusions: root.exclusions.clone(),
                         writable: root.writable,
                     }),
@@ -1077,6 +1093,7 @@ impl EnzymeConfig {
                 for root in &self.notes_roots {
                     let notes = ensure_table(sources, &root.name);
                     set_value(notes, "path", &root.path)?;
+                    set_optional(notes, "document_ref_prefix", &root.document_ref_prefix)?;
                     set_value(notes, "exclusions", &root.exclusions)?;
                     set_value(notes, "writable", &root.writable)?;
                 }
@@ -1479,6 +1496,7 @@ entities = [
             r#"
 [workspaces.margins.sources.sessions]
 path = "/notes/sessions"
+document_ref_prefix = "markdown:sessions"
 exclusions = ["exports"]
 writable = true
 
@@ -1492,9 +1510,53 @@ writable = false
         let config = EnzymeConfig::from_workspace_config("margins", &global);
         assert_eq!(config.notes_roots.len(), 2);
         assert_eq!(config.notes_roots[0].name, "references");
+        assert_eq!(config.notes_roots[0].document_ref_prefix, None);
         assert_eq!(config.notes_roots[0].exclusions, vec!["cache", "private"]);
         assert!(!config.notes_roots[0].writable);
+        assert_eq!(config.notes_roots[1].name, "sessions");
+        assert_eq!(
+            config.notes_roots[1].document_ref_prefix.as_deref(),
+            Some("markdown:sessions")
+        );
         assert_eq!(config.notes_path, None);
+    }
+
+    #[test]
+    fn named_workspace_document_ref_prefix_survives_in_place_save_and_load() {
+        let temp = TempDir::new().unwrap();
+        let store = temp.path().join("workspaces/margins");
+        fs::create_dir_all(&store).unwrap();
+        let config_path = temp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"# keep this comment
+[workspaces.margins.sources.notes]
+path = "/notes/original"
+document_ref_prefix = "markdown-original"
+"#,
+        )
+        .unwrap();
+
+        let mut config = EnzymeConfig::load_at(&store, &config_path)
+            .unwrap()
+            .unwrap();
+        config.notes_roots[0].path = PathBuf::from("/notes/updated");
+        config.notes_roots[0].document_ref_prefix = Some("markdown-stable".to_string());
+        config
+            .save_at(&store, &config_path, "# Enzyme configuration\n")
+            .unwrap();
+
+        let raw = fs::read_to_string(&config_path).unwrap();
+        assert!(raw.contains("# keep this comment"));
+        assert!(raw.contains("document_ref_prefix = \"markdown-stable\""));
+        let loaded = EnzymeConfig::load_at(&store, &config_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.notes_roots[0].path, PathBuf::from("/notes/updated"));
+        assert_eq!(
+            loaded.notes_roots[0].document_ref_prefix.as_deref(),
+            Some("markdown-stable")
+        );
     }
 
     #[test]
@@ -1689,16 +1751,17 @@ local_model = "catalyst-135m-v3"
                 "messages".to_string(),
                 SqliteSourceConfig {
                     db: PathBuf::from("/tmp/messages.db"),
-                    query: "SELECT id, sender, sent_at, subject, body, thread FROM messages"
+                    query: "SELECT id, document_ref, sender, sent_at, subject, body FROM messages"
                         .to_string(),
                     roles: SqliteSourceRoles {
                         id: vec!["id".to_string()],
+                        document_ref: Some("document_ref".to_string()),
                         who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec![
                             "sender".to_string(),
                         ])),
                         when: "sent_at".to_string(),
                         what: vec!["subject".to_string(), "body".to_string()],
-                        r#where: vec!["thread".to_string()],
+                        r#where: Vec::new(),
                         weight: None,
                     },
                     timestamp: SqliteTimestampConfig {
@@ -1728,9 +1791,10 @@ local_model = "catalyst-135m-v3"
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
         let source = loaded.sources.get("messages").unwrap();
         assert_eq!(source.roles.id, vec!["id"]);
+        assert_eq!(source.roles.document_ref.as_deref(), Some("document_ref"));
         assert_eq!(source.roles.who.columns(), vec!["sender"]);
         assert_eq!(source.roles.what, vec!["subject", "body"]);
-        assert_eq!(source.roles.r#where, vec!["thread"]);
+        assert!(source.roles.r#where.is_empty());
         assert_eq!(source.timestamp.unit, SqliteTimestampUnit::Ms);
         assert_eq!(source.timestamp.epoch.as_deref(), Some("2001-01-01"));
         let llm = EnzymeConfig::catalyst_llm_config().unwrap();
