@@ -15,7 +15,8 @@ pub mod update_sentinel;
 pub use connection::{Database, initialize_sqlite_runtime};
 pub use errors::DbError;
 pub use repository::{
-    DocumentForEmbedding, EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats,
+    CatalystEraAudit, DocumentForEmbedding, EntityRefreshStats, FileChunk, FolderChild,
+    FolderStats, SubfolderStats,
 };
 
 #[cfg(test)]

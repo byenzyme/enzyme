@@ -105,6 +105,63 @@ CREATE TABLE IF NOT EXISTS catalyst_entity_hashes (
     PRIMARY KEY (entity, entity_type)
 );
 
+-- Rebuildable era index parsed from canonical catalyst text. Catalyst text is
+-- the source of truth; this table may be dropped and reconstructed at any time.
+CREATE TABLE IF NOT EXISTS catalyst_eras (
+    generation_run_id  TEXT NOT NULL,
+    epoch_id           TEXT,
+    entity             TEXT NOT NULL,
+    entity_type        TEXT NOT NULL,
+    era_label          TEXT NOT NULL DEFAULT '',
+    start_month        TEXT NOT NULL DEFAULT '',
+    end_month          TEXT NOT NULL DEFAULT '',
+    distinct_documents INTEGER NOT NULL,
+    substantive_tokens INTEGER NOT NULL,
+    occurrence_count    INTEGER NOT NULL DEFAULT 0,
+    catalyst_budget     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL,
+    reason              TEXT,
+    created_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (generation_run_id, entity, entity_type, era_label)
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_eras_epoch ON catalyst_eras(epoch_id);
+
+-- Rebuildable receipt index parsed from canonical catalyst text. One row is
+-- stored per receipt occurrence (or ordinal zero with a NULL occurrence_id).
+CREATE TABLE IF NOT EXISTS catalyst_receipts (
+    catalyst_id        TEXT NOT NULL,
+    anchor_id          TEXT NOT NULL,
+    occurrence_ordinal INTEGER NOT NULL,
+    source_ref         TEXT NOT NULL,
+    occurrence_id      INTEGER,
+    timestamp_ms       INTEGER NOT NULL,
+    chunk_index        INTEGER,
+    quote              TEXT NOT NULL,
+    PRIMARY KEY (catalyst_id, anchor_id, occurrence_ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_receipts_source
+    ON catalyst_receipts(source_ref);
+CREATE INDEX IF NOT EXISTS idx_catalyst_receipts_occurrence
+    ON catalyst_receipts(occurrence_id);
+
+-- Append-only operational log: unlike receipt/era indexes, a skipped catalyst
+-- has no canonical text to parse, so this table is intentionally not derived.
+CREATE TABLE IF NOT EXISTS catalyst_generation_skips (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation_run_id   TEXT NOT NULL,
+    epoch_id            TEXT,
+    entity              TEXT NOT NULL,
+    entity_type         TEXT NOT NULL,
+    era_label           TEXT NOT NULL DEFAULT '',
+    reason_code         TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    distinct_documents  INTEGER NOT NULL DEFAULT 0,
+    substantive_tokens  INTEGER NOT NULL DEFAULT 0,
+    created_at_ms        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_generation_skips_run
+    ON catalyst_generation_skips(generation_run_id);
+
 -- Catalyst similarities (typically in the embeddings database) ----------------
 CREATE TABLE IF NOT EXISTS catalyst_similarities (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,6 +305,9 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "entity_occurrences",
     "catalysts",
     "catalyst_entity_hashes",
+    "catalyst_eras",
+    "catalyst_receipts",
+    "catalyst_generation_skips",
     "catalyst_similarities",
     "context_cache",
     "config",
@@ -269,6 +329,10 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_entities_frequency",
     "idx_catalysts_entity",
     "idx_catalysts_context",
+    "idx_catalyst_eras_epoch",
+    "idx_catalyst_receipts_source",
+    "idx_catalyst_receipts_occurrence",
+    "idx_catalyst_generation_skips_run",
     "idx_entity_occurrences_entity",
     "idx_entity_occurrences_file",
     "idx_catalyst_epochs_status",

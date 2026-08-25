@@ -11,6 +11,20 @@ pub struct Generator {
 }
 
 impl Generator {
+    #[cfg(test)]
+    pub(crate) fn fixture(client: LlmClient, model: &str) -> Self {
+        Self {
+            config: ResolvedConfig {
+                api_key: "fixture-key".to_string(),
+                base_url: "fixture".to_string(),
+                model: model.to_string(),
+                provider: ConfigProvider::Env,
+                expires_at: None,
+            },
+            client,
+        }
+    }
+
     /// Resolve env credentials, configured local inference, or the anonymous
     /// hosted fallback using the same policy as the rest of Enzyme core.
     pub async fn resolve() -> Result<Self> {

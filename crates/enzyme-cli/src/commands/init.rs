@@ -352,10 +352,14 @@ fn prune_deselected_catalysts(
 /// success that generated zero catalysts, not a failure.
 fn evaluate_catalyst_quality(stats: &CatalystStats, total_entities: usize) -> CatalystQualityGate {
     let failed = stats.errors.len();
-    let succeeded = stats.entities_processed + stats.entities_unchanged;
+    let succeeded =
+        stats.entities_processed + stats.entities_unchanged + stats.entities_below_threshold;
     let attempted = succeeded + failed;
 
-    if stats.catalysts_generated == 0 && stats.entities_unchanged == 0 {
+    if stats.catalysts_generated == 0
+        && stats.entities_unchanged == 0
+        && stats.entities_below_threshold == 0
+    {
         return CatalystQualityGate {
             quality: CatalystQuality::Failed,
             message: Some(format!(
@@ -1022,6 +1026,15 @@ pub async fn run_init(
                 .and_then(|v| v.parse().ok()),
             stream_partial_catalysts,
             force_regenerate: force,
+            min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
+            min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
+            epoch_id: None,
         };
 
         // The database now survives a re-init, so entities that dropped out of
@@ -1624,8 +1637,8 @@ pub(super) async fn generation_contract(
     catalyst_config.max_embedding_files = None;
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
     Ok(GenerationContract {
-        schema_version: "catalyst-epoch.v1".to_string(),
-        prompt_version: "catalyst-prompts.2026-07".to_string(),
+        schema_version: "catalyst-epoch.v2".to_string(),
+        prompt_version: "catalyst-prompts.2026-08-canonical-receipts".to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()
@@ -1651,6 +1664,14 @@ pub(super) async fn generation_contract(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20),
+        min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
+        min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
     })
 }
 
@@ -1957,6 +1978,9 @@ async fn build_and_activate_epoch(
         // The shadow epoch starts from a snapshot with its catalyst view
         // wiped, so every selected entity is dirty by construction.
         force_regenerate: false,
+        min_evidence_documents: contract.min_evidence_documents,
+        min_evidence_tokens: contract.min_evidence_tokens,
+        epoch_id: Some(&claim.epoch_id),
     };
 
     let stats = cat_pipeline
@@ -2029,6 +2053,11 @@ async fn build_and_activate_epoch(
     let mut carried_entities = 0usize;
     let mut carried_catalysts = 0usize;
     for entity in &sel_result.entities {
+        if stats.suppressed_entities.iter().any(|(name, entity_type)| {
+            name == &entity.name && entity_type == entity.entity_type.as_str()
+        }) {
+            continue;
+        }
         if covered.contains(&entity.name) {
             continue;
         }
@@ -2055,7 +2084,13 @@ async fn build_and_activate_epoch(
         .entities
         .iter()
         .map(|e| e.name.as_str())
-        .filter(|name| !covered.contains(*name))
+        .filter(|name| {
+            !covered.contains(*name)
+                && !stats
+                    .suppressed_entities
+                    .iter()
+                    .any(|(suppressed, _)| suppressed == name)
+        })
         .collect();
     if !uncovered.is_empty() {
         let message = format!(
@@ -2582,6 +2617,9 @@ mod tests {
                 .collect(),
             duration_ms: 0,
             rate_limited: 0,
+            entities_below_threshold: 0,
+            hypotheses_rejected: 0,
+            suppressed_entities: Vec::new(),
         }
     }
 
