@@ -228,11 +228,15 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
     // Honor `exclude` here too: "indexable files present" must be computed the
     // same way IndexingPipeline will index, or a vault whose only files live in
     // excluded folders would be judged non-empty and its DB-only corpus wiped.
-    let markdown_root =
-        EnzymeConfig::markdown_root(vault_path)?.unwrap_or_else(|| vault_path.to_path_buf());
-    let discovered_files = FileDiscovery::new(markdown_root)
+    let roots = EnzymeConfig::markdown_roots(vault_path)?;
+    let discovery = if roots.is_empty() {
+        FileDiscovery::new(vault_path.to_path_buf())
+    } else {
+        FileDiscovery::from_notes_roots(roots)
+    };
+    let discovered_files = discovery
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path))
-        .discover()?;
+        .discover_named()?;
     if !discovered_files.is_empty() {
         return Ok(false);
     }
@@ -255,9 +259,14 @@ fn configured_indexing_pipeline<'a>(
         .filter(|entity| entity.entity_type == enzyme_core::models::EntityType::AppendLog)
         .map(|entity| entity.name)
         .collect();
-    Ok(IndexingPipeline::new(db, markdown_root)
+    let pipeline = IndexingPipeline::new(db, markdown_root)
         .with_excluded_folders(config.excluded_folders)
-        .with_configured_logs(logs))
+        .with_configured_logs(logs);
+    Ok(if config.notes_roots.is_empty() {
+        pipeline
+    } else {
+        pipeline.with_notes_roots(config.notes_roots)
+    })
 }
 
 fn index_configured_sqlite_sources(
@@ -2593,6 +2602,7 @@ mod tests {
             name: name.to_string(),
             entity_type: EntityType::Tag,
             frequency: 1,
+            ranking_weight: 1.0,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends::default(),

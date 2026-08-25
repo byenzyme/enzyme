@@ -787,8 +787,8 @@ impl Database {
 
                 tx.execute(
                     "INSERT INTO entity_occurrences
-                     (entity_id, file_path, context, created_at, effective_date, date_source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (entity_id, file_path, context, created_at, effective_date, date_source, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     vec![
                         Value::Integer(entity_id),
                         Value::Text(occurrence.file_path.clone()),
@@ -796,6 +796,7 @@ impl Database {
                         Value::Integer(occurrence.created_at),
                         opt_val(occurrence.effective_date),
                         Value::Text(occurrence.date_source.clone()),
+                        Value::Real(occurrence.weight),
                     ],
                 )
                 .await?;
@@ -875,8 +876,8 @@ impl Database {
             for occ in &occurrences {
                 tx.execute(
                     "INSERT INTO entity_occurrences
-                     (entity_id, file_path, context, created_at, effective_date, date_source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (entity_id, file_path, context, created_at, effective_date, date_source, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     vec![
                         Value::Integer(entity_id),
                         Value::Text(occ.file_path.clone()),
@@ -884,6 +885,7 @@ impl Database {
                         Value::Integer(occ.created_at),
                         opt_val(occ.effective_date),
                         Value::Text(occ.date_source.clone()),
+                        Value::Real(occ.weight),
                     ],
                 )
                 .await?;
@@ -928,7 +930,7 @@ impl Database {
     /// Get all occurrences for a given entity.
     pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
         let rows = self.query_read(
-            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source, weight
              FROM entity_occurrences WHERE entity_id = ?1",
             vec![Value::Integer(entity_id)],
             |row| {
@@ -940,6 +942,7 @@ impl Database {
                     created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
                     effective_date: row.get::<Option<i64>>(5)?,
                     date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
+                    weight: row.get::<f64>(7)?,
                 })
             },
         )?;
@@ -1014,8 +1017,10 @@ impl Database {
             Ok(entities)
         } else {
             let rows = self.query_read(
-                "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-                 FROM entities ORDER BY frequency DESC LIMIT ?1",
+                "SELECT e.id, e.name, e.type, e.frequency,
+                        CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                        e.first_seen, e.last_seen, e.trends, e.metadata
+                 FROM entities e ORDER BY 5 DESC LIMIT ?1",
                 vec![Value::Integer(limit as i64)],
                 map_entity_row,
             )?;
@@ -1054,9 +1059,9 @@ impl Database {
     }
 
     /// Fetch all occurrence timestamps in one query, grouped by entity_id.
-    pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64)>> {
+    pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64, f64)>> {
         let rows = self.query_read(
-            "SELECT entity_id, effective_date, created_at
+            "SELECT entity_id, effective_date, created_at, weight
              FROM entity_occurrences
              ORDER BY entity_id",
             vec![],
@@ -1065,6 +1070,7 @@ impl Database {
                     row.get::<i64>(0)?,
                     row.get::<Option<i64>>(1)?,
                     row.get::<i64>(2)?,
+                    row.get::<f64>(3)?,
                 ))
             },
         )?;
@@ -1120,8 +1126,10 @@ impl Database {
 
         for (name, entity_type) in names {
             let rows = self.query_read(
-                "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-                 FROM entities WHERE name = ?1 AND type = ?2",
+                "SELECT e.id, e.name, e.type, e.frequency,
+                        CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                        e.first_seen, e.last_seen, e.trends, e.metadata
+                 FROM entities e WHERE LOWER(e.name) = ?1 AND e.type = ?2",
                 vec![
                     Value::Text(name.to_lowercase()),
                     Value::Text(entity_type.as_str().to_string()),
@@ -1137,8 +1145,10 @@ impl Database {
     /// Retrieve every entity in the database.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.query_read(
-            "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-             FROM entities",
+            "SELECT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e",
             vec![],
             map_entity_row,
         )?;
@@ -1377,10 +1387,12 @@ impl Database {
         let not_like_pattern = format!("{}/%/%", parent_name);
 
         let rows = self.query_read(
-            "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-             FROM entities
-             WHERE name LIKE ?1 AND name NOT LIKE ?2 AND type = ?3
-             ORDER BY frequency DESC
+            "SELECT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e
+             WHERE e.name LIKE ?1 AND e.name NOT LIKE ?2 AND e.type = ?3
+             ORDER BY 5 DESC
              LIMIT ?4",
             vec![
                 Value::Text(like_pattern),
@@ -1495,7 +1507,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<EntityOccurrence>> {
         let rows = self.query_read(
-            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source, weight
              FROM entity_occurrences
              WHERE entity_id = ?1
              ORDER BY effective_date DESC
@@ -1510,6 +1522,7 @@ impl Database {
                     created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
                     effective_date: row.get::<Option<i64>>(5)?,
                     date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
+                    weight: row.get::<f64>(7)?,
                 })
             },
         )?;
@@ -2913,10 +2926,10 @@ impl Database {
 // ---------------------------------------------------------------------------
 
 fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
-    let trends_str: String = row.get::<Option<String>>(6)?.unwrap_or_default();
+    let trends_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
     let trends: EntityTrends = serde_json::from_str(&trends_str).unwrap_or_default();
 
-    let metadata_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
+    let metadata_str: String = row.get::<Option<String>>(8)?.unwrap_or_default();
     let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
         .unwrap_or(serde_json::Value::Object(Default::default()));
 
@@ -2925,8 +2938,9 @@ fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
         name: row.get::<String>(1)?,
         entity_type: parse_entity_type(&row.get::<String>(2)?),
         frequency: row.get::<i64>(3)?,
-        first_seen: row.get::<Option<i64>>(4)?,
-        last_seen: row.get::<Option<i64>>(5)?,
+        ranking_weight: row.get::<f64>(4)?,
+        first_seen: row.get::<Option<i64>>(5)?,
+        last_seen: row.get::<Option<i64>>(6)?,
         trends,
         metadata,
     })

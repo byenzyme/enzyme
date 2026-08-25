@@ -11,7 +11,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+    SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig,
+    SqliteTimestampUnit, SqliteWhoRole,
 };
 use crate::db::{Database, initialize_sqlite_runtime};
 use crate::document::{
@@ -24,6 +25,49 @@ use crate::pipeline::indexing::IndexingPipeline;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteSourceValidation {
     pub row_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceRefreshStaleness {
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Report whether a configured source changed after its last successful
+/// reconciliation. SQLite WAL/shm sidecars participate in the file watermark.
+pub fn source_refresh_staleness(
+    db: &Database,
+    source_name: &str,
+    source_path: &Path,
+) -> Result<SourceRefreshStaleness> {
+    let Some((_, _, refreshed_at_ms)) = db.get_source_refresh_status(source_name)? else {
+        return Ok(SourceRefreshStaleness {
+            stale: true,
+            reason: Some("never_refreshed".to_string()),
+        });
+    };
+    if std::fs::metadata(source_path).is_err() {
+        return Ok(SourceRefreshStaleness {
+            stale: true,
+            reason: Some("source_unavailable".to_string()),
+        });
+    }
+    let mut paths = vec![source_path.to_path_buf()];
+    let raw = source_path.as_os_str().to_string_lossy();
+    paths.push(std::path::PathBuf::from(format!("{raw}-wal")));
+    paths.push(std::path::PathBuf::from(format!("{raw}-shm")));
+    let modified_ms = paths
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())
+        .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .max();
+    let stale = modified_ms.is_some_and(|modified| modified > refreshed_at_ms);
+    Ok(SourceRefreshStaleness {
+        stale,
+        reason: stale.then(|| "source_modified_after_refresh".to_string()),
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -88,6 +132,7 @@ struct SourceRow {
     where_labels: Vec<String>,
     where_key: Vec<Option<String>>,
     created_at: i64,
+    weight: f64,
 }
 
 #[derive(Debug)]
@@ -270,10 +315,16 @@ pub fn run_sqlite_source(
             .iter()
             .map(|index| CursorValue::from_ref(row.get_ref(*index)?))
             .collect::<Result<Vec<_>>>()?;
-        let who = role_text_values(row, &columns.who, "who")?;
+        let who = who_values(row, &columns.who, &source.roles.who)?;
         let where_labels = role_text_values(row, &columns.where_columns, "where")?;
         let created_at =
             timestamp_value_to_unix_ms(row.get_ref(columns.when)?, &source.timestamp, epoch_ms)?;
+        let weight = columns
+            .weight
+            .map(|index| numeric_weight(row.get_ref(index)?))
+            .transpose()?
+            .flatten()
+            .unwrap_or(1.0);
         let where_key = role_optional_text_values(row, &columns.where_columns, "where")?;
         source_rows.push(SourceRow {
             id,
@@ -282,6 +333,7 @@ pub fn run_sqlite_source(
             where_labels,
             where_key,
             created_at,
+            weight,
         });
     }
     drop(rows);
@@ -417,10 +469,18 @@ fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDo
             // the record — `when`, every `who`, and `where` — into it. Otherwise an
             // edit to a timestamp or a non-leading participant leaves the hash equal
             // and the row is skipped, so stored dates/links/entity occurrences rot.
-            document.content_hash =
-                row_reconcile_hash(&document.content_hash, created_at, &who, &where_labels);
-            let occurrences =
+            document.content_hash = row_reconcile_hash(
+                &document.content_hash,
+                created_at,
+                &who,
+                &where_labels,
+                row.weight,
+            );
+            let mut occurrences =
                 IndexingPipeline::collect_entity_entries(std::slice::from_ref(&document));
+            for (_, _, occurrence) in &mut occurrences {
+                occurrence.weight = row.weight;
+            }
             PendingDocument {
                 document,
                 occurrences,
@@ -437,6 +497,7 @@ fn row_reconcile_hash(
     created_at: i64,
     who: &[String],
     where_labels: &[String],
+    weight: f64,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_content_hash.as_bytes());
@@ -447,6 +508,7 @@ fn row_reconcile_hash(
         hasher.update([b'\x1e']);
     }
     hasher.update([b'\x1d']);
+    hasher.update(weight.to_le_bytes());
     for value in where_labels {
         hasher.update(value.as_bytes());
         hasher.update([b'\x1e']);
@@ -512,14 +574,26 @@ fn build_bucket_documents(source_name: &str, rows: Vec<SourceRow>) -> Result<Vec
                 occurrences.push((
                     who.clone(),
                     EntityType::Link,
-                    source_occurrence(&source_ref, context.clone(), now, row.created_at),
+                    source_occurrence(
+                        &source_ref,
+                        context.clone(),
+                        now,
+                        row.created_at,
+                        row.weight,
+                    ),
                 ));
             }
             for folder in &row.where_labels {
                 occurrences.push((
                     folder.clone(),
                     EntityType::Folder,
-                    source_occurrence(&source_ref, context.clone(), now, row.created_at),
+                    source_occurrence(
+                        &source_ref,
+                        context.clone(),
+                        now,
+                        row.created_at,
+                        row.weight,
+                    ),
                 ));
             }
         }
@@ -536,6 +610,7 @@ fn source_occurrence(
     context: Option<String>,
     created_at: i64,
     effective_date: i64,
+    weight: f64,
 ) -> EntityOccurrence {
     EntityOccurrence {
         id: None,
@@ -545,6 +620,7 @@ fn source_occurrence(
         created_at,
         effective_date: Some(effective_date),
         date_source: "content".to_string(),
+        weight,
     }
 }
 
@@ -589,7 +665,7 @@ fn bucket_fingerprint(rows: &[SourceRow]) -> String {
     let mut records: Vec<Vec<u8>> = rows
         .iter()
         .map(|row| {
-            serde_json::to_vec(&(&row.who, row.created_at, &row.what))
+            serde_json::to_vec(&(&row.who, row.created_at, &row.what, row.weight))
                 .expect("serializing normalized SQLite roles cannot fail")
         })
         .collect();
@@ -625,6 +701,7 @@ struct ResolvedColumns {
     when: usize,
     what: Vec<usize>,
     where_columns: Vec<usize>,
+    weight: Option<usize>,
 }
 
 impl ResolvedColumns {
@@ -646,7 +723,16 @@ impl ResolvedColumns {
 
         Ok(Self {
             id: indices(statement, &roles.id, "id")?,
-            who: indices(statement, &roles.who, "who")?,
+            who: indices(
+                statement,
+                &roles
+                    .who
+                    .columns()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                "who",
+            )?,
             when: statement.column_index(&roles.when).with_context(|| {
                 format!(
                     "source role {:?} references missing result column {:?}",
@@ -655,8 +741,75 @@ impl ResolvedColumns {
             })?,
             what: indices(statement, &roles.what, "what")?,
             where_columns: indices(statement, &roles.r#where, "where")?,
+            weight: roles
+                .weight
+                .as_deref()
+                .map(|name| {
+                    statement.column_index(name).with_context(|| {
+                        format!(
+                            "source role {:?} references missing result column {name:?}",
+                            "weight"
+                        )
+                    })
+                })
+                .transpose()?,
         })
     }
+}
+
+fn who_values(
+    row: &rusqlite::Row<'_>,
+    columns: &[usize],
+    role: &SqliteWhoRole,
+) -> Result<Vec<String>> {
+    match role {
+        SqliteWhoRole::Columns(_) => role_text_values(row, columns, "who"),
+        SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::JsonArray { .. }) => {
+            let Some(raw) = scalar_text(row.get_ref(columns[0])?, "who")? else {
+                return Ok(Vec::new());
+            };
+            let values: Vec<String> = serde_json::from_str(&raw)
+                .context("source role \"who\" contains invalid JSON array text")?;
+            Ok(normalize_participants(values))
+        }
+        SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::Delimited { delimiter, .. }) => {
+            anyhow::ensure!(
+                !delimiter.is_empty(),
+                "source role \"who\" delimiter may not be empty"
+            );
+            let Some(raw) = scalar_text(row.get_ref(columns[0])?, "who")? else {
+                return Ok(Vec::new());
+            };
+            Ok(normalize_participants(
+                raw.split(delimiter).map(str::to_string),
+            ))
+        }
+    }
+}
+
+fn normalize_participants(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !normalized.iter().any(|existing| existing == value) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
+}
+
+fn numeric_weight(value: ValueRef<'_>) -> Result<Option<f64>> {
+    let weight = match value {
+        ValueRef::Null => return Ok(None),
+        ValueRef::Integer(value) => value as f64,
+        ValueRef::Real(value) => value,
+        _ => bail!("source role \"weight\" must contain numeric values"),
+    };
+    anyhow::ensure!(
+        weight.is_finite() && weight >= 0.0,
+        "source role \"weight\" must be finite and non-negative"
+    );
+    Ok(Some(weight))
 }
 
 fn concatenated_text(
@@ -883,6 +1036,7 @@ mod tests {
             where_labels: vec!["Thread".to_string()],
             where_key: vec![Some("Thread".to_string())],
             created_at,
+            weight: 1.0,
         }
     }
 

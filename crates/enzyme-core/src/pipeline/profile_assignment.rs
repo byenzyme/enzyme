@@ -358,6 +358,7 @@ mod tests {
             name: name.to_string(),
             entity_type: etype,
             frequency: 0,
+            ranking_weight: 0.0,
             first_seen: None,
             last_seen: None,
             trends: Default::default(),

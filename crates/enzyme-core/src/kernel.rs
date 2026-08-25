@@ -333,6 +333,7 @@ fn ensure_searchable_owned(
         min_catalyst_evidence_tokens,
     } = options;
     let mut configured_sources = None;
+    let mut configured_notes_roots = Vec::new();
     if let Some(config_path) = config_path {
         configured_sources = Some(HashMap::new());
         let loaded = EnzymeConfig::load_at(&vault_path, &config_path)
@@ -342,6 +343,7 @@ fn ensure_searchable_owned(
         }
         if let Some(config) = loaded {
             configured_sources = Some(config.sources.clone());
+            configured_notes_roots = config.notes_roots.clone();
             if excluded_folders.is_empty() {
                 excluded_folders = config.excluded_folders.clone();
             }
@@ -362,9 +364,13 @@ fn ensure_searchable_owned(
         run_configured_sqlite_sources(&db, &sources)
             .context("indexing configured SQLite sources")?;
     }
-    IndexingPipeline::new(&db, vault_path.clone())
+    let mut indexing = IndexingPipeline::new(&db, vault_path.clone())
         .with_excluded_folders(excluded_folders)
-        .with_configured_logs(configured_logs)
+        .with_configured_logs(configured_logs);
+    if !configured_notes_roots.is_empty() {
+        indexing = indexing.with_notes_roots(configured_notes_roots);
+    }
+    indexing
         .run(full_reindex, |_| {})
         .context("indexing documents")?;
     let document_count = db.get_document_count().unwrap_or(0) as usize;

@@ -231,7 +231,6 @@ fn failed_catalyst_attempt_does_not_gate_source_reexecution() {
         "imessage",
     ]);
     assert_success(&init);
-
     let config_path = fixture.enzyme_home.join("config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap().replace(
         "[workspaces.imessage]\n",
@@ -251,11 +250,19 @@ fn failed_catalyst_attempt_does_not_gate_source_reexecution() {
             ("OPENAI_API_KEY", "test-key"),
             ("OPENAI_BASE_URL", "http://127.0.0.1:1/v1"),
             ("OPENAI_MODEL", "test-model"),
+            // Keep this test non-vacuous after the evidence gates added in #13:
+            // the single-row fixture must reach the deliberately failing LLM.
+            ("ENZYME_MIN_EVIDENCE_DOCUMENTS", "1"),
+            ("ENZYME_MIN_EVIDENCE_TOKENS", "1"),
         ],
     );
-    assert_success(&retry);
-    let output: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
-    assert_eq!(output["status"], "completed_with_warnings");
+    assert!(
+        !retry.status.success(),
+        "the deliberately unreachable LLM must make the catalyst attempt fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&retry.stderr).contains("Catalyst generation produced 0 catalysts")
+    );
     assert!(
         fixture
             .indexed_content("updated before failed catalysts")

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use enzyme_core::config::{
-    SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+    OneOrManyStrings, SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig,
+    SqliteTimestampUnit, SqliteWhoRole,
 };
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
@@ -316,10 +317,11 @@ async fn shared_thread_generation_and_person_retrieval_stay_participant_scoped()
         query: "SELECT id, sender, sent_at, body, thread FROM messages".to_string(),
         roles: SqliteSourceRoles {
             id: vec!["id".to_string()],
-            who: vec!["sender".to_string()],
+            who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["sender".to_string()])),
             when: "sent_at".to_string(),
             what: vec!["body".to_string()],
             r#where: vec!["thread".to_string()],
+            weight: None,
         },
         timestamp: SqliteTimestampConfig {
             unit: SqliteTimestampUnit::Ms,

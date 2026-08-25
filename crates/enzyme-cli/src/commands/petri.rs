@@ -804,6 +804,7 @@ mod tests {
             frequency_recent: frequency,
             recency_score,
             timeline_buckets: HashMap::new(),
+            timeline_weights: HashMap::new(),
         })
         .unwrap();
 

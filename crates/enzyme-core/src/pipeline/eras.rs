@@ -15,6 +15,9 @@ pub struct Era {
     pub end: String,
     /// Total note count across all months in this era.
     pub count: i64,
+    /// Additive evidence weight in this era. Unweighted Markdown gives `1.0`
+    /// per occurrence, so this equals `count` for legacy corpora.
+    pub weight: f64,
 }
 
 /// Cluster an entity's timeline_buckets into contiguous eras.
@@ -71,6 +74,7 @@ pub fn cluster_eras(timeline_buckets: &HashMap<String, i64>, min_notes: i64) -> 
                 start,
                 end,
                 count,
+                weight: count as f64,
             }
         })
         .collect();
@@ -144,6 +148,22 @@ pub fn cluster_eras_periodic(
     eras
 }
 
+/// Replace default mention-count weights with configured per-month weights.
+pub fn apply_timeline_weights(eras: &mut [Era], timeline_weights: &HashMap<String, f64>) {
+    if timeline_weights.is_empty() {
+        return;
+    }
+    for era in eras {
+        era.weight = timeline_weights
+            .iter()
+            .filter(|(month, _)| {
+                month.as_str() >= era.start.as_str() && month.as_str() <= era.end.as_str()
+            })
+            .map(|(_, weight)| *weight)
+            .sum();
+    }
+}
+
 /// Assign occurrences to eras based on their effective_date.
 /// Returns a vec parallel to `eras` with the occurrences that fall in each era,
 /// plus a final vec for any occurrences that don't match any era.
@@ -214,11 +234,19 @@ pub fn allocate_catalysts_to_eras(eras: &[Era], total: usize, min_per_era: usize
 
     // Weight remaining catalysts: more recent eras get higher weight.
     // Simple linear weighting: era 0 gets weight 1, era 1 gets weight 2, etc.
-    let weights: Vec<usize> = (1..=eras.len()).collect();
-    let total_weight: usize = weights.iter().sum();
+    let weights: Vec<f64> = eras
+        .iter()
+        .enumerate()
+        .map(|(index, era)| (index + 1) as f64 * era.weight.max(0.0))
+        .collect();
+    let total_weight: f64 = weights.iter().sum();
 
     for (i, &w) in weights.iter().enumerate() {
-        let share = (remaining * w) / total_weight;
+        let share = if total_weight > 0.0 {
+            (remaining as f64 * w / total_weight).floor() as usize
+        } else {
+            0
+        };
         allocs[i] += share;
     }
 
@@ -331,6 +359,7 @@ fn bucket_monthly(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
                 start: key.clone(),
                 end: key.clone(),
                 count,
+                weight: count as f64,
             }
         })
         .collect()
@@ -361,6 +390,7 @@ fn bucket_quarterly(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
                 start: format!("{:04}-{:02}", y, start_month),
                 end: format!("{:04}-{:02}", y, end_month),
                 count,
+                weight: count as f64,
             }
         })
         .collect()
@@ -404,6 +434,7 @@ fn bucket_hybrid(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
             start: format!("{:04}-{:02}", y, start_month),
             end: format!("{:04}-{:02}", y, end_month),
             count,
+            weight: count as f64,
         });
     }
 
@@ -418,6 +449,7 @@ fn bucket_hybrid(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
             start: format!("{:04}-{:02}", y, start_month),
             end: format!("{:04}-{:02}", y, end_month),
             count,
+            weight: count as f64,
         });
     }
 
@@ -518,6 +550,7 @@ fn merge_into_neighbor(eras: &mut Vec<Era>, idx: usize) {
     let removed = eras.remove(remove);
     let kept = &mut eras[keep];
     kept.count += removed.count;
+    kept.weight += removed.weight;
     if removed.start < kept.start {
         kept.start = removed.start;
     }
@@ -616,17 +649,23 @@ mod tests {
                 start: "2025-01".into(),
                 end: "2025-03".into(),
                 count: 20,
+                weight: 20.0,
             },
             Era {
                 label: "B".into(),
                 start: "2025-06".into(),
                 end: "2025-08".into(),
                 count: 5,
+                weight: 5.0,
             },
         ];
         let allocs = allocate_catalysts_to_eras(&eras, 7, 2);
         assert_eq!(allocs.iter().sum::<usize>(), 7);
         assert!(allocs.iter().all(|&a| a >= 2));
+        assert!(
+            allocs[0] > allocs[1],
+            "the older era's larger additive evidence weight should outweigh recency"
+        );
     }
 
     #[test]
@@ -636,6 +675,7 @@ mod tests {
             start: "2025-01".into(),
             end: "2025-03".into(),
             count: 10,
+            weight: 10.0,
         }];
         let allocs = allocate_catalysts_to_eras(&eras, 7, 2);
         assert_eq!(allocs, vec![7]);
@@ -650,6 +690,7 @@ mod tests {
                 start: format!("2025-{:02}", i + 1),
                 end: format!("2025-{:02}", i + 1),
                 count: 10,
+                weight: 10.0,
             })
             .collect();
         let allocs = allocate_catalysts_to_eras(&eras, 7, 1);

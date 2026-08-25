@@ -29,8 +29,8 @@ use crate::models::{
     render_catalyst_text,
 };
 use crate::pipeline::eras::{
-    Era, allocate_catalysts_to_eras, assign_occurrences_to_eras, cluster_eras_periodic,
-    sample_contexts_by_era,
+    Era, allocate_catalysts_to_eras, apply_timeline_weights, assign_occurrences_to_eras,
+    cluster_eras_periodic, sample_contexts_by_era,
 };
 
 /// Default context char budget for local models. Leaves room for the
@@ -307,6 +307,56 @@ fn participant_span(context: &str, entity_name: &str) -> Option<String> {
         })
         .collect::<Vec<_>>();
     (!selected.is_empty()).then(|| selected.join("\n\n"))
+}
+
+/// Re-scope a shared document from its canonical chunks instead of trusting a
+/// single occurrence's cached context. This keeps late participants visible
+/// when their first stored occurrence points at an earlier conversation
+/// window, and it also recovers participant spans from contexts slimmed by an
+/// older database migration.
+fn participant_document_occurrences(
+    entity_name: &str,
+    occurrences: &[EntityOccurrence],
+    chunks: &[FileChunk],
+) -> Vec<EntityOccurrence> {
+    let mut scoped = Vec::new();
+    for chunk in chunks {
+        let Some(context) = participant_span(&chunk.content, entity_name) else {
+            continue;
+        };
+        let Some(base) = occurrences
+            .iter()
+            .filter(|occurrence| occurrence.file_path == chunk.file_path)
+            .min_by_key(|occurrence| {
+                let occurrence_date = occurrence.effective_date.unwrap_or(occurrence.created_at);
+                chunk
+                    .entry_date
+                    .map_or(0, |chunk_date| occurrence_date.abs_diff(chunk_date))
+            })
+        else {
+            continue;
+        };
+        let mut occurrence = base.clone();
+        occurrence.context = Some(context);
+        if chunk.entry_date.is_some() {
+            occurrence.effective_date = chunk.entry_date;
+        }
+        scoped.push(occurrence);
+    }
+
+    if scoped.is_empty() {
+        occurrences
+            .iter()
+            .filter_map(|occurrence| {
+                let mut occurrence = occurrence.clone();
+                occurrence.context = participant_span(occurrence.context.as_deref()?, entity_name);
+                occurrence.context.as_ref()?;
+                Some(occurrence)
+            })
+            .collect()
+    } else {
+        scoped
+    }
 }
 
 fn substantive_token_count(text: &str) -> usize {
@@ -1633,23 +1683,22 @@ impl<'a> CatalystPipeline<'a> {
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
 
-            let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
+            let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
+            apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
             let selected_context = if participant_scoped {
-                // Shared conversations produce one document/chunk stream for
-                // all speakers, but SQLite-source occurrences retain the span
-                // for the participant that created it. Keep link generation on
-                // those own spans; hydrating NULLs here would reintroduce the
-                // whole shared thread and erase the participant boundary.
-                let own_spans = occurrences
+                // A participant may first appear in a later conversation
+                // window. Scan every canonical document chunk, then retain
+                // only that participant's v1 spans. Occurrence-local contexts
+                // remain the fallback for old databases without chunks.
+                let file_paths = occurrences
                     .iter()
-                    .filter_map(|occurrence| {
-                        let mut occurrence = occurrence.clone();
-                        occurrence.context =
-                            participant_span(occurrence.context.as_deref()?, entity_name);
-                        occurrence.context.as_ref()?;
-                        Some(occurrence)
-                    })
+                    .map(|occurrence| occurrence.file_path.clone())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
                     .collect::<Vec<_>>();
+                let chunks = self.db.get_chunks_for_files(&file_paths)?;
+                let own_spans =
+                    participant_document_occurrences(entity_name, &occurrences, &chunks);
                 build_occurrence_context(
                     &eras,
                     &own_spans,
@@ -2511,14 +2560,14 @@ pub fn calculate_allocations(
         .unwrap_or(DEFAULT_TOP_CATALYSTS)
         .max(HARD_MIN_CATALYSTS);
 
-    // Reference document count: the value at the configured percentile (entities
-    // sorted by document count, descending). The top slice sits at or above it
+    // Reference evidence weight: the value at the configured percentile (entities
+    // sorted by additive occurrence weight, descending). The top slice sits at or above it
     // and all receive `top_target`; the rest scale linearly against it.
-    let mut doc_counts: Vec<i64> = entities.iter().map(|e| e.frequency.max(0)).collect();
-    doc_counts.sort_unstable_by(|a, b| b.cmp(a));
-    let docs_max = doc_counts.first().copied().unwrap_or(0);
+    let mut doc_counts: Vec<f64> = entities.iter().map(|e| e.ranking_weight.max(0.0)).collect();
+    doc_counts.sort_by(|a, b| b.total_cmp(a));
+    let docs_max = doc_counts.first().copied().unwrap_or(0.0);
     let anchor = if doc_counts.is_empty() {
-        0
+        0.0
     } else {
         let idx = (doc_counts.len() * (100 - ALLOCATION_ANCHOR_PERCENTILE) / 100)
             .min(doc_counts.len() - 1);
@@ -2527,19 +2576,20 @@ pub fn calculate_allocations(
     // If the percentile lands on an empty entity (a vault dominated by
     // zero-document entities), fall back to the largest so the few non-empty
     // entities still scale sensibly instead of all collapsing to the floor.
-    let anchor = if anchor > 0 { anchor } else { docs_max };
+    let anchor = if anchor > 0.0 { anchor } else { docs_max };
 
     entities
         .iter()
         .map(|e| {
-            let docs = e.frequency.max(0);
-            let alloc = if anchor <= 0 {
+            let docs = e.ranking_weight.max(0.0);
+            let alloc = if anchor <= 0.0 {
                 // No entity has any material; fall back to the safety floor.
                 HARD_MIN_CATALYSTS
             } else {
-                // round(top_target * docs / anchor) with integer arithmetic.
-                let scaled = (top_target as u64 * docs as u64 + anchor as u64 / 2) / anchor as u64;
-                (scaled as usize).clamp(HARD_MIN_CATALYSTS, top_target)
+                // Scale linearly against additive evidence, rounded to the
+                // nearest whole catalyst budget.
+                let scaled = (top_target as f64 * docs / anchor).round() as usize;
+                scaled.clamp(HARD_MIN_CATALYSTS, top_target)
             };
             (e.name.clone(), alloc)
         })
@@ -2560,12 +2610,14 @@ mod tests {
             name: name.to_string(),
             entity_type: EntityType::Tag,
             frequency: doc_count,
+            ranking_weight: doc_count as f64,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends {
                 frequency_recent: 0,
                 recency_score: 0.0,
                 timeline_buckets: HashMap::new(),
+                timeline_weights: HashMap::new(),
             },
             metadata: serde_json::json!({}),
         }
@@ -2577,6 +2629,7 @@ mod tests {
             start: start.to_string(),
             end: end.to_string(),
             count,
+            weight: count as f64,
         }
     }
 
@@ -2619,6 +2672,7 @@ mod tests {
             created_at: aug,
             effective_date: Some(aug),
             date_source: "content".to_string(),
+            weight: 1.0,
         };
         let chunks = vec![
             FileChunk {
@@ -2908,6 +2962,7 @@ mod tests {
             created_at: 0,
             effective_date: Some(0),
             date_source: "test".to_string(),
+            weight: 1.0,
         }
     }
 
@@ -2952,6 +3007,43 @@ mod tests {
 
         let legacy = "# Margins mail thread\n\n### 2026-08-25 — alice@example.com\n\nALICE\n\n### 2026-08-25 — bob@example.com\n\nBOB";
         assert!(participant_span(legacy, "alice@example.com").is_none());
+    }
+
+    #[test]
+    fn late_thread_participant_uses_every_owned_document_span_and_clears_grounding_floor() {
+        let first_window = "# Thread\n\n## 2026-08-25 07:30:00 UTC — alice@example.com\n\nAlice opens the thread.\n\n## 2026-08-25 07:31:00 UTC — bob@example.com\n\nBob answers the opening question.";
+        let later_window = "# Thread\n\n## 2026-08-25 07:32:00 UTC — carol@example.com\n\nCarol describes the concrete migration boundary and the unresolved ownership tradeoff in substantive detail.\n\n## 2026-08-25 07:33:00 UTC — alice@example.com, carol@example.com\n\nCarol follows up with a specific rollout constraint and an explicit verification plan for the migration.";
+        // Reproduce the round-12 failure shape: Carol's only cached occurrence
+        // points at the first window, where she has no owned span.
+        let occurrences = vec![make_occurrence("thread.md", first_window)];
+        let chunks = vec![
+            FileChunk {
+                file_path: "thread.md".to_string(),
+                chunk_index: 0,
+                content: first_window.to_string(),
+                entry_date: Some(1_777_100_200_000),
+            },
+            FileChunk {
+                file_path: "thread.md".to_string(),
+                chunk_index: 1,
+                content: later_window.to_string(),
+                entry_date: Some(1_777_100_380_000),
+            },
+        ];
+
+        let owned = participant_document_occurrences("carol@example.com", &occurrences, &chunks);
+        assert_eq!(owned.len(), 1);
+        let context = owned[0].context.as_deref().unwrap();
+        assert!(context.contains("concrete migration boundary"));
+        assert!(context.contains("specific rollout constraint"));
+        assert!(!context.contains("Alice opens"));
+        assert!(!context.contains("Bob answers"));
+
+        let selected = build_occurrence_context(&[], &owned, 1, 10, 60_000);
+        let audits = era_audits(&[], &selected.evidence_anchors, 1, 1, 12);
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].status, "eligible");
+        assert!(audits[0].substantive_tokens >= 12);
     }
 
     /// Regression: a single high-frequency entity whose occurrences are long

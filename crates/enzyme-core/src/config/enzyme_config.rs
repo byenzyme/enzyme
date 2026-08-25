@@ -35,6 +35,19 @@ const CONFIG_HEADER: &str = "\
 # entities = [\"folder:projects\", \"[[Design Principles]]\", \"log:journal\"]
 # [workspaces.notes.sources.notes]
 # path = \"/Users/you/notes\"
+# exclusions = [\"private\"]
+# writable = true
+# Additional named Markdown roots use sibling source tables; with multiple
+# roots their names prefix source refs and preserve provenance.
+# [workspaces.notes.sources.references]
+# path = \"/Users/you/references\"
+# writable = false
+#
+# SQLite participant roles accept scalar/array columns or a multi-value shape:
+# who = { format = \"json_array\", column = \"participants\" }
+# who = { format = \"delimited\", column = \"participants\", delimiter = \"|\" }
+# An optional `weight = \"importance\"` role contributes additive evidence;
+# NULL/omitted weights default to one, like one Markdown mention.
 #
 # Existing path-addressed Markdown vaults remain supported under [vaults].
 # # log: marks a single file of dated entries (a journal that grows by
@@ -88,6 +101,10 @@ pub struct EnzymeConfig {
     /// vaults implicitly use their vault path and therefore leave this unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_path: Option<PathBuf>,
+    /// Named Markdown roots for a workspace. A single legacy `notes` source is
+    /// retained in `notes_path`; this list is the public multi-root view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes_roots: Vec<NotesRootConfig>,
     /// Maximum number of documents to embed per run.
     /// `None` uses the built-in default (1024). `Some(0)` means unlimited.
     #[serde(default)]
@@ -111,13 +128,80 @@ pub struct SqliteSourceConfig {
 pub struct SqliteSourceRoles {
     #[serde(deserialize_with = "deserialize_one_or_many")]
     pub id: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_one_or_many")]
-    pub who: Vec<String>,
+    #[serde(default)]
+    pub who: SqliteWhoRole,
     pub when: String,
     #[serde(deserialize_with = "deserialize_one_or_many")]
     pub what: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_one_or_many")]
     pub r#where: Vec<String>,
+    /// Optional numeric result column. Each emitted entity occurrence receives
+    /// this additive weight; omitted/NULL values default to `1.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<String>,
+}
+
+/// Public Markdown-root contract for named workspaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotesRootConfig {
+    pub name: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+    #[serde(default = "default_true")]
+    pub writable: bool,
+}
+
+/// SQLite `who` may be scalar/composite, a JSON array, or delimited text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SqliteWhoRole {
+    Columns(OneOrManyStrings),
+    MultiValue(SqliteMultiValueWhoRole),
+}
+
+impl Default for SqliteWhoRole {
+    fn default() -> Self {
+        Self::Columns(OneOrManyStrings::Many(Vec::new()))
+    }
+}
+
+impl SqliteWhoRole {
+    pub fn columns(&self) -> Vec<&str> {
+        match self {
+            Self::Columns(OneOrManyStrings::One(column)) => vec![column],
+            Self::Columns(OneOrManyStrings::Many(columns)) => {
+                columns.iter().map(String::as_str).collect()
+            }
+            Self::MultiValue(role) => vec![role.column()],
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns().is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "format")]
+pub enum SqliteMultiValueWhoRole {
+    JsonArray { column: String },
+    Delimited { column: String, delimiter: String },
+}
+
+impl SqliteMultiValueWhoRole {
+    pub fn column(&self) -> &str {
+        match self {
+            Self::JsonArray { column } | Self::Delimited { column, .. } => column,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrManyStrings {
+    One(String),
+    Many(Vec<String>),
 }
 
 fn deserialize_one_or_many<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
@@ -386,6 +470,10 @@ enum WorkspaceSourceToml {
 #[serde(deny_unknown_fields)]
 struct NotesSourceToml {
     path: PathBuf,
+    #[serde(default)]
+    exclusions: Vec<String>,
+    #[serde(default = "default_true")]
+    writable: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -562,6 +650,7 @@ impl EnzymeConfig {
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
             sources: vault.map(|v| v.sources.clone()).unwrap_or_default(),
             notes_path: None,
+            notes_roots: Vec::new(),
             max_embedding_files: vault
                 .and_then(|v| v.max_embedding_files)
                 .or(global.defaults.max_embedding_files),
@@ -578,10 +667,28 @@ impl EnzymeConfig {
             min_top_catalysts: workspace.and_then(|w| w.min_top_catalysts),
         };
 
-        let notes_path = workspace.and_then(|w| match w.sources.get("notes") {
-            Some(WorkspaceSourceToml::Notes(notes)) => Some(notes.path.clone()),
-            _ => None,
-        });
+        let mut notes_roots: Vec<NotesRootConfig> = workspace
+            .map(|w| {
+                w.sources
+                    .iter()
+                    .filter_map(|(name, source)| match source {
+                        WorkspaceSourceToml::Notes(notes) => Some(NotesRootConfig {
+                            name: name.clone(),
+                            path: notes.path.clone(),
+                            exclusions: notes.exclusions.clone(),
+                            writable: notes.writable,
+                        }),
+                        WorkspaceSourceToml::Sqlite(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        notes_roots.sort_by(|left, right| left.name.cmp(&right.name));
+        let notes_path = notes_roots
+            .iter()
+            .find(|root| root.name == "notes")
+            .map(|root| root.path.clone())
+            .or_else(|| (notes_roots.len() == 1).then(|| notes_roots[0].path.clone()));
         let sources = workspace
             .map(|w| {
                 w.sources
@@ -614,20 +721,37 @@ impl EnzymeConfig {
             targets: workspace.map(|w| w.targets.clone()).unwrap_or_default(),
             sources,
             notes_path,
+            notes_roots,
             max_embedding_files: workspace
                 .and_then(|w| w.max_embedding_files)
                 .or(global.defaults.max_embedding_files),
         }
     }
 
-    /// Markdown root for this target. Named workspaces only have Markdown
-    /// when they declare `[workspaces.<name>.sources.notes]`; legacy vaults
+    /// Legacy single Markdown root for this target. Named workspaces with
+    /// several roots should use [`Self::markdown_roots`]; legacy vaults
     /// implicitly use the path by which they were addressed.
     pub fn markdown_root(vault_path: &Path) -> Result<Option<PathBuf>> {
         if EnzymePaths::bound_workspace(vault_path)?.is_some() {
             return Ok(Self::load(vault_path)?.and_then(|config| config.notes_path));
         }
         Ok(Some(vault_path.to_path_buf()))
+    }
+
+    /// Markdown roots for this target. Legacy/path-addressed vaults and the
+    /// historic single `notes` source preserve un-namespaced source refs.
+    pub fn markdown_roots(vault_path: &Path) -> Result<Vec<NotesRootConfig>> {
+        if EnzymePaths::bound_workspace(vault_path)?.is_some() {
+            return Ok(Self::load(vault_path)?
+                .map(|config| config.notes_roots)
+                .unwrap_or_default());
+        }
+        Ok(vec![NotesRootConfig {
+            name: "notes".to_string(),
+            path: vault_path.to_path_buf(),
+            exclusions: Vec::new(),
+            writable: true,
+        }])
     }
 
     fn load_legacy_yaml(vault_path: &Path) -> Result<Option<Self>> {
@@ -659,6 +783,7 @@ impl EnzymeConfig {
             targets: Vec::new(),
             sources: HashMap::new(),
             notes_path: None,
+            notes_roots: Vec::new(),
             max_embedding_files: None,
         }))
     }
@@ -820,10 +945,26 @@ impl EnzymeConfig {
                     )
                 })
                 .collect();
-            if let Some(path) = &self.notes_path {
+            if self.notes_roots.is_empty()
+                && let Some(path) = &self.notes_path
+            {
                 entry.sources.insert(
                     "notes".to_string(),
-                    WorkspaceSourceToml::Notes(NotesSourceToml { path: path.clone() }),
+                    WorkspaceSourceToml::Notes(NotesSourceToml {
+                        path: path.clone(),
+                        exclusions: Vec::new(),
+                        writable: true,
+                    }),
+                );
+            }
+            for root in &self.notes_roots {
+                entry.sources.insert(
+                    root.name.clone(),
+                    WorkspaceSourceToml::Notes(NotesSourceToml {
+                        path: root.path.clone(),
+                        exclusions: root.exclusions.clone(),
+                        writable: root.writable,
+                    }),
                 );
             }
             entry.catalyst_format = self.catalyst_format.clone();
@@ -913,7 +1054,8 @@ impl EnzymeConfig {
                 &ws.max_embedding_files,
             )?;
             set_optional(entry, "catalyst_format", &ws.catalyst_format)?;
-            if !self.sources.is_empty() || self.notes_path.is_some() {
+            if !self.sources.is_empty() || self.notes_path.is_some() || !self.notes_roots.is_empty()
+            {
                 let sources = ensure_table(entry, "sources");
                 for (source_name, source) in &self.sources {
                     // Only write sources absent from the file; an authored contract
@@ -926,9 +1068,17 @@ impl EnzymeConfig {
                         )?;
                     }
                 }
-                if let Some(path) = &self.notes_path {
+                if self.notes_roots.is_empty()
+                    && let Some(path) = &self.notes_path
+                {
                     let notes = ensure_table(sources, "notes");
                     set_value(notes, "path", path)?;
+                }
+                for root in &self.notes_roots {
+                    let notes = ensure_table(sources, &root.name);
+                    set_value(notes, "path", &root.path)?;
+                    set_value(notes, "exclusions", &root.exclusions)?;
+                    set_value(notes, "writable", &root.writable)?;
                 }
             }
         } else {
@@ -1280,6 +1430,7 @@ excludedTags:
             targets: Vec::new(),
             sources: HashMap::new(),
             notes_path: None,
+            notes_roots: Vec::new(),
             max_embedding_files: None,
         };
         let prefs = merged.parse_preferences();
@@ -1320,6 +1471,30 @@ entities = [
                 .entity_profiles
                 .contains_key("agent-observed-preference")
         );
+    }
+
+    #[test]
+    fn named_workspace_parses_multiple_markdown_roots() {
+        let global: GlobalTomlConfig = toml::from_str(
+            r#"
+[workspaces.margins.sources.sessions]
+path = "/notes/sessions"
+exclusions = ["exports"]
+writable = true
+
+[workspaces.margins.sources.references]
+path = "/notes/references"
+exclusions = ["cache", "private"]
+writable = false
+"#,
+        )
+        .unwrap();
+        let config = EnzymeConfig::from_workspace_config("margins", &global);
+        assert_eq!(config.notes_roots.len(), 2);
+        assert_eq!(config.notes_roots[0].name, "references");
+        assert_eq!(config.notes_roots[0].exclusions, vec!["cache", "private"]);
+        assert!(!config.notes_roots[0].writable);
+        assert_eq!(config.notes_path, None);
     }
 
     #[test]
@@ -1518,10 +1693,13 @@ local_model = "catalyst-135m-v3"
                         .to_string(),
                     roles: SqliteSourceRoles {
                         id: vec!["id".to_string()],
-                        who: vec!["sender".to_string()],
+                        who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec![
+                            "sender".to_string(),
+                        ])),
                         when: "sent_at".to_string(),
                         what: vec!["subject".to_string(), "body".to_string()],
                         r#where: vec!["thread".to_string()],
+                        weight: None,
                     },
                     timestamp: SqliteTimestampConfig {
                         unit: SqliteTimestampUnit::Ms,
@@ -1530,6 +1708,7 @@ local_model = "catalyst-135m-v3"
                 },
             )]),
             notes_path: None,
+            notes_roots: Vec::new(),
             max_embedding_files: None,
         };
 
@@ -1549,7 +1728,7 @@ local_model = "catalyst-135m-v3"
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
         let source = loaded.sources.get("messages").unwrap();
         assert_eq!(source.roles.id, vec!["id"]);
-        assert_eq!(source.roles.who, vec!["sender"]);
+        assert_eq!(source.roles.who.columns(), vec!["sender"]);
         assert_eq!(source.roles.what, vec!["subject", "body"]);
         assert_eq!(source.roles.r#where, vec!["thread"]);
         assert_eq!(source.timestamp.unit, SqliteTimestampUnit::Ms);

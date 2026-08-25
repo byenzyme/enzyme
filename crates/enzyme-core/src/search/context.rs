@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Catalyst, Embedding, Entity, catalyst_embedding_text, parse_catalyst_text};
-use crate::pipeline::eras::{Era, cluster_eras_periodic};
+use crate::pipeline::eras::{Era, apply_timeline_weights, cluster_eras_periodic};
 use crate::pipeline::similarity::CATALYST_TOP_K;
 
 pub const TARGET_PROJECTION_NOT_READY: &str = "target projection is not ready for active epoch";
@@ -150,7 +150,8 @@ fn build_anchored_era_index(
         if budget == 0 {
             continue;
         }
-        let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, budget);
+        let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, budget);
+        apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
         era_order.extend((0..eras.len()).map(|era_index| EraKey {
             entity_id: *entity_id,
             era_index,
@@ -365,6 +366,7 @@ mod tests {
             name: name.to_string(),
             entity_type: EntityType::Link,
             frequency: 1,
+            ranking_weight: 1.0,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends::default(),

@@ -7,8 +7,11 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
+use crate::config::NotesRootConfig;
 use crate::db::Database;
-use crate::document::{DocumentProcessor, FileDiscovery, ProcessedDocument, most_recent_entry};
+use crate::document::{
+    DiscoveredFile, DocumentProcessor, FileDiscovery, ProcessedDocument, most_recent_entry,
+};
 use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
     representative_excerpt,
@@ -27,6 +30,7 @@ pub struct IndexingPipeline<'a> {
     /// Config-declared `log:` entity names. `None` means "resolve from the
     /// vault config at run time"; `Some` is an explicit override (tests).
     configured_logs: Option<std::collections::HashSet<String>>,
+    notes_roots: Option<Vec<NotesRootConfig>>,
 }
 
 /// Cap on entity occurrences emitted per config-declared log. Keeps a
@@ -57,7 +61,15 @@ impl<'a> IndexingPipeline<'a> {
             vault_path,
             excluded_folders: None,
             configured_logs: None,
+            notes_roots: None,
         }
+    }
+
+    /// Use explicit named Markdown roots. A one-root list preserves historical
+    /// relative source refs; two or more roots are namespaced by root name.
+    pub fn with_notes_roots(mut self, roots: Vec<NotesRootConfig>) -> Self {
+        self.notes_roots = Some(roots);
+        self
     }
 
     /// Explicitly set the config-declared log names, bypassing config
@@ -102,16 +114,19 @@ impl<'a> IndexingPipeline<'a> {
         // (templates, excalidraw, …) are deliberately NOT excluded here — they
         // stay indexed and are only suppressed at the surface gate.
         on_progress("Discovering files...");
-        let discovery = FileDiscovery::new(self.vault_path.clone())
-            .with_excluded_folders(self.resolve_excluded_folders());
-        let all_paths = discovery.discover()?;
+        let discovery = match &self.notes_roots {
+            Some(roots) => FileDiscovery::from_notes_roots(roots.clone()),
+            None => FileDiscovery::new(self.vault_path.clone()),
+        }
+        .with_excluded_folders(self.resolve_excluded_folders());
+        let all_files = discovery.discover_named()?;
         let existing_hashes = self.db.get_all_document_hashes()?;
         let db_doc_count = existing_hashes.len();
         let db_markdown_count = existing_hashes
             .keys()
             .filter(|source_ref| is_markdown_source_ref(source_ref))
             .count();
-        if all_paths.is_empty() && db_doc_count > 0 && db_markdown_count == 0 {
+        if all_files.is_empty() && db_doc_count > 0 && db_markdown_count == 0 {
             on_progress("Using DB-ingested documents...");
             self.compute_trending_scores()?;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -128,40 +143,39 @@ impl<'a> IndexingPipeline<'a> {
                 duration_ms,
             });
         }
-        let files_discovered = all_paths.len();
+        let files_discovered = all_files.len();
         info!(files_discovered, "files discovered");
 
         // Step 3: Build a lookup from source_ref -> PathBuf for all discovered files
-        let all_source_refs: HashMap<String, PathBuf> = all_paths
+        let all_source_refs: HashMap<String, DiscoveredFile> = all_files
             .iter()
-            .map(|p| (p.to_string_lossy().to_string(), p.clone()))
+            .map(|file| (file.source_ref.clone(), file.clone()))
             .collect();
 
         // Step 4: Diff — determine which files are new, changed, or deleted
-        let mut paths_to_process: Vec<PathBuf> = Vec::new();
+        let mut paths_to_process: Vec<DiscoveredFile> = Vec::new();
         let files_new;
         let mut files_updated = 0usize;
 
         if full {
             // Full mode: process everything
-            paths_to_process = all_paths.clone();
+            paths_to_process = all_files.clone();
             files_new = paths_to_process.len();
         } else {
             // Incremental mode: check mtime first, then hash only if mtime changed.
             //
             // Phase 1: Partition into new files vs files needing mtime check.
             let mut new_paths = Vec::new();
-            let mut candidates_to_check: Vec<(PathBuf, &str)> = Vec::new();
+            let mut candidates_to_check: Vec<(DiscoveredFile, &str)> = Vec::new();
 
-            for path in &all_paths {
-                let source_ref = path.to_string_lossy();
-                match existing_hashes.get(source_ref.as_ref()) {
+            for file in &all_files {
+                match existing_hashes.get(file.source_ref.as_str()) {
                     None => {
-                        new_paths.push(path.clone());
+                        new_paths.push(file.clone());
                     }
                     Some((old_hash, stored_mtime_ms)) => {
                         // Quick mtime check: stat() is ~1000x cheaper than read+hash
-                        let abs_path = self.vault_path.join(path);
+                        let abs_path = file.root_path.join(&file.relative_path);
                         let mtime_changed = std::fs::metadata(&abs_path)
                             .and_then(|m| m.modified())
                             .ok()
@@ -176,7 +190,7 @@ impl<'a> IndexingPipeline<'a> {
                             .unwrap_or(true); // if stat fails, assume changed
 
                         if mtime_changed {
-                            candidates_to_check.push((path.clone(), old_hash.as_str()));
+                            candidates_to_check.push((file.clone(), old_hash.as_str()));
                         }
                     }
                 }
@@ -186,17 +200,16 @@ impl<'a> IndexingPipeline<'a> {
             paths_to_process.extend(new_paths);
 
             // Phase 2: For files with newer mtime, read+hash in parallel to confirm change.
-            let vault_root = &self.vault_path;
-            let changed: Vec<PathBuf> = candidates_to_check
+            let changed: Vec<DiscoveredFile> = candidates_to_check
                 .par_iter()
-                .filter_map(|(path, old_hash)| {
-                    let abs_path = vault_root.join(path);
+                .filter_map(|(file, old_hash)| {
+                    let abs_path = file.root_path.join(&file.relative_path);
                     let content = std::fs::read_to_string(&abs_path).ok()?;
                     let mut hasher = Sha256::new();
                     hasher.update(content.as_bytes());
                     let current_hash = format!("{:x}", hasher.finalize());
                     if current_hash != *old_hash {
-                        Some(path.clone())
+                        Some(file.clone())
                     } else {
                         None
                     }
@@ -218,8 +231,10 @@ impl<'a> IndexingPipeline<'a> {
 
         // Step 5: Process new + changed files
         on_progress(&format!("Processing {} files...", paths_to_process.len()));
-        let processor = DocumentProcessor::new(self.vault_path.clone());
-        let results = processor.process_all(&paths_to_process);
+        let results: Vec<_> = paths_to_process
+            .par_iter()
+            .map(DocumentProcessor::process_discovered)
+            .collect();
 
         let mut processed_docs: Vec<ProcessedDocument> = Vec::new();
         for result in results {
@@ -257,7 +272,7 @@ impl<'a> IndexingPipeline<'a> {
         // Step 8b: Reconcile config-declared `log:` entities (replace
         // semantics, promotion of newly declared logs, removal of undeclared).
         on_progress("Reconciling log entities...");
-        self.reconcile_log_entities(&processed_docs, &all_paths)?;
+        self.reconcile_log_entities(&processed_docs, &all_files)?;
 
         // Step 8c: Drop entities whose last occurrence is gone (their notes
         // were deleted, or an edit removed the tag/link). They have no
@@ -369,6 +384,7 @@ impl<'a> IndexingPipeline<'a> {
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
+                        weight: 1.0,
                     },
                 ));
             }
@@ -393,6 +409,7 @@ impl<'a> IndexingPipeline<'a> {
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
+                        weight: 1.0,
                     },
                 ));
             }
@@ -410,6 +427,7 @@ impl<'a> IndexingPipeline<'a> {
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
+                        weight: 1.0,
                     },
                 ));
             }
@@ -429,6 +447,7 @@ impl<'a> IndexingPipeline<'a> {
                         created_at: now,
                         effective_date: Some(doc.created_at),
                         date_source: doc.created_source.as_str().to_string(),
+                        weight: 1.0,
                     },
                 ));
             }
@@ -474,6 +493,7 @@ impl<'a> IndexingPipeline<'a> {
                 created_at: now,
                 effective_date: Some(entry_date),
                 date_source: "content".to_string(),
+                weight: 1.0,
             })
             .collect();
         Some((name, occurrences))
@@ -488,7 +508,7 @@ impl<'a> IndexingPipeline<'a> {
     fn reconcile_log_entities(
         &self,
         processed_docs: &[ProcessedDocument],
-        all_paths: &[PathBuf],
+        all_paths: &[DiscoveredFile],
     ) -> Result<()> {
         let configured = self.resolve_configured_logs();
         let removed = self.db.delete_append_log_entities_not_in(&configured)?;
@@ -520,13 +540,13 @@ impl<'a> IndexingPipeline<'a> {
             )?
             .into_iter()
             .collect();
-        let processor = DocumentProcessor::new(self.vault_path.clone());
         for name in &configured {
             if handled.contains(name) || existing.contains(name) {
                 continue;
             }
-            let candidate = all_paths.iter().find(|p| {
-                p.file_stem()
+            let candidate = all_paths.iter().find(|file| {
+                file.relative_path
+                    .file_stem()
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| s.trim().to_lowercase() == *name)
             });
@@ -537,7 +557,7 @@ impl<'a> IndexingPipeline<'a> {
                 );
                 continue;
             };
-            match processor.process_file(path) {
+            match DocumentProcessor::process_discovered(path) {
                 Ok(doc) => {
                     if let Some((doc_name, occurrences)) = Self::log_occurrences_for_doc(&doc) {
                         if doc_name == *name {
@@ -642,12 +662,6 @@ impl<'a> IndexingPipeline<'a> {
         let entities = self.db.get_all_entities()?;
         let now_millis = chrono::Utc::now().timestamp_millis();
 
-        // Build entity_id -> frequency lookup
-        let entity_freq: HashMap<i64, i64> = entities
-            .iter()
-            .filter_map(|e| e.id.map(|id| (id, e.frequency)))
-            .collect();
-
         // Single bulk fetch of all occurrence dates
         let all_occ_dates = self.db.get_all_occurrence_dates()?;
 
@@ -657,11 +671,12 @@ impl<'a> IndexingPipeline<'a> {
             weighted_sum: f64,
             frequency_recent: i64,
             timeline_buckets: HashMap<String, i64>,
+            timeline_weights: HashMap<String, f64>,
         }
 
         let mut accums: HashMap<i64, Accum> = HashMap::new();
 
-        for (entity_id, effective_date_opt, created_at) in &all_occ_dates {
+        for (entity_id, effective_date_opt, created_at, occurrence_weight) in &all_occ_dates {
             let effective_date = effective_date_opt.unwrap_or(*created_at);
             let age_days = ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
 
@@ -669,11 +684,12 @@ impl<'a> IndexingPipeline<'a> {
                 weighted_sum: 0.0,
                 frequency_recent: 0,
                 timeline_buckets: HashMap::new(),
+                timeline_weights: HashMap::new(),
             });
 
             // Exponential decay with a half-life of 30 days
             let weight = (-0.693_147 / 30.0 * age_days).exp();
-            acc.weighted_sum += weight;
+            acc.weighted_sum += weight * occurrence_weight;
 
             if age_days <= 365.0 {
                 acc.frequency_recent += 1;
@@ -681,7 +697,8 @@ impl<'a> IndexingPipeline<'a> {
 
             if let Some(dt) = chrono::DateTime::from_timestamp_millis(effective_date) {
                 let bucket = dt.format("%Y-%m").to_string();
-                *acc.timeline_buckets.entry(bucket).or_insert(0) += 1;
+                *acc.timeline_buckets.entry(bucket.clone()).or_insert(0) += 1;
+                *acc.timeline_weights.entry(bucket).or_insert(0.0) += occurrence_weight;
             }
         }
 
@@ -690,12 +707,18 @@ impl<'a> IndexingPipeline<'a> {
             .iter()
             .filter_map(|e| {
                 let entity_id = e.id?;
-                let frequency = entity_freq.get(&entity_id).copied().unwrap_or(0) as f64;
+                let frequency = e.ranking_weight.max(0.0);
 
                 let acc = accums.remove(&entity_id);
-                let (weighted_sum, frequency_recent, timeline_buckets) = match acc {
-                    Some(a) => (a.weighted_sum, a.frequency_recent, a.timeline_buckets),
-                    None => (0.0, 0, HashMap::new()),
+                let (weighted_sum, frequency_recent, timeline_buckets, timeline_weights) = match acc
+                {
+                    Some(a) => (
+                        a.weighted_sum,
+                        a.frequency_recent,
+                        a.timeline_buckets,
+                        a.timeline_weights,
+                    ),
+                    None => (0.0, 0, HashMap::new(), HashMap::new()),
                 };
 
                 let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
@@ -706,6 +729,7 @@ impl<'a> IndexingPipeline<'a> {
                         frequency_recent,
                         recency_score,
                         timeline_buckets,
+                        timeline_weights,
                     },
                 ))
             })
@@ -796,6 +820,36 @@ mod tests {
             has_nonzero,
             "at least one entity should have a non-zero recency score"
         );
+    }
+
+    #[test]
+    fn named_multi_roots_are_indexed_without_materialization() {
+        let db = test_db();
+        let sessions = tempfile::tempdir().unwrap();
+        let references = tempfile::tempdir().unwrap();
+        write_md(sessions.path(), "shared.md", "# Session\n#session\n");
+        write_md(references.path(), "shared.md", "# Reference\n#reference\n");
+        let roots = vec![
+            NotesRootConfig {
+                name: "sessions".into(),
+                path: sessions.path().to_path_buf(),
+                exclusions: Vec::new(),
+                writable: true,
+            },
+            NotesRootConfig {
+                name: "references".into(),
+                path: references.path().to_path_buf(),
+                exclusions: Vec::new(),
+                writable: false,
+            },
+        ];
+        IndexingPipeline::new(&db, sessions.path().to_path_buf())
+            .with_notes_roots(roots)
+            .run(true, |_| {})
+            .unwrap();
+        let refs = db.get_all_source_refs().unwrap();
+        assert!(refs.contains(&"sessions/shared.md".to_string()));
+        assert!(refs.contains(&"references/shared.md".to_string()));
     }
 
     #[test]
