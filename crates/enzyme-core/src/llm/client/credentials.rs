@@ -21,8 +21,8 @@ use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
-const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/margins/free-config";
-const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Margins-Bootstrap-Id";
+const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/llm/free-config";
+const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Enzyme-Bootstrap-Id";
 const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
 /// Leave enough lease life for broker/request latency and modest clock skew.
@@ -623,7 +623,7 @@ fn load_or_create_bootstrap_id(path: &std::path::Path) -> Result<String> {
     Ok(identity.bootstrap_id)
 }
 
-/// Fetch an account-selected or anonymous bootstrap config from the Margins broker.
+/// Fetch an account-selected or anonymous bootstrap config from Enzyme.
 async fn fetch_free_config_from(
     identity: &HostedIdentity,
     free_config_url: &str,
@@ -645,11 +645,11 @@ async fn fetch_free_config_from(
     let resp = request
         .send()
         .await
-        .context("failed to reach the Margins free-config broker")?;
+        .context("failed to reach the Enzyme free-config broker")?;
 
     if identity.authorization.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
         bail!(
-            "Margins anonymous hosted bootstrap is unavailable; retry later or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
+            "Enzyme anonymous hosted bootstrap is unavailable; retry later or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
         );
     }
 
@@ -660,12 +660,12 @@ async fn fetch_free_config_from(
 
     let resp: FreeConfigResponse = resp
         .error_for_status()
-        .context("Margins free-config broker returned an error")?
+        .context("Enzyme free-config broker returned an error")?
         .json()
         .await
-        .context("failed to parse Margins free-config response")?;
+        .context("failed to parse Enzyme free-config response")?;
     info!(
-        "Resolved API config from Margins free-config broker (model={})",
+        "Resolved API config from Enzyme free-config broker (model={})",
         resp.model
     );
 
@@ -1044,10 +1044,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let identity = anonymous_hosted_identity(home.path()).unwrap();
         let bootstrap_id = identity.bootstrap_id.clone().unwrap();
-        let fetched =
-            fetch_free_config_from(&identity, &format!("http://{addr}/margins/free-config"))
-                .await
-                .unwrap();
+        let fetched = fetch_free_config_from(&identity, &format!("http://{addr}/llm/free-config"))
+            .await
+            .unwrap();
         let request = server.join().unwrap().to_ascii_lowercase();
 
         assert_eq!(fetched.config.api_key, "anonymous-key");
@@ -1056,9 +1055,9 @@ mod tests {
             fetched.config.provider,
             ConfigProvider::ServerFallback
         ));
-        assert!(request.starts_with("get /margins/free-config "));
+        assert!(request.starts_with("get /llm/free-config "));
         assert!(request.contains(&format!(
-            "\r\nx-margins-bootstrap-id: {}\r\n",
+            "\r\nx-enzyme-bootstrap-id: {}\r\n",
             bootstrap_id.to_ascii_lowercase()
         )));
         assert!(!request.contains("authorization:"));
@@ -1081,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn margins_free_config_contract_accepts_missing_or_epoch_expiry() {
+    fn enzyme_free_config_contract_accepts_missing_or_epoch_expiry() {
         let persistent: FreeConfigResponse = serde_json::from_str(
             r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture"}"#,
         )
@@ -1093,11 +1092,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expiring.expires_at, Some(1_800_000_000));
-        assert_eq!(
-            FREE_CONFIG_URL,
-            "https://api.enzyme.garden/margins/free-config"
-        );
-        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Margins-Bootstrap-Id");
+        assert_eq!(FREE_CONFIG_URL, "https://api.enzyme.garden/llm/free-config");
+        assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Enzyme-Bootstrap-Id");
     }
 
     #[test]

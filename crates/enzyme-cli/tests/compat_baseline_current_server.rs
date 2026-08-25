@@ -18,7 +18,7 @@
 //!   2  free account, credits=0                 -> free-config 402, no LLM call, BYOK guidance
 //!   3  pro account active, pool funded         -> $10/mo pro lease, init proceeds
 //!   6  env-llm / BYOK                          -> no hosted call at all, no deduct
-//!   7  anonymous bootstrap (unauth first init) -> X-Margins-Bootstrap-Id sent, key handed out
+//!   7  anonymous bootstrap (unauth first init) -> X-Enzyme-Bootstrap-Id sent, key handed out
 //!
 //! NOTE on the credit deduct: the CLI deducts credits AFTER successful LLM
 //! work (deduct-after-success, gated on `ConfigProvider::ServerFallback` and
@@ -406,7 +406,7 @@ fn cell6_env_llm_makes_no_hosted_call_and_never_deducts() {
 // ---------------------------------------------------------------------------
 
 /// A fresh machine with no login: first init is allowed loginless. The CLI must
-/// send an `X-Margins-Bootstrap-Id` (never a Bearer token), the server hands out
+/// send an `X-Enzyme-Bootstrap-Id` (never a Bearer token), the server hands out
 /// a bootstrap lease, and catalyst generation proceeds on it. Because there is
 /// no account, nothing is deducted.
 #[test]
@@ -454,7 +454,7 @@ fn cell7_anonymous_bootstrap_sends_bootstrap_id_and_gets_key() {
             .iter()
             .any(|id| !id.trim().is_empty()),
         "expected the unauthenticated CLI to send a non-empty \
-         X-Margins-Bootstrap-Id.{diag}"
+         X-Enzyme-Bootstrap-Id.{diag}"
     );
     // ...and NO Bearer token was ever presented (there is no account).
     assert!(

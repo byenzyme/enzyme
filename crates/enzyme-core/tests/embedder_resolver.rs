@@ -261,8 +261,8 @@ fn start_broker(old_base_url: String, new_base_url: String) -> (RecordingServer,
     let calls = Arc::new(AtomicUsize::new(0));
     let captured_calls = Arc::clone(&calls);
     let server = RecordingServer::start(move |request| {
-        assert!(request.starts_with("GET /margins/free-config "));
-        assert!(request_header(request, "X-Margins-Bootstrap-Id").is_some());
+        assert!(request.starts_with("GET /llm/free-config "));
+        assert!(request_header(request, "X-Enzyme-Bootstrap-Id").is_some());
         assert!(request_header(request, "Authorization").is_none());
         let call = captured_calls.fetch_add(1, Ordering::SeqCst);
         let (api_key, base_url, model) = if call == 0 {
@@ -340,7 +340,7 @@ async fn assert_sequential_rotation(streaming: bool) {
     let mut old = RecordingServer::start(|_| rejected_response());
     let mut new = RecordingServer::start(completion_response);
     let (mut broker, broker_calls) = start_broker(old.base_url.clone(), new.base_url.clone());
-    let _env = HostedEnv::install(&format!("{}/margins/free-config", broker.base_url));
+    let _env = HostedEnv::install(&format!("{}/llm/free-config", broker.base_url));
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
@@ -375,7 +375,7 @@ fn start_near_expiry_server() -> (String, std::thread::JoinHandle<()>) {
         for call in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream).unwrap();
-            assert!(request.starts_with("GET /margins/free-config "));
+            assert!(request.starts_with("GET /llm/free-config "));
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -394,7 +394,7 @@ fn start_near_expiry_server() -> (String, std::thread::JoinHandle<()>) {
             respond(&mut stream, "200 OK", "application/json", &body).unwrap();
         }
     });
-    (format!("http://{address}/margins/free-config"), handle)
+    (format!("http://{address}/llm/free-config"), handle)
 }
 
 #[tokio::test]
@@ -448,7 +448,7 @@ async fn concurrent_non_streaming_401s_singleflight_one_broker_refresh() {
     let mut old = RecordingServer::start_batched(CALLERS, |_| rejected_response());
     let mut new = RecordingServer::start(completion_response);
     let (mut broker, broker_calls) = start_broker(old.base_url.clone(), new.base_url.clone());
-    let _env = HostedEnv::install(&format!("{}/margins/free-config", broker.base_url));
+    let _env = HostedEnv::install(&format!("{}/llm/free-config", broker.base_url));
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
         home.path().join("config.toml"),
