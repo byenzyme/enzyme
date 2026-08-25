@@ -11,8 +11,8 @@ installed files, optionally runs `codex exec` against the isolated workspace,
 and cleans up unless --keep is passed.
 
 Environment:
-  ENZYME_BIN       Path to enzyme binary. Defaults to target/debug/enzyme,
-                   building it if missing.
+  ENZYME_BIN       Path to enzyme binary. Defaults to Cargo's configured
+                   target debug enzyme, building it if missing.
   SOURCE_CODEX_HOME Source auth/config directory. Defaults to $CODEX_HOME or ~/.codex.
 USAGE
 }
@@ -32,9 +32,21 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+default_enzyme_bin() {
+  local target_dir
+  if target_dir="$(
+    cargo metadata --format-version=1 --no-deps 2>/dev/null |
+      python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+  )"; then
+    printf '%s/debug/enzyme\n' "$target_dir"
+  else
+    printf '%s/target/debug/enzyme\n' "$repo_root"
+  fi
+}
+
 if [[ -z "${ENZYME_BIN:-}" ]]; then
-  cargo build -p enzyme-cli
-  ENZYME_BIN="$repo_root/target/debug/enzyme"
+  scripts/cargo-lane shared -- cargo build -p enzyme-cli
+  ENZYME_BIN="$(default_enzyme_bin)"
 fi
 
 if [[ ! -x "$ENZYME_BIN" ]]; then

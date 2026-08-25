@@ -2,6 +2,8 @@
 /target
 **/*.rs.bk
 Cargo.lock
+/.cargo/config
+/.cargo/config.toml
 
 # Python/local build artifacts
 __pycache__/

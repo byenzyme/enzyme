@@ -3,8 +3,21 @@
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+default_enzyme_bin() {
+  local target_dir
+  if target_dir="$(
+    cd "$REPO_ROOT" &&
+      cargo metadata --format-version=1 --no-deps 2>/dev/null |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
+  )"; then
+    printf '%s/debug/enzyme\n' "$target_dir"
+  else
+    printf '%s/target/debug/enzyme\n' "$REPO_ROOT"
+  fi
+}
+
 # Binary under test. Override with ENZYME_BIN; defaults to the debug build.
-ENZYME_BIN="${ENZYME_BIN:-$REPO_ROOT/target/debug/enzyme}"
+ENZYME_BIN="${ENZYME_BIN:-$(default_enzyme_bin)}"
 
 PASS=0
 FAIL=0
@@ -47,7 +60,7 @@ isolated_home() {
 require_bin() {
   if [ ! -x "$ENZYME_BIN" ]; then
     echo "release-checks: enzyme binary not found at $ENZYME_BIN" >&2
-    echo "run: cargo build -p enzyme-cli --features local-llm   (or set ENZYME_BIN)" >&2
+    echo "run: scripts/cargo-lane shared -- cargo build -p enzyme-cli --features local-llm   (or set ENZYME_BIN)" >&2
     exit 1
   fi
 }

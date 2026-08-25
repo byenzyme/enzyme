@@ -2,17 +2,17 @@
 
 # Build release binary and install to cargo bin
 install:
-	cargo install --path crates/enzyme-cli
+	scripts/cargo-lane shared -- cargo install --path crates/enzyme-cli
 
 # Local-only optimized release build for benchmarking/development.
 # Do not ship this binary: target-cpu=native may emit instructions that fail on older CPUs.
 build-native:
-	RUSTFLAGS="-Ctarget-cpu=native" cargo build --release --bin enzyme
-	@echo "Built native-optimized binary at target/release/enzyme"
+	RUSTFLAGS="-Ctarget-cpu=native" scripts/cargo-lane shared -- cargo build --release --bin enzyme
+	@echo "Built native-optimized binary at $$(scripts/cargo-lane target-dir)/release/enzyme"
 
 # Install a local-only native-optimized enzyme into cargo bin.
 install-native:
-	RUSTFLAGS="-Ctarget-cpu=native" cargo install --path crates/enzyme-cli --force
+	RUSTFLAGS="-Ctarget-cpu=native" scripts/cargo-lane shared -- cargo install --path crates/enzyme-cli --force
 
 # Show what rustc maps target-cpu=native to on this machine.
 native-cpu:
@@ -39,17 +39,17 @@ check-workspace-skill:
 # Set ENZYME_TEST_VAULT to a snapshot-vault.sh output to add the real-scale
 # tier; set ENZYME_CHECK_FULL=0 to skip the hosted-bootstrap full-init tier.
 release-check:
-	cargo build -p enzyme-cli --features local-llm
-	bash scripts/release-checks/10-install-matrix.sh
-	bash scripts/release-checks/20-sync-contract.sh
-	bash scripts/release-checks/30-vault-lifecycle.sh
+	scripts/cargo-lane shared -- cargo build -p enzyme-cli --features local-llm
+	ENZYME_BIN="$${ENZYME_BIN:-$$(scripts/cargo-lane target-dir)/debug/enzyme}" bash scripts/release-checks/10-install-matrix.sh
+	ENZYME_BIN="$${ENZYME_BIN:-$$(scripts/cargo-lane target-dir)/debug/enzyme}" bash scripts/release-checks/20-sync-contract.sh
+	ENZYME_BIN="$${ENZYME_BIN:-$$(scripts/cargo-lane target-dir)/debug/enzyme}" bash scripts/release-checks/30-vault-lifecycle.sh
 
 # Agentic release checks: a headless Claude agent does the memory.enzyme.garden
 # cold-start install and a full teardown, graded by deterministic assertions.
 # Uses the local claude subscription; run at release time or nightly.
 release-check-agentic:
-	cargo build -p enzyme-cli --features local-llm
-	bash scripts/release-checks/40-agentic-setup.sh
+	scripts/cargo-lane shared -- cargo build -p enzyme-cli --features local-llm
+	ENZYME_BIN="$${ENZYME_BIN:-$$(scripts/cargo-lane target-dir)/debug/enzyme}" bash scripts/release-checks/40-agentic-setup.sh
 
 # Snapshot the real vault's markdown corpus into ~/.enzyme-test-vaults/real
 # (local only; never enters git).
