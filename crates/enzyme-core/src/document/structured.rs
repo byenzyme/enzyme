@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::models::DateSource;
@@ -8,6 +8,29 @@ use super::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
 /// A gap this large starts a new SQLite conversation window even when the
 /// current window still fits within the character budget.
 pub const STRUCTURED_LOG_GAP_MS: i64 = 6 * 60 * 60 * 1_000;
+
+/// Versioned text contract for speaker-attributed structured-log spans.
+pub const STRUCTURED_SPEAKER_SPAN_FORMAT_VERSION: &str = "enzyme-speaker-span.v1";
+pub const STRUCTURED_SPEAKER_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S UTC";
+const STRUCTURED_SPEAKER_HEADING_PREFIX: &str = "## ";
+const STRUCTURED_SPEAKER_SEPARATOR: &str = " — ";
+const STRUCTURED_SPEAKER_LIST_SEPARATOR: &str = ", ";
+
+/// Parse an exact `enzyme-speaker-span.v1` heading. Participant tokens are
+/// canonical link-entity keys and therefore may not contain commas.
+pub fn structured_speaker_participants(heading: &str) -> Option<Vec<&str>> {
+    let rest = heading.strip_prefix(STRUCTURED_SPEAKER_HEADING_PREFIX)?;
+    let (timestamp, participants) = rest.split_once(STRUCTURED_SPEAKER_SEPARATOR)?;
+    NaiveDateTime::parse_from_str(timestamp, STRUCTURED_SPEAKER_TIMESTAMP_FORMAT).ok()?;
+    let participants = participants
+        .split(STRUCTURED_SPEAKER_LIST_SEPARATOR)
+        .collect::<Vec<_>>();
+    (!participants.is_empty()
+        && participants
+            .iter()
+            .all(|participant| !participant.is_empty() && !participant.contains(',')))
+    .then_some(participants)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredLogEntry {
@@ -213,14 +236,17 @@ pub fn structured_log_document_to_processed_document(
 
 fn render_log_entry(entry: &StructuredLogEntry) -> String {
     let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.created_at)
-        .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|date| date.format(STRUCTURED_SPEAKER_TIMESTAMP_FORMAT).to_string())
         .unwrap_or_else(|| format!("{} ms", entry.created_at));
     let who = if entry.who.is_empty() {
         "Unknown".to_string()
     } else {
-        entry.who.join(", ")
+        entry.who.join(STRUCTURED_SPEAKER_LIST_SEPARATOR)
     };
-    format!("## {timestamp} — {who}\n\n{}", entry.content)
+    format!(
+        "{STRUCTURED_SPEAKER_HEADING_PREFIX}{timestamp}{STRUCTURED_SPEAKER_SEPARATOR}{who}\n\n{}",
+        entry.content
+    )
 }
 
 #[cfg(test)]
@@ -236,6 +262,24 @@ mod log_tests {
             entries,
             fingerprint: "fingerprint".to_string(),
         }
+    }
+
+    #[test]
+    fn speaker_heading_v1_is_exact_and_versioned() {
+        assert_eq!(
+            STRUCTURED_SPEAKER_SPAN_FORMAT_VERSION,
+            "enzyme-speaker-span.v1"
+        );
+        assert_eq!(
+            structured_speaker_participants("## 2026-08-25 07:30:00 UTC — alice@example.com, Bob"),
+            Some(vec!["alice@example.com", "Bob"])
+        );
+        assert!(structured_speaker_participants("### 2026-08-25 07:30:00 UTC — Bob").is_none());
+        assert!(structured_speaker_participants("## 2026-08-25T07:30:00Z — Bob").is_none());
+        assert!(structured_speaker_participants("## 2026-08-25 07:30:00 UTC - Bob").is_none());
+        assert!(
+            structured_speaker_participants("## 2026-08-25 07:30:00 UTC — Bob,Carol").is_none()
+        );
     }
 
     #[test]

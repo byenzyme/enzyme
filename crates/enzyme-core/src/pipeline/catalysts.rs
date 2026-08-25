@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::db::{CatalystEraAudit, Database, FileChunk};
+use crate::document::structured_speaker_participants;
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
@@ -259,11 +260,20 @@ fn occurrence_anchor(
 /// Ordinary Markdown occurrence contexts are already entity-local spans and
 /// pass through unchanged.
 fn participant_span(context: &str, entity_name: &str) -> Option<String> {
+    // Speaker-looking input must conform wholly to v1. Mixing a valid block
+    // with a legacy/malformed heading could otherwise leak that block as body.
+    if context.lines().any(|line| {
+        (line.starts_with("## ") || line.starts_with("### "))
+            && line.contains(" — ")
+            && structured_speaker_participants(line).is_none()
+    }) {
+        return None;
+    }
     let mut blocks = Vec::<(String, Vec<String>)>::new();
     let mut heading: Option<String> = None;
     let mut body = Vec::new();
     for line in context.lines() {
-        if line.starts_with("## ") {
+        if structured_speaker_participants(line).is_some() {
             if let Some(previous) = heading.replace(line.to_string()) {
                 blocks.push((previous, std::mem::take(&mut body)));
             }
@@ -281,14 +291,11 @@ fn participant_span(context: &str, entity_name: &str) -> Option<String> {
     let selected = blocks
         .into_iter()
         .filter(|(heading, _)| {
-            heading
-                .split_once(" — ")
-                .map(|(_, participants)| {
-                    participants
-                        .split(',')
-                        .any(|name| name.trim().eq_ignore_ascii_case(entity_name))
-                })
-                .unwrap_or(false)
+            structured_speaker_participants(heading).is_some_and(|participants| {
+                participants
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(entity_name))
+            })
         })
         .map(|(heading, body)| {
             let body = body.join("\n").trim().to_string();
@@ -2919,6 +2926,32 @@ mod tests {
             "What does Carol's role tell Bob about the migration?",
             "Bob"
         ));
+    }
+
+    #[test]
+    fn margins_speaker_span_v1_isolates_every_participant_and_rejects_legacy_headings() {
+        let context = "# Margins mail thread\n\n## 2026-08-25 07:30:00 UTC — alice@example.com\n\nALICE_ONLY\n\n## 2026-08-25 07:31:00 UTC — bob@example.com\n\nBOB_ONLY\n\n## 2026-08-25 07:32:00 UTC — carol@example.com\n\nCAROL_ONLY";
+        for (entity, own, others) in [
+            (
+                "alice@example.com",
+                "ALICE_ONLY",
+                ["BOB_ONLY", "CAROL_ONLY"],
+            ),
+            ("bob@example.com", "BOB_ONLY", ["ALICE_ONLY", "CAROL_ONLY"]),
+            (
+                "carol@example.com",
+                "CAROL_ONLY",
+                ["ALICE_ONLY", "BOB_ONLY"],
+            ),
+        ] {
+            let span = participant_span(context, entity).expect("participant v1 span");
+            assert!(span.contains(own));
+            assert!(others.iter().all(|other| !span.contains(other)));
+        }
+        assert!(participant_span(context, "nobody@example.com").is_none());
+
+        let legacy = "# Margins mail thread\n\n### 2026-08-25 — alice@example.com\n\nALICE\n\n### 2026-08-25 — bob@example.com\n\nBOB";
+        assert!(participant_span(legacy, "alice@example.com").is_none());
     }
 
     /// Regression: a single high-frequency entity whose occurrences are long
