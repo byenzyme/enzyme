@@ -105,6 +105,44 @@ CREATE TABLE IF NOT EXISTS catalyst_entity_hashes (
     PRIMARY KEY (entity, entity_type)
 );
 
+-- Evidence-era audit rows for every catalyst generation run. Rows are retained
+-- for skipped thin eras as well as generated eras so absence is explainable.
+CREATE TABLE IF NOT EXISTS catalyst_eras (
+    generation_run_id  TEXT NOT NULL,
+    epoch_id           TEXT,
+    entity             TEXT NOT NULL,
+    entity_type        TEXT NOT NULL,
+    era_label          TEXT NOT NULL DEFAULT '',
+    start_month        TEXT NOT NULL DEFAULT '',
+    end_month          TEXT NOT NULL DEFAULT '',
+    distinct_documents INTEGER NOT NULL,
+    substantive_tokens INTEGER NOT NULL,
+    occurrence_count    INTEGER NOT NULL DEFAULT 0,
+    catalyst_budget     INTEGER NOT NULL DEFAULT 0,
+    status              TEXT NOT NULL,
+    reason              TEXT,
+    created_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (generation_run_id, entity, entity_type, era_label)
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_eras_epoch ON catalyst_eras(epoch_id);
+
+-- Durable reasons why an entity/era did not reach or survive generation.
+CREATE TABLE IF NOT EXISTS catalyst_generation_skips (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation_run_id   TEXT NOT NULL,
+    epoch_id            TEXT,
+    entity              TEXT NOT NULL,
+    entity_type         TEXT NOT NULL,
+    era_label           TEXT NOT NULL DEFAULT '',
+    reason_code         TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    distinct_documents  INTEGER NOT NULL DEFAULT 0,
+    substantive_tokens  INTEGER NOT NULL DEFAULT 0,
+    created_at_ms        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_catalyst_generation_skips_run
+    ON catalyst_generation_skips(generation_run_id);
+
 -- Catalyst similarities (typically in the embeddings database) ----------------
 CREATE TABLE IF NOT EXISTS catalyst_similarities (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -248,6 +286,8 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "entity_occurrences",
     "catalysts",
     "catalyst_entity_hashes",
+    "catalyst_eras",
+    "catalyst_generation_skips",
     "catalyst_similarities",
     "context_cache",
     "config",
@@ -269,6 +309,8 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_entities_frequency",
     "idx_catalysts_entity",
     "idx_catalysts_context",
+    "idx_catalyst_eras_epoch",
+    "idx_catalyst_generation_skips_run",
     "idx_entity_occurrences_entity",
     "idx_entity_occurrences_file",
     "idx_catalyst_epochs_status",

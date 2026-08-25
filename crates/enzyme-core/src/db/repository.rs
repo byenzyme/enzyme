@@ -70,6 +70,24 @@ pub struct EntityRefreshStats {
     pub latest_effective_date: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CatalystEraAudit<'a> {
+    pub generation_run_id: &'a str,
+    pub epoch_id: Option<&'a str>,
+    pub entity: &'a str,
+    pub entity_type: &'a str,
+    pub era_label: &'a str,
+    pub start_month: &'a str,
+    pub end_month: &'a str,
+    pub occurrence_count: usize,
+    pub catalyst_budget: usize,
+    pub distinct_documents: usize,
+    pub substantive_tokens: usize,
+    pub status: &'a str,
+    pub reason: Option<&'a str>,
+    pub created_at_ms: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -119,6 +137,59 @@ fn opt_val<T: Into<Value>>(opt: Option<T>) -> Value {
 // ---------------------------------------------------------------------------
 
 impl Database {
+    pub fn record_catalyst_era_audit(&self, audit: &CatalystEraAudit<'_>) -> Result<()> {
+        self.execute_write(
+            "INSERT OR REPLACE INTO catalyst_eras
+             (generation_run_id, epoch_id, entity, entity_type, era_label,
+              start_month, end_month, distinct_documents, substantive_tokens,
+              occurrence_count, catalyst_budget, status, reason, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            vec![
+                Value::Text(audit.generation_run_id.to_string()),
+                opt_val(audit.epoch_id.map(str::to_string)),
+                Value::Text(audit.entity.to_string()),
+                Value::Text(audit.entity_type.to_string()),
+                Value::Text(audit.era_label.to_string()),
+                Value::Text(audit.start_month.to_string()),
+                Value::Text(audit.end_month.to_string()),
+                Value::Integer(audit.distinct_documents as i64),
+                Value::Integer(audit.substantive_tokens as i64),
+                Value::Integer(audit.occurrence_count as i64),
+                Value::Integer(audit.catalyst_budget as i64),
+                Value::Text(audit.status.to_string()),
+                opt_val(audit.reason.map(str::to_string)),
+                Value::Integer(audit.created_at_ms),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_catalyst_generation_skip(
+        &self,
+        audit: &CatalystEraAudit<'_>,
+        reason_code: &str,
+    ) -> Result<()> {
+        self.execute_write(
+            "INSERT INTO catalyst_generation_skips
+             (generation_run_id, epoch_id, entity, entity_type, era_label,
+              reason_code, reason, distinct_documents, substantive_tokens, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            vec![
+                Value::Text(audit.generation_run_id.to_string()),
+                opt_val(audit.epoch_id.map(str::to_string)),
+                Value::Text(audit.entity.to_string()),
+                Value::Text(audit.entity_type.to_string()),
+                Value::Text(audit.era_label.to_string()),
+                Value::Text(reason_code.to_string()),
+                Value::Text(audit.reason.unwrap_or_default().to_string()),
+                Value::Integer(audit.distinct_documents as i64),
+                Value::Integer(audit.substantive_tokens as i64),
+                Value::Integer(audit.created_at_ms),
+            ],
+        )?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Document operations
     // -----------------------------------------------------------------------
@@ -2499,6 +2570,51 @@ impl Database {
                 ))
             },
         )?;
+        let era_rows = shadow.query_read(
+            "SELECT generation_run_id, epoch_id, entity, entity_type, era_label,
+                    start_month, end_month, distinct_documents, substantive_tokens,
+                    occurrence_count, catalyst_budget, status, reason, created_at_ms
+             FROM catalyst_eras WHERE epoch_id=?1",
+            vec![Value::Text(epoch_id.to_string())],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<Option<String>>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<i64>(8)?,
+                    row.get::<i64>(9)?,
+                    row.get::<i64>(10)?,
+                    row.get::<String>(11)?,
+                    row.get::<Option<String>>(12)?,
+                    row.get::<i64>(13)?,
+                ))
+            },
+        )?;
+        let skip_rows = shadow.query_read(
+            "SELECT generation_run_id, epoch_id, entity, entity_type, era_label,
+                    reason_code, reason, distinct_documents, substantive_tokens, created_at_ms
+             FROM catalyst_generation_skips WHERE epoch_id=?1",
+            vec![Value::Text(epoch_id.to_string())],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<Option<String>>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<i64>(8)?,
+                    row.get::<i64>(9)?,
+                ))
+            },
+        )?;
         let packed = shadow
             .query_read(
                 "SELECT count, ids, vectors FROM catalyst_embeddings_packed WHERE id=1",
@@ -2517,14 +2633,16 @@ impl Database {
             .iter()
             .map(|(id, text, ..)| (id.clone(), text.clone()))
             .collect();
-        let (_, packed_ids_json, packed_vectors) = packed
-            .as_ref()
-            .context("shadow epoch is missing catalyst embeddings")?;
-        let packed_ids: Vec<String> = serde_json::from_str(packed_ids_json)?;
-        anyhow::ensure!(
-            packed_ids.len() == catalysts.len() && !packed_vectors.is_empty(),
-            "shadow epoch catalyst embedding set is incomplete"
-        );
+        if !catalysts.is_empty() {
+            let (_, packed_ids_json, packed_vectors) = packed
+                .as_ref()
+                .context("shadow epoch is missing catalyst embeddings")?;
+            let packed_ids: Vec<String> = serde_json::from_str(packed_ids_json)?;
+            anyhow::ensure!(
+                packed_ids.len() == catalysts.len() && !packed_vectors.is_empty(),
+                "shadow epoch catalyst embedding set is incomplete"
+            );
+        }
 
         block_in_place_sync(async move {
             let tx = self
@@ -2654,9 +2772,56 @@ impl Database {
                 )
                 .await?;
             }
+            for row in era_rows {
+                tx.execute(
+                    "INSERT OR REPLACE INTO catalyst_eras
+                     (generation_run_id,epoch_id,entity,entity_type,era_label,start_month,end_month,
+                      distinct_documents,substantive_tokens,occurrence_count,catalyst_budget,
+                      status,reason,created_at_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    vec![
+                        Value::Text(row.0),
+                        opt_val(row.1),
+                        Value::Text(row.2),
+                        Value::Text(row.3),
+                        Value::Text(row.4),
+                        Value::Text(row.5),
+                        Value::Text(row.6),
+                        Value::Integer(row.7),
+                        Value::Integer(row.8),
+                        Value::Integer(row.9),
+                        Value::Integer(row.10),
+                        Value::Text(row.11),
+                        opt_val(row.12),
+                        Value::Integer(row.13),
+                    ],
+                )
+                .await?;
+            }
+            for row in skip_rows {
+                tx.execute(
+                    "INSERT INTO catalyst_generation_skips
+                     (generation_run_id,epoch_id,entity,entity_type,era_label,reason_code,reason,
+                      distinct_documents,substantive_tokens,created_at_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    vec![
+                        Value::Text(row.0),
+                        opt_val(row.1),
+                        Value::Text(row.2),
+                        Value::Text(row.3),
+                        Value::Text(row.4),
+                        Value::Text(row.5),
+                        Value::Text(row.6),
+                        Value::Integer(row.7),
+                        Value::Integer(row.8),
+                        Value::Integer(row.9),
+                    ],
+                )
+                .await?;
+            }
             Database::mark_epoch_activated_on_tx(&tx, epoch_id, completed_at_ms).await?;
             tx.commit().await.context("commit epoch activation")?;
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })
     }
 }

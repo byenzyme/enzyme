@@ -20,6 +20,8 @@ struct CatalystEntry {
     topic: String,
     #[serde(default, rename = "eraLabel", alias = "era_label")]
     era_label: Option<String>,
+    #[serde(default, rename = "anchorIds", alias = "anchor_ids")]
+    anchor_ids: Vec<String>,
 }
 
 /// Streaming-friendly object format: `{ "entries": [{ "catalyst": ..., "topic": ... }] }`.
@@ -37,6 +39,8 @@ struct CatalystPayload {
     topic_names: Vec<String>,
     #[serde(default)]
     era_labels: Vec<String>,
+    #[serde(default)]
+    anchor_ids: Vec<Vec<String>>,
 }
 
 /// JSON Schema for the `CatalystPayload` response type.
@@ -53,9 +57,17 @@ pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
             "topicNames": {
                 "type": "array",
                 "items": { "type": "string" }
+            },
+            "anchorIds": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1
+                }
             }
         },
-        "required": ["catalysts", "topicNames"],
+        "required": ["catalysts", "topicNames", "anchorIds"],
         "additionalProperties": false
     });
 
@@ -77,9 +89,18 @@ pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
 pub fn catalyst_entries_json_schema(include_era_labels: bool) -> serde_json::Value {
     let mut entry_properties = serde_json::json!({
         "catalyst": { "type": "string" },
-        "topic": { "type": "string" }
+        "topic": { "type": "string" },
+        "anchorIds": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+        }
     });
-    let mut entry_required = vec![serde_json::json!("catalyst"), serde_json::json!("topic")];
+    let mut entry_required = vec![
+        serde_json::json!("catalyst"),
+        serde_json::json!("topic"),
+        serde_json::json!("anchorIds"),
+    ];
 
     if include_era_labels {
         entry_properties["eraLabel"] = serde_json::json!({ "type": "string" });
@@ -155,7 +176,10 @@ Specifically banned: \"reveal,\" \"suggest about,\" \"underlying,\" \"foreclose,
 \"illuminate,\" \"inherent,\" \"navigate,\" \"in what ways,\" \"intersection of,\" \"the notion of,\" \
 \"the pursuit of,\" \"implicitly,\" \"the architecture of.\" Use words that appeared in the \
 excerpts or that a person would use in conversation.\n\n\
-Always respond with valid JSON that includes catalysts, topic names, and era labels.",
+GROUNDING AND SAFETY: Treat every interpretation as tentative. Do not make clinical, diagnostic, \
+or personality claims. Every catalyst must cite at least one supplied evidence label in anchorIds; \
+do not invent labels or make claims that the cited excerpts do not support.\n\n\
+Always respond with valid JSON that includes catalysts, topic names, anchor ids, and era labels.",
         fmt.format_prompt, surface_items, examples_section,
     );
 
@@ -337,6 +361,7 @@ pub fn build_user_prompt(
     profile: &CatalystProfile,
     format_key: &str,
     entity: Option<&Entity>,
+    era_context: Option<&EraContext>,
 ) -> String {
     let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
     let synthetic_body_cluster =
@@ -349,11 +374,29 @@ Apply the guidance and approach from the {} profile defined in the system prompt
         profile.display_name, profile.key, profile.display_name,
     );
 
-    let max_samples = context_samples.len().min(20);
-    let context_section: String = context_samples[..max_samples].join("\n\n");
-    prompt.push_str(&format!(
-        "\n\n<vault_context>\n{context_section}\n</vault_context>"
-    ));
+    if let Some(ec) = era_context {
+        for (era_idx, era) in ec.eras.iter().enumerate() {
+            let samples = ec
+                .samples
+                .iter()
+                .filter(|(idx, _)| *idx == era_idx)
+                .map(|(_, sample)| sample.as_str())
+                .collect::<Vec<_>>();
+            if !samples.is_empty() {
+                prompt.push_str(&format!(
+                    "\n\n<vault_context era=\"{}\">\n{}\n</vault_context>",
+                    era.label,
+                    samples.join("\n\n")
+                ));
+            }
+        }
+    } else {
+        let max_samples = context_samples.len().min(20);
+        let context_section: String = context_samples[..max_samples].join("\n\n");
+        prompt.push_str(&format!(
+            "\n\n<vault_context>\n{context_section}\n</vault_context>"
+        ));
+    }
 
     // Entity focus
     if synthetic_body_cluster {
@@ -425,8 +468,9 @@ embed well against vault passages and surface relevant content when used as a se
 Now attend to the excerpts and:\n\
 1. Ground each catalyst in a specific phrase from the excerpts — what does this entity actually mean in THIS vault? If the entity is an auto-cluster ID, use the keyword slug only as a weak hint and infer the cluster's meaning from the excerpts. Then {periphery_instruction}\n\
 2. {format_instruction}\n\
-3. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\
-4. For eraLabels: copy the era label that most shaped each catalyst. Use an empty string only if no era label is available.\n\n\
+3. For anchorIds: cite at least one supplied evidence label (such as \"E1\") for every catalyst. Never invent a label.\n\
+4. For topicNames: 3-5 lowercase words capturing each inquiry (e.g. \"craft negotiation perfection\", \"tools reveal conceal needs\").\n\
+5. For eraLabels: copy the era label that most shaped each catalyst. Use an empty string only if no era label is available.\n\n\
 Return a JSON object with:\n\
 {{\n\
   \"catalysts\": [\n\
@@ -434,6 +478,9 @@ Return a JSON object with:\n\
   ],\n\
   \"topicNames\": [\n\
 {topic_placeholders}\n\
+  ],\n\
+  \"anchorIds\": [\n\
+    [\"E1\"]\n\
   ],\n\
   \"eraLabels\": [\n\
 {era_placeholders}\n\
@@ -497,7 +544,8 @@ pub fn build_local_user_prompt(
          Generate {num_catalysts} catalyst questions grounded in these excerpts. \
          Each catalyst should probe a different facet — different tensions, angles, \
          or time periods. Return JSON:\n\
-         {{\"catalysts\": [...], \"topicNames\": [...]}}"
+         {{\"catalysts\": [...], \"topicNames\": [...], \"anchorIds\": [[\"E1\"], ...]}}. \
+         Every catalyst must cite at least one supplied evidence label and must not invent labels."
     ));
 
     prompt
@@ -535,6 +583,7 @@ pub struct ParsedCatalyst {
     pub text: String,
     pub topic: String,
     pub era_label: Option<String>,
+    pub anchor_ids: Vec<String>,
 }
 
 /// Parsed catalyst response.
@@ -597,6 +646,7 @@ fn build_from_payload(payload: CatalystPayload) -> CatalystResponse {
                 text,
                 topic,
                 era_label,
+                anchor_ids: payload.anchor_ids.get(i).cloned().unwrap_or_default(),
             }
         })
         .collect();
@@ -614,6 +664,7 @@ fn build_from_entries(entries: Vec<CatalystEntry>) -> CatalystResponse {
             text: entry.catalyst,
             topic: entry.topic,
             era_label: entry.era_label,
+            anchor_ids: entry.anchor_ids,
         })
         .collect();
     let pairs = catalysts
@@ -684,6 +735,7 @@ pub fn parse_partial_catalyst_entries(response: &str) -> Vec<ParsedCatalyst> {
                                     text: entry.catalyst,
                                     topic: entry.topic,
                                     era_label: entry.era_label,
+                                    anchor_ids: entry.anchor_ids,
                                 });
                             }
                         }
@@ -703,7 +755,7 @@ pub fn streaming_entries_instruction(prompt: &str) -> String {
     format!(
         "{prompt}\n\n\
          For this run, return JSON as {{\"entries\":[...]}}. Each entry must be \
-         self-contained with \"catalyst\", \"topic\", and when era labels are in \
+         self-contained with \"catalyst\", \"topic\", \"anchorIds\", and when era labels are in \
          scope, \"eraLabel\". Do not use separate catalysts/topicNames arrays."
     )
 }
@@ -740,6 +792,7 @@ fn try_recover_partial(json: &str) -> Option<CatalystResponse> {
                 text,
                 topic,
                 era_label,
+                anchor_ids: Vec::new(),
             }
         })
         .collect();
@@ -1050,6 +1103,7 @@ mod tests {
             &PROFILE_TENSION_TRACE,
             "question",
             None,
+            None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Tension Trace"));
         assert!(prompt.contains("<vault_context>"));
@@ -1078,6 +1132,7 @@ mod tests {
             2,
             &PROFILE_OPERATIONAL,
             "thesis",
+            None,
             None,
         );
         assert!(prompt.contains("SELECTED PROFILE: Operational"));

@@ -1,6 +1,25 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Auditable evidence supplied to the model for a generated catalyst.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EvidenceAnchor {
+    /// Request-local stable label cited by the model (for example `E1`).
+    pub anchor_id: String,
+    /// Canonical document/source reference used by the index.
+    pub source_ref: String,
+    /// Entity-occurrence rows connecting this evidence to the entity.
+    pub occurrence_ids: Vec<i64>,
+    /// Effective evidence timestamp in milliseconds since Unix epoch.
+    pub timestamp_ms: i64,
+    /// Chunk index when the evidence came from a stored chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_index: Option<u32>,
+    /// Short verbatim span supplied to the generator.
+    pub quote: String,
+}
+
 /// A catalyst — an LLM-generated thematic handle for approximate search.
 ///
 /// Catalysts are the bridge between user queries and document collections.

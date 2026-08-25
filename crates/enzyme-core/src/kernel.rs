@@ -21,6 +21,7 @@ use crate::models::Embedding;
 use crate::models::EntityType;
 use crate::pipeline::catalysts::{CatalystConfig, CatalystPipeline};
 use crate::pipeline::embedding::EmbeddingPipeline;
+use crate::pipeline::epoch::{GenerationContract, now_ms};
 use crate::pipeline::indexing::IndexingPipeline;
 use crate::pipeline::selection::SelectionPipeline;
 use crate::pipeline::similarity::SimilarityPipeline;
@@ -50,6 +51,10 @@ pub struct SearchOptions {
     pub full_reindex: bool,
     /// Maximum entities for which catalysts may be generated.
     pub max_bridged_entities: usize,
+    /// Minimum distinct source documents per entity-era before generation.
+    pub min_catalyst_evidence_documents: usize,
+    /// Minimum substantive tokens per entity-era before generation.
+    pub min_catalyst_evidence_tokens: usize,
 }
 
 impl SearchOptions {
@@ -78,6 +83,9 @@ impl Default for SearchOptions {
             selection_config: None,
             full_reindex: false,
             max_bridged_entities: 32,
+            min_catalyst_evidence_documents:
+                crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS,
+            min_catalyst_evidence_tokens: crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS,
         }
     }
 }
@@ -321,6 +329,8 @@ fn ensure_searchable_owned(
         mut selection_config,
         full_reindex,
         max_bridged_entities,
+        min_catalyst_evidence_documents,
+        min_catalyst_evidence_tokens,
     } = options;
     let mut configured_sources = None;
     if let Some(config_path) = config_path {
@@ -373,9 +383,39 @@ fn ensure_searchable_owned(
             Bridged::NoEntities
         } else {
             let model = generator.model();
+            let selection_config_json = serde_json::to_string(
+                selection_config
+                    .as_ref()
+                    .unwrap_or(&EnzymeConfig::default()),
+            )?;
+            let contract = GenerationContract {
+                schema_version: "catalyst-epoch.v2".into(),
+                prompt_version: "catalyst-prompts.2026-08-anchors".into(),
+                catalyst_format: crate::llm::DEFAULT_FORMAT_KEY.into(),
+                catalyst_profile: crate::llm::DEFAULT_PROFILE_KEY.into(),
+                model: model.clone(),
+                llm_mode: "embedder-pull".into(),
+                llm_provider: format!("{:?}", generator.provider()).to_lowercase(),
+                llm_base_url: "resolved-by-generator".into(),
+                allocation_semantics: "volume-floor-and-top-boost.v1".into(),
+                catalysts_per_entity: 7,
+                min_top_catalysts: None,
+                embedding_backend: service.backend_name().into(),
+                embedding_dimension: service.dimension(),
+                targets: Vec::new(),
+                selection_config_json,
+                max_context_chars: None,
+                max_context_samples: 20,
+                min_evidence_documents: min_catalyst_evidence_documents,
+                min_evidence_tokens: min_catalyst_evidence_tokens,
+            };
+            let epoch_id = db.begin_inline_catalyst_epoch(&contract, now_ms())?;
             let config = CatalystConfig {
                 model: &model,
                 entity_profiles: &selection.entity_profiles,
+                min_evidence_documents: min_catalyst_evidence_documents,
+                min_evidence_tokens: min_catalyst_evidence_tokens,
+                epoch_id: Some(&epoch_id),
                 ..Default::default()
             };
             // Catalyst/database calls use `block_in_place`; a current-thread
@@ -383,7 +423,7 @@ fn ensure_searchable_owned(
             // generator. Own a small multi-thread runtime so sync embedders do
             // not inherit that Tokio requirement.
             let runtime = catalyst_runtime()?;
-            runtime
+            let generation = runtime
                 .block_on(
                     CatalystPipeline::new(&db, generator.client(), Some(service)).run(
                         &entities,
@@ -391,10 +431,22 @@ fn ensure_searchable_owned(
                         |_| {},
                     ),
                 )
-                .context("generating catalysts")?;
-            SimilarityPipeline::new(&db, service)
+                .context("generating catalysts");
+            if let Err(error) = generation {
+                db.mark_epoch_failed(&epoch_id, now_ms(), &error.to_string())?;
+                return Err(error);
+            }
+            let similarities = SimilarityPipeline::new(&db, service)
                 .run(|_, _| {})
-                .context("building catalyst similarities")?;
+                .context("building catalyst similarities");
+            if let Err(error) = similarities {
+                db.mark_epoch_failed(&epoch_id, now_ms(), &error.to_string())?;
+                return Err(error);
+            }
+            if let Err(error) = db.activate_inline_catalyst_epoch(&epoch_id, now_ms()) {
+                db.mark_epoch_failed(&epoch_id, now_ms(), &error.to_string())?;
+                return Err(error);
+            }
             Bridged::Ready
         }
     } else {
@@ -420,6 +472,10 @@ fn catalyst_runtime() -> Result<tokio::runtime::Runtime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::enzyme_config::CatalyzedEntity;
+    use crate::llm::LlmClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -516,6 +572,95 @@ mod tests {
         catalyst_runtime().unwrap().block_on(async {
             assert_eq!(tokio::task::block_in_place(|| 42), 42);
         });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provision_path_persists_epoch_era_budget_and_anchored_catalyst() {
+        let temp = tempfile::tempdir().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        for index in 0..4 {
+            std::fs::write(
+                vault.join(format!("evidence-{index}.md")),
+                format!(
+                    "#focus\n\nDocument {index}: {}",
+                    "The concrete source migration preserves auditable evidence and occurrence provenance. "
+                        .repeat(25)
+                ),
+            )
+            .unwrap();
+        }
+
+        let server = MockServer::start().await;
+        let content = serde_json::json!({
+            "catalysts": ["Could preserving occurrence provenance change the migration decision?"],
+            "topicNames": ["auditable migration provenance"],
+            "anchorIds": [["E1"]]
+        });
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let selection = EnzymeConfig {
+            catalyzed_entities: vec![CatalyzedEntity::Simple("#focus".to_string())],
+            ..Default::default()
+        };
+        let options = SearchOptions {
+            selection_config: Some(selection),
+            full_reindex: true,
+            max_bridged_entities: 1,
+            ..SearchOptions::new(&vault, temp.path().join("provision.db"))
+        };
+        let generator = Generator::fixture(
+            LlmClient::with_base_url("fixture-key", &server.uri()),
+            "fixture-model",
+        );
+        let index = ensure_searchable_sync(options, Some(generator)).unwrap();
+        assert_eq!(index.bridged, Bridged::Ready);
+
+        let epochs = index
+            .database()
+            .query_read(
+                "SELECT epoch_id FROM catalyst_epochs WHERE status='active'",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        assert_eq!(epochs.len(), 1);
+        let catalyst = index.database().get_all_catalysts().unwrap().pop().unwrap();
+        assert!(
+            !catalyst.metadata["era"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert_eq!(
+            catalyst.metadata["epoch_id"].as_str(),
+            Some(epochs[0].as_str())
+        );
+        assert!(
+            !catalyst.metadata["evidence_anchors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let era_rows = index
+            .database()
+            .query_read(
+                "SELECT era_label, occurrence_count, catalyst_budget FROM catalyst_eras WHERE epoch_id=?1",
+                vec![libsql::Value::Text(epochs[0].clone())],
+                |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?, row.get::<i64>(2)?)),
+            )
+            .unwrap();
+        assert!(!era_rows.is_empty());
+        assert!(!era_rows[0].0.is_empty());
+        assert!(era_rows[0].1 > 0);
+        assert!(era_rows[0].2 > 0);
     }
 
     #[test]
