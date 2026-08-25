@@ -1174,6 +1174,7 @@ mod tests {
             query: "SELECT id, author, created_at, body FROM entries".to_string(),
             roles: SqliteSourceRoles {
                 id: vec!["id".to_string()],
+                document_ref: None,
                 who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["author".to_string()])),
                 when: "created_at".to_string(),
                 what: vec!["body".to_string()],

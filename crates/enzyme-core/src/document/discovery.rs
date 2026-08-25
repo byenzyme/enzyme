@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -12,8 +13,8 @@ pub struct DiscoveredFile {
     pub root_name: String,
     pub root_path: PathBuf,
     pub relative_path: PathBuf,
-    /// DB identity. Single-root discovery remains the historical relative path;
-    /// multi-root discovery prefixes the configured root name.
+    /// DB identity. An explicit document prefix is stable across root-count and
+    /// display-name changes; roots without one preserve historical behavior.
     pub source_ref: String,
     pub writable: bool,
 }
@@ -165,12 +166,24 @@ impl FileDiscovery {
             vec![NotesRootConfig {
                 name: "notes".to_string(),
                 path: self.vault_path.clone(),
+                document_ref_prefix: None,
                 exclusions: Vec::new(),
                 writable: true,
             }]
         });
         let multi = roots.len() > 1;
         let mut files = Vec::new();
+        let mut explicit_prefixes = HashSet::new();
+        for root in &roots {
+            if let Some(prefix) = root.document_ref_prefix.as_deref() {
+                validate_document_ref_prefix(prefix)?;
+                anyhow::ensure!(
+                    explicit_prefixes.insert(prefix),
+                    "notes roots may not share document_ref_prefix {prefix:?}"
+                );
+            }
+        }
+        let mut source_refs = HashSet::new();
         for root in roots {
             anyhow::ensure!(
                 !root.name.trim().is_empty(),
@@ -187,11 +200,17 @@ impl FileDiscovery {
                 .with_context(|| format!("notes root does not exist: {:?}", root.path))?;
             for relative_path in self.walk_root(&canonical, &root.exclusions)? {
                 let relative = relative_path.to_string_lossy().replace('\\', "/");
-                let source_ref = if multi {
+                let source_ref = if let Some(prefix) = &root.document_ref_prefix {
+                    format!("{prefix}/{relative}")
+                } else if multi {
                     format!("{}/{relative}", root.name)
                 } else {
                     relative
                 };
+                anyhow::ensure!(
+                    source_refs.insert(source_ref.clone()),
+                    "notes roots produced duplicate document ref {source_ref:?}"
+                );
                 files.push(DiscoveredFile {
                     root_name: root.name.clone(),
                     root_path: canonical.clone(),
@@ -272,6 +291,30 @@ impl FileDiscovery {
     }
 }
 
+fn validate_document_ref_prefix(prefix: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prefix.trim().is_empty(),
+        "notes root document_ref_prefix may not be empty"
+    );
+    anyhow::ensure!(
+        prefix == prefix.trim(),
+        "notes root document_ref_prefix may not have surrounding whitespace"
+    );
+    anyhow::ensure!(
+        !prefix.contains('/') && !prefix.contains('\\'),
+        "notes root document_ref_prefix must be one path segment: {prefix:?}"
+    );
+    anyhow::ensure!(
+        !prefix.chars().any(char::is_control),
+        "notes root document_ref_prefix may not contain control characters"
+    );
+    anyhow::ensure!(
+        !prefix.starts_with("sqlite:"),
+        "notes root document_ref_prefix may not use the reserved sqlite: namespace"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,12 +376,14 @@ mod tests {
             NotesRootConfig {
                 name: "primary".into(),
                 path: first.path().to_path_buf(),
+                document_ref_prefix: None,
                 exclusions: vec!["private".into()],
                 writable: true,
             },
             NotesRootConfig {
                 name: "reference".into(),
                 path: second.path().to_path_buf(),
+                document_ref_prefix: None,
                 exclusions: Vec::new(),
                 writable: false,
             },
@@ -357,6 +402,90 @@ mod tests {
         assert!(!files[1].writable);
     }
 
+    #[test]
+    fn explicit_document_prefix_is_stable_across_root_count_and_display_name() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        fs::write(first.path().join("same.md"), "# first").unwrap();
+        fs::write(second.path().join("same.md"), "# second").unwrap();
+
+        let first_root = NotesRootConfig {
+            name: "home".into(),
+            path: first.path().to_path_buf(),
+            document_ref_prefix: Some("md-home-stable".into()),
+            exclusions: Vec::new(),
+            writable: true,
+        };
+        let single = FileDiscovery::from_notes_roots(vec![first_root.clone()])
+            .discover_named()
+            .unwrap();
+        assert_eq!(single[0].source_ref, "md-home-stable/same.md");
+
+        let mut renamed = first_root.clone();
+        renamed.name = "renamed-binding".into();
+        let renamed_files = FileDiscovery::from_notes_roots(vec![renamed.clone()])
+            .discover_named()
+            .unwrap();
+        assert_eq!(renamed_files[0].source_ref, single[0].source_ref);
+
+        let multi = FileDiscovery::from_notes_roots(vec![
+            renamed,
+            NotesRootConfig {
+                name: "reference".into(),
+                path: second.path().to_path_buf(),
+                document_ref_prefix: Some("md-reference-stable".into()),
+                exclusions: Vec::new(),
+                writable: false,
+            },
+        ])
+        .discover_named()
+        .unwrap();
+        assert_eq!(
+            multi
+                .iter()
+                .map(|file| file.source_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["md-home-stable/same.md", "md-reference-stable/same.md"]
+        );
+    }
+
+    #[test]
+    fn duplicate_or_invalid_document_prefixes_fail_closed() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        fs::write(first.path().join("a.md"), "# first").unwrap();
+        fs::write(second.path().join("b.md"), "# second").unwrap();
+        let root = |name: &str, path: &std::path::Path, prefix: &str| NotesRootConfig {
+            name: name.into(),
+            path: path.to_path_buf(),
+            document_ref_prefix: Some(prefix.into()),
+            exclusions: Vec::new(),
+            writable: false,
+        };
+
+        let duplicate = FileDiscovery::from_notes_roots(vec![
+            root("first", first.path(), "stable"),
+            root("second", second.path(), "stable"),
+        ])
+        .discover_named()
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("may not share"));
+
+        for invalid in [
+            "",
+            " spaced",
+            "nested/prefix",
+            "nested\\prefix",
+            "bad\nref",
+            "sqlite:mail",
+        ] {
+            let error = FileDiscovery::from_notes_roots(vec![root("first", first.path(), invalid)])
+                .discover_named()
+                .unwrap_err();
+            assert!(!error.to_string().is_empty(), "invalid prefix {invalid:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn configured_symlink_root_is_followed() {
@@ -369,6 +498,7 @@ mod tests {
         let files = FileDiscovery::from_notes_roots(vec![NotesRootConfig {
             name: "notes".into(),
             path: link,
+            document_ref_prefix: None,
             exclusions: Vec::new(),
             writable: true,
         }])

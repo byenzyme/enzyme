@@ -127,6 +127,7 @@ impl CursorValue {
 #[derive(Debug, Clone)]
 struct SourceRow {
     id: Vec<CursorValue>,
+    document_ref: Option<String>,
     who: Vec<String>,
     what: String,
     where_labels: Vec<String>,
@@ -300,8 +301,19 @@ pub fn run_sqlite_source(
 
     let epoch_ms = timestamp_epoch_ms(&source.timestamp)?;
     let mut source_rows = Vec::new();
+    let mut supplied_document_refs = HashSet::new();
     let mut rows_skipped_empty = 0usize;
     while let Some(row) = rows.next().context("failed to read source query row")? {
+        let document_ref = columns
+            .document_ref
+            .map(|index| supplied_document_ref(row.get_ref(index)?, source_name))
+            .transpose()?;
+        if let Some(document_ref) = &document_ref {
+            anyhow::ensure!(
+                supplied_document_refs.insert(document_ref.clone()),
+                "source role \"document_ref\" contains duplicate value {document_ref:?}"
+            );
+        }
         // Content-free rows (e.g. attachment-only or reaction messages whose
         // body lives outside the mapped `what` columns) are skipped rather than
         // aborting the whole index. Mapping `what` to a BLOB column is still a
@@ -328,6 +340,7 @@ pub fn run_sqlite_source(
         let where_key = role_optional_text_values(row, &columns.where_columns, "where")?;
         source_rows.push(SourceRow {
             id,
+            document_ref,
             who,
             what,
             where_labels,
@@ -423,6 +436,9 @@ fn validate_contract(source_name: &str, source: &SqliteSourceConfig) -> Result<(
     if source.roles.id.is_empty() {
         bail!("source roles.id must contain at least one result column");
     }
+    if source.roles.document_ref.is_some() && !source.roles.r#where.is_empty() {
+        bail!("source roles.document_ref is supported only for row-mode sources");
+    }
     if source.roles.what.is_empty() {
         bail!("source roles.what must contain at least one result column");
     }
@@ -448,10 +464,13 @@ fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDo
     rows.into_iter()
         .map(|row| {
             let created_at = row.created_at;
+            let source_ref = row
+                .document_ref
+                .unwrap_or_else(|| stable_source_ref(source_name, &row.id));
             let who = row.who;
             let where_labels = row.where_labels;
             let mut document = structured_document_to_processed_document(StructuredDocumentInput {
-                source_ref: stable_source_ref(source_name, &row.id),
+                source_ref,
                 title: who
                     .first()
                     .cloned()
@@ -697,6 +716,7 @@ fn stable_where_digest(where_key: &[Option<String>]) -> String {
 
 struct ResolvedColumns {
     id: Vec<usize>,
+    document_ref: Option<usize>,
     who: Vec<usize>,
     when: usize,
     what: Vec<usize>,
@@ -723,6 +743,18 @@ impl ResolvedColumns {
 
         Ok(Self {
             id: indices(statement, &roles.id, "id")?,
+            document_ref: roles
+                .document_ref
+                .as_deref()
+                .map(|name| {
+                    statement.column_index(name).with_context(|| {
+                        format!(
+                            "source role {:?} references missing result column {name:?}",
+                            "document_ref"
+                        )
+                    })
+                })
+                .transpose()?,
             who: indices(
                 statement,
                 &roles
@@ -755,6 +787,30 @@ impl ResolvedColumns {
                 .transpose()?,
         })
     }
+}
+
+fn supplied_document_ref(value: ValueRef<'_>, source_name: &str) -> Result<String> {
+    let ValueRef::Text(bytes) = value else {
+        bail!("source role \"document_ref\" must contain non-NULL UTF-8 text values");
+    };
+    let document_ref = std::str::from_utf8(bytes)
+        .context("source role \"document_ref\" contains non-UTF-8 text")?;
+    anyhow::ensure!(
+        !document_ref.is_empty() && document_ref == document_ref.trim(),
+        "source role \"document_ref\" values must be non-empty without surrounding whitespace"
+    );
+    anyhow::ensure!(
+        !document_ref.chars().any(char::is_control),
+        "source role \"document_ref\" values may not contain control characters"
+    );
+    let namespace = format!("sqlite:{}/", escape_source_name(source_name));
+    anyhow::ensure!(
+        document_ref
+            .strip_prefix(&namespace)
+            .is_some_and(|suffix| !suffix.is_empty()),
+        "source role \"document_ref\" value {document_ref:?} must stay inside namespace {namespace:?}"
+    );
+    Ok(document_ref.to_string())
 }
 
 fn who_values(
@@ -1031,6 +1087,7 @@ mod tests {
     fn source_row(id: i64, created_at: i64, body: &str) -> SourceRow {
         SourceRow {
             id: vec![CursorValue::Integer(id)],
+            document_ref: None,
             who: vec!["Alice".to_string()],
             what: body.to_string(),
             where_labels: vec!["Thread".to_string()],
