@@ -25,7 +25,7 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
 
     if write_config {
         let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-        if EnzymeConfig::markdown_root(vault_path)?.is_none() {
+        if EnzymeConfig::markdown_roots(vault_path)?.is_empty() {
             append_message(
                 &mut suggestion.message,
                 "--write-config only derives settings from a configured Markdown source; SQLite source contracts are unchanged",
@@ -237,17 +237,17 @@ struct Metric {
 }
 
 fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
-    let Some(markdown_root) = EnzymeConfig::markdown_root(vault_path)? else {
+    let roots = EnzymeConfig::markdown_roots(vault_path)?;
+    if roots.is_empty() {
         return Ok(Vec::new());
-    };
+    }
     // Honor `exclude` so scan metrics/suggestions never count excluded folders.
-    let discovery = FileDiscovery::new(markdown_root.clone())
+    let discovery = FileDiscovery::from_notes_roots(roots)
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path));
-    let paths = discovery.discover()?;
-    let processor = DocumentProcessor::new(markdown_root);
-    Ok(processor
-        .process_all(&paths)
-        .into_iter()
+    Ok(discovery
+        .discover_named()?
+        .iter()
+        .map(DocumentProcessor::process_discovered)
         .flatten()
         .collect())
 }
@@ -1155,8 +1155,8 @@ fn is_structural_tag(tag: &str) -> bool {
 mod tests {
     use super::*;
     use enzyme_core::config::enzyme_config::{
-        EnzymeConfig, SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig,
-        SqliteTimestampUnit,
+        EnzymeConfig, OneOrManyStrings, SqliteSourceConfig, SqliteSourceRoles,
+        SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
     };
     use enzyme_core::db::Database;
     use enzyme_core::document::Frontmatter;
@@ -1174,10 +1174,12 @@ mod tests {
             query: "SELECT id, author, created_at, body FROM entries".to_string(),
             roles: SqliteSourceRoles {
                 id: vec!["id".to_string()],
-                who: vec!["author".to_string()],
+                document_ref: None,
+                who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["author".to_string()])),
                 when: "created_at".to_string(),
                 what: vec!["body".to_string()],
                 r#where: Vec::new(),
+                weight: None,
             },
             timestamp: SqliteTimestampConfig {
                 unit: SqliteTimestampUnit::Ms,

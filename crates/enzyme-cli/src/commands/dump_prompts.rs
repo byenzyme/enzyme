@@ -65,6 +65,15 @@ pub async fn run_dump_prompts(
         concurrency: None,
         stream_partial_catalysts: false,
         force_regenerate: false,
+        min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
+        min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
+        epoch_id: None,
     };
 
     let llm = LlmClient::with_base_url("dummy", "http://localhost:0");

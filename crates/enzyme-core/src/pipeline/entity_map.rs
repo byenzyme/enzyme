@@ -278,6 +278,7 @@ impl EntityMap {
                 name: folder_name,
                 entity_type: EntityType::Folder,
                 frequency: folder_stats.map(|f| f.file_count).unwrap_or(0),
+                ranking_weight: folder_stats.map(|f| f.file_count as f64).unwrap_or(0.0),
                 first_seen: None,
                 last_seen: None,
                 trends: Default::default(),
@@ -446,7 +447,7 @@ impl EntityMap {
                         !e.name.contains('/')
                             && !excluded_tags.contains(e.name.to_lowercase().as_str())
                     }
-                    EntityType::Link => !e.name.contains('/') && e.frequency >= 3,
+                    EntityType::Link => !e.name.contains('/') && e.ranking_weight >= 3.0,
                     EntityType::AppendLog => true,
                 }
             })
@@ -470,7 +471,7 @@ impl EntityMap {
                 }
 
                 let recency_sig = entity.trends.recency_score / 100.0;
-                let freq_sig = (entity.frequency as f64 + 1.0).ln();
+                let freq_sig = (entity.ranking_weight.max(0.0) + 1.0).ln();
                 let freq_recent_sig = (entity.trends.frequency_recent as f64 + 1.0).ln();
 
                 let mut score = 0.7 * (recency_sig.max(0.001) * freq_sig).sqrt()
@@ -615,12 +616,14 @@ mod tests {
             name: name.to_string(),
             entity_type: etype,
             frequency,
+            ranking_weight: frequency as f64,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends {
                 frequency_recent: frequency,
                 recency_score: frequency as f64,
                 timeline_buckets: HashMap::new(),
+                timeline_weights: HashMap::new(),
             },
             metadata: serde_json::Value::Null,
         }

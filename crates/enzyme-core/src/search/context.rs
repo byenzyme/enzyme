@@ -6,8 +6,8 @@ use tracing::debug;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Catalyst, Embedding, Entity};
-use crate::pipeline::eras::{Era, cluster_eras_periodic};
+use crate::models::{Catalyst, Embedding, Entity, catalyst_embedding_text, parse_catalyst_text};
+use crate::pipeline::eras::{Era, apply_timeline_weights, cluster_eras_periodic};
 use crate::pipeline::similarity::CATALYST_TOP_K;
 
 pub const TARGET_PROJECTION_NOT_READY: &str = "target projection is not ready for active epoch";
@@ -73,24 +73,49 @@ fn match_query_entity_names(query: &str, entities: &[Entity]) -> Vec<String> {
     matched
 }
 
-/// Keep the existing cosine order within both pools, but put every catalyst
-/// owned by an explicitly named entity before the global fill pool.
+/// Route an explicit link-entity (person) query through that identity's own
+/// catalysts when available. For other named entities, keep cosine order
+/// within the owned and global pools while putting owned catalysts first.
 fn prioritize_anchored_catalysts(
     global_ranking: &[(usize, f32)],
     catalysts: &[Catalyst],
     matched_entity_names: &HashSet<String>,
+    matched_identity_names: &HashSet<String>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
+    let entity_name = |catalyst: &Catalyst| {
+        parse_catalyst_text(&catalyst.text)
+            .map(|parsed| parsed.header.entity_id)
+            .unwrap_or_else(|_| catalyst.entity.clone())
+            .to_lowercase()
+    };
+    if !matched_identity_names.is_empty() {
+        let owned = global_ranking
+            .iter()
+            .filter(|(idx, _)| matched_identity_names.contains(&entity_name(&catalysts[*idx])))
+            .copied()
+            .take(limit)
+            .collect::<Vec<_>>();
+        // An explicit person query routes through that person's own catalyst
+        // set when it exists. Other catalysts remain a fallback only when the
+        // identity has no catalysts at all, rather than winning because they
+        // happen to mention the person in higher-cosine generic prose.
+        if !owned.is_empty() {
+            return owned;
+        }
+    }
     if matched_entity_names.is_empty() {
         return global_ranking.iter().copied().take(limit).collect();
     }
 
     global_ranking
         .iter()
-        .filter(|(idx, _)| matched_entity_names.contains(&catalysts[*idx].entity.to_lowercase()))
-        .chain(global_ranking.iter().filter(|(idx, _)| {
-            !matched_entity_names.contains(&catalysts[*idx].entity.to_lowercase())
-        }))
+        .filter(|(idx, _)| matched_entity_names.contains(&entity_name(&catalysts[*idx])))
+        .chain(
+            global_ranking
+                .iter()
+                .filter(|(idx, _)| !matched_entity_names.contains(&entity_name(&catalysts[*idx]))),
+        )
         .copied()
         .take(limit)
         .collect()
@@ -125,7 +150,8 @@ fn build_anchored_era_index(
         if budget == 0 {
             continue;
         }
-        let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, budget);
+        let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, budget);
+        apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
         era_order.extend((0..eras.len()).map(|era_index| EraKey {
             entity_id: *entity_id,
             era_index,
@@ -340,6 +366,7 @@ mod tests {
             name: name.to_string(),
             entity_type: EntityType::Link,
             frequency: 1,
+            ranking_weight: 1.0,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends::default(),
@@ -397,8 +424,24 @@ mod tests {
         let matched = HashSet::from(["will ashby".to_string()]);
 
         assert_eq!(
-            prioritize_anchored_catalysts(&global, &catalysts, &matched, 3),
+            prioritize_anchored_catalysts(&global, &catalysts, &matched, &HashSet::new(), 3),
             vec![(1, 0.8), (2, 0.7), (0, 0.9)]
+        );
+    }
+
+    #[test]
+    fn person_routes_only_through_owned_catalysts_when_available() {
+        let catalysts = vec![
+            catalyst("mention-high", "Other"),
+            catalyst("own-high", "Will Ashby"),
+            catalyst("own-low", "Will Ashby"),
+        ];
+        let global = vec![(0, 0.99), (1, 0.7), (2, 0.4)];
+        let matched = HashSet::from(["will ashby".to_string()]);
+
+        assert_eq!(
+            prioritize_anchored_catalysts(&global, &catalysts, &matched, &matched, 10),
+            vec![(1, 0.7), (2, 0.4)]
         );
     }
 
@@ -445,7 +488,7 @@ mod tests {
         let global = vec![(2, 0.9), (0, 0.8), (1, 0.7)];
 
         assert_eq!(
-            prioritize_anchored_catalysts(&global, &catalysts, &HashSet::new(), 2),
+            prioritize_anchored_catalysts(&global, &catalysts, &HashSet::new(), &HashSet::new(), 2,),
             vec![(2, 0.9), (0, 0.8)]
         );
     }
@@ -460,6 +503,12 @@ pub struct CatalyzeResultItem {
     /// Catalyst bridge that contributed the strongest score for this result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_catalyst_id: Option<String>,
+    /// Full canonical catalyst chunk, including header and inline receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_catalyst_text: Option<String>,
+    /// Evidence behind the catalyst bridge that produced this result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_anchors: Vec<crate::models::EvidenceAnchor>,
 }
 
 /// A catalyst that contributed to search results.
@@ -471,6 +520,8 @@ pub struct TopCatalyst {
     pub topic_name: Option<String>,
     pub relevance_score: f64,
     pub contribution_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_anchors: Vec<crate::models::EvidenceAnchor>,
 }
 
 /// A single result from direct (non-catalyst) search.
@@ -579,6 +630,11 @@ impl<'a> ContextSearch<'a> {
                     .filter(move |entity| entity.name.eq_ignore_ascii_case(name))
             })
             .collect::<Vec<_>>();
+        let matched_identity_name_set = matched_entities
+            .iter()
+            .filter(|entity| entity.entity_type == crate::models::EntityType::Link)
+            .map(|entity| entity.name.to_lowercase())
+            .collect::<HashSet<_>>();
         let anchored = !matched_entity_name_set.is_empty();
 
         // Load cached catalyst embeddings from DB, falling back to re-embedding
@@ -618,12 +674,20 @@ impl<'a> ContextSearch<'a> {
                     "catalyst cache stale, re-embedding {} catalysts",
                     catalysts.len()
                 );
-                let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+                let embedding_texts: Vec<String> = catalysts
+                    .iter()
+                    .map(|c| catalyst_embedding_text(&c.text))
+                    .collect();
+                let cat_texts: Vec<&str> = embedding_texts.iter().map(String::as_str).collect();
                 self.service.embed_documents(&cat_texts)?
             }
         } else {
             debug!("no catalyst cache, embedding {} catalysts", catalysts.len());
-            let cat_texts: Vec<&str> = catalysts.iter().map(|c| c.text.as_str()).collect();
+            let embedding_texts: Vec<String> = catalysts
+                .iter()
+                .map(|c| catalyst_embedding_text(&c.text))
+                .collect();
+            let cat_texts: Vec<&str> = embedding_texts.iter().map(String::as_str).collect();
             self.service.embed_documents(&cat_texts)?
         };
 
@@ -639,17 +703,30 @@ impl<'a> ContextSearch<'a> {
             &global_cat_sims,
             &catalysts,
             &matched_entity_name_set,
+            &matched_identity_name_set,
             max_catalysts,
         );
 
         // Build catalyst metadata lookup for the top catalysts
-        let catalyst_meta: HashMap<String, (&str, &str, f64)> = cat_sims
+        let catalyst_meta: HashMap<
+            String,
+            (String, String, f64, Vec<crate::models::EvidenceAnchor>),
+        > = cat_sims
             .iter()
             .map(|(idx, sim)| {
                 let c = &catalysts[*idx];
+                let canonical = parse_catalyst_text(&c.text).ok();
                 (
                     c.id.clone(),
-                    (c.text.as_str(), c.entity.as_str(), *sim as f64),
+                    (
+                        c.text.clone(),
+                        canonical
+                            .as_ref()
+                            .map(|parsed| parsed.header.entity_id.clone())
+                            .unwrap_or_else(|| c.entity.clone()),
+                        *sim as f64,
+                        canonical.map(|parsed| parsed.receipts).unwrap_or_default(),
+                    ),
                 )
             })
             .collect();
@@ -840,18 +917,19 @@ impl<'a> ContextSearch<'a> {
         // Build top contributing catalysts (top 3 by contribution count)
         let mut top_catalysts: Vec<TopCatalyst> = catalyst_meta
             .iter()
-            .filter_map(|(id, (text, entity, relevance_score))| {
+            .filter_map(|(id, (text, entity, relevance_score, evidence_anchors))| {
                 let count = contribution_counts.get(id.as_str()).copied().unwrap_or(0);
                 if count == 0 {
                     return None;
                 }
                 Some(TopCatalyst {
                     id: id.clone(),
-                    text: text.to_string(),
-                    entity: entity.to_string(),
+                    text: text.clone(),
+                    entity: entity.clone(),
                     topic_name: None,
                     relevance_score: (*relevance_score * 1000.0).round() / 1000.0,
                     contribution_count: count,
+                    evidence_anchors: evidence_anchors.clone(),
                 })
             })
             .collect();
@@ -873,6 +951,13 @@ impl<'a> ContextSearch<'a> {
                 content: s.content.clone(),
                 similarity: (s.score * 1000.0).round() / 1000.0,
                 via_catalyst_id: Some(s.best_catalyst_id.clone()),
+                via_catalyst_text: catalyst_meta
+                    .get(&s.best_catalyst_id)
+                    .map(|(text, _, _, _)| text.clone()),
+                evidence_anchors: catalyst_meta
+                    .get(&s.best_catalyst_id)
+                    .map(|(_, _, _, anchors)| anchors.clone())
+                    .unwrap_or_default(),
             })
             .collect();
 

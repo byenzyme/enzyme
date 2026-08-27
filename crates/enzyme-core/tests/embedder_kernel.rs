@@ -254,3 +254,63 @@ fn production_kernel_runs_sources_before_embedding_and_reconciles_renames() {
     drop(removed);
     assert_eq!(sqlite_document_count(&db_path, "renamed"), 0);
 }
+
+#[test]
+fn production_kernel_keeps_supplied_sqlite_refs_with_markdown_extensions() {
+    let _sqlite_runtime = sqlite_runtime_lock().lock().unwrap();
+    initialize_sqlite_runtime().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("native.md"), "# Native\n\nMarkdown remains.").unwrap();
+    let source_path = root.path().join("evidence.db");
+    Connection::open(&source_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY,
+                document_ref TEXT NOT NULL,
+                sent_at INTEGER NOT NULL,
+                body TEXT NOT NULL
+             );
+             INSERT INTO evidence VALUES
+                (1, 'sqlite:mail-stable/thread-9.md', 1700000000000, 'external evidence');",
+        )
+        .unwrap();
+
+    let db_path = root.path().join("state/search.sqlite3");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let config_path = root.path().join("config.toml");
+    let vault_key = vault
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"[vaults."{vault_key}".sources.mail-stable]
+db = "{}"
+query = "SELECT id, document_ref, sent_at, body FROM evidence"
+roles = {{ id = "id", document_ref = "document_ref", when = "sent_at", what = "body" }}
+timestamp = {{ unit = "ms" }}
+"#,
+            source_path.display()
+        ),
+    )
+    .unwrap();
+
+    let mut options = SearchOptions::new(&vault, &db_path);
+    options.config_path = Some(config_path);
+    let index = ensure_searchable_sync(options, None).unwrap();
+    assert_eq!(index.document_count, 2);
+    drop(index);
+    let external_count: i64 = Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM docs WHERE source_ref = 'sqlite:mail-stable/thread-9.md'",
+            (),
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(external_count, 1);
+}

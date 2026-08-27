@@ -83,6 +83,10 @@ pub struct EntityTrends {
     pub recency_score: f64,
     /// Counts per month bucket, e.g. `{"2025-01": 3, "2025-02": 2}`.
     pub timeline_buckets: HashMap<String, i64>,
+    /// Additive occurrence weight per month. Markdown occurrences contribute
+    /// `1.0`; SQLite `weight` roles may contribute any finite non-negative value.
+    #[serde(default)]
+    pub timeline_weights: HashMap<String, f64>,
 }
 
 /// An entity (tag, wikilink, or folder) extracted from vault documents.
@@ -93,6 +97,10 @@ pub struct Entity {
     pub name: String,
     pub entity_type: EntityType,
     pub frequency: i64,
+    /// Sum of occurrence weights. Defaults to mention-count semantics (`1.0`
+    /// per occurrence), so old/unweighted sources rank exactly as before.
+    #[serde(default)]
+    pub ranking_weight: f64,
     pub first_seen: Option<Timestamp>,
     pub last_seen: Option<Timestamp>,
     pub trends: EntityTrends,
@@ -110,4 +118,11 @@ pub struct EntityOccurrence {
     /// The effective date of the document (from frontmatter, filename, or filesystem).
     pub effective_date: Option<Timestamp>,
     pub date_source: String,
+    /// Additive ranking/budget contribution; Markdown defaults to `1.0`.
+    #[serde(default = "default_occurrence_weight")]
+    pub weight: f64,
+}
+
+fn default_occurrence_weight() -> f64 {
+    1.0
 }

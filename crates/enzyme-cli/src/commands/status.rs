@@ -11,7 +11,7 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::db::update_sentinel::{self, UpdateStatus};
 use enzyme_core::llm::model_registry;
-use enzyme_core::sqlite_source::check_sqlite_source_reachability;
+use enzyme_core::sqlite_source::{check_sqlite_source_reachability, source_refresh_staleness};
 
 use super::init::BINARY_VERSION;
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
@@ -30,6 +30,9 @@ struct SourceStatus {
     bucket_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_refresh_ms: Option<i64>,
+    stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<String>,
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reachability_error: Option<String>,
@@ -155,6 +158,7 @@ fn build_source_statuses(
                 Err(error) => (false, Some(format!("{error:#}"))),
             };
             let refresh = db.get_source_refresh_status(name)?;
+            let staleness = source_refresh_staleness(db, name, &source.db)?;
 
             Ok(SourceStatus {
                 name: name.clone(),
@@ -163,6 +167,8 @@ fn build_source_statuses(
                 row_count: refresh.map(|status| status.0),
                 bucket_count: refresh.map(|status| status.1),
                 last_refresh_ms: refresh.map(|status| status.2),
+                stale: staleness.stale,
+                stale_reason: staleness.reason,
                 reachable,
                 reachability_error,
             })
@@ -277,6 +283,14 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
                     if let Some(last_refresh_ms) = source["last_refresh_ms"].as_i64() {
                         println!("    Refreshed: {}", format_finished_at(last_refresh_ms));
                     }
+                    if source["stale"].as_bool().unwrap_or(true) {
+                        println!(
+                            "    Stale: yes ({})",
+                            source["stale_reason"].as_str().unwrap_or("unknown")
+                        );
+                    } else {
+                        println!("    Stale: no");
+                    }
                 }
             }
             if json["update"]["regen_required"].as_bool().unwrap_or(false) {
@@ -327,7 +341,7 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use enzyme_core::config::enzyme_config::{
-        SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+        SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
     };
     use tempfile::TempDir;
 
@@ -337,10 +351,12 @@ mod tests {
             query: "SELECT id, created_at, body FROM entries".to_string(),
             roles: SqliteSourceRoles {
                 id: vec!["id".to_string()],
-                who: Vec::new(),
+                document_ref: None,
+                who: SqliteWhoRole::default(),
                 when: "created_at".to_string(),
                 what: vec!["body".to_string()],
                 r#where: Vec::new(),
+                weight: None,
             },
             timestamp: SqliteTimestampConfig {
                 unit: SqliteTimestampUnit::Ms,

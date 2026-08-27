@@ -50,6 +50,18 @@ pub struct GenerationContract {
     /// Run-level ceiling for per-entity context samples. Hosted generation
     /// adapts within this ceiling based on the entity's catalyst allocation.
     pub max_context_samples: usize,
+    #[serde(default = "default_min_evidence_documents")]
+    pub min_evidence_documents: usize,
+    #[serde(default = "default_min_evidence_tokens")]
+    pub min_evidence_tokens: usize,
+}
+
+fn default_min_evidence_documents() -> usize {
+    crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS
+}
+
+fn default_min_evidence_tokens() -> usize {
+    crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS
 }
 
 impl GenerationContract {
@@ -123,6 +135,49 @@ pub struct ContinuousProjectionFence {
 }
 
 impl Database {
+    /// Begin an in-process pull generation that writes directly to the active
+    /// materialized view instead of using the detached shadow builder.
+    pub fn begin_inline_catalyst_epoch(
+        &self,
+        contract: &GenerationContract,
+        now_ms: i64,
+    ) -> Result<String> {
+        let state = self.reconcile_corpus_generation(now_ms)?;
+        let epoch_id = Uuid::new_v4().to_string();
+        self.execute_write(
+            "INSERT INTO catalyst_epochs
+             (epoch_id, status, corpus_generation, corpus_fingerprint,
+              generation_contract, generation_contract_json, requested_at_ms,
+              started_at_ms, attempt)
+             VALUES (?1, 'building', ?2, ?3, ?4, ?5, ?6, ?6, 1)",
+            vec![
+                Value::Text(epoch_id.clone()),
+                Value::Integer(state.corpus_generation),
+                Value::Text(state.corpus_fingerprint),
+                Value::Text(contract.fingerprint()?),
+                Value::Text(serde_json::to_string(contract)?),
+                Value::Integer(now_ms),
+            ],
+        )?;
+        Ok(epoch_id)
+    }
+
+    /// Activate a successfully generated in-process epoch after similarities
+    /// have also been committed to the active materialized view.
+    pub fn activate_inline_catalyst_epoch(&self, epoch_id: &str, now_ms: i64) -> Result<()> {
+        block_in_place_sync(async {
+            let tx = self
+                .conn
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .context("begin inline epoch activation")?;
+            Self::mark_epoch_activated_on_tx(&tx, epoch_id, now_ms).await?;
+            tx.commit()
+                .await
+                .context("commit inline epoch activation")?;
+            Ok::<(), anyhow::Error>(())
+        })
+    }
     pub fn continuous_projection_fence(&self) -> Result<ContinuousProjectionFence> {
         let value = self
             .get_config("continuous_projection_fence")?
@@ -613,6 +668,8 @@ mod tests {
             selection_config_json: "{}".into(),
             max_context_chars: None,
             max_context_samples: 40,
+            min_evidence_documents: default_min_evidence_documents(),
+            min_evidence_tokens: default_min_evidence_tokens(),
         }
     }
 

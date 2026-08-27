@@ -67,6 +67,7 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         .await
         .map_err(DbError::Libsql)?;
     ensure_chunk_entry_date_column(conn).await?;
+    ensure_occurrence_weight_column(conn).await?;
     backfill_chunk_entry_dates(conn).await?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
     backfill_excerpts_for_slimmed_contexts(conn).await?;
@@ -86,6 +87,20 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         .await?;
     }
     Ok(())
+}
+
+async fn ensure_occurrence_weight_column(conn: &Connection) -> Result<(), DbError> {
+    match conn
+        .execute(
+            "ALTER TABLE entity_occurrences ADD COLUMN weight REAL NOT NULL DEFAULT 1.0",
+            (),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(DbError::Libsql(e)),
+    }
 }
 
 /// Add `chunks.entry_date` to databases created before the column existed in

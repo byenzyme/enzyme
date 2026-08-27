@@ -9,6 +9,9 @@ use super::{DEFAULT_CHUNK_SIZE_CHARS, ProcessedDocument, chunk_document};
 /// current window still fits within the character budget.
 pub const STRUCTURED_LOG_GAP_MS: i64 = 6 * 60 * 60 * 1_000;
 
+pub const STRUCTURED_LOG_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S UTC";
+const STRUCTURED_LOG_HEADING_PREFIX: &str = "## ";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredLogEntry {
     pub who: Vec<String>,
@@ -213,14 +216,12 @@ pub fn structured_log_document_to_processed_document(
 
 fn render_log_entry(entry: &StructuredLogEntry) -> String {
     let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.created_at)
-        .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|date| date.format(STRUCTURED_LOG_TIMESTAMP_FORMAT).to_string())
         .unwrap_or_else(|| format!("{} ms", entry.created_at));
-    let who = if entry.who.is_empty() {
-        "Unknown".to_string()
-    } else {
-        entry.who.join(", ")
-    };
-    format!("## {timestamp} — {who}\n\n{}", entry.content)
+    format!(
+        "{STRUCTURED_LOG_HEADING_PREFIX}{timestamp}\n\n{}",
+        entry.content
+    )
 }
 
 #[cfg(test)]
@@ -236,6 +237,40 @@ mod log_tests {
             entries,
             fingerprint: "fingerprint".to_string(),
         }
+    }
+
+    #[test]
+    fn structured_log_who_becomes_document_links_not_rendered_speaker_headings() {
+        let output = structured_log_document_to_processed_document(input(vec![
+            StructuredLogEntry {
+                who: vec!["alice@example.com".to_string(), "Bob".to_string()],
+                content: "Alice and Bob discuss the migration boundary.".to_string(),
+                created_at: 1_700_000_000_000,
+            },
+            StructuredLogEntry {
+                who: vec!["Carol".to_string()],
+                content: "Carol follows up with rollout constraints.".to_string(),
+                created_at: 1_700_000_001_000,
+            },
+        ]));
+
+        assert_eq!(
+            output.document.links,
+            vec!["Bob", "Carol", "alice@example.com"]
+        );
+        assert!(!output.document.content.contains(" — alice@example.com"));
+        assert!(!output.document.content.contains(" — Bob"));
+        assert!(!output.document.content.contains(" — Carol"));
+        let first_timestamp = DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000)
+            .unwrap()
+            .format(STRUCTURED_LOG_TIMESTAMP_FORMAT)
+            .to_string();
+        assert!(
+            output
+                .document
+                .content
+                .contains(&format!("## {first_timestamp}"))
+        );
     }
 
     #[test]

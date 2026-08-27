@@ -324,12 +324,14 @@ mod tests {
             name: name.to_string(),
             entity_type,
             frequency,
+            ranking_weight: frequency as f64,
             first_seen: None,
             last_seen: None,
             trends: EntityTrends {
                 frequency_recent: frequency,
                 recency_score: frequency as f64,
                 timeline_buckets: HashMap::new(),
+                timeline_weights: HashMap::new(),
             },
             metadata: serde_json::Value::Null,
         }

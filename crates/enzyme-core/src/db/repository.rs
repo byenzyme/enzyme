@@ -70,6 +70,24 @@ pub struct EntityRefreshStats {
     pub latest_effective_date: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CatalystEraAudit<'a> {
+    pub generation_run_id: &'a str,
+    pub epoch_id: Option<&'a str>,
+    pub entity: &'a str,
+    pub entity_type: &'a str,
+    pub era_label: &'a str,
+    pub start_month: &'a str,
+    pub end_month: &'a str,
+    pub occurrence_count: usize,
+    pub catalyst_budget: usize,
+    pub distinct_documents: usize,
+    pub substantive_tokens: usize,
+    pub status: &'a str,
+    pub reason: Option<&'a str>,
+    pub created_at_ms: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -114,11 +132,124 @@ fn opt_val<T: Into<Value>>(opt: Option<T>) -> Value {
     }
 }
 
+async fn index_catalyst_text(
+    tx: &libsql::Transaction,
+    catalyst_id: &str,
+    text: &str,
+) -> Result<(usize, usize)> {
+    tx.execute(
+        "DELETE FROM catalyst_receipts WHERE catalyst_id=?1",
+        vec![Value::Text(catalyst_id.to_string())],
+    )
+    .await?;
+
+    let Ok(parsed) = parse_catalyst_text(text) else {
+        // Pre-v1 catalyst text is migration-safe: it remains searchable, but
+        // cannot invent provenance that was never embedded in the chunk.
+        return Ok((0, 0));
+    };
+    let mut receipt_rows = 0;
+    for receipt in &parsed.receipts {
+        let occurrences: Vec<Option<i64>> = if receipt.occurrence_ids.is_empty() {
+            vec![None]
+        } else {
+            receipt.occurrence_ids.iter().copied().map(Some).collect()
+        };
+        for (ordinal, occurrence_id) in occurrences.into_iter().enumerate() {
+            tx.execute(
+                "INSERT INTO catalyst_receipts
+                 (catalyst_id,anchor_id,occurrence_ordinal,source_ref,occurrence_id,
+                  timestamp_ms,chunk_index,quote)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                vec![
+                    Value::Text(catalyst_id.to_string()),
+                    Value::Text(receipt.anchor_id.clone()),
+                    Value::Integer(ordinal as i64),
+                    Value::Text(receipt.source_ref.clone()),
+                    opt_val(occurrence_id),
+                    Value::Integer(receipt.timestamp_ms),
+                    opt_val(receipt.chunk_index.map(i64::from)),
+                    Value::Text(receipt.quote.clone()),
+                ],
+            )
+            .await?;
+            receipt_rows += 1;
+        }
+    }
+
+    let mut era_rows = 0;
+    for era in &parsed.header.eras {
+        tx.execute(
+            "INSERT INTO catalyst_eras
+             (generation_run_id,epoch_id,entity,entity_type,era_label,start_month,end_month,
+              distinct_documents,substantive_tokens,occurrence_count,catalyst_budget,
+              status,reason,created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+             ON CONFLICT(generation_run_id,entity,entity_type,era_label) DO UPDATE SET
+               epoch_id=excluded.epoch_id,
+               start_month=excluded.start_month,
+               end_month=excluded.end_month,
+               distinct_documents=excluded.distinct_documents,
+               substantive_tokens=excluded.substantive_tokens,
+               occurrence_count=excluded.occurrence_count,
+               catalyst_budget=excluded.catalyst_budget,
+               status=excluded.status,
+               reason=excluded.reason,
+               created_at_ms=MIN(catalyst_eras.created_at_ms, excluded.created_at_ms)",
+            vec![
+                Value::Text(parsed.header.generation_run_id.clone()),
+                opt_val(parsed.header.epoch_id.clone()),
+                Value::Text(parsed.header.entity_id.clone()),
+                Value::Text(parsed.header.entity_type.clone()),
+                Value::Text(era.label.clone()),
+                Value::Text(era.start_month.clone()),
+                Value::Text(era.end_month.clone()),
+                Value::Integer(era.distinct_documents as i64),
+                Value::Integer(era.substantive_tokens as i64),
+                Value::Integer(era.occurrence_count as i64),
+                Value::Integer(era.catalyst_budget as i64),
+                Value::Text(era.status.clone()),
+                opt_val(era.reason.clone()),
+                Value::Integer(parsed.header.generated_at_ms),
+            ],
+        )
+        .await?;
+        era_rows += 1;
+    }
+    Ok((receipt_rows, era_rows))
+}
+
 // ---------------------------------------------------------------------------
 // High-level query / CRUD methods on Database
 // ---------------------------------------------------------------------------
 
 impl Database {
+    pub fn record_catalyst_generation_skip(
+        &self,
+        audit: &CatalystEraAudit<'_>,
+        reason_code: &str,
+    ) -> Result<()> {
+        self.execute_write(
+            "INSERT INTO catalyst_generation_skips
+             (generation_run_id, epoch_id, entity, entity_type, era_label,
+              reason_code, reason, distinct_documents, substantive_tokens, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            vec![
+                Value::Text(audit.generation_run_id.to_string()),
+                opt_val(audit.epoch_id.map(str::to_string)),
+                Value::Text(audit.entity.to_string()),
+                Value::Text(audit.entity_type.to_string()),
+                Value::Text(audit.era_label.to_string()),
+                Value::Text(reason_code.to_string()),
+                Value::Text(audit.reason.unwrap_or_default().to_string()),
+                Value::Integer(audit.distinct_documents as i64),
+                Value::Integer(audit.substantive_tokens as i64),
+                Value::Integer(audit.created_at_ms),
+            ],
+        )?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Document operations
     // -----------------------------------------------------------------------
@@ -656,8 +787,8 @@ impl Database {
 
                 tx.execute(
                     "INSERT INTO entity_occurrences
-                     (entity_id, file_path, context, created_at, effective_date, date_source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (entity_id, file_path, context, created_at, effective_date, date_source, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     vec![
                         Value::Integer(entity_id),
                         Value::Text(occurrence.file_path.clone()),
@@ -665,6 +796,7 @@ impl Database {
                         Value::Integer(occurrence.created_at),
                         opt_val(occurrence.effective_date),
                         Value::Text(occurrence.date_source.clone()),
+                        Value::Real(occurrence.weight),
                     ],
                 )
                 .await?;
@@ -744,8 +876,8 @@ impl Database {
             for occ in &occurrences {
                 tx.execute(
                     "INSERT INTO entity_occurrences
-                     (entity_id, file_path, context, created_at, effective_date, date_source)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                     (entity_id, file_path, context, created_at, effective_date, date_source, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     vec![
                         Value::Integer(entity_id),
                         Value::Text(occ.file_path.clone()),
@@ -753,6 +885,7 @@ impl Database {
                         Value::Integer(occ.created_at),
                         opt_val(occ.effective_date),
                         Value::Text(occ.date_source.clone()),
+                        Value::Real(occ.weight),
                     ],
                 )
                 .await?;
@@ -797,7 +930,7 @@ impl Database {
     /// Get all occurrences for a given entity.
     pub fn get_entity_occurrences(&self, entity_id: i64) -> Result<Vec<EntityOccurrence>> {
         let rows = self.query_read(
-            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source, weight
              FROM entity_occurrences WHERE entity_id = ?1",
             vec![Value::Integer(entity_id)],
             |row| {
@@ -809,6 +942,7 @@ impl Database {
                     created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
                     effective_date: row.get::<Option<i64>>(5)?,
                     date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
+                    weight: row.get::<f64>(7)?,
                 })
             },
         )?;
@@ -862,8 +996,10 @@ impl Database {
             Ok(entities)
         } else {
             let rows = self.query_read(
-                "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-                 FROM entities ORDER BY frequency DESC LIMIT ?1",
+                "SELECT e.id, e.name, e.type, e.frequency,
+                        CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                        e.first_seen, e.last_seen, e.trends, e.metadata
+                 FROM entities e ORDER BY 5 DESC LIMIT ?1",
                 vec![Value::Integer(limit as i64)],
                 map_entity_row,
             )?;
@@ -902,9 +1038,9 @@ impl Database {
     }
 
     /// Fetch all occurrence timestamps in one query, grouped by entity_id.
-    pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64)>> {
+    pub fn get_all_occurrence_dates(&self) -> Result<Vec<(i64, Option<i64>, i64, f64)>> {
         let rows = self.query_read(
-            "SELECT entity_id, effective_date, created_at
+            "SELECT entity_id, effective_date, created_at, weight
              FROM entity_occurrences
              ORDER BY entity_id",
             vec![],
@@ -913,6 +1049,7 @@ impl Database {
                     row.get::<i64>(0)?,
                     row.get::<Option<i64>>(1)?,
                     row.get::<i64>(2)?,
+                    row.get::<f64>(3)?,
                 ))
             },
         )?;
@@ -968,8 +1105,10 @@ impl Database {
 
         for (name, entity_type) in names {
             let rows = self.query_read(
-                "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-                 FROM entities WHERE name = ?1 AND type = ?2",
+                "SELECT e.id, e.name, e.type, e.frequency,
+                        CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                        e.first_seen, e.last_seen, e.trends, e.metadata
+                 FROM entities e WHERE LOWER(e.name) = ?1 AND e.type = ?2",
                 vec![
                     Value::Text(name.to_lowercase()),
                     Value::Text(entity_type.as_str().to_string()),
@@ -985,8 +1124,10 @@ impl Database {
     /// Retrieve every entity in the database.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.query_read(
-            "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-             FROM entities",
+            "SELECT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e",
             vec![],
             map_entity_row,
         )?;
@@ -1225,10 +1366,12 @@ impl Database {
         let not_like_pattern = format!("{}/%/%", parent_name);
 
         let rows = self.query_read(
-            "SELECT id, name, type, frequency, first_seen, last_seen, trends, metadata
-             FROM entities
-             WHERE name LIKE ?1 AND name NOT LIKE ?2 AND type = ?3
-             ORDER BY frequency DESC
+            "SELECT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e
+             WHERE e.name LIKE ?1 AND e.name NOT LIKE ?2 AND e.type = ?3
+             ORDER BY 5 DESC
              LIMIT ?4",
             vec![
                 Value::Text(like_pattern),
@@ -1343,7 +1486,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<EntityOccurrence>> {
         let rows = self.query_read(
-            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source
+            "SELECT id, entity_id, file_path, context, created_at, effective_date, date_source, weight
              FROM entity_occurrences
              WHERE entity_id = ?1
              ORDER BY effective_date DESC
@@ -1358,6 +1501,7 @@ impl Database {
                     created_at: row.get::<Option<i64>>(4)?.unwrap_or(0),
                     effective_date: row.get::<Option<i64>>(5)?,
                     date_source: row.get::<Option<String>>(6)?.unwrap_or_default(),
+                    weight: row.get::<f64>(7)?,
                 })
             },
         )?;
@@ -1396,12 +1540,40 @@ impl Database {
                     ],
                 )
                 .await?;
+                index_catalyst_text(&tx, &cat.id, &cat.text).await?;
             }
 
             tx.commit()
                 .await
                 .context("failed to commit insert_catalysts")?;
             Ok(())
+        })
+    }
+
+    /// Drop and reconstruct receipt/era indexes from canonical catalyst text.
+    /// Skip records are an operational log and are intentionally untouched.
+    pub fn rebuild_catalyst_derived_indexes(&self) -> Result<(usize, usize)> {
+        let catalysts = self.get_all_catalysts()?;
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+                .await
+                .context("begin catalyst derived-index rebuild")?;
+            tx.execute("DELETE FROM catalyst_receipts", ()).await?;
+            tx.execute("DELETE FROM catalyst_eras", ()).await?;
+            let mut receipts = 0;
+            let mut eras = 0;
+            for catalyst in catalysts {
+                let (receipt_count, era_count) =
+                    index_catalyst_text(&tx, &catalyst.id, &catalyst.text).await?;
+                receipts += receipt_count;
+                eras += era_count;
+            }
+            tx.commit()
+                .await
+                .context("commit catalyst derived-index rebuild")?;
+            Ok((receipts, eras))
         })
     }
 
@@ -1489,17 +1661,38 @@ impl Database {
     /// The type lives in catalyst metadata; rows without one (written before
     /// the type was stamped) still match so legacy catalysts get replaced.
     pub fn delete_catalysts_for_entity(&self, entity: &str, entity_type: &str) -> Result<()> {
-        self.execute_write(
-            "DELETE FROM catalysts
-             WHERE entity = ?1
-               AND (json_extract(metadata, '$.entity_type') = ?2
-                    OR json_extract(metadata, '$.entity_type') IS NULL)",
-            vec![
-                Value::Text(entity.to_string()),
-                Value::Text(entity_type.to_string()),
-            ],
-        )?;
-        Ok(())
+        let entity = entity.to_string();
+        let entity_type = entity_type.to_string();
+        block_in_place_sync(async move {
+            let tx = self.conn.transaction().await?;
+            let params = vec![
+                Value::Text(entity.clone()),
+                Value::Text(entity_type.clone()),
+            ];
+            tx.execute(
+                "DELETE FROM catalyst_receipts WHERE catalyst_id IN (
+                    SELECT id FROM catalysts WHERE entity = ?1
+                      AND (json_extract(metadata, '$.entity_type') = ?2
+                           OR json_extract(metadata, '$.entity_type') IS NULL)
+                 )",
+                params.clone(),
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM catalyst_eras WHERE entity=?1 AND entity_type=?2",
+                params.clone(),
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM catalysts WHERE entity = ?1
+                   AND (json_extract(metadata, '$.entity_type') = ?2
+                        OR json_extract(metadata, '$.entity_type') IS NULL)",
+                params,
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        })
     }
 
     /// Per-entity catalyst context fingerprints, keyed by (entity, type).
@@ -2499,6 +2692,26 @@ impl Database {
                 ))
             },
         )?;
+        let skip_rows = shadow.query_read(
+            "SELECT generation_run_id, epoch_id, entity, entity_type, era_label,
+                    reason_code, reason, distinct_documents, substantive_tokens, created_at_ms
+             FROM catalyst_generation_skips WHERE epoch_id=?1",
+            vec![Value::Text(epoch_id.to_string())],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<Option<String>>(1)?,
+                    row.get::<String>(2)?,
+                    row.get::<String>(3)?,
+                    row.get::<String>(4)?,
+                    row.get::<String>(5)?,
+                    row.get::<String>(6)?,
+                    row.get::<i64>(7)?,
+                    row.get::<i64>(8)?,
+                    row.get::<i64>(9)?,
+                ))
+            },
+        )?;
         let packed = shadow
             .query_read(
                 "SELECT count, ids, vectors FROM catalyst_embeddings_packed WHERE id=1",
@@ -2517,14 +2730,16 @@ impl Database {
             .iter()
             .map(|(id, text, ..)| (id.clone(), text.clone()))
             .collect();
-        let (_, packed_ids_json, packed_vectors) = packed
-            .as_ref()
-            .context("shadow epoch is missing catalyst embeddings")?;
-        let packed_ids: Vec<String> = serde_json::from_str(packed_ids_json)?;
-        anyhow::ensure!(
-            packed_ids.len() == catalysts.len() && !packed_vectors.is_empty(),
-            "shadow epoch catalyst embedding set is incomplete"
-        );
+        if !catalysts.is_empty() {
+            let (_, packed_ids_json, packed_vectors) = packed
+                .as_ref()
+                .context("shadow epoch is missing catalyst embeddings")?;
+            let packed_ids: Vec<String> = serde_json::from_str(packed_ids_json)?;
+            anyhow::ensure!(
+                packed_ids.len() == catalysts.len() && !packed_vectors.is_empty(),
+                "shadow epoch catalyst embedding set is incomplete"
+            );
+        }
 
         block_in_place_sync(async move {
             let tx = self
@@ -2594,6 +2809,8 @@ impl Database {
                 .await?;
             tx.execute("DELETE FROM catalysts", ()).await?;
             tx.execute("DELETE FROM catalyst_entity_hashes", ()).await?;
+            tx.execute("DELETE FROM catalyst_receipts", ()).await?;
+            tx.execute("DELETE FROM catalyst_eras", ()).await?;
             for (entity, entity_type, context_hash, generated_at_ms) in entity_hashes {
                 tx.execute(
                     "INSERT INTO catalyst_entity_hashes
@@ -2609,6 +2826,7 @@ impl Database {
                 .await?;
             }
             for (id, text, entity, context, generated_at, metadata) in catalysts {
+                index_catalyst_text(&tx, &id, &text).await?;
                 tx.execute(
                     "INSERT INTO catalysts (id,text,entity,context,generated_at,metadata)
                      VALUES (?1,?2,?3,?4,?5,?6)",
@@ -2654,9 +2872,30 @@ impl Database {
                 )
                 .await?;
             }
+            for row in skip_rows {
+                tx.execute(
+                    "INSERT INTO catalyst_generation_skips
+                     (generation_run_id,epoch_id,entity,entity_type,era_label,reason_code,reason,
+                      distinct_documents,substantive_tokens,created_at_ms)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    vec![
+                        Value::Text(row.0),
+                        opt_val(row.1),
+                        Value::Text(row.2),
+                        Value::Text(row.3),
+                        Value::Text(row.4),
+                        Value::Text(row.5),
+                        Value::Text(row.6),
+                        Value::Integer(row.7),
+                        Value::Integer(row.8),
+                        Value::Integer(row.9),
+                    ],
+                )
+                .await?;
+            }
             Database::mark_epoch_activated_on_tx(&tx, epoch_id, completed_at_ms).await?;
             tx.commit().await.context("commit epoch activation")?;
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })
     }
 }
@@ -2666,10 +2905,10 @@ impl Database {
 // ---------------------------------------------------------------------------
 
 fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
-    let trends_str: String = row.get::<Option<String>>(6)?.unwrap_or_default();
+    let trends_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
     let trends: EntityTrends = serde_json::from_str(&trends_str).unwrap_or_default();
 
-    let metadata_str: String = row.get::<Option<String>>(7)?.unwrap_or_default();
+    let metadata_str: String = row.get::<Option<String>>(8)?.unwrap_or_default();
     let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
         .unwrap_or(serde_json::Value::Object(Default::default()));
 
@@ -2678,8 +2917,9 @@ fn map_entity_row(row: libsql::Row) -> Result<Entity, libsql::Error> {
         name: row.get::<String>(1)?,
         entity_type: parse_entity_type(&row.get::<String>(2)?),
         frequency: row.get::<i64>(3)?,
-        first_seen: row.get::<Option<i64>>(4)?,
-        last_seen: row.get::<Option<i64>>(5)?,
+        ranking_weight: row.get::<f64>(4)?,
+        first_seen: row.get::<Option<i64>>(5)?,
+        last_seen: row.get::<Option<i64>>(6)?,
         trends,
         metadata,
     })

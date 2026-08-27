@@ -2,12 +2,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use enzyme_core::config::{
-    SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit,
+    OneOrManyStrings, SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceRoles,
+    SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
 };
 use enzyme_core::db::Database;
 use enzyme_core::initialize_sqlite_runtime;
+use enzyme_core::models::EntityType;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::sqlite_source::{run_configured_sqlite_sources, run_sqlite_source};
+use enzyme_core::sqlite_source::{
+    run_configured_sqlite_sources, run_sqlite_source, source_refresh_staleness,
+};
 use libsql::Value;
 use rusqlite::{Connection, params};
 
@@ -24,10 +28,33 @@ fn source_config(path: PathBuf) -> SqliteSourceConfig {
             .to_string(),
         roles: SqliteSourceRoles {
             id: vec!["id".to_string()],
-            who: vec!["who".to_string()],
+            document_ref: None,
+            who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["who".to_string()])),
             when: "when_ts".to_string(),
             what: vec!["body".to_string()],
             r#where: vec!["where_label".to_string()],
+            weight: None,
+        },
+        timestamp: SqliteTimestampConfig {
+            unit: SqliteTimestampUnit::Ms,
+            epoch: None,
+        },
+    }
+}
+
+fn supplied_document_ref_config(path: PathBuf) -> SqliteSourceConfig {
+    SqliteSourceConfig {
+        db: path,
+        query: "SELECT id, document_ref, sender AS who, ts AS when_ts, body FROM evidence"
+            .to_string(),
+        roles: SqliteSourceRoles {
+            id: vec!["id".to_string()],
+            document_ref: Some("document_ref".to_string()),
+            who: SqliteWhoRole::Columns(OneOrManyStrings::Many(vec!["who".to_string()])),
+            when: "when_ts".to_string(),
+            what: vec!["body".to_string()],
+            r#where: Vec::new(),
+            weight: None,
         },
         timestamp: SqliteTimestampConfig {
             unit: SqliteTimestampUnit::Ms,
@@ -62,6 +89,201 @@ fn insert_entry(
         params![id, sender, ts, body, thread],
     )
     .unwrap();
+}
+
+#[test]
+fn supplied_document_refs_round_trip_into_documents_and_occurrences() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("evidence.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY,
+                document_ref TEXT NOT NULL,
+                sender TEXT,
+                ts INTEGER NOT NULL,
+                body TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+    for (id, document_ref, sender, body) in [
+        (
+            1,
+            "sqlite:mail-stable/thread/account-a/thread-9",
+            "Alice",
+            "First evidence",
+        ),
+        (
+            2,
+            "sqlite:mail-stable/thread/account-a/thread-10",
+            "Bob",
+            "Second evidence",
+        ),
+    ] {
+        source_db
+            .execute(
+                "INSERT INTO evidence VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, document_ref, sender, JAN_2024 + id * 1_000, body],
+            )
+            .unwrap();
+    }
+
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let config = supplied_document_ref_config(source_path);
+    let first = run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap();
+    assert_eq!(first.documents_rebuilt, 2);
+    let refs = enzyme_db.get_all_source_refs().unwrap();
+    assert_eq!(
+        refs,
+        vec![
+            "sqlite:mail-stable/thread/account-a/thread-10".to_string(),
+            "sqlite:mail-stable/thread/account-a/thread-9".to_string(),
+        ]
+    );
+    let occurrence_refs = enzyme_db
+        .query_read(
+            "SELECT DISTINCT file_path FROM entity_occurrences ORDER BY file_path",
+            vec![],
+            |row| row.get::<String>(0),
+        )
+        .unwrap();
+    assert_eq!(occurrence_refs, refs);
+
+    let unchanged = run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap();
+    assert_eq!(unchanged.documents_rebuilt, 0);
+    assert_eq!(unchanged.documents_skipped, 2);
+
+    source_db
+        .execute("DELETE FROM evidence WHERE id = 1", [])
+        .unwrap();
+    let deleted = run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap();
+    assert_eq!(deleted.documents_pruned, 1);
+    assert_eq!(
+        enzyme_db.get_all_source_refs().unwrap(),
+        vec!["sqlite:mail-stable/thread/account-a/thread-10".to_string()]
+    );
+}
+
+#[test]
+fn invalid_or_duplicate_supplied_document_refs_fail_before_index_mutation() {
+    initialize_sqlite_runtime().unwrap();
+    for (label, sql) in [
+        (
+            "empty",
+            "INSERT INTO evidence VALUES (1, '', 'Alice', 1705276800000, 'body')",
+        ),
+        (
+            "null",
+            "INSERT INTO evidence VALUES (1, NULL, 'Alice', 1705276800000, 'body')",
+        ),
+        (
+            "numeric",
+            "INSERT INTO evidence VALUES (1, 42, 'Alice', 1705276800000, 'body')",
+        ),
+        (
+            "foreign",
+            "INSERT INTO evidence VALUES (1, 'sqlite:other/thread-1', 'Alice', 1705276800000, 'body')",
+        ),
+        (
+            "duplicate",
+            "INSERT INTO evidence VALUES
+                (1, 'sqlite:mail-stable/thread-1', 'Alice', 1705276800000, 'one'),
+                (2, 'sqlite:mail-stable/thread-1', 'Bob', 1705276801000, 'two')",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = temp.path().join(format!("{label}.db"));
+        let source_db = Connection::open(&source_path).unwrap();
+        source_db
+            .execute_batch(
+                "CREATE TABLE evidence (
+                    id INTEGER PRIMARY KEY,
+                    document_ref,
+                    sender TEXT,
+                    ts INTEGER NOT NULL,
+                    body TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        source_db.execute_batch(sql).unwrap();
+        let enzyme_db = Database::open_in_memory().unwrap();
+        let error = run_sqlite_source(
+            &enzyme_db,
+            "mail-stable",
+            &supplied_document_ref_config(source_path),
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty(), "invalid case {label}");
+        assert_eq!(enzyme_db.get_document_count().unwrap(), 0, "case {label}");
+    }
+}
+
+#[test]
+fn invalid_supplied_ref_on_empty_content_preserves_coherent_snapshot() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("invalid-empty.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY,
+                document_ref TEXT,
+                sender TEXT,
+                ts INTEGER NOT NULL,
+                body TEXT NOT NULL
+             );
+             INSERT INTO evidence VALUES
+                (1, 'sqlite:mail-stable/thread-1', 'Alice', 1705276800000, 'coherent');",
+        )
+        .unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let config = supplied_document_ref_config(source_path);
+    run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap();
+
+    source_db
+        .execute(
+            "UPDATE evidence SET document_ref = 'sqlite:other/thread-1', body = '' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    let error = run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap_err();
+    assert!(error.to_string().contains("must stay inside namespace"));
+    assert_eq!(
+        enzyme_db.get_all_source_refs().unwrap(),
+        vec!["sqlite:mail-stable/thread-1".to_string()]
+    );
+}
+
+#[test]
+fn supplied_document_ref_is_rejected_for_bucket_mode() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("bucket.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "CREATE TABLE evidence (
+                id INTEGER PRIMARY KEY,
+                document_ref TEXT,
+                sender TEXT,
+                ts INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                thread TEXT
+             );",
+        )
+        .unwrap();
+    let mut config = supplied_document_ref_config(source_path);
+    config.query =
+        "SELECT id, document_ref, sender AS who, ts AS when_ts, body, thread FROM evidence"
+            .to_string();
+    config.roles.r#where = vec!["thread".to_string()];
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let error = run_sqlite_source(&enzyme_db, "mail-stable", &config).unwrap_err();
+    assert!(error.to_string().contains("row-mode"));
+    assert_eq!(enzyme_db.get_document_count().unwrap(), 0);
 }
 
 fn mark_all_embedded(db: &Database) {
@@ -241,7 +463,9 @@ fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
             .iter()
             .all(|doc| doc.0.matches('/').count() == 2)
     );
-    assert!(source_docs.iter().all(|doc| doc.1.contains("Alice")));
+    assert!(source_docs.iter().all(|doc| !doc.1.contains(" — Alice")));
+    assert!(source_docs.iter().any(|doc| doc.1.contains("Met Will")));
+    assert!(source_docs.iter().any(|doc| doc.1.contains("Saw Will again")));
     assert!(source_docs.iter().all(|doc| doc.2.len() == 64));
 
     let chunk_dates = enzyme_db
@@ -405,7 +629,10 @@ fn row_mode_detects_non_leading_who_edit() {
     config.roles.r#where.clear();
     // Two who columns; the leading who (sender) stays in the title, the second
     // who (thread column) is non-leading and only reachable via the who list.
-    config.roles.who = vec!["who".to_string(), "where_label".to_string()];
+    config.roles.who = SqliteWhoRole::Columns(OneOrManyStrings::Many(vec![
+        "who".to_string(),
+        "where_label".to_string(),
+    ]));
 
     assert_eq!(
         run_sqlite_source(&enzyme_db, "messages", &config)
@@ -424,4 +651,120 @@ fn row_mode_detects_non_leading_who_edit() {
     let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
     assert_eq!(edited.documents_rebuilt, 1);
     assert_eq!(edited.documents_skipped, 1);
+}
+
+#[test]
+fn multi_value_who_and_weight_emit_additive_participant_occurrences() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+    let source_path = temp.path().join("participants.db");
+    let source_db = Connection::open(&source_path).unwrap();
+    source_db
+        .execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                participants TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                importance REAL
+             );
+             INSERT INTO messages VALUES
+                (1, '[\"Alice\",\"Bob\",\"Alice\"]', 1705276800000, 'json row', 2.5);",
+        )
+        .unwrap();
+
+    let mut config = source_config(source_path.clone());
+    config.query = "SELECT id, participants, ts AS when_ts, body, importance FROM messages".into();
+    config.roles.who = SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::JsonArray {
+        column: "participants".into(),
+    });
+    config.roles.r#where.clear();
+    config.roles.weight = Some("importance".into());
+    run_sqlite_source(&enzyme_db, "json", &config).unwrap();
+
+    for name in ["Alice", "Bob"] {
+        let entity = enzyme_db
+            .get_entities_by_names(&[(name, EntityType::Link)])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            entity.frequency, 1,
+            "duplicates within one array are collapsed"
+        );
+        assert_eq!(entity.ranking_weight, 2.5);
+        assert_eq!(
+            enzyme_db
+                .get_entity_occurrences(entity.id.unwrap())
+                .unwrap()[0]
+                .weight,
+            2.5
+        );
+    }
+
+    source_db
+        .execute(
+            "UPDATE messages SET participants = 'Carol | Dave', importance = NULL WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    config.roles.who = SqliteWhoRole::MultiValue(SqliteMultiValueWhoRole::Delimited {
+        column: "participants".into(),
+        delimiter: "|".into(),
+    });
+    run_sqlite_source(&enzyme_db, "delimited", &config).unwrap();
+    for name in ["Carol", "Dave"] {
+        let entity = enzyme_db
+            .get_entities_by_names(&[(name, EntityType::Link)])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            entity.ranking_weight, 1.0,
+            "NULL weight uses the additive default"
+        );
+    }
+}
+
+#[test]
+fn source_refresh_staleness_uses_engine_owned_success_watermark() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("source.db");
+    Connection::open(&source_path).unwrap();
+    let enzyme_db = Database::open_in_memory().unwrap();
+
+    let never = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(never.stale);
+    assert_eq!(never.reason.as_deref(), Some("never_refreshed"));
+
+    enzyme_db
+        .set_source_refresh_status("messages", 0, 0, 0)
+        .unwrap();
+    let changed = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(changed.stale);
+    assert_eq!(
+        changed.reason.as_deref(),
+        Some("source_modified_after_refresh")
+    );
+
+    enzyme_db
+        .set_source_refresh_status(
+            "messages",
+            0,
+            0,
+            chrono::Utc::now().timestamp_millis() + 1_000,
+        )
+        .unwrap();
+    assert!(
+        !source_refresh_staleness(&enzyme_db, "messages", &source_path)
+            .unwrap()
+            .stale
+    );
+
+    std::fs::remove_file(&source_path).unwrap();
+    let unavailable = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
+    assert!(unavailable.stale);
+    assert_eq!(unavailable.reason.as_deref(), Some("source_unavailable"));
 }

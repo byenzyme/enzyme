@@ -1,8 +1,23 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
+
+use crate::config::NotesRootConfig;
+
+/// A discovered Markdown file with stable text provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredFile {
+    pub root_name: String,
+    pub root_path: PathBuf,
+    pub relative_path: PathBuf,
+    /// DB identity. An explicit document prefix is stable across root-count and
+    /// display-name changes; roots without one preserve historical behavior.
+    pub source_ref: String,
+    pub writable: bool,
+}
 
 /// Escape glob metacharacters so a user-supplied folder name is matched
 /// literally — both so `exclude: [notes[draft]]` matches that exact folder and
@@ -35,6 +50,7 @@ fn escape_glob_meta(name: &str) -> String {
 /// makes `exclude` mean "leave it alone" (gone), not merely "don't surface."
 pub struct FileDiscovery {
     vault_path: PathBuf,
+    notes_roots: Option<Vec<NotesRootConfig>>,
     include_patterns: Vec<String>,
     exclude_patterns: Vec<String>,
 }
@@ -48,6 +64,7 @@ impl FileDiscovery {
     pub fn new(vault_path: PathBuf) -> Self {
         Self {
             vault_path,
+            notes_roots: None,
             include_patterns: vec!["**/*.md".to_string()],
             exclude_patterns: vec![
                 ".agents/**".to_string(),
@@ -72,6 +89,17 @@ impl FileDiscovery {
                 "enzyme-config.yaml".to_string(),
             ],
         }
+    }
+
+    /// Create discovery over public, named Markdown roots.
+    pub fn from_notes_roots(roots: Vec<NotesRootConfig>) -> Self {
+        let fallback = roots
+            .first()
+            .map(|root| root.path.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut discovery = Self::new(fallback);
+        discovery.notes_roots = Some(roots);
+        discovery
     }
 
     /// Override the default include patterns.
@@ -121,10 +149,89 @@ impl FileDiscovery {
     ///
     /// Uses the `ignore` crate, which respects `.gitignore` rules by default.
     pub fn discover(&self) -> Result<Vec<PathBuf>> {
-        let vault_path = self
-            .vault_path
+        if self.notes_roots.is_some() {
+            return Ok(self
+                .discover_named()?
+                .into_iter()
+                .map(|file| PathBuf::from(file.source_ref))
+                .collect());
+        }
+        self.walk_root(&self.vault_path, &[])
+    }
+
+    /// Walk every configured root with its own exclusions. Roots are sorted by
+    /// name and files by source ref, making reconciliation deterministic.
+    pub fn discover_named(&self) -> Result<Vec<DiscoveredFile>> {
+        let roots = self.notes_roots.clone().unwrap_or_else(|| {
+            vec![NotesRootConfig {
+                name: "notes".to_string(),
+                path: self.vault_path.clone(),
+                document_ref_prefix: None,
+                exclusions: Vec::new(),
+                writable: true,
+            }]
+        });
+        let multi = roots.len() > 1;
+        let mut files = Vec::new();
+        let mut explicit_prefixes = HashSet::new();
+        for root in &roots {
+            if let Some(prefix) = root.document_ref_prefix.as_deref() {
+                validate_document_ref_prefix(prefix)?;
+                anyhow::ensure!(
+                    explicit_prefixes.insert(prefix),
+                    "notes roots may not share document_ref_prefix {prefix:?}"
+                );
+            }
+        }
+        let mut source_refs = HashSet::new();
+        for root in roots {
+            anyhow::ensure!(
+                !root.name.trim().is_empty(),
+                "notes root name may not be empty"
+            );
+            anyhow::ensure!(
+                !root.name.contains('/') && !root.name.contains('\\'),
+                "notes root name may not contain path separators: {:?}",
+                root.name
+            );
+            let canonical = root
+                .path
+                .canonicalize()
+                .with_context(|| format!("notes root does not exist: {:?}", root.path))?;
+            for relative_path in self.walk_root(&canonical, &root.exclusions)? {
+                let relative = relative_path.to_string_lossy().replace('\\', "/");
+                let source_ref = if let Some(prefix) = &root.document_ref_prefix {
+                    format!("{prefix}/{relative}")
+                } else if multi {
+                    format!("{}/{relative}", root.name)
+                } else {
+                    relative
+                };
+                anyhow::ensure!(
+                    source_refs.insert(source_ref.clone()),
+                    "notes roots produced duplicate document ref {source_ref:?}"
+                );
+                files.push(DiscoveredFile {
+                    root_name: root.name.clone(),
+                    root_path: canonical.clone(),
+                    relative_path,
+                    source_ref,
+                    writable: root.writable,
+                });
+            }
+        }
+        files.sort_by(|left, right| left.source_ref.cmp(&right.source_ref));
+        Ok(files)
+    }
+
+    fn walk_root(
+        &self,
+        root: &std::path::Path,
+        root_exclusions: &[String],
+    ) -> Result<Vec<PathBuf>> {
+        let vault_path = root
             .canonicalize()
-            .with_context(|| format!("vault path does not exist: {:?}", self.vault_path))?;
+            .with_context(|| format!("notes root does not exist: {:?}", root))?;
 
         let mut overrides = OverrideBuilder::new(&vault_path);
         // Case-insensitive so user `exclude` names match regardless of on-disk
@@ -145,6 +252,16 @@ impl FileDiscovery {
             overrides
                 .add(&format!("!{pattern}"))
                 .with_context(|| format!("invalid exclude pattern: {pattern}"))?;
+        }
+        for name in root_exclusions {
+            let trimmed = name.trim().trim_matches('/');
+            if trimmed.is_empty() || trimmed == "." {
+                continue;
+            }
+            let pattern = format!("{}/**", escape_glob_meta(trimmed));
+            overrides
+                .add(&format!("!{pattern}"))
+                .with_context(|| format!("invalid notes-root exclusion: {name}"))?;
         }
 
         let overrides = overrides
@@ -172,6 +289,30 @@ impl FileDiscovery {
         paths.sort();
         Ok(paths)
     }
+}
+
+fn validate_document_ref_prefix(prefix: &str) -> Result<()> {
+    anyhow::ensure!(
+        !prefix.trim().is_empty(),
+        "notes root document_ref_prefix may not be empty"
+    );
+    anyhow::ensure!(
+        prefix == prefix.trim(),
+        "notes root document_ref_prefix may not have surrounding whitespace"
+    );
+    anyhow::ensure!(
+        !prefix.contains('/') && !prefix.contains('\\'),
+        "notes root document_ref_prefix must be one path segment: {prefix:?}"
+    );
+    anyhow::ensure!(
+        !prefix.chars().any(char::is_control),
+        "notes root document_ref_prefix may not contain control characters"
+    );
+    anyhow::ensure!(
+        !prefix.starts_with("sqlite:"),
+        "notes root document_ref_prefix may not use the reserved sqlite: namespace"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -220,6 +361,150 @@ mod tests {
         assert!(files.contains(&PathBuf::from("note1.md")));
         assert!(files.contains(&PathBuf::from("subfolder/note2.md")));
         assert!(files.contains(&PathBuf::from("deep/nested/folder/note3.md")));
+    }
+
+    #[test]
+    fn named_roots_are_namespaced_and_apply_per_root_exclusions() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        fs::write(first.path().join("same.md"), "# first").unwrap();
+        fs::create_dir(first.path().join("private")).unwrap();
+        fs::write(first.path().join("private/hidden.md"), "# hidden").unwrap();
+        fs::write(second.path().join("same.md"), "# second").unwrap();
+
+        let files = FileDiscovery::from_notes_roots(vec![
+            NotesRootConfig {
+                name: "primary".into(),
+                path: first.path().to_path_buf(),
+                document_ref_prefix: None,
+                exclusions: vec!["private".into()],
+                writable: true,
+            },
+            NotesRootConfig {
+                name: "reference".into(),
+                path: second.path().to_path_buf(),
+                document_ref_prefix: None,
+                exclusions: Vec::new(),
+                writable: false,
+            },
+        ])
+        .discover_named()
+        .unwrap();
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.source_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["primary/same.md", "reference/same.md"]
+        );
+        assert!(files[0].writable);
+        assert!(!files[1].writable);
+    }
+
+    #[test]
+    fn explicit_document_prefix_is_stable_across_root_count_and_display_name() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        fs::write(first.path().join("same.md"), "# first").unwrap();
+        fs::write(second.path().join("same.md"), "# second").unwrap();
+
+        let first_root = NotesRootConfig {
+            name: "home".into(),
+            path: first.path().to_path_buf(),
+            document_ref_prefix: Some("md-home-stable".into()),
+            exclusions: Vec::new(),
+            writable: true,
+        };
+        let single = FileDiscovery::from_notes_roots(vec![first_root.clone()])
+            .discover_named()
+            .unwrap();
+        assert_eq!(single[0].source_ref, "md-home-stable/same.md");
+
+        let mut renamed = first_root.clone();
+        renamed.name = "renamed-binding".into();
+        let renamed_files = FileDiscovery::from_notes_roots(vec![renamed.clone()])
+            .discover_named()
+            .unwrap();
+        assert_eq!(renamed_files[0].source_ref, single[0].source_ref);
+
+        let multi = FileDiscovery::from_notes_roots(vec![
+            renamed,
+            NotesRootConfig {
+                name: "reference".into(),
+                path: second.path().to_path_buf(),
+                document_ref_prefix: Some("md-reference-stable".into()),
+                exclusions: Vec::new(),
+                writable: false,
+            },
+        ])
+        .discover_named()
+        .unwrap();
+        assert_eq!(
+            multi
+                .iter()
+                .map(|file| file.source_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["md-home-stable/same.md", "md-reference-stable/same.md"]
+        );
+    }
+
+    #[test]
+    fn duplicate_or_invalid_document_prefixes_fail_closed() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        fs::write(first.path().join("a.md"), "# first").unwrap();
+        fs::write(second.path().join("b.md"), "# second").unwrap();
+        let root = |name: &str, path: &std::path::Path, prefix: &str| NotesRootConfig {
+            name: name.into(),
+            path: path.to_path_buf(),
+            document_ref_prefix: Some(prefix.into()),
+            exclusions: Vec::new(),
+            writable: false,
+        };
+
+        let duplicate = FileDiscovery::from_notes_roots(vec![
+            root("first", first.path(), "stable"),
+            root("second", second.path(), "stable"),
+        ])
+        .discover_named()
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("may not share"));
+
+        for invalid in [
+            "",
+            " spaced",
+            "nested/prefix",
+            "nested\\prefix",
+            "bad\nref",
+            "sqlite:mail",
+        ] {
+            let error = FileDiscovery::from_notes_roots(vec![root("first", first.path(), invalid)])
+                .discover_named()
+                .unwrap_err();
+            assert!(!error.to_string().is_empty(), "invalid prefix {invalid:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_symlink_root_is_followed() {
+        use std::os::unix::fs::symlink;
+        let target = TempDir::new().unwrap();
+        let holder = TempDir::new().unwrap();
+        fs::write(target.path().join("note.md"), "# linked").unwrap();
+        let link = holder.path().join("linked-notes");
+        symlink(target.path(), &link).unwrap();
+        let files = FileDiscovery::from_notes_roots(vec![NotesRootConfig {
+            name: "notes".into(),
+            path: link,
+            document_ref_prefix: None,
+            exclusions: Vec::new(),
+            writable: true,
+        }])
+        .discover_named()
+        .unwrap();
+        assert_eq!(files[0].source_ref, "note.md");
     }
 
     /// The index gate: a user `exclude`d folder is not read at all.
