@@ -41,6 +41,11 @@ const LOCAL_DEFAULT_MAX_CONTEXT_CHARS: usize = hardware::LOCAL_MAX_CONTEXT_CHARS
 /// not a quality knob; mirrors `EnzymeConfig::effective_max_embedding_files`'s
 /// default-on-with-escape-hatch shape (`Some(0)` = explicit unlimited).
 const DEFAULT_MAX_CONTEXT_CHARS: usize = 60000;
+/// Default upper bound for hosted context samples. The effective per-entity
+/// limit scales with the requested catalyst count, with a floor of 10.
+pub const DEFAULT_MAX_CONTEXT_SAMPLES: usize = 40;
+const MIN_CONTEXT_SAMPLES_PER_ENTITY: usize = 10;
+const LOCAL_MAX_CONTEXT_SAMPLES: usize = 10;
 const CHUNK_MMR_TOP_K: usize = 50;
 const CHUNK_MMR_LAMBDA: f32 = 0.5;
 
@@ -149,6 +154,22 @@ fn resolve_context_budget(configured: Option<usize>, is_local: bool) -> usize {
     }
 
     budget
+}
+
+/// Resolve the per-entity excerpt count from the run-level cap.
+///
+/// Hosted generation aims for one excerpt per requested catalyst, keeps at
+/// least 10 excerpts available for small entities, and uses 40 as the default
+/// ceiling. An explicit lower or higher run-level cap remains authoritative.
+/// Local generation stays within its fixed 10-excerpt model-window ceiling.
+fn resolve_sample_limit(configured_cap: usize, is_local: bool, num_catalysts: usize) -> usize {
+    if is_local {
+        return configured_cap.min(LOCAL_MAX_CONTEXT_SAMPLES);
+    }
+
+    num_catalysts
+        .max(MIN_CONTEXT_SAMPLES_PER_ENTITY)
+        .min(configured_cap)
 }
 
 /// Apply context budget: limit sample count, then truncate total chars via lasso.
@@ -626,7 +647,9 @@ pub struct CatalystConfig<'a> {
     /// - `Some(0)` → explicit unlimited (no truncation),
     /// - `Some(n)` → exactly `n` chars.
     pub max_context_chars: Option<usize>,
-    /// Maximum number of context samples per entity (default: 20).
+    /// Maximum number of context samples per entity. Hosted generation adapts
+    /// within this cap at roughly one sample per requested catalyst, with a
+    /// floor of 10 and a default cap of 40. Local generation is capped at 10.
     pub max_samples: usize,
     /// LLM concurrency override. If set, overrides the auto-detected value.
     pub concurrency: Option<usize>,
@@ -654,7 +677,7 @@ impl<'a> Default for CatalystConfig<'a> {
             model: DEFAULT_MODEL,
             per_entity_allocations: None,
             max_context_chars: None,
-            max_samples: 20,
+            max_samples: DEFAULT_MAX_CONTEXT_SAMPLES,
             concurrency: None,
             stream_partial_catalysts: false,
             force_regenerate: false,
@@ -1046,12 +1069,6 @@ impl<'a> CatalystPipeline<'a> {
             );
         }
 
-        let max_samples = if is_local && config.max_samples > 10 {
-            10 // Cap samples for local models to keep prompts manageable
-        } else {
-            config.max_samples
-        };
-
         let default_profile = get_profile(config.default_profile)
             .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
         let chunk_preload = self.preload_chunk_selection(entities);
@@ -1075,6 +1092,7 @@ impl<'a> CatalystPipeline<'a> {
                 .per_entity_allocations
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
+            let max_samples = resolve_sample_limit(config.max_samples, is_local, num_catalysts);
 
             let eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
             let selected_context = match self.build_chunk_context(
@@ -2149,6 +2167,24 @@ mod tests {
             resolve_context_budget(Some(999_999), true),
             hardware::LOCAL_MAX_CONTEXT_CHARS
         );
+    }
+
+    #[test]
+    fn hosted_sample_limit_scales_with_catalyst_allocation() {
+        assert_eq!(resolve_sample_limit(40, false, 3), 10);
+        assert_eq!(resolve_sample_limit(40, false, 10), 10);
+        assert_eq!(resolve_sample_limit(40, false, 25), 25);
+        assert_eq!(resolve_sample_limit(40, false, 40), 40);
+        assert_eq!(resolve_sample_limit(40, false, 80), 40);
+    }
+
+    #[test]
+    fn explicit_sample_cap_and_local_ceiling_are_authoritative() {
+        assert_eq!(resolve_sample_limit(5, false, 25), 5);
+        assert_eq!(resolve_sample_limit(80, false, 50), 50);
+        assert_eq!(resolve_sample_limit(40, true, 3), 10);
+        assert_eq!(resolve_sample_limit(40, true, 40), 10);
+        assert_eq!(resolve_sample_limit(5, true, 40), 5);
     }
 
     fn make_occurrence(file_path: &str, context: &str) -> EntityOccurrence {

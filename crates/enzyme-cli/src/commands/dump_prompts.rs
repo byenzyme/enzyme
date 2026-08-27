@@ -7,7 +7,9 @@ use enzyme_core::config::enzyme_config::EnzymeConfig;
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
-use enzyme_core::pipeline::catalysts::{CatalystConfig, CatalystPipeline, calculate_allocations};
+use enzyme_core::pipeline::catalysts::{
+    CatalystConfig, CatalystPipeline, DEFAULT_MAX_CONTEXT_SAMPLES, calculate_allocations,
+};
 use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::selection::SelectionPipeline;
 
@@ -59,7 +61,7 @@ pub async fn run_dump_prompts(
         per_entity_allocations: Some(&allocations),
         // Mirror real runs: None → the built-in default budget applies.
         max_context_chars: None,
-        max_samples: 20,
+        max_samples: DEFAULT_MAX_CONTEXT_SAMPLES,
         concurrency: None,
         stream_partial_catalysts: false,
         force_regenerate: false,

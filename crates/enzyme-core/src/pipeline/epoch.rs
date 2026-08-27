@@ -47,6 +47,8 @@ pub struct GenerationContract {
     /// `Some(n)` = exactly `n`.
     #[serde(default)]
     pub max_context_chars: Option<usize>,
+    /// Run-level ceiling for per-entity context samples. Hosted generation
+    /// adapts within this ceiling based on the entity's catalyst allocation.
     pub max_context_samples: usize,
 }
 
@@ -610,7 +612,7 @@ mod tests {
             targets: vec![],
             selection_config_json: "{}".into(),
             max_context_chars: None,
-            max_context_samples: 20,
+            max_context_samples: 40,
         }
     }
 

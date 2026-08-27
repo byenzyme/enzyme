@@ -18,7 +18,8 @@ use enzyme_core::llm::{
 };
 use enzyme_core::models::Entity;
 use enzyme_core::pipeline::catalysts::{
-    CatalystConfig, CatalystEvent, CatalystPipeline, CatalystStats, calculate_allocations,
+    CatalystConfig, CatalystEvent, CatalystPipeline, CatalystStats, DEFAULT_MAX_CONTEXT_SAMPLES,
+    calculate_allocations,
 };
 use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::embedding::{EmbeddingPipeline, EmbeddingStats};
@@ -1016,7 +1017,7 @@ pub async fn run_init(
             max_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20),
+                .unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
             concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
                 .ok()
                 .and_then(|v| v.parse().ok()),
@@ -1625,7 +1626,7 @@ pub(super) async fn generation_contract(
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
     Ok(GenerationContract {
         schema_version: "catalyst-epoch.v1".to_string(),
-        prompt_version: "catalyst-prompts.2026-07".to_string(),
+        prompt_version: "catalyst-prompts.2026-08-adaptive-samples".to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()
@@ -1650,7 +1651,7 @@ pub(super) async fn generation_contract(
         max_context_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(20),
+            .unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
     })
 }
 
