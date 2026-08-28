@@ -355,15 +355,6 @@ impl CliCommand {
         if !self.envs.contains_key("ENZYME_UPDATE_RELEASE_BASE") {
             cmd.env("ENZYME_UPDATE_RELEASE_BASE", "http://127.0.0.1:9");
         }
-        // Legacy CLI fixtures intentionally use tiny one-note vaults. Keep
-        // them focused on their original contracts; catalyst evidence gates
-        // have dedicated tests in enzyme-core.
-        if !self.envs.contains_key("ENZYME_MIN_EVIDENCE_DOCUMENTS") {
-            cmd.env("ENZYME_MIN_EVIDENCE_DOCUMENTS", "1");
-        }
-        if !self.envs.contains_key("ENZYME_MIN_EVIDENCE_TOKENS") {
-            cmd.env("ENZYME_MIN_EVIDENCE_TOKENS", "1");
-        }
         for (key, value) in &self.envs {
             cmd.env(key, value);
         }

@@ -50,18 +50,18 @@ pub struct GenerationContract {
     /// Run-level ceiling for per-entity context samples. Hosted generation
     /// adapts within this ceiling based on the entity's catalyst allocation.
     pub max_context_samples: usize,
-    #[serde(default = "default_min_evidence_documents")]
-    pub min_evidence_documents: usize,
-    #[serde(default = "default_min_evidence_tokens")]
-    pub min_evidence_tokens: usize,
+    #[serde(default = "default_min_context_documents")]
+    pub min_context_documents: usize,
+    #[serde(default = "default_min_context_tokens")]
+    pub min_context_tokens: usize,
 }
 
-fn default_min_evidence_documents() -> usize {
-    crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS
+fn default_min_context_documents() -> usize {
+    crate::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS
 }
 
-fn default_min_evidence_tokens() -> usize {
-    crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS
+fn default_min_context_tokens() -> usize {
+    crate::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS
 }
 
 impl GenerationContract {
@@ -668,8 +668,8 @@ mod tests {
             selection_config_json: "{}".into(),
             max_context_chars: None,
             max_context_samples: 40,
-            min_evidence_documents: default_min_evidence_documents(),
-            min_evidence_tokens: default_min_evidence_tokens(),
+            min_context_documents: default_min_context_documents(),
+            min_context_tokens: default_min_context_tokens(),
         }
     }
 

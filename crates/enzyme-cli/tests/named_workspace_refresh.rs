@@ -252,8 +252,8 @@ fn failed_catalyst_attempt_does_not_gate_source_reexecution() {
             ("OPENAI_MODEL", "test-model"),
             // Keep this test non-vacuous after the evidence gates added in #13:
             // the single-row fixture must reach the deliberately failing LLM.
-            ("ENZYME_MIN_EVIDENCE_DOCUMENTS", "1"),
-            ("ENZYME_MIN_EVIDENCE_TOKENS", "1"),
+            ("ENZYME_MIN_CONTEXT_DOCUMENTS", "1"),
+            ("ENZYME_MIN_CONTEXT_TOKENS", "1"),
         ],
     );
     assert!(

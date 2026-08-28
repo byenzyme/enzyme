@@ -70,24 +70,6 @@ pub struct EntityRefreshStats {
     pub latest_effective_date: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CatalystEraAudit<'a> {
-    pub generation_run_id: &'a str,
-    pub epoch_id: Option<&'a str>,
-    pub entity: &'a str,
-    pub entity_type: &'a str,
-    pub era_label: &'a str,
-    pub start_month: &'a str,
-    pub end_month: &'a str,
-    pub occurrence_count: usize,
-    pub catalyst_budget: usize,
-    pub distinct_documents: usize,
-    pub substantive_tokens: usize,
-    pub status: &'a str,
-    pub reason: Option<&'a str>,
-    pub created_at_ms: i64,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -132,124 +114,11 @@ fn opt_val<T: Into<Value>>(opt: Option<T>) -> Value {
     }
 }
 
-async fn index_catalyst_text(
-    tx: &libsql::Transaction,
-    catalyst_id: &str,
-    text: &str,
-) -> Result<(usize, usize)> {
-    tx.execute(
-        "DELETE FROM catalyst_receipts WHERE catalyst_id=?1",
-        vec![Value::Text(catalyst_id.to_string())],
-    )
-    .await?;
-
-    let Ok(parsed) = parse_catalyst_text(text) else {
-        // Pre-v1 catalyst text is migration-safe: it remains searchable, but
-        // cannot invent provenance that was never embedded in the chunk.
-        return Ok((0, 0));
-    };
-    let mut receipt_rows = 0;
-    for receipt in &parsed.receipts {
-        let occurrences: Vec<Option<i64>> = if receipt.occurrence_ids.is_empty() {
-            vec![None]
-        } else {
-            receipt.occurrence_ids.iter().copied().map(Some).collect()
-        };
-        for (ordinal, occurrence_id) in occurrences.into_iter().enumerate() {
-            tx.execute(
-                "INSERT INTO catalyst_receipts
-                 (catalyst_id,anchor_id,occurrence_ordinal,source_ref,occurrence_id,
-                  timestamp_ms,chunk_index,quote)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                vec![
-                    Value::Text(catalyst_id.to_string()),
-                    Value::Text(receipt.anchor_id.clone()),
-                    Value::Integer(ordinal as i64),
-                    Value::Text(receipt.source_ref.clone()),
-                    opt_val(occurrence_id),
-                    Value::Integer(receipt.timestamp_ms),
-                    opt_val(receipt.chunk_index.map(i64::from)),
-                    Value::Text(receipt.quote.clone()),
-                ],
-            )
-            .await?;
-            receipt_rows += 1;
-        }
-    }
-
-    let mut era_rows = 0;
-    for era in &parsed.header.eras {
-        tx.execute(
-            "INSERT INTO catalyst_eras
-             (generation_run_id,epoch_id,entity,entity_type,era_label,start_month,end_month,
-              distinct_documents,substantive_tokens,occurrence_count,catalyst_budget,
-              status,reason,created_at_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-             ON CONFLICT(generation_run_id,entity,entity_type,era_label) DO UPDATE SET
-               epoch_id=excluded.epoch_id,
-               start_month=excluded.start_month,
-               end_month=excluded.end_month,
-               distinct_documents=excluded.distinct_documents,
-               substantive_tokens=excluded.substantive_tokens,
-               occurrence_count=excluded.occurrence_count,
-               catalyst_budget=excluded.catalyst_budget,
-               status=excluded.status,
-               reason=excluded.reason,
-               created_at_ms=MIN(catalyst_eras.created_at_ms, excluded.created_at_ms)",
-            vec![
-                Value::Text(parsed.header.generation_run_id.clone()),
-                opt_val(parsed.header.epoch_id.clone()),
-                Value::Text(parsed.header.entity_id.clone()),
-                Value::Text(parsed.header.entity_type.clone()),
-                Value::Text(era.label.clone()),
-                Value::Text(era.start_month.clone()),
-                Value::Text(era.end_month.clone()),
-                Value::Integer(era.distinct_documents as i64),
-                Value::Integer(era.substantive_tokens as i64),
-                Value::Integer(era.occurrence_count as i64),
-                Value::Integer(era.catalyst_budget as i64),
-                Value::Text(era.status.clone()),
-                opt_val(era.reason.clone()),
-                Value::Integer(parsed.header.generated_at_ms),
-            ],
-        )
-        .await?;
-        era_rows += 1;
-    }
-    Ok((receipt_rows, era_rows))
-}
-
 // ---------------------------------------------------------------------------
 // High-level query / CRUD methods on Database
 // ---------------------------------------------------------------------------
 
 impl Database {
-    pub fn record_catalyst_generation_skip(
-        &self,
-        audit: &CatalystEraAudit<'_>,
-        reason_code: &str,
-    ) -> Result<()> {
-        self.execute_write(
-            "INSERT INTO catalyst_generation_skips
-             (generation_run_id, epoch_id, entity, entity_type, era_label,
-              reason_code, reason, distinct_documents, substantive_tokens, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            vec![
-                Value::Text(audit.generation_run_id.to_string()),
-                opt_val(audit.epoch_id.map(str::to_string)),
-                Value::Text(audit.entity.to_string()),
-                Value::Text(audit.entity_type.to_string()),
-                Value::Text(audit.era_label.to_string()),
-                Value::Text(reason_code.to_string()),
-                Value::Text(audit.reason.unwrap_or_default().to_string()),
-                Value::Integer(audit.distinct_documents as i64),
-                Value::Integer(audit.substantive_tokens as i64),
-                Value::Integer(audit.created_at_ms),
-            ],
-        )?;
-        Ok(())
-    }
-
     // -----------------------------------------------------------------------
     // Document operations
     // -----------------------------------------------------------------------
@@ -1540,40 +1409,12 @@ impl Database {
                     ],
                 )
                 .await?;
-                index_catalyst_text(&tx, &cat.id, &cat.text).await?;
             }
 
             tx.commit()
                 .await
                 .context("failed to commit insert_catalysts")?;
             Ok(())
-        })
-    }
-
-    /// Drop and reconstruct receipt/era indexes from canonical catalyst text.
-    /// Skip records are an operational log and are intentionally untouched.
-    pub fn rebuild_catalyst_derived_indexes(&self) -> Result<(usize, usize)> {
-        let catalysts = self.get_all_catalysts()?;
-        block_in_place_sync(async move {
-            let tx = self
-                .conn
-                .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
-                .await
-                .context("begin catalyst derived-index rebuild")?;
-            tx.execute("DELETE FROM catalyst_receipts", ()).await?;
-            tx.execute("DELETE FROM catalyst_eras", ()).await?;
-            let mut receipts = 0;
-            let mut eras = 0;
-            for catalyst in catalysts {
-                let (receipt_count, era_count) =
-                    index_catalyst_text(&tx, &catalyst.id, &catalyst.text).await?;
-                receipts += receipt_count;
-                eras += era_count;
-            }
-            tx.commit()
-                .await
-                .context("commit catalyst derived-index rebuild")?;
-            Ok((receipts, eras))
         })
     }
 
@@ -1669,20 +1510,6 @@ impl Database {
                 Value::Text(entity.clone()),
                 Value::Text(entity_type.clone()),
             ];
-            tx.execute(
-                "DELETE FROM catalyst_receipts WHERE catalyst_id IN (
-                    SELECT id FROM catalysts WHERE entity = ?1
-                      AND (json_extract(metadata, '$.entity_type') = ?2
-                           OR json_extract(metadata, '$.entity_type') IS NULL)
-                 )",
-                params.clone(),
-            )
-            .await?;
-            tx.execute(
-                "DELETE FROM catalyst_eras WHERE entity=?1 AND entity_type=?2",
-                params.clone(),
-            )
-            .await?;
             tx.execute(
                 "DELETE FROM catalysts WHERE entity = ?1
                    AND (json_extract(metadata, '$.entity_type') = ?2
@@ -2692,26 +2519,6 @@ impl Database {
                 ))
             },
         )?;
-        let skip_rows = shadow.query_read(
-            "SELECT generation_run_id, epoch_id, entity, entity_type, era_label,
-                    reason_code, reason, distinct_documents, substantive_tokens, created_at_ms
-             FROM catalyst_generation_skips WHERE epoch_id=?1",
-            vec![Value::Text(epoch_id.to_string())],
-            |row| {
-                Ok((
-                    row.get::<String>(0)?,
-                    row.get::<Option<String>>(1)?,
-                    row.get::<String>(2)?,
-                    row.get::<String>(3)?,
-                    row.get::<String>(4)?,
-                    row.get::<String>(5)?,
-                    row.get::<String>(6)?,
-                    row.get::<i64>(7)?,
-                    row.get::<i64>(8)?,
-                    row.get::<i64>(9)?,
-                ))
-            },
-        )?;
         let packed = shadow
             .query_read(
                 "SELECT count, ids, vectors FROM catalyst_embeddings_packed WHERE id=1",
@@ -2809,8 +2616,6 @@ impl Database {
                 .await?;
             tx.execute("DELETE FROM catalysts", ()).await?;
             tx.execute("DELETE FROM catalyst_entity_hashes", ()).await?;
-            tx.execute("DELETE FROM catalyst_receipts", ()).await?;
-            tx.execute("DELETE FROM catalyst_eras", ()).await?;
             for (entity, entity_type, context_hash, generated_at_ms) in entity_hashes {
                 tx.execute(
                     "INSERT INTO catalyst_entity_hashes
@@ -2826,7 +2631,6 @@ impl Database {
                 .await?;
             }
             for (id, text, entity, context, generated_at, metadata) in catalysts {
-                index_catalyst_text(&tx, &id, &text).await?;
                 tx.execute(
                     "INSERT INTO catalysts (id,text,entity,context,generated_at,metadata)
                      VALUES (?1,?2,?3,?4,?5,?6)",
@@ -2868,27 +2672,6 @@ impl Database {
                         Value::Text("{}".to_string()),
                         Value::Text("{}".to_string()),
                         Value::Text(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-                    ],
-                )
-                .await?;
-            }
-            for row in skip_rows {
-                tx.execute(
-                    "INSERT INTO catalyst_generation_skips
-                     (generation_run_id,epoch_id,entity,entity_type,era_label,reason_code,reason,
-                      distinct_documents,substantive_tokens,created_at_ms)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                    vec![
-                        Value::Text(row.0),
-                        opt_val(row.1),
-                        Value::Text(row.2),
-                        Value::Text(row.3),
-                        Value::Text(row.4),
-                        Value::Text(row.5),
-                        Value::Text(row.6),
-                        Value::Integer(row.7),
-                        Value::Integer(row.8),
-                        Value::Integer(row.9),
                     ],
                 )
                 .await?;

@@ -771,24 +771,6 @@ impl MockLlm {
 
     /// Build a well-formed OpenAI chat-completion JSON body wrapping `content`.
     pub fn completion_body(content: &str) -> String {
-        // Most compatibility fixtures predate evidence-anchor output. Preserve
-        // their intent by grounding every canned catalyst in the first evidence
-        // label; dedicated grounding tests exercise invalid/missing labels.
-        let content = serde_json::from_str::<serde_json::Value>(content)
-            .ok()
-            .map(|mut value| {
-                if value.get("anchorIds").is_none()
-                    && let Some(count) = value
-                        .get("catalysts")
-                        .and_then(|v| v.as_array())
-                        .map(Vec::len)
-                {
-                    value["anchorIds"] =
-                        serde_json::json!((0..count).map(|_| vec!["E1"]).collect::<Vec<_>>());
-                }
-                value.to_string()
-            })
-            .unwrap_or_else(|| content.to_string());
         serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",

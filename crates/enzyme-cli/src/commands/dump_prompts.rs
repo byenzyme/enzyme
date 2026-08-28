@@ -65,14 +65,14 @@ pub async fn run_dump_prompts(
         concurrency: None,
         stream_partial_catalysts: false,
         force_regenerate: false,
-        min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+        min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
-        min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
+        min_context_tokens: std::env::var("ENZYME_MIN_CONTEXT_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
         epoch_id: None,
     };
 

@@ -9,7 +9,7 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
 use enzyme_core::models::{catalyst_embedding_text, parse_catalyst_text};
 use enzyme_core::pipeline::catalysts::{
-    CatalystConfig, CatalystPipeline, DEFAULT_MIN_EVIDENCE_DOCUMENTS, DEFAULT_MIN_EVIDENCE_TOKENS,
+    CatalystConfig, CatalystPipeline, DEFAULT_MIN_CONTEXT_DOCUMENTS, DEFAULT_MIN_CONTEXT_TOKENS,
 };
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::epoch::{GenerationContract, now_ms};
@@ -48,7 +48,7 @@ fn focus_entity(db: &Database) -> enzyme_core::models::Entity {
 fn contract(service: &enzyme_core::embedding::EmbeddingService) -> GenerationContract {
     GenerationContract {
         schema_version: "catalyst-epoch.v2".into(),
-        prompt_version: "catalyst-prompts.2026-08-canonical-receipts".into(),
+        prompt_version: "catalyst-prompts.2026-08-context-sources".into(),
         catalyst_format: DEFAULT_FORMAT_KEY.into(),
         catalyst_profile: DEFAULT_PROFILE_KEY.into(),
         model: "fixture-model".into(),
@@ -64,16 +64,16 @@ fn contract(service: &enzyme_core::embedding::EmbeddingService) -> GenerationCon
         selection_config_json: "{}".into(),
         max_context_chars: None,
         max_context_samples: 20,
-        min_evidence_documents: DEFAULT_MIN_EVIDENCE_DOCUMENTS,
-        min_evidence_tokens: DEFAULT_MIN_EVIDENCE_TOKENS,
+        min_context_documents: DEFAULT_MIN_CONTEXT_DOCUMENTS,
+        min_context_tokens: DEFAULT_MIN_CONTEXT_TOKENS,
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claims() {
+async fn stub_generation_persists_engine_selected_source_refs() {
     let temp = tempfile::tempdir().unwrap();
     let vault = temp.path().join("vault");
-    write_evidence(&vault, DEFAULT_MIN_EVIDENCE_DOCUMENTS, false);
+    write_evidence(&vault, DEFAULT_MIN_CONTEXT_DOCUMENTS, false);
     let db = Database::open(temp.path().join("enzyme.db")).unwrap();
     IndexingPipeline::new(&db, vault.clone())
         .run(true, |_| {})
@@ -83,11 +83,9 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
     let server = MockServer::start().await;
     let content = serde_json::json!({
         "catalysts": [
-            "Which concrete migration tradeoff keeps source evidence auditable?",
-            "What unnamed needs are accelerating engagement?"
+            "Which concrete migration tradeoff keeps source evidence auditable?"
         ],
-        "topicNames": ["auditable migration tradeoff", "generic engagement prose"],
-        "anchorIds": [["E1"], ["NOT_SUPPLIED"]]
+        "topicNames": ["auditable migration tradeoff"]
     });
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -107,8 +105,8 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
         entity_profiles: &profiles,
         catalysts_per_entity: 1,
         model: "fixture-model",
-        min_evidence_documents: DEFAULT_MIN_EVIDENCE_DOCUMENTS,
-        min_evidence_tokens: DEFAULT_MIN_EVIDENCE_TOKENS,
+        min_context_documents: DEFAULT_MIN_CONTEXT_DOCUMENTS,
+        min_context_tokens: DEFAULT_MIN_CONTEXT_TOKENS,
         epoch_id: Some(&epoch_id),
         ..Default::default()
     };
@@ -117,68 +115,24 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
         .await
         .unwrap();
     assert_eq!(stats.catalysts_generated, 1);
-    assert_eq!(stats.hypotheses_rejected, 1);
 
     let catalyst = db.get_all_catalysts().unwrap().pop().unwrap();
     let canonical = parse_catalyst_text(&catalyst.text).unwrap();
-    let anchors = &canonical.receipts;
-    assert!(!canonical.header.era.is_empty());
-    assert_eq!(
-        canonical.header.epoch_id.as_deref(),
-        Some(epoch_id.as_str())
+    let source_refs = &canonical.source_refs;
+    assert!(
+        catalyst
+            .metadata
+            .get("era")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|era| !era.is_empty())
     );
-    assert_eq!(anchors.len(), 1);
-    assert!(anchors[0].source_ref.contains("evidence-"));
-    assert!(!anchors[0].occurrence_ids.is_empty());
-    assert!(!anchors[0].quote.is_empty());
-    assert!(catalyst.text.contains("```receipts\n"));
-    assert!(!catalyst_embedding_text(&catalyst.text).contains(&anchors[0].source_ref));
-
-    let derived_snapshot = || {
-        let receipts = db
-            .query_read(
-                "SELECT catalyst_id,anchor_id,occurrence_ordinal,source_ref,occurrence_id,
-                        timestamp_ms,chunk_index,quote FROM catalyst_receipts
-                 ORDER BY catalyst_id,anchor_id,occurrence_ordinal",
-                vec![],
-                |row| {
-                    Ok((
-                        row.get::<String>(0)?,
-                        row.get::<String>(1)?,
-                        row.get::<i64>(2)?,
-                        row.get::<String>(3)?,
-                        row.get::<Option<i64>>(4)?,
-                        row.get::<i64>(5)?,
-                        row.get::<Option<i64>>(6)?,
-                        row.get::<String>(7)?,
-                    ))
-                },
-            )
-            .unwrap();
-        let eras = db
-            .query_read(
-                "SELECT generation_run_id,epoch_id,entity,entity_type,era_label,start_month,
-                        end_month,distinct_documents,substantive_tokens,occurrence_count,
-                        catalyst_budget,status,reason,created_at_ms FROM catalyst_eras
-                 ORDER BY generation_run_id,entity,entity_type,era_label",
-                vec![],
-                |row| {
-                    Ok((0..14)
-                        .map(|index| format!("{:?}", row.get_value(index).unwrap()))
-                        .collect::<Vec<_>>())
-                },
-            )
-            .unwrap();
-        (receipts, eras)
-    };
-    let before_rebuild = derived_snapshot();
-    db.execute_write("DELETE FROM catalyst_receipts", vec![])
-        .unwrap();
-    db.execute_write("DELETE FROM catalyst_eras", vec![])
-        .unwrap();
-    let rebuilt = db.rebuild_catalyst_derived_indexes().unwrap();
-    assert!(rebuilt.0 > 0 && rebuilt.1 > 0);
-    assert_eq!(derived_snapshot(), before_rebuild);
+    assert_eq!(source_refs.len(), 1);
+    assert!(source_refs[0].contains("evidence-"));
+    assert!(catalyst.text.contains("```enzyme-context\n"));
+    assert!(!catalyst.text.contains("anchor_id"));
+    assert!(!catalyst.text.contains("occurrence_ids"));
+    assert!(!catalyst.text.contains("timestamp_ms"));
+    assert!(!catalyst_embedding_text(&catalyst.text).contains(&source_refs[0]));
 
     EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
     SimilarityPipeline::new(&db, service)
@@ -189,45 +143,121 @@ async fn stub_generation_persists_and_returns_anchors_and_drops_ungrounded_claim
     let response = ContextSearch::new(&db, service)
         .catalyze_search("auditable migration tradeoff", 5)
         .unwrap();
-    assert!(!response.results[0].evidence_anchors.is_empty());
-    assert!(
-        !response.top_contributing_catalysts[0]
-            .evidence_anchors
-            .is_empty()
-    );
     assert!(
         response.top_contributing_catalysts[0]
             .text
-            .contains("```receipts\n")
+            .contains("```enzyme-context\n")
     );
     assert!(
         response.results[0]
             .via_catalyst_text
             .as_deref()
             .unwrap()
-            .contains("```receipts\n")
+            .contains("```enzyme-context\n")
     );
 
-    let (eras, epochs): (i64, i64) = (
-        db.query_read(
-            "SELECT COUNT(*) FROM catalyst_eras WHERE epoch_id=?1 AND occurrence_count > 0 AND catalyst_budget > 0",
-            vec![libsql::Value::Text(epoch_id.clone())],
-            |row| row.get(0),
-        )
-        .unwrap()[0],
-        db.query_read(
+    let epochs: i64 = db
+        .query_read(
             "SELECT COUNT(*) FROM catalyst_epochs WHERE epoch_id=?1 AND status='active'",
             vec![libsql::Value::Text(epoch_id)],
             |row| row.get(0),
         )
-        .unwrap()[0],
-    );
-    assert!(eras > 0);
+        .unwrap()[0];
     assert_eq!(epochs, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn thin_evidence_skips_llm_and_records_reason() {
+async fn every_catalyst_carries_the_engine_selected_source_refs() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    let projects = vault.join("projects");
+    std::fs::create_dir_all(&projects).unwrap();
+    for day in 1..=3 {
+        std::fs::write(
+            projects.join(format!("2024-01-0{day}-garden-irrigation.md")),
+            "---\ntags: [focus]\n---\n\nThe garden irrigation manifold balances drip pressure across the vegetable beds. A calibrated valve controls the watering cycle. Related: [[heliograph-antenna]].",
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join(format!("2025-01-0{day}-heliograph-antenna.md")),
+            "---\ntags: [focus]\n---\n\nThe heliograph antenna mounts to the chimney mast. Signal telemetry determines the antenna calibration angle. Related: [[garden-irrigation]].",
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    IndexingPipeline::new(&db, vault.clone())
+        .run(true, |_| {})
+        .unwrap();
+    let entity = focus_entity(&db);
+
+    let server = MockServer::start().await;
+    let content = serde_json::json!({
+        "catalysts": [
+            "How does the heliograph antenna's chimney mast constrain signal telemetry?",
+            "Which garden irrigation manifold tradeoff protects drip pressure?"
+        ],
+        "topicNames": ["antenna signal telemetry", "irrigation pressure tradeoff"],
+        "eraLabels": ["2024-Q1", "2025-Q1"]
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let llm = LlmClient::with_base_url("fixture-key", &server.uri());
+    let profiles = HashMap::new();
+    let config = CatalystConfig {
+        entity_profiles: &profiles,
+        catalysts_per_entity: 2,
+        model: "fixture-model",
+        max_samples: 2,
+        min_context_documents: 1,
+        min_context_tokens: 1,
+        ..Default::default()
+    };
+    let stats = CatalystPipeline::new(&db, &llm, None)
+        .run(&[entity], &config, |_| {})
+        .await
+        .unwrap();
+
+    assert_eq!(stats.catalysts_generated, 2);
+    let persisted = db
+        .get_all_catalysts()
+        .unwrap()
+        .into_iter()
+        .map(|catalyst| parse_catalyst_text(&catalyst.text).unwrap())
+        .collect::<Vec<_>>();
+    let antenna = persisted
+        .iter()
+        .find(|catalyst| catalyst.hypothesis.contains("heliograph antenna"))
+        .unwrap();
+    assert_eq!(antenna.source_refs.len(), 2);
+    assert!(
+        antenna
+            .source_refs
+            .iter()
+            .any(|source| source.contains("heliograph-antenna"))
+    );
+    assert!(
+        antenna
+            .source_refs
+            .iter()
+            .any(|source| source.contains("garden-irrigation"))
+    );
+
+    let irrigation = persisted
+        .iter()
+        .find(|catalyst| catalyst.hypothesis.contains("garden irrigation"))
+        .unwrap();
+    assert_eq!(irrigation.source_refs, antenna.source_refs);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thin_context_skips_llm() {
     let temp = tempfile::tempdir().unwrap();
     let vault = temp.path().join("vault");
     write_evidence(&vault, 3, true);
@@ -260,15 +290,94 @@ async fn thin_evidence_skips_llm_and_records_reason() {
     assert_eq!(stats.entities_below_threshold, 1);
     assert!(db.get_all_catalysts().unwrap().is_empty());
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
-    let reasons = db
-        .query_read(
-            "SELECT reason_code, reason FROM catalyst_generation_skips",
-            vec![],
-            |row| Ok((row.get::<String>(0)?, row.get::<String>(1)?)),
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_context_sufficiency_does_not_filter_individual_eras() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    for index in 0..3 {
+        std::fs::write(
+            vault.join(format!("eligible-{index}.md")),
+            format!(
+                "---\ntags: [focus]\ndate: 2025-01-0{}\n---\n\nELIGIBLE_ERA_MARKER {}",
+                index + 1,
+                "The migration decision preserves grounded evidence while recording a concrete product tradeoff for later review. "
+                    .repeat(8)
+            ),
         )
         .unwrap();
-    assert_eq!(reasons[0].0, "thin_evidence");
-    assert!(reasons[0].1.contains("distinct documents"));
+        std::fs::write(
+            vault.join(format!("thin-{index}.md")),
+            format!(
+                "---\ntags: [focus]\ndate: 2026-01-0{}\n---\n\nTHIN_ERA_MARKER {}",
+                index + 1,
+                "Forwarded newsletter unsubscribe view browser advertisement ".repeat(12)
+            ),
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    IndexingPipeline::new(&db, vault.clone())
+        .run(true, |_| {})
+        .unwrap();
+    let entity = focus_entity(&db);
+    assert_eq!(entity.trends.timeline_buckets.len(), 2);
+
+    let server = MockServer::start().await;
+    let content = serde_json::json!({
+        "catalysts": ["Which migration tradeoff keeps the recorded evidence available for later review?"],
+        "topicNames": ["grounded migration tradeoff"],
+        "eraLabels": ["2026-Q1"]
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let llm = LlmClient::with_base_url("fixture-key", &server.uri());
+    let profiles = HashMap::new();
+    let config = CatalystConfig {
+        entity_profiles: &profiles,
+        catalysts_per_entity: 2,
+        model: "fixture-model",
+        ..Default::default()
+    };
+    let stats = CatalystPipeline::new(&db, &llm, None)
+        .run(&[entity], &config, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(stats.catalysts_generated, 1);
+    assert_eq!(stats.entities_below_threshold, 0);
+    assert!(stats.suppressed_entities.is_empty());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = String::from_utf8_lossy(&requests[0].body);
+    assert!(request.contains("ELIGIBLE_ERA_MARKER"));
+    assert!(request.contains("THIN_ERA_MARKER"));
+    assert!(request.contains("Generate 2 catalyst"));
+
+    let catalyst = db.get_all_catalysts().unwrap().pop().unwrap();
+    let canonical = parse_catalyst_text(&catalyst.text).unwrap();
+    assert!(catalyst.metadata.get("era").and_then(|era| era.as_str()) == Some("2026-Q1"));
+    assert!(
+        canonical
+            .source_refs
+            .iter()
+            .any(|source| source.contains("eligible-"))
+    );
+    assert!(
+        canonical
+            .source_refs
+            .iter()
+            .any(|source| source.contains("thin-"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -345,8 +454,7 @@ async fn shared_document_link_entities_each_see_full_conversation() {
             "catalysts": [
                 format!("What does the shared migration boundary leave unresolved for {name}?")
             ],
-            "topicNames": ["shared migration boundary"],
-            "anchorIds": [["E1"]]
+            "topicNames": ["shared migration boundary"]
         });
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -364,8 +472,8 @@ async fn shared_document_link_entities_each_see_full_conversation() {
         entity_profiles: &profiles,
         catalysts_per_entity: 1,
         model: "fixture-model",
-        min_evidence_documents: 1,
-        min_evidence_tokens: 1,
+        min_context_documents: 1,
+        min_context_tokens: 1,
         ..Default::default()
     };
     let stats = CatalystPipeline::new(&db, &llm, None)
@@ -373,7 +481,6 @@ async fn shared_document_link_entities_each_see_full_conversation() {
         .await
         .unwrap();
     assert_eq!(stats.catalysts_generated, 2);
-    assert_eq!(stats.hypotheses_rejected, 0);
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
@@ -402,9 +509,9 @@ async fn shared_document_link_entities_each_see_full_conversation() {
         let canonical = parse_catalyst_text(&catalyst.text).unwrap();
         assert!(
             canonical
-                .receipts
+                .source_refs
                 .iter()
-                .all(|receipt| receipt.source_ref.starts_with("sqlite:mail/"))
+                .all(|source_ref| source_ref.starts_with("sqlite:mail/"))
         );
     }
 

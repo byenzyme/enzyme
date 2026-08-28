@@ -420,10 +420,7 @@ impl<'a> SimilarityPipeline<'a> {
 mod tests {
     use super::*;
     use crate::embedding::{EmbeddingBackend, EmbeddingService};
-    use crate::models::{
-        CATALYST_TEXT_FORMAT_VERSION, Catalyst, CatalystTextHeader, EvidenceAnchor,
-        render_catalyst_text,
-    };
+    use crate::models::{Catalyst, render_catalyst_text};
     use chrono::Utc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -498,37 +495,17 @@ mod tests {
     }
 
     #[test]
-    fn full_similarity_embedding_excludes_header_and_receipts() {
+    fn full_similarity_embedding_excludes_source_refs() {
         let db = Database::open_in_memory().unwrap();
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let service = EmbeddingService::new(Box::new(RecordingBackend(recorded.clone())));
-        let header = CatalystTextHeader {
-            format_version: CATALYST_TEXT_FORMAT_VERSION,
-            entity_id: "Alice".into(),
-            entity_type: "link".into(),
-            era: "2026-08".into(),
-            generation_run_id: "run-1".into(),
-            epoch_id: None,
-            generated_at_ms: 1,
-            eras: vec![],
-        };
-        let receipt = EvidenceAnchor {
-            anchor_id: "E1".into(),
-            source_ref: "SECRET_SOURCE_REF".into(),
-            occurrence_ids: vec![1],
-            timestamp_ms: 1,
-            chunk_index: None,
-            quote: "SECRET_RECEIPT_QUOTE".into(),
-        };
-        let text = render_catalyst_text(&header, "Hypothesis prose [E1].", &[receipt]).unwrap();
+        let source = "SECRET_SOURCE_REF".to_string();
+        let text = render_catalyst_text("Hypothesis prose.", &[source]).unwrap();
         let catalyst = make_catalyst("canonical", &text);
         SimilarityPipeline::new(&db, &service)
             .run_with_catalysts(&[catalyst], |_, _| {})
             .unwrap();
-        assert_eq!(
-            recorded.lock().unwrap().as_slice(),
-            ["Hypothesis prose [E1]."]
-        );
+        assert_eq!(recorded.lock().unwrap().as_slice(), ["Hypothesis prose."]);
     }
 
     #[test]

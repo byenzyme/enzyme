@@ -13,7 +13,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::db::{CatalystEraAudit, Database, FileChunk};
+use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
@@ -23,9 +23,8 @@ use crate::llm::{
     streaming_entries_instruction,
 };
 use crate::models::{
-    CATALYST_TEXT_FORMAT_VERSION, Catalyst, CatalystTextEra, CatalystTextHeader, Embedding, Entity,
-    EntityOccurrence, EntityType, EvidenceAnchor, INLINE_CONTEXT_MAX_WORDS, parse_catalyst_text,
-    render_catalyst_text,
+    Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
+    parse_catalyst_text, render_catalyst_text,
 };
 use crate::pipeline::eras::{
     Era, allocate_catalysts_to_eras, apply_timeline_weights, assign_occurrences_to_eras,
@@ -50,9 +49,12 @@ const MIN_CONTEXT_SAMPLES_PER_ENTITY: usize = 10;
 const LOCAL_MAX_CONTEXT_SAMPLES: usize = 10;
 const CHUNK_MMR_TOP_K: usize = 50;
 const CHUNK_MMR_LAMBDA: f32 = 0.5;
-pub const DEFAULT_MIN_EVIDENCE_DOCUMENTS: usize = 4;
-pub const DEFAULT_MIN_EVIDENCE_TOKENS: usize = 128;
-const EVIDENCE_QUOTE_MAX_CHARS: usize = 320;
+/// A single substantive note is enough to generate useful catalysts.
+pub const DEFAULT_MIN_CONTEXT_DOCUMENTS: usize = 1;
+/// Reject near-empty and boilerplate-only context without excluding focused
+/// one-note entities during first-run setup.
+pub const DEFAULT_MIN_CONTEXT_TOKENS: usize = 32;
+const CONTEXT_EXCERPT_MAX_CHARS: usize = 320;
 
 /// Simplified system prompt for local fine-tuned models.
 /// Profiles, vault overview, and format template are baked in via SFT training.
@@ -87,9 +89,8 @@ what it's in friction with, or what it quietly assumes.
 one sentence. IMPORTANT: Vary your sentence openings — do NOT start multiple \
 catalysts with the same word.
 3. For topicNames: 3-5 lowercase words capturing each inquiry.
-4. For anchorIds: cite at least one supplied evidence label for every catalyst. Never invent labels.
 
-Always respond with valid JSON that includes the catalysts, topic names, and anchor ids.";
+Always respond with valid JSON that includes the catalysts and topic names.";
 
 /// Lasso compression: keep head 60% + tail 40% with a `[…]` marker.
 /// Preserves structural bookends (entity/instruction at start and end).
@@ -203,13 +204,23 @@ fn apply_context_budget(samples: Vec<String>, max_samples: usize, max_chars: usi
 #[derive(Clone)]
 struct ChunkCandidate {
     source_ref: String,
-    occurrence_ids: Vec<i64>,
     chunk_index: u32,
     content: String,
     timestamp: i64,
     era_index: usize,
     relevance: f32,
     vector: Option<Vec<f32>>,
+}
+
+/// A selected excerpt while one model request is in flight.
+///
+/// Timestamp and excerpt support selection and request construction. Only the
+/// source reference is durable.
+#[derive(Clone)]
+struct GenerationContextSource {
+    source_ref: String,
+    timestamp_ms: i64,
+    excerpt: String,
 }
 
 struct ChunkSelectionPreload {
@@ -220,7 +231,7 @@ struct ChunkSelectionPreload {
 struct SelectedContext {
     era_context: Option<EraContext>,
     flat_samples: Vec<String>,
-    evidence_anchors: Vec<EvidenceAnchor>,
+    context_sources: Vec<GenerationContextSource>,
 }
 
 fn constrain_labelled_context(mut context: SelectedContext, max_chars: usize) -> SelectedContext {
@@ -245,34 +256,26 @@ fn constrain_labelled_context(mut context: SelectedContext, max_chars: usize) ->
     context
 }
 
-fn evidence_quote(content: &str) -> String {
+fn context_excerpt(content: &str) -> String {
     let compact = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    lasso_truncate(&compact, EVIDENCE_QUOTE_MAX_CHARS)
+    lasso_truncate(&compact, CONTEXT_EXCERPT_MAX_CHARS)
 }
 
-fn format_anchor(anchor: &EvidenceAnchor, content: &str) -> String {
+fn format_context_source(source: &GenerationContextSource, content: &str) -> String {
     format!(
-        "[{}] source_ref={} occurrence_ids={} timestamp_ms={}\n{}",
-        anchor.anchor_id,
-        anchor.source_ref,
-        serde_json::to_string(&anchor.occurrence_ids).unwrap_or_else(|_| "[]".into()),
-        anchor.timestamp_ms,
-        content
+        "source_ref={} timestamp_ms={}\n{}",
+        source.source_ref, source.timestamp_ms, content
     )
 }
 
-fn occurrence_anchor(
-    anchor_id: String,
+fn occurrence_context_source(
     occurrence: &EntityOccurrence,
     content: &str,
-) -> EvidenceAnchor {
-    EvidenceAnchor {
-        anchor_id,
+) -> GenerationContextSource {
+    GenerationContextSource {
         source_ref: occurrence.file_path.clone(),
-        occurrence_ids: occurrence.id.into_iter().collect(),
         timestamp_ms: occurrence_timestamp(occurrence),
-        chunk_index: None,
-        quote: evidence_quote(content),
+        excerpt: context_excerpt(content),
     }
 }
 
@@ -301,116 +304,21 @@ fn substantive_token_count(text: &str) -> usize {
         .count()
 }
 
-fn era_audits(
-    eras: &[Era],
-    anchors: &[EvidenceAnchor],
-    catalyst_budget: usize,
+fn context_is_sufficient(
+    sources: &[GenerationContextSource],
     min_documents: usize,
     min_tokens: usize,
-) -> Vec<EraAuditRecord> {
-    let allocations = allocate_catalysts_to_eras(eras, catalyst_budget, 1);
-    let groups = if eras.len() > 1 {
-        eras.iter()
-            .enumerate()
-            .map(|(idx, era)| {
-                (
-                    era.label.clone(),
-                    era.start.clone(),
-                    era.end.clone(),
-                    Some(idx),
-                )
-            })
-            .collect::<Vec<_>>()
-    } else {
-        let (label, start, end) = eras.first().map_or_else(
-            || {
-                let mut months = anchors
-                    .iter()
-                    .filter_map(|anchor| month_key_from_timestamp(anchor.timestamp_ms))
-                    .collect::<Vec<_>>();
-                months.sort();
-                let start = months.first().cloned().unwrap_or_default();
-                let end = months.last().cloned().unwrap_or_else(|| start.clone());
-                let label = match (start.is_empty(), start == end) {
-                    (true, _) => "undated".to_string(),
-                    (false, true) => start.clone(),
-                    (false, false) => format!("{start} to {end}"),
-                };
-                (label, start, end)
-            },
-            |era| (era.label.clone(), era.start.clone(), era.end.clone()),
-        );
-        vec![(label, start, end, None)]
-    };
-
-    groups
-        .into_iter()
-        .map(|(label, start, end, era_idx)| {
-            let evidence = anchors.iter().filter(|anchor| {
-                era_idx.is_none()
-                    || era_index_for_timestamp(eras, anchor.timestamp_ms) == era_idx.unwrap()
-            });
-            let evidence = evidence.collect::<Vec<_>>();
-            let distinct_documents = evidence
-                .iter()
-                .map(|anchor| anchor.source_ref.as_str())
-                .collect::<HashSet<_>>()
-                .len();
-            let substantive_tokens = evidence
-                .iter()
-                .map(|anchor| substantive_token_count(&anchor.quote))
-                .sum();
-            let reason = if distinct_documents < min_documents {
-                Some(format!(
-                    "thin evidence: {distinct_documents} distinct documents; minimum is {min_documents}"
-                ))
-            } else if substantive_tokens < min_tokens {
-                Some(format!(
-                    "thin evidence: {substantive_tokens} substantive tokens; minimum is {min_tokens}"
-                ))
-            } else {
-                None
-            };
-            EraAuditRecord {
-                label,
-                start,
-                end,
-                occurrence_count: era_idx
-                    .and_then(|idx| eras.get(idx))
-                    .map_or(evidence.len(), |era| era.count.max(0) as usize),
-                catalyst_budget: era_idx
-                    .and_then(|idx| allocations.get(idx).copied())
-                    .unwrap_or(catalyst_budget),
-                distinct_documents,
-                substantive_tokens,
-                status: if reason.is_some() { "skipped" } else { "eligible" },
-                reason,
-            }
-        })
-        .collect()
-}
-
-fn validate_grounded_catalysts(
-    catalysts: Vec<ParsedCatalyst>,
-    anchors: &[EvidenceAnchor],
-) -> (Vec<ParsedCatalyst>, usize) {
-    let valid_ids = anchors
+) -> bool {
+    let distinct_documents = sources
         .iter()
-        .map(|anchor| anchor.anchor_id.as_str())
-        .collect::<HashSet<_>>();
-    let before = catalysts.len();
-    let kept = catalysts
-        .into_iter()
-        .filter(|catalyst| {
-            !catalyst.anchor_ids.is_empty()
-                && catalyst
-                    .anchor_ids
-                    .iter()
-                    .all(|id| valid_ids.contains(id.as_str()))
-        })
-        .collect::<Vec<_>>();
-    let rejected = before - kept.len();
-    (kept, rejected)
+        .map(|source| source.source_ref.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let substantive_tokens = sources
+        .iter()
+        .map(|source| substantive_token_count(&source.excerpt))
+        .sum::<usize>();
+    distinct_documents >= min_documents && substantive_tokens >= min_tokens
 }
 
 fn occurrence_timestamp(occ: &EntityOccurrence) -> i64 {
@@ -479,7 +387,7 @@ fn build_occurrence_context(
         max_context_chars,
     );
 
-    let mut evidence_anchors = Vec::new();
+    let mut context_sources = Vec::new();
     let mut used_occurrences = HashSet::new();
     let mut label_sample = |content: &str| {
         let occurrence = occurrences
@@ -505,14 +413,10 @@ fn build_occurrence_context(
             return content.to_string();
         };
         used_occurrences.insert(occurrence_idx);
-        let anchor = occurrence_anchor(
-            format!("E{}", evidence_anchors.len() + 1),
-            occurrence,
-            content,
-        );
-        let labelled = format_anchor(&anchor, content);
-        evidence_anchors.push(anchor);
-        labelled
+        let source = occurrence_context_source(occurrence, content);
+        let formatted = format_context_source(&source, content);
+        context_sources.push(source);
+        formatted
     };
 
     let era_context = raw_era_context.map(|mut context| {
@@ -536,7 +440,7 @@ fn build_occurrence_context(
         SelectedContext {
             era_context,
             flat_samples,
-            evidence_anchors,
+            context_sources,
         },
         max_context_chars,
     )
@@ -642,18 +546,14 @@ fn finalize_chunk_context(
     candidates: &[ChunkCandidate],
     selected: &[usize],
 ) -> SelectedContext {
-    let evidence_anchors = selected
+    let context_sources = selected
         .iter()
-        .enumerate()
-        .map(|(position, idx)| {
+        .map(|idx| {
             let candidate = &candidates[*idx];
-            EvidenceAnchor {
-                anchor_id: format!("E{}", position + 1),
+            GenerationContextSource {
                 source_ref: candidate.source_ref.clone(),
-                occurrence_ids: candidate.occurrence_ids.clone(),
                 timestamp_ms: candidate.timestamp,
-                chunk_index: Some(candidate.chunk_index),
-                quote: evidence_quote(&candidate.content),
+                excerpt: context_excerpt(&candidate.content),
             }
         })
         .collect::<Vec<_>>();
@@ -665,7 +565,7 @@ fn finalize_chunk_context(
                 let candidate = &candidates[*idx];
                 (
                     candidate.era_index,
-                    format_anchor(&evidence_anchors[position], &candidate.content),
+                    format_context_source(&context_sources[position], &candidate.content),
                 )
             })
             .collect::<Vec<_>>();
@@ -676,7 +576,7 @@ fn finalize_chunk_context(
                 samples,
             }),
             flat_samples: Vec::new(),
-            evidence_anchors,
+            context_sources,
         }
     } else {
         SelectedContext {
@@ -685,10 +585,10 @@ fn finalize_chunk_context(
                 .iter()
                 .enumerate()
                 .map(|(position, idx)| {
-                    format_anchor(&evidence_anchors[position], &candidates[*idx].content)
+                    format_context_source(&context_sources[position], &candidates[*idx].content)
                 })
                 .collect(),
-            evidence_anchors,
+            context_sources,
         }
     }
 }
@@ -802,19 +702,12 @@ fn build_chunk_candidates(
     query_vector: Option<&[f32]>,
 ) -> Vec<ChunkCandidate> {
     let mut file_timestamps: HashMap<&str, i64> = HashMap::new();
-    let mut file_occurrence_ids: HashMap<&str, Vec<i64>> = HashMap::new();
     for occ in occurrences {
         let ts = occurrence_timestamp(occ);
         file_timestamps
             .entry(occ.file_path.as_str())
             .and_modify(|existing| *existing = (*existing).max(ts))
             .or_insert(ts);
-        if let Some(id) = occ.id {
-            file_occurrence_ids
-                .entry(occ.file_path.as_str())
-                .or_default()
-                .push(id);
-        }
     }
 
     chunks
@@ -841,10 +734,6 @@ fn build_chunk_candidates(
 
             Some(ChunkCandidate {
                 source_ref: chunk.file_path.clone(),
-                occurrence_ids: file_occurrence_ids
-                    .get(chunk.file_path.as_str())
-                    .cloned()
-                    .unwrap_or_default(),
                 chunk_index: chunk.chunk_index,
                 content: chunk.content,
                 timestamp,
@@ -860,7 +749,7 @@ fn build_chunk_candidates(
 /// different canonicalization), so every entity is treated as dirty once after
 /// an upgrade rather than silently keeping catalysts the new inputs disagree
 /// with.
-const CONTEXT_HASH_VERSION: &str = "catalyst-context-v4-canonical-receipts";
+const CONTEXT_HASH_VERSION: &str = "catalyst-context-v6-generation-sources";
 
 /// Fold one labelled, length-prefixed field into the fingerprint. The label and
 /// explicit length keep concatenation unambiguous, so no combination of field
@@ -919,11 +808,9 @@ pub struct CatalystStats {
     pub duration_ms: u64,
     /// Number of entities that failed due to rate limiting (429 / timeout).
     pub rate_limited: usize,
-    /// Entities suppressed before inference because their evidence was thin.
+    /// Entities suppressed before inference because their context was thin.
     pub entities_below_threshold: usize,
-    /// Parsed hypotheses rejected because they did not cite supplied evidence.
-    pub hypotheses_rejected: usize,
-    /// (entity name, entity type) intentionally suppressed for thin evidence.
+    /// (entity name, entity type) intentionally suppressed for thin context.
     pub suppressed_entities: Vec<(String, String)>,
 }
 
@@ -965,9 +852,9 @@ pub struct CatalystConfig<'a> {
     /// matches (`--force`).
     pub force_regenerate: bool,
     /// Minimum distinct source documents required per entity-era.
-    pub min_evidence_documents: usize,
+    pub min_context_documents: usize,
     /// Minimum substantive (non-boilerplate) tokens required per entity-era.
-    pub min_evidence_tokens: usize,
+    pub min_context_tokens: usize,
     /// Durable epoch associated with this run, when an orchestrator owns one.
     pub epoch_id: Option<&'a str>,
 }
@@ -992,8 +879,8 @@ impl<'a> Default for CatalystConfig<'a> {
             concurrency: None,
             stream_partial_catalysts: false,
             force_regenerate: false,
-            min_evidence_documents: DEFAULT_MIN_EVIDENCE_DOCUMENTS,
-            min_evidence_tokens: DEFAULT_MIN_EVIDENCE_TOKENS,
+            min_context_documents: DEFAULT_MIN_CONTEXT_DOCUMENTS,
+            min_context_tokens: DEFAULT_MIN_CONTEXT_TOKENS,
             epoch_id: None,
         }
     }
@@ -1039,28 +926,14 @@ struct EntityJob {
     user_prompt: String,
     /// Fingerprint of this job's inputs; stored after the catalysts commit.
     context_hash: String,
-    evidence_anchors: Vec<EvidenceAnchor>,
-    era_audits: Vec<EraAuditRecord>,
-}
-
-#[derive(Clone)]
-struct EraAuditRecord {
-    label: String,
-    start: String,
-    end: String,
-    occurrence_count: usize,
-    catalyst_budget: usize,
-    distinct_documents: usize,
-    substantive_tokens: usize,
-    status: &'static str,
-    reason: Option<String>,
+    context_sources: Vec<GenerationContextSource>,
+    era_labels: Vec<String>,
 }
 
 struct SkippedEntity {
     entity_name: String,
     entity_type: String,
-    era_audits: Vec<EraAuditRecord>,
-    reason_code: &'static str,
+    thin_context: bool,
 }
 
 /// Result of a single entity's catalyst generation.
@@ -1070,9 +943,8 @@ struct EntityResult {
     context_hash: String,
     catalysts: Option<Vec<ParsedCatalyst>>,
     error: Option<String>,
-    evidence_anchors: Vec<EvidenceAnchor>,
-    era_audits: Vec<EraAuditRecord>,
-    rejected: usize,
+    context_sources: Vec<GenerationContextSource>,
+    era_labels: Vec<String>,
 }
 
 struct PartialCatalystEvent {
@@ -1080,42 +952,23 @@ struct PartialCatalystEvent {
     entity_type: String,
     index: usize,
     catalyst: ParsedCatalyst,
-    evidence_anchors: Vec<EvidenceAnchor>,
-    era_audits: Vec<EraAuditRecord>,
+    context_sources: Vec<GenerationContextSource>,
+    era_labels: Vec<String>,
 }
 
-fn catalyst_era(
-    parsed: &ParsedCatalyst,
-    anchors: &[EvidenceAnchor],
-    audits: &[EraAuditRecord],
-) -> String {
+fn catalyst_era(parsed: &ParsedCatalyst, era_labels: &[String]) -> String {
     if let Some(label) = parsed
         .era_label
         .as_deref()
-        .filter(|label| !label.is_empty() && audits.iter().any(|audit| audit.label == *label))
+        .filter(|label| !label.is_empty() && era_labels.iter().any(|available| available == *label))
     {
         return label.to_string();
     }
 
-    let timestamp_ms = anchors
+    era_labels
         .iter()
-        .find(|anchor| parsed.anchor_ids.contains(&anchor.anchor_id))
-        .map(|anchor| anchor.timestamp_ms);
-    let month = timestamp_ms.and_then(month_key_from_timestamp);
-    if let Some(month) = month {
-        if let Some(audit) = audits
-            .iter()
-            .find(|audit| !audit.label.is_empty() && month >= audit.start && month <= audit.end)
-        {
-            return audit.label.clone();
-        }
-        return month;
-    }
-
-    audits
-        .iter()
-        .find(|audit| !audit.label.is_empty())
-        .map(|audit| audit.label.clone())
+        .find(|label| !label.is_empty())
+        .cloned()
         .unwrap_or_else(|| "undated".to_string())
 }
 
@@ -1123,55 +976,33 @@ fn catalyst_from_parsed(
     entity_name: &str,
     entity_type: &str,
     parsed: ParsedCatalyst,
-    available_anchors: &[EvidenceAnchor],
-    era_audits: &[EraAuditRecord],
-    generation_run_id: &str,
-    epoch_id: Option<&str>,
+    available_sources: &[GenerationContextSource],
+    era_labels: &[String],
     provisional: bool,
 ) -> Catalyst {
-    let era = catalyst_era(&parsed, available_anchors, era_audits);
+    let era = catalyst_era(&parsed, era_labels);
     let generated_at = Utc::now();
     let mut metadata = if provisional {
         serde_json::json!({"era": era, "generation_phase": "stream"})
     } else {
         serde_json::json!({"era": era})
     };
-    // Legacy/cache fields only. Canonical provenance lives in `text` and every
-    // machine-facing receipt/era row is rebuilt by parsing it.
+    // Catalyst attributes use the existing row and metadata contract. The
+    // portable text carries only the unique sources included in this request.
     metadata["entity_type"] = serde_json::json!(entity_type);
-    let cited = available_anchors
+    let mut seen_sources = HashSet::new();
+    let source_refs = available_sources
         .iter()
-        .filter(|anchor| parsed.anchor_ids.contains(&anchor.anchor_id))
-        .cloned()
+        .filter(|source| seen_sources.insert(source.source_ref.as_str()))
+        .map(|source| source.source_ref.clone())
         .collect::<Vec<_>>();
-    let header = CatalystTextHeader {
-        format_version: CATALYST_TEXT_FORMAT_VERSION,
-        entity_id: entity_name.to_string(),
-        entity_type: entity_type.to_string(),
-        era,
-        generation_run_id: generation_run_id.to_string(),
-        epoch_id: epoch_id.map(str::to_string),
-        generated_at_ms: generated_at.timestamp_millis(),
-        eras: era_audits
-            .iter()
-            .map(|audit| CatalystTextEra {
-                label: audit.label.clone(),
-                start_month: audit.start.clone(),
-                end_month: audit.end.clone(),
-                distinct_documents: audit.distinct_documents,
-                substantive_tokens: audit.substantive_tokens,
-                occurrence_count: audit.occurrence_count,
-                catalyst_budget: audit.catalyst_budget,
-                status: audit.status.to_string(),
-                reason: audit.reason.clone(),
-            })
-            .collect(),
-    };
-    let text = render_catalyst_text(&header, &parsed.text, &cited)
-        .expect("grounded catalyst must render canonical provenance text");
-    let canonical =
-        parse_catalyst_text(&text).expect("rendered catalyst must pass the text grounding guard");
-    assert!(!canonical.receipts.is_empty(), "ungrounded catalyst text");
+    let text = render_catalyst_text(&parsed.text, &source_refs)
+        .expect("catalyst must render portable context text");
+    let canonical = parse_catalyst_text(&text).expect("rendered catalyst context must parse");
+    assert!(
+        !canonical.source_refs.is_empty(),
+        "catalyst has no source references"
+    );
     Catalyst {
         id: Uuid::new_v4().to_string(),
         text,
@@ -1189,42 +1020,6 @@ impl<'a> CatalystPipeline<'a> {
         embedding: Option<&'a EmbeddingService>,
     ) -> Self {
         Self { db, llm, embedding }
-    }
-
-    fn persist_audits(
-        &self,
-        run_id: &str,
-        epoch_id: Option<&str>,
-        entity_name: &str,
-        entity_type: &str,
-        audits: &[EraAuditRecord],
-        skip_reason_code: Option<&str>,
-    ) -> Result<()> {
-        let now = Utc::now().timestamp_millis();
-        for era in audits {
-            let audit = CatalystEraAudit {
-                generation_run_id: run_id,
-                epoch_id,
-                entity: entity_name,
-                entity_type,
-                era_label: &era.label,
-                start_month: &era.start,
-                end_month: &era.end,
-                occurrence_count: era.occurrence_count,
-                catalyst_budget: era.catalyst_budget,
-                distinct_documents: era.distinct_documents,
-                substantive_tokens: era.substantive_tokens,
-                status: era.status,
-                reason: era.reason.as_deref(),
-                created_at_ms: now,
-            };
-            if let Some(code) = skip_reason_code
-                && era.reason.is_some()
-            {
-                self.db.record_catalyst_generation_skip(&audit, code)?;
-            }
-        }
-        Ok(())
     }
 
     fn preload_chunk_selection(&self, entities: &[Entity]) -> Option<ChunkSelectionPreload> {
@@ -1572,11 +1367,7 @@ impl<'a> CatalystPipeline<'a> {
                     )
                 }
             };
-            let era_context = selected_context.era_context;
-            let flat_samples = selected_context.flat_samples;
-            let context_samples = &flat_samples;
-
-            if flat_samples.is_empty() && era_context.is_none() {
+            if selected_context.flat_samples.is_empty() && selected_context.era_context.is_none() {
                 debug!(
                     entity_name = entity_name.as_str(),
                     "no context samples, skipping"
@@ -1584,42 +1375,30 @@ impl<'a> CatalystPipeline<'a> {
                 skipped.push(SkippedEntity {
                     entity_name: entity_name.clone(),
                     entity_type: entity.entity_type.as_str().to_string(),
-                    era_audits: vec![EraAuditRecord {
-                        label: String::new(),
-                        start: String::new(),
-                        end: String::new(),
-                        distinct_documents: 0,
-                        substantive_tokens: 0,
-                        occurrence_count: 0,
-                        catalyst_budget: num_catalysts,
-                        status: "skipped",
-                        reason: Some("no context samples were available".to_string()),
-                    }],
-                    reason_code: "no_context",
+                    thin_context: false,
                 });
                 continue;
             }
 
-            let audits = era_audits(
-                &eras,
-                &selected_context.evidence_anchors,
-                num_catalysts,
-                config.min_evidence_documents,
-                config.min_evidence_tokens,
-            );
-            if audits.iter().any(|audit| audit.reason.is_some()) {
+            if !context_is_sufficient(
+                &selected_context.context_sources,
+                config.min_context_documents,
+                config.min_context_tokens,
+            ) {
                 debug!(
                     entity_name = entity_name.as_str(),
-                    "thin evidence, skipping"
+                    "thin generation context, skipping"
                 );
                 skipped.push(SkippedEntity {
                     entity_name: entity_name.clone(),
                     entity_type: entity.entity_type.as_str().to_string(),
-                    era_audits: audits,
-                    reason_code: "thin_evidence",
+                    thin_context: true,
                 });
                 continue;
             }
+
+            let era_context = selected_context.era_context.as_ref();
+            let context_samples = selected_context.flat_samples.as_slice();
 
             let user_prompt = if is_local {
                 build_local_user_prompt(
@@ -1627,7 +1406,7 @@ impl<'a> CatalystPipeline<'a> {
                     context_samples,
                     num_catalysts,
                     Some(profile),
-                    era_context.as_ref(),
+                    era_context,
                 )
             } else {
                 build_user_prompt(
@@ -1637,7 +1416,7 @@ impl<'a> CatalystPipeline<'a> {
                     profile,
                     config.format_key,
                     Some(entity),
-                    era_context.as_ref(),
+                    era_context,
                 )
             };
             debug!(
@@ -1662,8 +1441,8 @@ impl<'a> CatalystPipeline<'a> {
                 entity_type,
                 user_prompt,
                 context_hash,
-                evidence_anchors: selected_context.evidence_anchors,
-                era_audits: audits,
+                context_sources: selected_context.context_sources,
+                era_labels: eras.into_iter().map(|era| era.label).collect(),
             });
         }
 
@@ -1773,35 +1552,14 @@ impl<'a> CatalystPipeline<'a> {
             duration_ms: 0,
             rate_limited: 0,
             entities_below_threshold: 0,
-            hypotheses_rejected: 0,
             suppressed_entities: Vec::new(),
         };
-        let generation_run_id = Uuid::new_v4().to_string();
-
         let total = entities.len();
         info!(total, "generating catalysts for selected entities");
 
         let (system_prompt, jobs, skipped) = self.build_jobs(entities, config)?;
-        for job in &jobs {
-            self.persist_audits(
-                &generation_run_id,
-                config.epoch_id,
-                &job.entity_name,
-                &job.entity_type,
-                &job.era_audits,
-                None,
-            )?;
-        }
         for skipped_entity in &skipped {
-            self.persist_audits(
-                &generation_run_id,
-                config.epoch_id,
-                &skipped_entity.entity_name,
-                &skipped_entity.entity_type,
-                &skipped_entity.era_audits,
-                Some(skipped_entity.reason_code),
-            )?;
-            if skipped_entity.reason_code == "thin_evidence" {
+            if skipped_entity.thin_context {
                 self.db.delete_catalysts_for_entity(
                     &skipped_entity.entity_name,
                     &skipped_entity.entity_type,
@@ -1880,7 +1638,6 @@ impl<'a> CatalystPipeline<'a> {
         let credits_exhausted = Arc::new(AtomicBool::new(false));
 
         let model = config.model.to_string();
-        let generation_run_id = Arc::new(generation_run_id);
         for job in jobs {
             on_event(CatalystEvent::EntityStarted {
                 entity_name: job.entity_name.clone(),
@@ -1900,8 +1657,8 @@ impl<'a> CatalystPipeline<'a> {
                 let entity_name = job.entity_name.clone();
                 let entity_type = job.entity_type.clone();
                 let context_hash = job.context_hash.clone();
-                let evidence_anchors = job.evidence_anchors.clone();
-                let era_audits = job.era_audits.clone();
+                let context_sources = job.context_sources.clone();
+                let era_labels = job.era_labels.clone();
 
                 if credits_exhausted.load(Ordering::SeqCst) {
                     return EntityResult {
@@ -1910,9 +1667,8 @@ impl<'a> CatalystPipeline<'a> {
                         context_hash,
                         catalysts: None,
                         error: Some("skipped: provider payment-required (402)".to_string()),
-                        evidence_anchors,
-                        era_audits,
-                        rejected: 0,
+                        context_sources,
+                        era_labels,
                     };
                 }
 
@@ -1978,8 +1734,8 @@ impl<'a> CatalystPipeline<'a> {
                                                         entity_type: entity_type.clone(),
                                                         index,
                                                         catalyst,
-                                                        evidence_anchors: evidence_anchors.clone(),
-                                                        era_audits: era_audits.clone(),
+                                                        context_sources: context_sources.clone(),
+                                                        era_labels: era_labels.clone(),
                                                     });
                                                 }
                                             }
@@ -2035,23 +1791,7 @@ impl<'a> CatalystPipeline<'a> {
                         // flaky entity from silently landing at zero catalysts.
                         match parse_catalyst_response(&response_text) {
                             Ok(parsed) if !parsed.catalysts.is_empty() => {
-                                let (grounded, rejected) = validate_grounded_catalysts(
-                                    parsed.catalysts,
-                                    &evidence_anchors,
-                                );
-                                if !grounded.is_empty() {
-                                    return Ok((grounded, rejected));
-                                }
-                                last_error = format!(
-                                    "all {} hypotheses failed evidence grounding",
-                                    rejected
-                                );
-                                debug!(
-                                    entity_name = entity_name.as_str(),
-                                    attempt,
-                                    rejected,
-                                    "ungrounded or off-subject catalysts rejected; retrying"
-                                );
+                                return Ok(parsed.catalysts);
                             }
                             Ok(_) => {
                                 last_error = "LLM returned empty catalysts array".to_string();
@@ -2082,15 +1822,14 @@ impl<'a> CatalystPipeline<'a> {
                 .await;
 
                 match result {
-                    Ok(Ok((catalysts, rejected))) => EntityResult {
+                    Ok(Ok(catalysts)) => EntityResult {
                         entity_name,
                         entity_type,
                         context_hash,
                         catalysts: Some(catalysts),
                         error: None,
-                        evidence_anchors,
-                        era_audits,
-                        rejected,
+                        context_sources,
+                        era_labels,
                     },
                     Ok(Err(e)) => EntityResult {
                         entity_name,
@@ -2098,9 +1837,8 @@ impl<'a> CatalystPipeline<'a> {
                         context_hash,
                         catalysts: None,
                         error: Some(e.to_string()),
-                        evidence_anchors,
-                        era_audits,
-                        rejected: 0,
+                        context_sources,
+                        era_labels,
                     },
                     Err(_) => {
                         debug!(
@@ -2114,9 +1852,8 @@ impl<'a> CatalystPipeline<'a> {
                             context_hash,
                             catalysts: None,
                             error: Some(format!("timed out after {}s", entity_timeout_secs)),
-                            evidence_anchors,
-                            era_audits,
-                            rejected: 0,
+                            context_sources,
+                            era_labels,
                         }
                     }
                 }
@@ -2136,13 +1873,6 @@ impl<'a> CatalystPipeline<'a> {
             let result = tokio::select! {
                 partial = partial_rx.recv() => {
                     if let Some(partial) = partial {
-                        let (mut grounded, _) = validate_grounded_catalysts(
-                            vec![partial.catalyst],
-                            &partial.evidence_anchors,
-                        );
-                        let Some(grounded) = grounded.pop() else {
-                            continue;
-                        };
                         let entity_key =
                             (partial.entity_name.clone(), partial.entity_type.clone());
                         let inserted = partial_inserted_counts
@@ -2160,11 +1890,9 @@ impl<'a> CatalystPipeline<'a> {
                         let catalyst = catalyst_from_parsed(
                             &partial.entity_name,
                             &partial.entity_type,
-                            grounded,
-                            &partial.evidence_anchors,
-                            &partial.era_audits,
-                            generation_run_id.as_str(),
-                            config.epoch_id,
+                            partial.catalyst,
+                            &partial.context_sources,
+                            &partial.era_labels,
                             true,
                         );
                         self.db.insert_catalysts(&[catalyst])?;
@@ -2222,7 +1950,6 @@ impl<'a> CatalystPipeline<'a> {
                     }
 
                     if let Some(parsed_catalysts) = entity_result.catalysts {
-                        stats.hypotheses_rejected += entity_result.rejected;
                         // Delete old catalysts and insert new ones
                         self.db.delete_catalysts_for_entity(
                             &entity_result.entity_name,
@@ -2241,10 +1968,8 @@ impl<'a> CatalystPipeline<'a> {
                                     &entity_result.entity_name,
                                     &entity_result.entity_type,
                                     pc,
-                                    &entity_result.evidence_anchors,
-                                    &entity_result.era_audits,
-                                    generation_run_id.as_str(),
-                                    config.epoch_id,
+                                    &entity_result.context_sources,
+                                    &entity_result.era_labels,
                                     false,
                                 )
                             })
@@ -2444,7 +2169,6 @@ mod tests {
     ) -> ChunkCandidate {
         ChunkCandidate {
             source_ref: format!("test-{chunk_index}.md"),
-            occurrence_ids: vec![i64::from(chunk_index)],
             chunk_index,
             content: content.to_string(),
             timestamp,
@@ -2940,8 +2664,8 @@ mod tests {
             entity_type: "tag".to_string(),
             user_prompt: "prompt".to_string(),
             context_hash: hash.to_string(),
-            evidence_anchors: Vec::new(),
-            era_audits: Vec::new(),
+            context_sources: Vec::new(),
+            era_labels: Vec::new(),
         }
     }
 

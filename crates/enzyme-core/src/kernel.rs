@@ -51,10 +51,10 @@ pub struct SearchOptions {
     pub full_reindex: bool,
     /// Maximum entities for which catalysts may be generated.
     pub max_bridged_entities: usize,
-    /// Minimum distinct source documents per entity-era before generation.
-    pub min_catalyst_evidence_documents: usize,
-    /// Minimum substantive tokens per entity-era before generation.
-    pub min_catalyst_evidence_tokens: usize,
+    /// Minimum distinct source documents in an entity's selected context.
+    pub min_catalyst_context_documents: usize,
+    /// Minimum substantive tokens in an entity's selected context.
+    pub min_catalyst_context_tokens: usize,
 }
 
 impl SearchOptions {
@@ -83,9 +83,9 @@ impl Default for SearchOptions {
             selection_config: None,
             full_reindex: false,
             max_bridged_entities: 32,
-            min_catalyst_evidence_documents:
-                crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS,
-            min_catalyst_evidence_tokens: crate::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS,
+            min_catalyst_context_documents:
+                crate::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS,
+            min_catalyst_context_tokens: crate::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS,
         }
     }
 }
@@ -329,8 +329,8 @@ fn ensure_searchable_owned(
         mut selection_config,
         full_reindex,
         max_bridged_entities,
-        min_catalyst_evidence_documents,
-        min_catalyst_evidence_tokens,
+        min_catalyst_context_documents,
+        min_catalyst_context_tokens,
     } = options;
     let mut configured_sources = None;
     let mut configured_notes_roots = Vec::new();
@@ -396,7 +396,7 @@ fn ensure_searchable_owned(
             )?;
             let contract = GenerationContract {
                 schema_version: "catalyst-epoch.v2".into(),
-                prompt_version: "catalyst-prompts.2026-08-canonical-receipts".into(),
+                prompt_version: "catalyst-prompts.2026-08-context-sources".into(),
                 catalyst_format: crate::llm::DEFAULT_FORMAT_KEY.into(),
                 catalyst_profile: crate::llm::DEFAULT_PROFILE_KEY.into(),
                 model: model.clone(),
@@ -412,15 +412,15 @@ fn ensure_searchable_owned(
                 selection_config_json,
                 max_context_chars: None,
                 max_context_samples: 20,
-                min_evidence_documents: min_catalyst_evidence_documents,
-                min_evidence_tokens: min_catalyst_evidence_tokens,
+                min_context_documents: min_catalyst_context_documents,
+                min_context_tokens: min_catalyst_context_tokens,
             };
             let epoch_id = db.begin_inline_catalyst_epoch(&contract, now_ms())?;
             let config = CatalystConfig {
                 model: &model,
                 entity_profiles: &selection.entity_profiles,
-                min_evidence_documents: min_catalyst_evidence_documents,
-                min_evidence_tokens: min_catalyst_evidence_tokens,
+                min_context_documents: min_catalyst_context_documents,
+                min_context_tokens: min_catalyst_context_tokens,
                 epoch_id: Some(&epoch_id),
                 ..Default::default()
             };
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn provision_path_persists_epoch_era_budget_and_anchored_catalyst() {
+    async fn provision_path_persists_epoch_era_and_source_refs() {
         let temp = tempfile::tempdir().unwrap();
         let vault = temp.path().join("vault");
         std::fs::create_dir(&vault).unwrap();
@@ -601,8 +601,7 @@ mod tests {
         let server = MockServer::start().await;
         let content = serde_json::json!({
             "catalysts": ["Could preserving occurrence provenance change the migration decision?"],
-            "topicNames": ["auditable migration provenance"],
-            "anchorIds": [["E1"]]
+            "topicNames": ["auditable migration provenance"]
         });
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -640,25 +639,14 @@ mod tests {
         assert_eq!(epochs.len(), 1);
         let catalyst = index.database().get_all_catalysts().unwrap().pop().unwrap();
         let canonical = parse_catalyst_text(&catalyst.text).unwrap();
-        assert!(!canonical.header.era.is_empty());
-        assert_eq!(
-            canonical.header.epoch_id.as_deref(),
-            Some(epochs[0].as_str())
+        assert!(
+            catalyst
+                .metadata
+                .get("era")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|era| !era.is_empty())
         );
-        assert!(!canonical.receipts.is_empty());
-
-        let era_rows = index
-            .database()
-            .query_read(
-                "SELECT era_label, occurrence_count, catalyst_budget FROM catalyst_eras WHERE epoch_id=?1",
-                vec![libsql::Value::Text(epochs[0].clone())],
-                |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?, row.get::<i64>(2)?)),
-            )
-            .unwrap();
-        assert!(!era_rows.is_empty());
-        assert!(!era_rows[0].0.is_empty());
-        assert!(era_rows[0].1 > 0);
-        assert!(era_rows[0].2 > 0);
+        assert!(!canonical.source_refs.is_empty());
     }
 
     #[test]

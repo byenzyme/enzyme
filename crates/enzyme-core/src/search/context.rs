@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::db::Database;
 use crate::embedding::EmbeddingService;
-use crate::models::{Catalyst, Embedding, Entity, catalyst_embedding_text, parse_catalyst_text};
+use crate::models::{Catalyst, Embedding, Entity, catalyst_embedding_text};
 use crate::pipeline::eras::{Era, apply_timeline_weights, cluster_eras_periodic};
 use crate::pipeline::similarity::CATALYST_TOP_K;
 
@@ -83,12 +83,7 @@ fn prioritize_anchored_catalysts(
     matched_identity_names: &HashSet<String>,
     limit: usize,
 ) -> Vec<(usize, f32)> {
-    let entity_name = |catalyst: &Catalyst| {
-        parse_catalyst_text(&catalyst.text)
-            .map(|parsed| parsed.header.entity_id)
-            .unwrap_or_else(|_| catalyst.entity.clone())
-            .to_lowercase()
-    };
+    let entity_name = |catalyst: &Catalyst| catalyst.entity.to_lowercase();
     if !matched_identity_names.is_empty() {
         let owned = global_ranking
             .iter()
@@ -503,12 +498,9 @@ pub struct CatalyzeResultItem {
     /// Catalyst bridge that contributed the strongest score for this result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_catalyst_id: Option<String>,
-    /// Full canonical catalyst chunk, including header and inline receipts.
+    /// Portable catalyst text, including sources used as generation context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_catalyst_text: Option<String>,
-    /// Evidence behind the catalyst bridge that produced this result.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_anchors: Vec<crate::models::EvidenceAnchor>,
 }
 
 /// A catalyst that contributed to search results.
@@ -520,8 +512,6 @@ pub struct TopCatalyst {
     pub topic_name: Option<String>,
     pub relevance_score: f64,
     pub contribution_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_anchors: Vec<crate::models::EvidenceAnchor>,
 }
 
 /// A single result from direct (non-catalyst) search.
@@ -708,25 +698,13 @@ impl<'a> ContextSearch<'a> {
         );
 
         // Build catalyst metadata lookup for the top catalysts
-        let catalyst_meta: HashMap<
-            String,
-            (String, String, f64, Vec<crate::models::EvidenceAnchor>),
-        > = cat_sims
+        let catalyst_meta: HashMap<String, (String, String, f64)> = cat_sims
             .iter()
             .map(|(idx, sim)| {
-                let c = &catalysts[*idx];
-                let canonical = parse_catalyst_text(&c.text).ok();
+                let catalyst = &catalysts[*idx];
                 (
-                    c.id.clone(),
-                    (
-                        c.text.clone(),
-                        canonical
-                            .as_ref()
-                            .map(|parsed| parsed.header.entity_id.clone())
-                            .unwrap_or_else(|| c.entity.clone()),
-                        *sim as f64,
-                        canonical.map(|parsed| parsed.receipts).unwrap_or_default(),
-                    ),
+                    catalyst.id.clone(),
+                    (catalyst.text.clone(), catalyst.entity.clone(), *sim as f64),
                 )
             })
             .collect();
@@ -917,7 +895,7 @@ impl<'a> ContextSearch<'a> {
         // Build top contributing catalysts (top 3 by contribution count)
         let mut top_catalysts: Vec<TopCatalyst> = catalyst_meta
             .iter()
-            .filter_map(|(id, (text, entity, relevance_score, evidence_anchors))| {
+            .filter_map(|(id, (text, entity, relevance_score))| {
                 let count = contribution_counts.get(id.as_str()).copied().unwrap_or(0);
                 if count == 0 {
                     return None;
@@ -929,7 +907,6 @@ impl<'a> ContextSearch<'a> {
                     topic_name: None,
                     relevance_score: (*relevance_score * 1000.0).round() / 1000.0,
                     contribution_count: count,
-                    evidence_anchors: evidence_anchors.clone(),
                 })
             })
             .collect();
@@ -953,11 +930,7 @@ impl<'a> ContextSearch<'a> {
                 via_catalyst_id: Some(s.best_catalyst_id.clone()),
                 via_catalyst_text: catalyst_meta
                     .get(&s.best_catalyst_id)
-                    .map(|(text, _, _, _)| text.clone()),
-                evidence_anchors: catalyst_meta
-                    .get(&s.best_catalyst_id)
-                    .map(|(_, _, _, anchors)| anchors.clone())
-                    .unwrap_or_default(),
+                    .map(|(text, _, _)| text.clone()),
             })
             .collect();
 

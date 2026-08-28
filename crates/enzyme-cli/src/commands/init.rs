@@ -56,7 +56,7 @@ impl UpdateOutcome {
         &self,
         binary_outcome: Option<super::update::BinaryUpdateOutcome>,
     ) -> serde_json::Value {
-        use super::update::{automatic_major_allowed, update_available, BinaryUpdateStatus};
+        use super::update::{BinaryUpdateStatus, automatic_major_allowed, update_available};
 
         if let UpdateOutcome::RegenBlocked { reason } = self {
             return json!({
@@ -1036,14 +1036,14 @@ pub async fn run_init(
                 .and_then(|v| v.parse().ok()),
             stream_partial_catalysts,
             force_regenerate: force,
-            min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+            min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
-            min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
+            min_context_tokens: std::env::var("ENZYME_MIN_CONTEXT_TOKENS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
             epoch_id: None,
         };
 
@@ -1648,7 +1648,7 @@ pub(super) async fn generation_contract(
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
     Ok(GenerationContract {
         schema_version: "catalyst-epoch.v2".to_string(),
-        prompt_version: "catalyst-prompts.2026-08-canonical-receipts-adaptive-samples".to_string(),
+        prompt_version: "catalyst-prompts.2026-08-context-sources-adaptive-samples".to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()
@@ -1674,14 +1674,14 @@ pub(super) async fn generation_contract(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
-        min_evidence_documents: std::env::var("ENZYME_MIN_EVIDENCE_DOCUMENTS")
+        min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_DOCUMENTS),
-        min_evidence_tokens: std::env::var("ENZYME_MIN_EVIDENCE_TOKENS")
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
+        min_context_tokens: std::env::var("ENZYME_MIN_CONTEXT_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_EVIDENCE_TOKENS),
+            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
     })
 }
 
@@ -1988,8 +1988,8 @@ async fn build_and_activate_epoch(
         // The shadow epoch starts from a snapshot with its catalyst view
         // wiped, so every selected entity is dirty by construction.
         force_regenerate: false,
-        min_evidence_documents: contract.min_evidence_documents,
-        min_evidence_tokens: contract.min_evidence_tokens,
+        min_context_documents: contract.min_context_documents,
+        min_context_tokens: contract.min_context_tokens,
         epoch_id: Some(&claim.epoch_id),
     };
 
@@ -2629,7 +2629,6 @@ mod tests {
             duration_ms: 0,
             rate_limited: 0,
             entities_below_threshold: 0,
-            hypotheses_rejected: 0,
             suppressed_entities: Vec::new(),
         }
     }
