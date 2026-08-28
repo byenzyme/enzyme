@@ -50,7 +50,7 @@ Every gap between how the vault looks and what Enzyme sees is a finding. The mec
 Mechanism facts:
 
 - Discovery reads Markdown. Anything saved only as PDF, transcript, export, image, JSON, or log is invisible to indexing unless there is meaningful Markdown wrapping it.
-- Frontmatter is a free entity handle: title, dates, tags, and wikilinks can become signal, but only if the metadata parses. A leading `---` proves nothing.
+- Frontmatter can carry retrieval handles, but the mechanism is exact: title and recognized dates shape the document; tags become tag entities; literal wikilinks in any field become link entities. Plain strings such as `people: [Alice Smith]` are inert unless that vault/workspace section in `~/.enzyme/config.toml` lists the field in `frontmatter_link_fields`, for example `frontmatter_link_fields = ["people"]`. Mapped values become generic link entities, not a typed person/project model. A leading `---` proves nothing.
 - Retrieval compounds when related notes share one home and dedupes by file; scattered notes cannot stack as strongly.
 - Undated notes fall out of time-aware ranking, and only the most-recent slice is embedded; old or undated content can go dark.
 - Frequency and recency rank entities, so a large recent generated/reference/template folder can outrank real notes. Treat authored reference material as real content unless evidence says otherwise.
@@ -60,7 +60,7 @@ Before you read anything, snapshot the workspace to a unique temporary path with
 
 Place every observed cluster in exactly one tier:
 
-1. **Already usable**: structured Markdown, dated notes, existing wikilinks or frontmatter that Enzyme can leverage now.
+1. **Already usable**: structured Markdown, dated notes, existing wikilinks, or frontmatter fields that the active config demonstrably maps into Enzyme signal.
 2. **Weakly indexable**: real content Enzyme can only partly see, such as missing dates, malformed metadata, thin bodies, or non-Markdown source.
 3. **Would improve retrieval**: content that would compound much better after a small, deterministic move, exclusion, date stamp, or settings recording (a `log:` line).
 4. **Can wait**: non-note structure that should not be reorganized for Enzyme, such as source code, raw exports, build outputs, and foreign-domain material.
@@ -76,7 +76,7 @@ State each invariant, then prove it:
 - **Full backup before first mutation**: create a self-sufficient backup of every affected file before moving or stamping it. A temporary backup workspace is acceptable if it is retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
 - **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
 
-Only moves/renames, date-repair frontmatter stamps, and settings edits (`log:` lines, exclusions, targets in Enzyme's config) are allowed, and only from deterministic evidence such as existing metadata, filenames, or exact entity matches. No body rewrites, invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
+Only moves/renames, date-repair frontmatter stamps, and settings edits (`log:` lines, `frontmatter_link_fields`, exclusions, targets in Enzyme's config) are allowed, and only from deterministic evidence such as existing metadata, filenames, or exact entity matches. Configure a frontmatter link field only when scan/file evidence shows it is an established identity/reference field with scalar or list string values; never map broad metadata such as `status`, `type`, `aliases`, IDs, or arbitrary objects. No body rewrites, invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
 
 Log recognition is a **settings edit, never a note edit**. When a single file of dated entries is confirmed (see the two-shapes mechanism fact), the remedy is its `log:` line in Enzyme's config: keep the line `scan --write-config` already recorded, or add one for a real recurring log the detector missed (too few entries, say). Narrate the lines at the gate in the user's terms — "Enzyme recognized these files as running logs and reads each as a timeline; here are their lines, remove any I misread" — and treat removal as a first-class correction, not a failure. Because a false recognition is one deletable line in one settings file, this is the lightest mutation in the skill; it still passes through consent because it changes what Enzyme anchors on. Do not stamp `type:` metadata into the user's files to mark logs — the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their settings, not buried in per-file metadata. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
 
@@ -101,9 +101,10 @@ Setup/re-setup command path, after the vault path is confirmed:
 
 "$ENZYME_BIN" -p "<vault path>" scan --write-config
 # Read ~/.enzyme/config.toml. This is the vault's anchor ledger: the entities
-# (folders, tags, links) and any recognized running logs (`log:` lines) that
-# Enzyme will anchor on. Tune only the minimum entity/log/exclusion/target
-# choices supported by scan/doctor evidence before init, and carry the
+# (folders, tags, links), any configured plain frontmatter link fields, and
+# recognized running logs (`log:` lines) that Enzyme will anchor on. Tune only
+# the minimum entity/field/log/exclusion/target choices supported by scan/doctor
+# evidence before init, and carry the
 # resulting anchors into what you narrate at the gate.
 
 "$ENZYME_BIN" -p "<vault path>" init --quiet
@@ -155,7 +156,7 @@ For the healthy-vault branch, the anchors reveal **is** the message: show what E
 
 ## Restructure After Consent
 
-Runs only after the single yes. The hard bound is moves/renames within reason, batch date-repair frontmatter edits, and Enzyme settings edits (`log:` lines, exclusions) only. Bodies are never touched, and log recognition never writes to note files at all.
+Runs only after the single yes. The hard bound is moves/renames within reason, batch date-repair frontmatter edits, and Enzyme settings edits (`log:` lines, `frontmatter_link_fields`, exclusions) only. Bodies are never touched, and field/log recognition never writes to note files at all.
 
 Before the first mutation, write a backup package either to a unique temporary directory or to a visible vault-local directory selected by the product surface. It must contain:
 

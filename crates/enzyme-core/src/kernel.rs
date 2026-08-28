@@ -36,14 +36,17 @@ pub struct SearchOptions {
     /// Exact database file to open or create.
     pub db_path: PathBuf,
     /// Optional caller-selected config path. It is loaded directly for index
-    /// exclusions, configured logs, and catalyst selection. No default path is
-    /// resolved when it is absent.
+    /// exclusions, configured logs, frontmatter link fields, and catalyst
+    /// selection. No default path is resolved when it is absent.
     pub config_path: Option<PathBuf>,
     /// Folders excluded from indexing. An explicit empty list means no
     /// caller-defined exclusions; no config path is resolved implicitly.
     pub excluded_folders: Vec<String>,
     /// Config-declared log entities used during indexing.
     pub configured_logs: HashSet<String>,
+    /// Plain frontmatter fields promoted to generic link entities during
+    /// indexing. An explicit empty set means none when no config path is set.
+    pub frontmatter_link_fields: HashSet<String>,
     /// Optional frozen selection configuration. `None` selects by coverage and
     /// does not read a vault config file.
     pub selection_config: Option<EnzymeConfig>,
@@ -80,6 +83,7 @@ impl Default for SearchOptions {
             config_path: None,
             excluded_folders: Vec::new(),
             configured_logs: HashSet::new(),
+            frontmatter_link_fields: HashSet::new(),
             selection_config: None,
             full_reindex: false,
             max_bridged_entities: 32,
@@ -326,6 +330,7 @@ fn ensure_searchable_owned(
         config_path,
         mut excluded_folders,
         mut configured_logs,
+        mut frontmatter_link_fields,
         mut selection_config,
         full_reindex,
         max_bridged_entities,
@@ -344,6 +349,9 @@ fn ensure_searchable_owned(
         if let Some(config) = loaded {
             configured_sources = Some(config.sources.clone());
             configured_notes_roots = config.notes_roots.clone();
+            if frontmatter_link_fields.is_empty() {
+                frontmatter_link_fields = config.frontmatter_link_fields.iter().cloned().collect();
+            }
             if excluded_folders.is_empty() {
                 excluded_folders = config.excluded_folders.clone();
             }
@@ -366,7 +374,8 @@ fn ensure_searchable_owned(
     }
     let mut indexing = IndexingPipeline::new(&db, vault_path.clone())
         .with_excluded_folders(excluded_folders)
-        .with_configured_logs(configured_logs);
+        .with_configured_logs(configured_logs)
+        .with_frontmatter_link_fields(frontmatter_link_fields);
     if !configured_notes_roots.is_empty() {
         indexing = indexing.with_notes_roots(configured_notes_roots);
     }
@@ -666,6 +675,11 @@ mod tests {
     #[test]
     fn explicit_config_path_drives_index_policy() {
         let (_temp, vault, db_path) = fixture();
+        std::fs::write(
+            vault.join("note.md"),
+            "---\npeople: [Jay Vidyarthi]\n---\nRust search boundaries make embedding honest.",
+        )
+        .unwrap();
         let ignored = vault.join("ignored");
         std::fs::create_dir(&ignored).unwrap();
         std::fs::write(ignored.join("secret.md"), "excluded by injected config").unwrap();
@@ -674,7 +688,7 @@ mod tests {
         std::fs::write(
             &config_path,
             format!(
-                "[vaults.\"{}\"]\nexcluded_folders = [\"ignored\"]\n",
+                "[vaults.\"{}\"]\nexcluded_folders = [\"ignored\"]\nfrontmatter_link_fields = [\"people\"]\n",
                 vault_key.display()
             ),
         )
@@ -686,5 +700,15 @@ mod tests {
         };
         let index = ensure_searchable_sync(options, None).unwrap();
         assert_eq!(index.document_count, 1);
+        assert!(
+            index
+                .database()
+                .get_all_entities()
+                .unwrap()
+                .iter()
+                .any(|entity| {
+                    entity.name == "jay vidyarthi" && entity.entity_type == EntityType::Link
+                })
+        );
     }
 }

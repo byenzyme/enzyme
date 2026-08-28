@@ -102,7 +102,8 @@ impl StalenessResult {
 /// Check whether the vault's catalysts are stale and need regeneration.
 ///
 /// Two independent checks (any one triggers stale):
-/// 1. **Config hash** — SHA256 of `catalyzedEntities` + `catalystProfile` changed.
+/// 1. **Config hash** — selected entities or frontmatter entity-field
+///    interpretation changed.
 /// 2. **New content** — entities with 3+ new document mentions since last generation.
 ///
 /// All stale entities are collected (not short-circuited) so callers can decide
@@ -257,7 +258,8 @@ pub fn store_staleness_bookkeeping_partial(db: &Database, entity_names: &[String
     Ok(())
 }
 
-/// Compute a SHA256 hash of the config fields that affect catalyst generation.
+/// Compute a SHA256 hash of the config fields that affect catalyst generation
+/// or the entity evidence feeding it.
 ///
 /// Hashes the sorted list of parsed entity names/types.
 /// This is deterministic regardless of YAML formatting or ordering.
@@ -276,6 +278,15 @@ fn compute_config_hash(vault_path: &Path) -> Result<String> {
     entity_keys.sort();
     for key in &entity_keys {
         hasher.update(key.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    let mut frontmatter_link_fields = config.frontmatter_link_fields;
+    frontmatter_link_fields.sort();
+    frontmatter_link_fields.dedup();
+    for field in &frontmatter_link_fields {
+        hasher.update(b"frontmatter_link_field:");
+        hasher.update(field.as_bytes());
         hasher.update(b"\n");
     }
 

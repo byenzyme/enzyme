@@ -80,9 +80,17 @@ enzyme status -p /path/to/vault
 ```toml
 [vaults."/path/to/vault"]
 entities = ["#distributed-systems", "[[Raft Consensus]]", "folder:journal"]
+frontmatter_link_fields = ["people"]
 excluded_tags = ["todo", "template"]
 excluded_folders = [".claude", ".enzyme", ".git", ".obsidian", "templates"]
 ```
+
+`frontmatter_link_fields` promotes plain strings (a scalar or YAML list) from
+the named fields into generic link entities. For example, `people: [Alice
+Smith, Bob Jones]` becomes the same two entity handles that wikilinks would
+produce. Literal `[[wikilinks]]` continue to work in every frontmatter field
+without configuration; Enzyme does not infer a typed “person” model from the
+field name.
 
 If no entities are configured, Enzyme selects from trending analysis automatically. Legacy vault-local `enzyme-config.yaml` is still read for backward compatibility.
 

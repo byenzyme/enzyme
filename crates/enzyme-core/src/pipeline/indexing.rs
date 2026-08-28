@@ -30,6 +30,9 @@ pub struct IndexingPipeline<'a> {
     /// Config-declared `log:` entity names. `None` means "resolve from the
     /// vault config at run time"; `Some` is an explicit override (tests).
     configured_logs: Option<std::collections::HashSet<String>>,
+    /// Plain frontmatter fields promoted to generic link entities. `None`
+    /// resolves the active vault/workspace config at run time.
+    frontmatter_link_fields: Option<std::collections::HashSet<String>>,
     notes_roots: Option<Vec<NotesRootConfig>>,
 }
 
@@ -37,6 +40,7 @@ pub struct IndexingPipeline<'a> {
 /// years-long daily journal from flooding the occurrence table; the newest
 /// entries are kept, and the drop is logged.
 const MAX_LOG_OCCURRENCES: usize = 1000;
+const FRONTMATTER_LINK_FIELDS_STATE_KEY: &str = "index.frontmatter_link_fields.v1";
 fn is_markdown_source_ref(source_ref: &str) -> bool {
     !source_ref.starts_with("sqlite:")
         && std::path::Path::new(source_ref)
@@ -52,6 +56,9 @@ pub struct IndexingStats {
     pub files_updated: usize,
     pub files_deleted: usize,
     pub entities_extracted: usize,
+    /// True when unchanged Markdown was re-read to apply a changed
+    /// `frontmatter_link_fields` interpretation without rebuilding embeddings.
+    pub entity_config_changed: bool,
     pub duration_ms: u64,
 }
 
@@ -62,6 +69,7 @@ impl<'a> IndexingPipeline<'a> {
             vault_path,
             excluded_folders: None,
             configured_logs: None,
+            frontmatter_link_fields: None,
             notes_roots: None,
         }
     }
@@ -77,6 +85,22 @@ impl<'a> IndexingPipeline<'a> {
     /// resolution. Mainly for tests.
     pub fn with_configured_logs(mut self, names: std::collections::HashSet<String>) -> Self {
         self.configured_logs = Some(names);
+        self
+    }
+
+    /// Explicitly select plain frontmatter fields that become link entities.
+    /// Mainly for tests and callers that already loaded an explicit config.
+    pub fn with_frontmatter_link_fields(
+        mut self,
+        fields: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.frontmatter_link_fields = Some(
+            fields
+                .into_iter()
+                .map(|field| field.trim().to_lowercase())
+                .filter(|field| !field.is_empty())
+                .collect(),
+        );
         self
     }
 
@@ -97,6 +121,32 @@ impl<'a> IndexingPipeline<'a> {
             return names.clone();
         }
         crate::config::enzyme_config::EnzymeConfig::excluded_folders_at(&self.vault_path)
+    }
+
+    fn resolve_frontmatter_link_fields(&self) -> std::collections::HashSet<String> {
+        if let Some(fields) = &self.frontmatter_link_fields {
+            return fields.clone();
+        }
+        crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path)
+            .ok()
+            .flatten()
+            .map(|config| config.frontmatter_link_fields.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    fn frontmatter_link_fields_state(
+        &self,
+        fields: &std::collections::HashSet<String>,
+    ) -> Result<(String, bool)> {
+        let mut fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        fields.sort_unstable();
+        let current = serde_json::to_string(&fields)?;
+        let stored = self.db.get_config(FRONTMATTER_LINK_FIELDS_STATE_KEY)?;
+        let changed = match stored {
+            Some(stored) => stored != current,
+            None => !fields.is_empty(),
+        };
+        Ok((current, changed))
     }
 
     /// Execute the indexing pipeline.
@@ -141,11 +191,15 @@ impl<'a> IndexingPipeline<'a> {
                 files_updated: 0,
                 files_deleted: 0,
                 entities_extracted: 0,
+                entity_config_changed: false,
                 duration_ms,
             });
         }
         let files_discovered = all_files.len();
         info!(files_discovered, "files discovered");
+        let frontmatter_link_fields = self.resolve_frontmatter_link_fields();
+        let (frontmatter_link_fields_state, entity_config_changed) =
+            self.frontmatter_link_fields_state(&frontmatter_link_fields)?;
 
         // Step 3: Build a lookup from source_ref -> PathBuf for all discovered files
         let all_source_refs: HashMap<String, DiscoveredFile> = all_files
@@ -230,24 +284,54 @@ impl<'a> IndexingPipeline<'a> {
             .collect();
         let files_deleted = deleted_paths.len();
 
-        // Step 5: Process new + changed files
-        on_progress(&format!("Processing {} files...", paths_to_process.len()));
-        let results: Vec<_> = paths_to_process
+        // Step 5: Process new + changed files. A frontmatter field-mapping
+        // change re-reads every Markdown document for entity extraction only;
+        // unchanged documents are not upserted, so their chunks and embeddings
+        // stay intact.
+        let normal_source_refs: std::collections::HashSet<&str> = paths_to_process
+            .iter()
+            .map(|file| file.source_ref.as_str())
+            .collect();
+        let entity_paths = if entity_config_changed && !full {
+            &all_files
+        } else {
+            &paths_to_process
+        };
+        on_progress(&format!("Processing {} files...", entity_paths.len()));
+        let results: Vec<_> = entity_paths
             .par_iter()
-            .map(DocumentProcessor::process_discovered)
+            .map(|file| {
+                DocumentProcessor::process_discovered_with_link_fields(
+                    file,
+                    frontmatter_link_fields.iter().cloned(),
+                )
+            })
             .collect();
 
         let mut processed_docs: Vec<ProcessedDocument> = Vec::new();
+        let mut processing_failures = 0usize;
         for result in results {
             match result {
                 Ok(doc) => processed_docs.push(doc),
-                Err(e) => warn!("Failed to process file: {}", e),
+                Err(e) => {
+                    processing_failures += 1;
+                    warn!("Failed to process file: {}", e);
+                }
             }
         }
+        let docs_to_upsert: Vec<ProcessedDocument> = if entity_config_changed && !full {
+            processed_docs
+                .iter()
+                .filter(|doc| normal_source_refs.contains(doc.source_ref.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            processed_docs.clone()
+        };
 
         // Step 6: Upsert processed documents into the database (single transaction)
         on_progress("Upserting documents...");
-        self.db.upsert_documents_batch(&processed_docs)?;
+        self.db.upsert_documents_batch(&docs_to_upsert)?;
 
         // Step 7: Delete removed files from the database
         if !deleted_paths.is_empty() {
@@ -290,6 +374,17 @@ impl<'a> IndexingPipeline<'a> {
         on_progress("Computing trending scores...");
         self.compute_trending_scores()?;
 
+        // Persist only after entity reconciliation succeeds. If a config-led
+        // full entity pass could not read every file, leave the old state in
+        // place so the next refresh retries instead of silently accepting a
+        // partial interpretation.
+        if !entity_config_changed || processing_failures == 0 {
+            self.db.set_config(
+                FRONTMATTER_LINK_FIELDS_STATE_KEY,
+                &frontmatter_link_fields_state,
+            )?;
+        }
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         info!(
@@ -298,6 +393,7 @@ impl<'a> IndexingPipeline<'a> {
             files_updated,
             files_deleted,
             entities_extracted,
+            entity_config_changed,
             duration_ms,
             "indexing complete"
         );
@@ -308,6 +404,7 @@ impl<'a> IndexingPipeline<'a> {
             files_updated,
             files_deleted,
             entities_extracted,
+            entity_config_changed,
             duration_ms,
         })
     }
@@ -896,6 +993,66 @@ mod tests {
         assert_eq!(stats.files_new, 0);
         assert_eq!(stats.files_updated, 0);
         assert_eq!(stats.entities_extracted, 0);
+        assert!(!stats.entity_config_changed);
+    }
+
+    #[test]
+    fn frontmatter_link_field_change_reconciles_unchanged_docs_without_reembedding() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+        write_md(
+            vault.path(),
+            "meetings/one.md",
+            "---\npeople: [Jay Vidyarthi, Stefan Leßle]\n---\nMeeting notes.\n",
+        );
+
+        let initial = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_frontmatter_link_fields(Vec::<String>::new());
+        initial.run(true, |_| {}).unwrap();
+        assert!(
+            !db.get_all_entities()
+                .unwrap()
+                .iter()
+                .any(|entity| entity.name == "jay vidyarthi")
+        );
+
+        let document = db.get_document_by_path("meetings/one.md").unwrap().unwrap();
+        db.mark_document_embedded(
+            document.id.unwrap(),
+            &document.content_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+
+        let configured = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_frontmatter_link_fields(["people".to_string()]);
+        let stats = configured.run(false, |_| {}).unwrap();
+        assert_eq!(stats.files_new + stats.files_updated, 0);
+        assert!(stats.entity_config_changed);
+        let entities = db.get_all_entities().unwrap();
+        assert!(entities.iter().any(|entity| {
+            entity.name == "jay vidyarthi" && entity.entity_type == EntityType::Link
+        }));
+        assert!(entities.iter().any(|entity| {
+            entity.name == "stefan leßle" && entity.entity_type == EntityType::Link
+        }));
+        let document = db.get_document_by_path("meetings/one.md").unwrap().unwrap();
+        assert_eq!(
+            document.embedded_content_hash.as_deref(),
+            Some(document.content_hash.as_str()),
+            "entity-only reconciliation must preserve the existing embedding receipt"
+        );
+
+        let removed = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_frontmatter_link_fields(Vec::<String>::new());
+        let stats = removed.run(false, |_| {}).unwrap();
+        assert!(stats.entity_config_changed);
+        assert!(
+            !db.get_all_entities()
+                .unwrap()
+                .iter()
+                .any(|entity| entity.name == "jay vidyarthi")
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -84,6 +85,7 @@ pub struct ProcessedDocument {
 pub struct DocumentProcessor {
     vault_path: PathBuf,
     chunk_size: usize,
+    frontmatter_link_fields: HashSet<String>,
 }
 
 impl DocumentProcessor {
@@ -92,12 +94,27 @@ impl DocumentProcessor {
         Self {
             vault_path,
             chunk_size: DEFAULT_CHUNK_SIZE_CHARS,
+            frontmatter_link_fields: HashSet::new(),
         }
     }
 
     /// Override the chunk size (in characters).
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Promote plain string values from these frontmatter fields as generic
+    /// link entities. Literal wikilinks remain recognized in every field.
+    pub fn with_frontmatter_link_fields(
+        mut self,
+        fields: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.frontmatter_link_fields = fields
+            .into_iter()
+            .map(|field| field.trim().to_lowercase())
+            .filter(|field| !field.is_empty())
+            .collect();
         self
     }
 
@@ -117,7 +134,10 @@ impl DocumentProcessor {
         };
 
         // Frontmatter
-        let frontmatter = parse_frontmatter(&content);
+        let mut frontmatter = parse_frontmatter(&content);
+        if let Some(frontmatter) = frontmatter.as_mut() {
+            frontmatter.promote_link_fields(&self.frontmatter_link_fields);
+        }
 
         // Title: from frontmatter, or derive from filename
         let title = frontmatter
@@ -244,7 +264,18 @@ impl DocumentProcessor {
     /// name becomes the leading textual folder only when source refs are
     /// namespaced (multi-root mode); single-root behavior stays byte-compatible.
     pub fn process_discovered(file: &DiscoveredFile) -> Result<ProcessedDocument> {
-        let mut document = Self::new(file.root_path.clone()).process_file(&file.relative_path)?;
+        Self::process_discovered_with_link_fields(file, std::iter::empty::<String>())
+    }
+
+    /// Process a discovered file using configured plain frontmatter link
+    /// fields. This static form keeps named-root callers easy to parallelize.
+    pub fn process_discovered_with_link_fields(
+        file: &DiscoveredFile,
+        fields: impl IntoIterator<Item = String>,
+    ) -> Result<ProcessedDocument> {
+        let mut document = Self::new(file.root_path.clone())
+            .with_frontmatter_link_fields(fields)
+            .process_file(&file.relative_path)?;
         let relative = file.relative_path.to_string_lossy().replace('\\', "/");
         if document.source_ref != file.source_ref {
             let prefix = file
@@ -496,6 +527,27 @@ Second paragraph here.
         assert!(doc.frontmatter.is_none());
         assert_eq!(doc.created_source, DateSource::Filesystem);
         assert_eq!(doc.modified_source, DateSource::Filesystem);
+    }
+
+    #[test]
+    fn test_process_configured_plain_frontmatter_link_field() {
+        let (_dir, vault) = create_test_vault();
+        fs::write(
+            vault.join("meeting.md"),
+            "---\npeople: [Jay Vidyarthi, Stefan Leßle]\n---\nMeeting notes.\n",
+        )
+        .unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .with_frontmatter_link_fields(["people".to_string()])
+            .process_file(Path::new("meeting.md"))
+            .unwrap();
+
+        assert_eq!(
+            doc.links,
+            vec!["jay vidyarthi".to_string(), "stefan leßle".to_string()]
+        );
+        assert_eq!(doc.frontmatter.unwrap().links, doc.links);
     }
 
     #[test]

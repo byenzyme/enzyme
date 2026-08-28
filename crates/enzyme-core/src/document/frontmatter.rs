@@ -18,6 +18,36 @@ pub struct Frontmatter {
     pub extra: HashMap<String, Value>,
 }
 
+impl Frontmatter {
+    /// Promote plain string values from configured frontmatter fields into
+    /// generic link entities.
+    ///
+    /// Literal wikilinks are already extracted from every field without
+    /// configuration. This method only handles unbracketed scalar strings and
+    /// string lists from deliberately selected fields such as `people` or
+    /// `projects`. Field names are matched case-insensitively.
+    pub fn promote_link_fields(&mut self, fields: &HashSet<String>) {
+        if fields.is_empty() {
+            return;
+        }
+
+        let normalized_fields: HashSet<String> = fields
+            .iter()
+            .map(|field| field.trim().to_lowercase())
+            .filter(|field| !field.is_empty())
+            .collect();
+        let mut promoted: HashSet<String> = HashSet::new();
+        for (key, value) in &self.extra {
+            if normalized_fields.contains(&key.trim().to_lowercase()) {
+                collect_plain_link_values(value, &mut promoted);
+            }
+        }
+        self.links.extend(promoted);
+        self.links.sort();
+        self.links.dedup();
+    }
+}
+
 /// Parse YAML frontmatter delimited by `---` at the start of a document.
 ///
 /// Returns `None` if the document has no valid frontmatter block.
@@ -220,6 +250,30 @@ fn collect_wikilinks_from_value(val: &Value, links: &mut HashSet<String>) {
         Value::Mapping(map) => {
             for v in map.values() {
                 collect_wikilinks_from_value(v, links);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect plain entity handles from a configured field value.
+///
+/// Only strings and nested string sequences are accepted. Mappings, numbers,
+/// booleans, and nulls are ignored so a broad metadata object cannot silently
+/// turn roles, IDs, or flags into entities. Strings containing wikilink syntax
+/// are also ignored here because the normal wikilink extractor already emits
+/// their exact targets.
+fn collect_plain_link_values(val: &Value, links: &mut HashSet<String>) {
+    match val {
+        Value::String(value) if !value.contains("[[") => {
+            let normalized = value.trim().to_lowercase();
+            if !normalized.is_empty() {
+                links.insert(normalized);
+            }
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                collect_plain_link_values(value, links);
             }
         }
         _ => {}
@@ -731,6 +785,52 @@ Body
 ";
         let fm = parse_frontmatter(content).expect("should parse");
         assert!(fm.links.is_empty());
+    }
+
+    #[test]
+    fn test_configured_plain_frontmatter_values_promote_to_links() {
+        let content = "\
+---
+people:
+  - Jay Vidyarthi
+  - Stefan Leßle
+  - Jay Vidyarthi
+projects: Product OS
+count: 3
+details:
+  role: facilitator
+---
+Body
+";
+        let mut fm = parse_frontmatter(content).expect("should parse");
+        fm.promote_link_fields(&["people".to_string()].into_iter().collect());
+
+        assert_eq!(
+            fm.links,
+            vec!["jay vidyarthi".to_string(), "stefan leßle".to_string()]
+        );
+        assert!(!fm.links.contains(&"product os".to_string()));
+        assert!(!fm.links.contains(&"facilitator".to_string()));
+        assert!(!fm.links.contains(&"3".to_string()));
+    }
+
+    #[test]
+    fn test_configured_field_keeps_literal_wikilinks_exact() {
+        let content = "\
+---
+people:
+  - \"[[Alice Smith|Alice]]\"
+  - Bob Jones
+---
+Body
+";
+        let mut fm = parse_frontmatter(content).expect("should parse");
+        fm.promote_link_fields(&["PEOPLE".to_string()].into_iter().collect());
+
+        assert_eq!(
+            fm.links,
+            vec!["alice smith".to_string(), "bob jones".to_string()]
+        );
     }
 
     #[test]

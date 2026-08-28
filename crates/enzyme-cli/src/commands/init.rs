@@ -262,7 +262,8 @@ fn configured_indexing_pipeline<'a>(
         .collect();
     let pipeline = IndexingPipeline::new(db, markdown_root)
         .with_excluded_folders(config.excluded_folders)
-        .with_configured_logs(logs);
+        .with_configured_logs(logs)
+        .with_frontmatter_link_fields(config.frontmatter_link_fields);
     Ok(if config.notes_roots.is_empty() {
         pipeline
     } else {
@@ -296,8 +297,11 @@ impl LocalRefreshResult {
 
     fn change_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
-        if has_index_changes(&self.indexing) || self.sources.changed() {
+        if has_document_changes(&self.indexing) || self.sources.changed() {
             reasons.push("documents_changed");
+        }
+        if self.indexing.entity_config_changed {
+            reasons.push("entity_configuration_changed");
         }
         if self.embedding.documents_embedded > 0 || self.embedding.documents_pruned > 0 {
             reasons.push("embeddings_changed");
@@ -1519,6 +1523,7 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
             "files_new": local.indexing.files_new,
             "files_updated": local.indexing.files_updated,
             "files_deleted": local.indexing.files_deleted,
+            "entity_config_changed": local.indexing.entity_config_changed,
         },
         "duration_ms": duration_ms,
         "petri": petri,
@@ -1566,7 +1571,7 @@ fn run_local_refresh_work(
         db,
         service,
         index_start_ms,
-        has_index_changes(&idx_stats) || source_stats.changed(),
+        has_document_changes(&idx_stats) || source_stats.changed(),
     )?;
 
     let after_embeddings = db.get_all_chunk_embeddings()?;
@@ -1599,6 +1604,10 @@ fn run_local_refresh_work(
 }
 
 fn has_index_changes(stats: &IndexingStats) -> bool {
+    has_document_changes(stats) || stats.entity_config_changed
+}
+
+fn has_document_changes(stats: &IndexingStats) -> bool {
     stats.files_new > 0 || stats.files_updated > 0 || stats.files_deleted > 0
 }
 
@@ -2537,6 +2546,7 @@ async fn run_refresh_interactive(
                 "files_new": local.indexing.files_new,
                 "files_updated": local.indexing.files_updated,
                 "files_deleted": local.indexing.files_deleted,
+                "entity_config_changed": local.indexing.entity_config_changed,
                 "duration_ms": local.indexing.duration_ms,
             },
             "sources": local.sources,

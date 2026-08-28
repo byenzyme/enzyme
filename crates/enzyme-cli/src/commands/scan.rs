@@ -207,6 +207,7 @@ struct CurrentConfigSummary {
     excluded_folders: Vec<String>,
     excluded_tags: Vec<String>,
     excluded_links: Vec<String>,
+    frontmatter_link_fields: Vec<String>,
     catalyst_format: Option<String>,
     max_embedding_files: Option<usize>,
 }
@@ -244,10 +245,18 @@ fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
     // Honor `exclude` so scan metrics/suggestions never count excluded folders.
     let discovery = FileDiscovery::from_notes_roots(roots)
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path));
+    let frontmatter_link_fields = EnzymeConfig::load(vault_path)?
+        .unwrap_or_default()
+        .frontmatter_link_fields;
     Ok(discovery
         .discover_named()?
         .iter()
-        .map(DocumentProcessor::process_discovered)
+        .map(|file| {
+            DocumentProcessor::process_discovered_with_link_fields(
+                file,
+                frontmatter_link_fields.iter().cloned(),
+            )
+        })
         .flatten()
         .collect())
 }
@@ -444,6 +453,7 @@ fn current_config_summary(vault_path: &Path) -> Result<CurrentConfigSummary> {
             excluded_folders: config.excluded_folders,
             excluded_tags: config.excluded_tags,
             excluded_links: config.excluded_links,
+            frontmatter_link_fields: config.frontmatter_link_fields,
             catalyst_format: config.catalyst_format,
             max_embedding_files: config.max_embedding_files,
         },
@@ -455,6 +465,7 @@ fn current_config_summary(vault_path: &Path) -> Result<CurrentConfigSummary> {
             excluded_folders: Vec::new(),
             excluded_tags: Vec::new(),
             excluded_links: Vec::new(),
+            frontmatter_link_fields: Vec::new(),
             catalyst_format: None,
             max_embedding_files: None,
         },

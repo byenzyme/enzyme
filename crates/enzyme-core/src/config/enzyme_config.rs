@@ -33,6 +33,7 @@ const CONFIG_HEADER: &str = "\
 #
 # [workspaces.notes]
 # entities = [\"folder:projects\", \"[[Design Principles]]\", \"log:journal\"]
+# frontmatter_link_fields = [\"people\"] # plain strings become generic link entities
 # [workspaces.notes.sources.notes]
 # path = \"/Users/you/notes\"
 # exclusions = [\"private\"]
@@ -50,6 +51,8 @@ const CONFIG_HEADER: &str = "\
 # NULL/omitted weights default to one, like one Markdown mention.
 #
 # Existing path-addressed Markdown vaults remain supported under [vaults].
+# # `frontmatter_link_fields` promotes plain string/list values from deliberate
+# # identity/reference fields. Wikilinks work in every field without this setting.
 # # log: marks a single file of dated entries (a journal that grows by
 # # appending) as its own entity, so retrieval sees its internal timeline.
 # # `enzyme scan --write-config` records the logs it recognizes here; add or
@@ -91,6 +94,10 @@ pub struct EnzymeConfig {
     pub excluded_links: Vec<String>,
     #[serde(default)]
     pub excluded_folders: Vec<String>,
+    /// Frontmatter fields whose plain string/list values become generic link
+    /// entities. Literal wikilinks are recognized in every field regardless.
+    #[serde(default)]
+    pub frontmatter_link_fields: Vec<String>,
     /// External directories to project this vault's catalysts onto.
     #[serde(default)]
     pub targets: Vec<String>,
@@ -435,6 +442,8 @@ struct VaultTomlSection {
     #[serde(default)]
     excluded_folders: Vec<String>,
     #[serde(default)]
+    frontmatter_link_fields: Vec<String>,
+    #[serde(default)]
     min_top_catalysts: Option<usize>,
     #[serde(default)]
     entities: Vec<CatalyzedEntity>,
@@ -455,6 +464,8 @@ struct WorkspaceTomlSection {
     excluded_links: Vec<String>,
     #[serde(default)]
     excluded_folders: Vec<String>,
+    #[serde(default)]
+    frontmatter_link_fields: Vec<String>,
     #[serde(default)]
     min_top_catalysts: Option<usize>,
     #[serde(default)]
@@ -659,6 +670,9 @@ impl EnzymeConfig {
             excluded_folders: vault
                 .map(|v| v.excluded_folders.clone())
                 .unwrap_or_default(),
+            frontmatter_link_fields: vault
+                .map(|v| normalize_frontmatter_link_fields(&v.frontmatter_link_fields))
+                .unwrap_or_default(),
             targets: vault.map(|v| v.targets.clone()).unwrap_or_default(),
             sources: vault.map(|v| v.sources.clone()).unwrap_or_default(),
             notes_path: None,
@@ -731,6 +745,9 @@ impl EnzymeConfig {
             excluded_folders: workspace
                 .map(|w| w.excluded_folders.clone())
                 .unwrap_or_default(),
+            frontmatter_link_fields: workspace
+                .map(|w| normalize_frontmatter_link_fields(&w.frontmatter_link_fields))
+                .unwrap_or_default(),
             targets: workspace.map(|w| w.targets.clone()).unwrap_or_default(),
             sources,
             notes_path,
@@ -794,6 +811,7 @@ impl EnzymeConfig {
             excluded_tags: legacy.excluded_tags,
             excluded_links: legacy.excluded_links,
             excluded_folders: legacy.excluded_folders,
+            frontmatter_link_fields: Vec::new(),
             targets: Vec::new(),
             sources: HashMap::new(),
             notes_path: None,
@@ -946,6 +964,8 @@ impl EnzymeConfig {
             entry.excluded_tags = self.excluded_tags.clone();
             entry.excluded_links = self.excluded_links.clone();
             entry.excluded_folders = self.excluded_folders.clone();
+            entry.frontmatter_link_fields =
+                normalize_frontmatter_link_fields(&self.frontmatter_link_fields);
             entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
             entry.entities = self.catalyzed_entities.clone();
             entry.targets = self.targets.clone();
@@ -994,6 +1014,8 @@ impl EnzymeConfig {
             entry.excluded_tags = self.excluded_tags.clone();
             entry.excluded_links = self.excluded_links.clone();
             entry.excluded_folders = self.excluded_folders.clone();
+            entry.frontmatter_link_fields =
+                normalize_frontmatter_link_fields(&self.frontmatter_link_fields);
             entry.min_top_catalysts = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
             entry.entities = self.catalyzed_entities.clone();
             entry.targets = self.targets.clone();
@@ -1064,6 +1086,7 @@ impl EnzymeConfig {
                 &ws.excluded_tags,
                 &ws.excluded_links,
                 &ws.excluded_folders,
+                &ws.frontmatter_link_fields,
                 &ws.min_top_catalysts,
                 &ws.entities,
                 &ws.targets,
@@ -1112,6 +1135,7 @@ impl EnzymeConfig {
                 &vault.excluded_tags,
                 &vault.excluded_links,
                 &vault.excluded_folders,
+                &vault.frontmatter_link_fields,
                 &vault.min_top_catalysts,
                 &vault.entities,
                 &vault.targets,
@@ -1155,6 +1179,17 @@ fn canonical_vault_key(vault_path: &Path) -> String {
         .unwrap_or_else(|_| vault_path.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+fn normalize_frontmatter_link_fields(fields: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = fields
+        .iter()
+        .map(|field| field.trim().to_lowercase())
+        .filter(|field| !field.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 #[derive(Serialize)]
@@ -1223,6 +1258,7 @@ fn apply_common_entry(
     excluded_tags: &[String],
     excluded_links: &[String],
     excluded_folders: &[String],
+    frontmatter_link_fields: &[String],
     min_top_catalysts: &Option<usize>,
     entities: &[CatalyzedEntity],
     targets: &[String],
@@ -1231,6 +1267,11 @@ fn apply_common_entry(
     set_value(entry, "excluded_tags", &excluded_tags.to_vec())?;
     set_value(entry, "excluded_links", &excluded_links.to_vec())?;
     set_value(entry, "excluded_folders", &excluded_folders.to_vec())?;
+    set_value(
+        entry,
+        "frontmatter_link_fields",
+        &normalize_frontmatter_link_fields(frontmatter_link_fields),
+    )?;
     set_optional(entry, "min_top_catalysts", min_top_catalysts)?;
     set_value(entry, "entities", &entities.to_vec())?;
     set_value(entry, "targets", &targets.to_vec())?;
@@ -1315,6 +1356,7 @@ timestamp = { unit = "ms" }
         let entry = ensure_table(workspaces, "imessage");
         apply_common_entry(
             entry,
+            &[],
             &[],
             &[],
             &[],
@@ -1444,6 +1486,7 @@ excludedTags:
             excluded_tags: config.excluded_tags,
             excluded_links: config.excluded_links,
             excluded_folders: config.excluded_folders,
+            frontmatter_link_fields: Vec::new(),
             targets: Vec::new(),
             sources: HashMap::new(),
             notes_path: None,
@@ -1460,6 +1503,7 @@ excludedTags:
     fn test_parse_global_toml_entity_profile_options() {
         let toml = r##"
 [vaults."/tmp/recipe-vault"]
+frontmatter_link_fields = [" People ", "projects", "people"]
 entities = [
   { "folder:user-recipe-comment" = { profile = "preference_evidence" } },
   "folder:agent-observed-preference",
@@ -1472,6 +1516,7 @@ entities = [
         let prefs = config.parse_preferences();
 
         assert_eq!(prefs.entities.len(), 3);
+        assert_eq!(config.frontmatter_link_fields, vec!["people", "projects"]);
         assert_eq!(
             prefs.entity_profiles.get("user-recipe-comment").unwrap(),
             "preference_evidence"
@@ -1494,6 +1539,9 @@ entities = [
     fn named_workspace_parses_multiple_markdown_roots() {
         let global: GlobalTomlConfig = toml::from_str(
             r#"
+[workspaces.margins]
+frontmatter_link_fields = ["People", "projects"]
+
 [workspaces.margins.sources.sessions]
 path = "/notes/sessions"
 document_ref_prefix = "markdown:sessions"
@@ -1519,6 +1567,7 @@ writable = false
             Some("markdown:sessions")
         );
         assert_eq!(config.notes_path, None);
+        assert_eq!(config.frontmatter_link_fields, vec!["people", "projects"]);
     }
 
     #[test]
@@ -1542,6 +1591,7 @@ document_ref_prefix = "markdown-original"
             .unwrap();
         config.notes_roots[0].path = PathBuf::from("/notes/updated");
         config.notes_roots[0].document_ref_prefix = Some("markdown-stable".to_string());
+        config.frontmatter_link_fields = vec!["people".to_string()];
         config
             .save_at(&store, &config_path, "# Enzyme configuration\n")
             .unwrap();
@@ -1549,6 +1599,7 @@ document_ref_prefix = "markdown-original"
         let raw = fs::read_to_string(&config_path).unwrap();
         assert!(raw.contains("# keep this comment"));
         assert!(raw.contains("document_ref_prefix = \"markdown-stable\""));
+        assert!(raw.contains("frontmatter_link_fields = [\"people\"]"));
         let loaded = EnzymeConfig::load_at(&store, &config_path)
             .unwrap()
             .unwrap();
@@ -1557,6 +1608,7 @@ document_ref_prefix = "markdown-original"
             loaded.notes_roots[0].document_ref_prefix.as_deref(),
             Some("markdown-stable")
         );
+        assert_eq!(loaded.frontmatter_link_fields, vec!["people"]);
     }
 
     #[test]
@@ -1746,6 +1798,7 @@ local_model = "catalyst-135m-v3"
             excluded_tags: vec!["todo".to_string()],
             excluded_links: vec!["Template".to_string()],
             excluded_folders: vec!["templates".to_string()],
+            frontmatter_link_fields: vec![" People ".to_string(), "projects".to_string()],
             targets: vec!["/Users/alice/code/my-app".to_string()],
             sources: HashMap::from([(
                 "messages".to_string(),
@@ -1789,6 +1842,7 @@ local_model = "catalyst-135m-v3"
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
         assert_eq!(loaded.catalyzed_entities.len(), 2);
         assert_eq!(loaded.targets, vec!["/Users/alice/code/my-app"]);
+        assert_eq!(loaded.frontmatter_link_fields, vec!["people", "projects"]);
         let source = loaded.sources.get("messages").unwrap();
         assert_eq!(source.roles.id, vec!["id"]);
         assert_eq!(source.roles.document_ref.as_deref(), Some("document_ref"));
