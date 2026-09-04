@@ -22,6 +22,9 @@ use super::status::build_status_json;
 
 const SKILL_MD: &str =
     include_str!("../../../../plugin/plugins/enzyme/skills/enzyme-workspace-setup/SKILL.md");
+const KNOWLEDGE_PRACTICE_REVIEW: &str = include_str!(
+    "../../../../plugin/plugins/enzyme/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
+);
 
 /// Strip YAML frontmatter (delimited by `---`) from a string.
 fn strip_frontmatter(s: &str) -> &str {
@@ -34,6 +37,14 @@ fn strip_frontmatter(s: &str) -> &str {
     } else {
         s
     }
+}
+
+fn setup_instructions() -> String {
+    format!(
+        "{}\n\n{}",
+        strip_frontmatter(SKILL_MD).trim_end(),
+        KNOWLEDGE_PRACTICE_REVIEW.trim()
+    )
 }
 
 #[derive(Clone)]
@@ -296,7 +307,7 @@ impl ServerHandler for EnzymeMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::new("enzyme", env!("CARGO_PKG_VERSION")))
-            .with_instructions(strip_frontmatter(SKILL_MD))
+            .with_instructions(setup_instructions())
     }
 }
 
@@ -308,4 +319,17 @@ pub async fn run_mcp(vault: Option<PathBuf>) -> Result<()> {
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setup_instructions;
+
+    #[test]
+    fn setup_instructions_compose_the_operational_skill_and_shared_review() {
+        let instructions = setup_instructions();
+        assert!(instructions.contains("# Enzyme Workspace Setup"));
+        assert!(instructions.contains("# Knowledge Practice Review Contract"));
+        assert!(instructions.contains("grants no authority to write"));
+    }
 }

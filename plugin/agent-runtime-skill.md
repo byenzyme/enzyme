@@ -45,66 +45,18 @@ Do not expose embedding implementation details unless asked. Prefer simple langu
 
 Do not build a separate context tree. Learn from the user's folders, but prefer lightweight markdown signals: tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts. Create new folders or people pages only when the vault already uses that convention or the user asks for it.
 
-Treat setup as an indexability assessment. A workspace may start anywhere on the spectrum from raw JSON exports to a highly structured agent-team markdown repo. Do not assume either is already Enzyme-ready. The final setup target is an Enzyme-indexable markdown workspace: meaningful folders, explicit dates when temporal retrieval matters, stable tags/wikilinks/frontmatter entity handles where the vault benefits from them, and enough source text for grounded retrieval. Use the audit to explain what is already indexable, what is missing, and what work would make Enzyme materially better before init. Ask for user feedback on that interpretation before writing config, materializing imports, or repairing structure.
-
 ## First-Time Setup
 
-If `.enzyme/enzyme.db` is missing, do setup before normal retrieval. Setup should demonstrate value, not interrogate the user or impose a schema.
+If `.enzyme/enzyme.db` is missing, or the user asks to set up, re-set up,
+diagnose, or repair the workspace, stop the routine retrieval flow and load the
+dedicated `enzyme-workspace-setup` skill. Follow it end to end; it is the sole
+source of truth for scan interpretation, configuration, consent, repair, backup,
+revert, and proof. Do not improvise a setup procedure from this runtime skill.
 
-Import materialization and structural repair belong in setup/repair, not routine runtime note-writing. Use this phase flow:
-
-1. **Assess indexability** — run `enzyme scan`; if raw exports or weakly structured markdown are present, use a scripted read-only audit to report what is already indexable, what is missing, and what would materially improve Enzyme.
-2. **Preview the target shape** — explain the Enzyme-readable workspace you are aiming for: meaningful folders, dates when temporal retrieval matters, stable entity handles, scope boundaries, and source text.
-3. **Materialize or repair only with approval** — required outputs are an audit summary, a dry-run plan or sample diff, and a backup plan. Preserve raw artifacts. Apply only deterministic high-confidence changes the user approves.
-4. **Configure, initialize, validate** — tune TOML, run init/refresh, then test with petri/catalyze prompts that should cite the newly indexable captures.
-
-```bash
-enzyme scan
-# Read the structured scan evidence and produce a setup preview.
-enzyme scan --write-config
-# Read and tune ~/.enzyme/config.toml before init.
-enzyme init --quiet
-enzyme petri
-# Show the active map, then complete the first value demo.
-enzyme petri --query "<simulated user prompt>"
-enzyme catalyze "<query composed from prompt + petri catalyst vocabulary>"
-```
-
-Before `enzyme scan --write-config`, use `enzyme scan` as the primary evidence for setup. Read the structured fields directly, do only bounded follow-up when the scan is ambiguous, then produce a concrete setup preview:
-
-- what is already working as Enzyme signal;
-- what is not yet Enzyme-indexable or would be weakly indexable, such as raw dumps, missing dates, missing entity handles, or scope boundaries that are only implicit;
-- why the user does not need a new memory architecture;
-- small habit upgrades, such as stable wikilinks for central people/projects/concepts and durable existing tags;
-- the proposed stance for ongoing capture, durable work context, relationship/entity context, reference material, temporal context, and noise;
-- 3-5 vault-specific prompts an Enzyme-aware agent should answer with grounded source notes;
-- how the demo should show the map-to-connection loop: Enzyme's precomputed questions help the agent recognize active ideas, then source-grounded retrieval places notes beside each other so a useful question appears;
-- any external corpora that could be searched with `enzyme catalyze --target`;
-- if the vault would materially benefit, a minimal high-confidence retrieval repair offer before init, with exact scope and user confirmation.
-
-Ask for corrections to that stance before writing config. Do not ask the user to classify the vault up front.
-
-If offering a minimal repair, keep it small, reversible, and based on existing conventions: adding missing date frontmatter to date-named notes, configuring an already-established scalar/list identity field such as `people:` via `frontmatter_link_fields = ["people"]`, adding `people:`/`projects:` values only where those fields already exist and either the field is configured or the values are exact wikilinks, adding a few central wikilinks to obvious notes, or excluding runtime/generated folders from config. A configured plain value becomes a generic link entity, not a typed person/project record. Do not map broad metadata fields such as `status`, `type`, `aliases`, IDs, or arbitrary objects. Do not move files, create a new taxonomy, generate summaries, or bulk-normalize the vault during first setup. If the user declines, initialize as-is and still demonstrate value; after the demo, offer the remaining refinements as optional next steps.
-
-If the vault uses Obsidian, optionally offer capture templates after the demo. Core Obsidian Templates are enough for simple date/time templates inserted into a note, and Daily notes can apply a daily template. Do not require new plugins during Enzyme setup. Frame templates as optional capture affordances for future new notes, not prerequisites: they help users create inbox/daily/meeting/project notes with existing date/tag/wikilink handles so Enzyme can build on them later.
-
-After `enzyme scan --write-config`, read `~/.enzyme/config.toml` and compare it with the scan evidence before `enzyme init`. Add missing important markdown folders as `folder:<path>` entries when they are central and not covered by a parent. Common folders include `inbox`, `daily`, `journal`, `docs`, `notes`, `research`, `logs`, `decisions`, `meetings`, `transcripts`, `sessions`, `projects`, `areas`, `resources`, `people`, `contacts`, `clients`, and `companies`. Keep the entity list focused; prefer scan-backed top-level surfaces over every subfolder. If `frontmatter_samples` shows a consistent identity/reference field whose plain values should be entity handles, add only that field to the same vault/workspace section's `frontmatter_link_fields`, then verify it appears in scan's `current_config` before init. This is a visible interpretation setting, not a reason to rewrite the notes.
-
-For expandable folders, look for scan/petri evidence that a selected folder contains page files that are also wikilinks elsewhere (`page_entities`, `page_entity_children`, `sampled_children`, `catalyzed_children`, or similar folder-page evidence). In Rust Enzyme, selecting the parent folder is usually enough: the selection pipeline auto-detects expandable folders, caps/ranks children, and materializes child page links as their own catalyst entities. Do not manually add every child wikilink to config just because it lives in a selected folder; add a child link separately only when it has a distinct role independent of the parent folder.
-
-Use profile overrides only when the posture is clear. Loose examples: people/relationships → `relational`; projects/work/inbox → `operational`; product/strategy/decisions → `decision_trace`; Readwise/research/PKM → `resonance_trace`; journal/daily/writing → `reflective`; ethics/philosophy/tradeoffs → `tension_trace`; taste/feedback/activity logs → `preference_evidence`. Example TOML entity: `{ "folder:people" = { profile = "relational" } }`. Leave ambiguous entities un-overridden rather than guessing.
-
-Keep runtime/build folders excluded: `.hermes`, `.enzyme`, `.git`, `.claude`, `.agents`, `.codex`, `.codex-work`, `.pi`, `.local`, `.obsidian`, `node_modules`, `target`, `dist`, `build`, and templates.
-
-For persistent `targets = [...]` entries, use raw filesystem paths or vault-relative directory paths such as `Readwise/Books` or `../research`; do not prefix them with `folder:` and do not use tag/wikilink syntax.
-
-For voice agents that need an immediate first turn, use:
-
-```bash
-enzyme init --voice-ready --voice-entities 3 --voice-min-catalysts 1
-```
-
-It returns once seed petri context exists; semantic search becomes available after the detached init worker finishes.
+`enzyme install codex`, `enzyme install claude`, `enzyme install hermes`, and
+`enzyme install openclaw` install that setup skill beside this one. If it is
+missing, rerun the matching install command once, then read its `SKILL.md` and
+bundled `references/knowledge-practice-review.md` before issuing setup commands.
 
 ## Session Lifecycle
 
@@ -118,7 +70,7 @@ What's automatic depends on your runtime:
 
 **Hermes** (hooks handle it):
 
-- **First setup** — the plugin can bootstrap the binary; the workspace still needs `enzyme scan`, TOML validation, and `enzyme init` once
+- **First setup** — the plugin can bootstrap the binary; load the installed `enzyme-workspace-setup` skill for the complete workflow
 - **Session start** — binary bootstrap + `enzyme refresh` run automatically
 - **Each turn** — `enzyme petri --query` injects vault context before the model sees your message
 - **Session end** — after any useful markdown notes are written, `enzyme refresh` indexes them

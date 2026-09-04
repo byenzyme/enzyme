@@ -6,6 +6,13 @@ allowed-tools: Read, Glob, Grep, Bash, Write, Edit
 
 # Enzyme Workspace Setup
 
+Before acting, read
+`references/knowledge-practice-review.md` completely. It is the shared contract for
+interpreting evidence, recognizing meaningful continuity, coaching missing handles,
+and handing off an insight before mechanics. This skill remains authoritative for
+Enzyme commands, configuration, consent, mutation, backup, revert, and proof. When
+these instructions arrive through MCP, the same reference is appended inline.
+
 The durable promise:
 
 > You can start now. Existing files will not be changed until you say yes. If a repair is worth doing, it is small, reversible, and proved against the user's real notes.
@@ -129,16 +136,10 @@ This proof note edits and moves nothing. If there is not enough content for a ri
 
 ## Coach The Missing Handles
 
-Some gaps no deterministic mutation can close: the handle Enzyme needs does not exist yet. Nothing recurs by name, dates live nowhere the parser reads, one thread is split across three spellings of a person. The rules above rightly forbid inventing that structure — so for these gaps the honest lever is coaching: change how tomorrow's notes are captured, never what yesterday's say.
-
-Coaching lines use the anchors-reveal grammar in future tense: name the thread in the user's own content, one sentence of why Enzyme cannot grab it, the smallest capture habit that would create the handle, and the question that becomes answerable once it exists. The feel:
-
-- Dates: "Your product thinking is all here, but nothing says *when* — every file claims the day of your laptop migration. Put the date in new filenames and each note becomes a moment that stacks; 'how did my thinking change after the pilot' starts being answerable."
-- Homes: "'Pricing' lives in a dozen notes scattered at the root. I find each mention, but they never accumulate into a place that can be watched. Give the thread one home — a folder, or one running file of dated entries — and it becomes an anchor with its own standing questions."
-- Names: "You write this person three different ways — three thin threads instead of one thick one. I won't rewrite the past, but pick one handle from today and the thread compounds from here."
-- Trapped content: "The decisions from these meetings live in PDFs that can't be read as notes. Three Markdown lines per meeting — date in the title, what was decided — give more than the whole export."
-
-Bounds: coach only where a tier-2 or tier-3 finding exists, offer at most two habits (the two that unlock the most), keep each to two sentences, and never present a habit as a condition of proceeding. Coaching is advice at the close, not a mutation and not a gate item.
+Use the shared knowledge-practice review contract for the form and bounds of
+future-capture coaching. In Enzyme, coach only where a tier-2 or tier-3 finding
+exists. Advice belongs at the close; it is not a mutation, a gate item, or a reason
+to loosen the deterministic-evidence rules above.
 
 ## One Decision
 

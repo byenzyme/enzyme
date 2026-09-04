@@ -13,11 +13,15 @@ const INSTRUCTIONS_URL: &str =
 const SKILL_URL: &str =
     "https://raw.githubusercontent.com/useenzyme/enzyme/main/agent-runtime-skill.md";
 const WORKSPACE_SETUP_SKILL_URL: &str = "https://raw.githubusercontent.com/useenzyme/enzyme/main/skills/enzyme-workspace-setup/SKILL.md";
+const KNOWLEDGE_PRACTICE_REVIEW_URL: &str = "https://raw.githubusercontent.com/useenzyme/enzyme/main/skills/enzyme-workspace-setup/references/knowledge-practice-review.md";
 
 const LOCAL_INSTRUCTIONS: &str = include_str!("../../../../plugin/agent-instructions.md");
 const LOCAL_SKILL: &str = include_str!("../../../../plugin/agent-runtime-skill.md");
 const LOCAL_WORKSPACE_SETUP_SKILL: &str =
     include_str!("../../../../plugin/skills/enzyme-workspace-setup/SKILL.md");
+const LOCAL_KNOWLEDGE_PRACTICE_REVIEW: &str = include_str!(
+    "../../../../plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
+);
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum AgentTarget {
@@ -53,18 +57,31 @@ pub async fn run_agents_install(
 ) -> Result<()> {
     let instructions = load_template(INSTRUCTIONS_URL, LOCAL_INSTRUCTIONS, source).await?;
     let skill = load_template(SKILL_URL, LOCAL_SKILL, source).await?;
-    let workspace_setup_skill = if matches!(target, AgentTarget::Codex | AgentTarget::Claude) {
-        Some(
-            load_template(
-                WORKSPACE_SETUP_SKILL_URL,
-                LOCAL_WORKSPACE_SETUP_SKILL,
-                source,
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let mut workspace_setup_skill = load_template(
+        WORKSPACE_SETUP_SKILL_URL,
+        LOCAL_WORKSPACE_SETUP_SKILL,
+        source,
+    )
+    .await?;
+    let mut knowledge_practice_review = load_template(
+        KNOWLEDGE_PRACTICE_REVIEW_URL,
+        LOCAL_KNOWLEDGE_PRACTICE_REVIEW,
+        source,
+    )
+    .await?;
+    if workspace_setup_skill.source != knowledge_practice_review.source {
+        tracing::warn!(
+            "workspace setup bundle resolved from mixed sources; using the packaged pair"
+        );
+        workspace_setup_skill = LoadedTemplate {
+            content: LOCAL_WORKSPACE_SETUP_SKILL.trim_end().to_string(),
+            source: "packaged",
+        };
+        knowledge_practice_review = LoadedTemplate {
+            content: LOCAL_KNOWLEDGE_PRACTICE_REVIEW.trim_end().to_string(),
+            source: "packaged",
+        };
+    }
 
     let agents_path = write_agents_section(vault_path, target, &instructions.content)?;
     if matches!(target, AgentTarget::Claude) {
@@ -78,19 +95,14 @@ pub async fn run_agents_install(
             source: skill.source,
         });
         installed.push(InstalledSkill {
-            path: write_named_skill(
+            path: write_named_skill_bundle(
                 vault_path,
                 ".agents",
                 "enzyme-workspace-setup",
-                &workspace_setup_skill
-                    .as_ref()
-                    .expect("workspace setup skill loaded for codex target")
-                    .content,
+                &workspace_setup_skill.content,
+                &knowledge_practice_review.content,
             )?,
-            source: workspace_setup_skill
-                .as_ref()
-                .expect("workspace setup skill loaded for codex target")
-                .source,
+            source: workspace_setup_skill.source,
         });
     }
     if matches!(target, AgentTarget::Claude) {
@@ -99,19 +111,14 @@ pub async fn run_agents_install(
             source: skill.source,
         });
         installed.push(InstalledSkill {
-            path: write_named_skill(
+            path: write_named_skill_bundle(
                 vault_path,
                 ".claude",
                 "enzyme-workspace-setup",
-                &workspace_setup_skill
-                    .as_ref()
-                    .expect("workspace setup skill loaded for claude target")
-                    .content,
+                &workspace_setup_skill.content,
+                &knowledge_practice_review.content,
             )?,
-            source: workspace_setup_skill
-                .as_ref()
-                .expect("workspace setup skill loaded for claude target")
-                .source,
+            source: workspace_setup_skill.source,
         });
     }
     if matches!(target, AgentTarget::Hermes) {
@@ -120,11 +127,27 @@ pub async fn run_agents_install(
             path: write_hermes_skill(&skill.content)?,
             source: skill.source,
         });
+        installed.push(InstalledSkill {
+            path: write_hermes_named_skill_bundle(
+                "enzyme-workspace-setup",
+                &workspace_setup_skill.content,
+                &knowledge_practice_review.content,
+            )?,
+            source: workspace_setup_skill.source,
+        });
     }
     if matches!(target, AgentTarget::Openclaw) {
         installed.push(InstalledSkill {
             path: write_openclaw_skill(&skill.content)?,
             source: skill.source,
+        });
+        installed.push(InstalledSkill {
+            path: write_openclaw_named_skill_bundle(
+                "enzyme-workspace-setup",
+                &workspace_setup_skill.content,
+                &knowledge_practice_review.content,
+            )?,
+            source: workspace_setup_skill.source,
         });
     }
 
@@ -267,9 +290,46 @@ fn write_named_skill(
     Ok(skill_path)
 }
 
+fn write_named_skill_bundle(
+    vault_path: &Path,
+    agent_dir: &str,
+    skill_name: &str,
+    skill: &str,
+    knowledge_practice_review: &str,
+) -> Result<PathBuf> {
+    let skill_path = write_named_skill(vault_path, agent_dir, skill_name, skill)?;
+    write_knowledge_practice_review(&skill_path, knowledge_practice_review)?;
+    Ok(skill_path)
+}
+
+fn write_knowledge_practice_review(skill_path: &Path, reference: &str) -> Result<()> {
+    let references = skill_path
+        .parent()
+        .expect("skill path always has a parent")
+        .join("references");
+    fs::create_dir_all(&references)
+        .with_context(|| format!("failed to create {}", references.display()))?;
+    let path = references.join("knowledge-practice-review.md");
+    fs::write(&path, format!("{}\n", reference.trim_end()))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
 fn write_hermes_skill(skill: &str) -> Result<PathBuf> {
-    let hermes_home = hermes_home_dir();
-    let path = hermes_home.join("skills").join("enzyme");
+    write_global_named_skill(&hermes_home_dir(), "enzyme", skill)
+}
+
+fn write_hermes_named_skill_bundle(
+    skill_name: &str,
+    skill: &str,
+    knowledge_practice_review: &str,
+) -> Result<PathBuf> {
+    let path = write_global_named_skill(&hermes_home_dir(), skill_name, skill)?;
+    write_knowledge_practice_review(&path, knowledge_practice_review)?;
+    Ok(path)
+}
+
+fn write_global_named_skill(home: &Path, skill_name: &str, skill: &str) -> Result<PathBuf> {
+    let path = home.join("skills").join(skill_name);
     fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
     let skill_path = path.join("SKILL.md");
     fs::write(&skill_path, format!("{}\n", skill.trim_end()))
@@ -278,13 +338,17 @@ fn write_hermes_skill(skill: &str) -> Result<PathBuf> {
 }
 
 fn write_openclaw_skill(skill: &str) -> Result<PathBuf> {
-    let openclaw_home = openclaw_home_dir();
-    let path = openclaw_home.join("skills").join("enzyme");
-    fs::create_dir_all(&path).with_context(|| format!("failed to create {}", path.display()))?;
-    let skill_path = path.join("SKILL.md");
-    fs::write(&skill_path, format!("{}\n", skill.trim_end()))
-        .with_context(|| format!("failed to write {}", skill_path.display()))?;
-    Ok(skill_path)
+    write_global_named_skill(&openclaw_home_dir(), "enzyme", skill)
+}
+
+fn write_openclaw_named_skill_bundle(
+    skill_name: &str,
+    skill: &str,
+    knowledge_practice_review: &str,
+) -> Result<PathBuf> {
+    let path = write_global_named_skill(&openclaw_home_dir(), skill_name, skill)?;
+    write_knowledge_practice_review(&path, knowledge_practice_review)?;
+    Ok(path)
 }
 
 fn hermes_home_dir() -> PathBuf {
@@ -484,11 +548,12 @@ mod tests {
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("name: enzyme"));
 
-        let setup_path = write_named_skill(
+        let setup_path = write_named_skill_bundle(
             dir.path(),
             ".agents",
             "enzyme-workspace-setup",
             LOCAL_WORKSPACE_SETUP_SKILL,
+            LOCAL_KNOWLEDGE_PRACTICE_REVIEW,
         )
         .unwrap();
         assert_eq!(
@@ -498,6 +563,12 @@ mod tests {
         );
         let setup_content = fs::read_to_string(setup_path).unwrap();
         assert!(setup_content.contains("name: enzyme-workspace-setup"));
+        let reference =
+            fs::read_to_string(dir.path().join(
+                ".agents/skills/enzyme-workspace-setup/references/knowledge-practice-review.md",
+            ))
+            .unwrap();
+        assert!(reference.contains("# Knowledge Practice Review Contract"));
     }
 
     #[test]
@@ -519,13 +590,31 @@ mod tests {
             env::set_var("HERMES_HOME", dir.path());
         }
         let path = write_hermes_skill(LOCAL_SKILL).unwrap();
-        unsafe {
-            env::remove_var("HERMES_HOME");
-        }
 
         assert_eq!(path, dir.path().join("skills/enzyme/SKILL.md"));
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("name: enzyme"));
+
+        let setup_path = write_hermes_named_skill_bundle(
+            "enzyme-workspace-setup",
+            LOCAL_WORKSPACE_SETUP_SKILL,
+            LOCAL_KNOWLEDGE_PRACTICE_REVIEW,
+        )
+        .unwrap();
+        assert_eq!(
+            setup_path,
+            dir.path().join("skills/enzyme-workspace-setup/SKILL.md")
+        );
+        assert!(
+            setup_path
+                .parent()
+                .unwrap()
+                .join("references/knowledge-practice-review.md")
+                .is_file()
+        );
+        unsafe {
+            env::remove_var("HERMES_HOME");
+        }
     }
 
     #[test]
@@ -535,12 +624,30 @@ mod tests {
             env::set_var("OPENCLAW_HOME", dir.path());
         }
         let path = write_openclaw_skill(LOCAL_SKILL).unwrap();
-        unsafe {
-            env::remove_var("OPENCLAW_HOME");
-        }
 
         assert_eq!(path, dir.path().join("skills/enzyme/SKILL.md"));
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("name: enzyme"));
+
+        let setup_path = write_openclaw_named_skill_bundle(
+            "enzyme-workspace-setup",
+            LOCAL_WORKSPACE_SETUP_SKILL,
+            LOCAL_KNOWLEDGE_PRACTICE_REVIEW,
+        )
+        .unwrap();
+        assert_eq!(
+            setup_path,
+            dir.path().join("skills/enzyme-workspace-setup/SKILL.md")
+        );
+        assert!(
+            setup_path
+                .parent()
+                .unwrap()
+                .join("references/knowledge-practice-review.md")
+                .is_file()
+        );
+        unsafe {
+            env::remove_var("OPENCLAW_HOME");
+        }
     }
 }

@@ -18,7 +18,7 @@ def _not_initialized_error() -> str:
     return json.dumps(
         {
             "error": "enzyme vault is not initialized",
-            "next": "Run `enzyme scan`, audit the workspace independently, confirm the final entity/exclusion list with the user, run `enzyme scan --write-config`, validate ~/.enzyme/config.toml for missing important folders, then run `enzyme init`.",
+            "next": "Load the installed `enzyme-workspace-setup` skill and follow it end to end. If that skill is missing, run `enzyme install hermes --source local` once, then read its SKILL.md and bundled knowledge-practice review reference before issuing setup commands.",
         }
     )
 

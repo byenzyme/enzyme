@@ -96,19 +96,22 @@ HOME="$test_home" CODEX_HOME="$test_codex_home" \
 
 skill_path="$workspace/.agents/skills/enzyme/SKILL.md"
 setup_skill_path="$workspace/.agents/skills/enzyme-workspace-setup/SKILL.md"
+setup_reference_path="$workspace/.agents/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
 agents_path="$workspace/AGENTS.md"
 
 test -f "$skill_path"
 test -f "$setup_skill_path"
+test -f "$setup_reference_path"
 test -f "$agents_path"
 grep -q '^name: enzyme$' "$skill_path"
-grep -q 'enzyme scan' "$skill_path"
+grep -q 'source of truth for scan interpretation' "$skill_path"
 grep -q 'do not call `enzyme install <runtime>`' "$skill_path"
 grep -q '^name: enzyme-workspace-setup$' "$setup_skill_path"
 grep -q 'What Does Enzyme Actually See' "$setup_skill_path"
 grep -q 'scan --write-config' "$setup_skill_path"
 grep -q 'config.toml' "$setup_skill_path"
 grep -q 'catalyze' "$setup_skill_path"
+grep -q 'Knowledge Practice Review Contract' "$setup_reference_path"
 grep -q '<!-- enzyme:start -->' "$agents_path"
 grep -q '<!-- enzyme:end -->' "$agents_path"
 grep -q 'enzyme-workspace-setup/SKILL.md' "$agents_path"
@@ -130,7 +133,7 @@ if [[ "$run_codex" -eq 1 ]]; then
   fi
 
   output_file="$tmp_root/codex-final.txt"
-  prompt='Use the enzyme skill if it is available. Do not run shell commands. Answer exactly: ENZYME_SKILL_OK command=<the first setup command shown in the Enzyme skill first-time setup block>'
+  prompt='Use the enzyme skill if it is available. Do not run shell commands. Answer exactly: ENZYME_SKILL_OK setup=<the name of the dedicated skill that owns first-time setup>'
 
   HOME="$test_home" CODEX_HOME="$test_codex_home" \
     codex exec \
@@ -142,7 +145,7 @@ if [[ "$run_codex" -eq 1 ]]; then
       --output-last-message "$output_file" \
       "$prompt"
 
-  if ! grep -q 'ENZYME_SKILL_OK command=enzyme scan' "$output_file"; then
+  if ! grep -q 'ENZYME_SKILL_OK setup=enzyme-workspace-setup' "$output_file"; then
     echo "codex smoke failed; final answer was:" >&2
     cat "$output_file" >&2
     exit 1

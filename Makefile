@@ -27,8 +27,8 @@ sync-agent-skill:
 check-agent-skill:
 	python3 scripts/sync-agent-runtime-skill.py --check
 
-# Keep the vendored aside workspace-setup skill in sync with the canonical
-# enzyme-rust source at plugin/skills/enzyme-workspace-setup/SKILL.md.
+# Keep the operational setup skill mirrored into the Enzyme plugin and its
+# neutral practice-review reference mirrored into both the plugin and Margins.
 sync-workspace-skill:
 	python3 scripts/sync-workspace-setup-skill.py
 
