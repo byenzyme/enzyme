@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Sync the Enzyme setup skill and its product-neutral review contract.
+"""Check Enzyme's setup surfaces and sync its neutral review contract.
 
 Enzyme owns the operational setup skill. Its bundled knowledge-practice review
 reference is intentionally command-free and may be composed into other product
-adapters. The plugin mirrors both files byte-for-byte; Margins mirrors only the
-neutral reference and keeps its own commands, state model, and mutation policy.
+adapters. The marketplace plugin carries only a small bootstrap that installs
+the canonical skills into a vault. Margins mirrors the neutral reference and
+keeps its own commands, state model, and mutation policy.
 """
 
 from __future__ import annotations
@@ -19,11 +20,18 @@ CANONICAL_DIR = ROOT / "plugin" / "skills" / "enzyme-workspace-setup"
 CANONICAL_SKILL = CANONICAL_DIR / "SKILL.md"
 CANONICAL_REVIEW = CANONICAL_DIR / "references" / "knowledge-practice-review.md"
 
-PLUGIN_DIR = (
-    ROOT / "plugin" / "plugins" / "enzyme" / "skills" / "enzyme-workspace-setup"
+PLUGIN_BOOTSTRAP = (
+    ROOT / "plugin" / "plugins" / "enzyme" / "skills" / "enzyme-bootstrap" / "SKILL.md"
 )
-PLUGIN_SKILL = PLUGIN_DIR / "SKILL.md"
-PLUGIN_REVIEW = PLUGIN_DIR / "references" / "knowledge-practice-review.md"
+LEGACY_PLUGIN_SETUP = (
+    ROOT
+    / "plugin"
+    / "plugins"
+    / "enzyme"
+    / "skills"
+    / "enzyme-workspace-setup"
+    / "SKILL.md"
+)
 
 # The Margins checkout is normally a sibling named aside-desktop. CI and other
 # machines may omit it; set ASIDE_ROOT to check or update another checkout.
@@ -42,8 +50,13 @@ SKILL_ANCHORS = [
     "Never delete `~/.enzyme/auth.json`",
     "ENZYME_BIN",
     '"$ENZYME_BIN" --version',
+    '"$ENZYME_BIN" -p "<vault path>" model status',
     '"$ENZYME_BIN" -p "<vault path>" init --quiet',
     "--use-env-llm",
+    "runtime installation has already succeeded",
+    "Downloading a model or switching modes requires",
+    "approval reviewer",
+    "`scan --write-config` is a settings mutation",
     "Do not inspect, print, unset, or rely on API-key environment variables",
     "Already usable",
     "Weakly indexable",
@@ -55,6 +68,8 @@ SKILL_ANCHORS = [
     "No body edits",
     "No restructuring needed; your vault already compounds well",
     "One Decision",
+    "End With Something Worth Returning To",
+    "The user should leave with a",
     "Ground truth is Enzyme's view",
     "references/knowledge-practice-review.md",
 ]
@@ -89,9 +104,10 @@ REVIEW_ANCHORS = [
     "Read evidence as evidence",
     "Form a recognizable account",
     "Prefer meaningful continuity over structural noise",
-    "Coach sparse handles without rewriting history",
+    "Help the user keep hold of one important thread",
     "End insight-first",
-    "at most two future capture habits",
+    "When you <something you already do>",
+    "old notes do not need",
     "two to four plain-language",
 ]
 
@@ -112,6 +128,26 @@ REVIEW_BANNED_TOKENS = [
     "config.toml",
 ]
 
+BOOTSTRAP_ANCHORS = [
+    "name: enzyme-bootstrap",
+    "only the doorway",
+    "enzyme-workspace-setup",
+    "scheduled reviews",
+    "ask permission",
+    'install codex --source local',
+    'install claude --source local',
+    "does not edit your notes",
+    "Do not run `init`, `refresh`",
+]
+
+BOOTSTRAP_BANNED_TOKENS = [
+    "# Enzyme Workspace Setup",
+    "# Knowledge Practice Review Contract",
+    "scan --write-config",
+    "min_top_catalysts",
+    "frontmatter_link_fields",
+]
+
 
 def assert_mirror(errors: list[str], canonical: Path, mirror: Path) -> None:
     if not mirror.exists():
@@ -127,9 +163,15 @@ def check() -> None:
     errors: list[str] = []
     skill_text = CANONICAL_SKILL.read_text()
     review_text = CANONICAL_REVIEW.read_text()
-
-    assert_mirror(errors, CANONICAL_SKILL, PLUGIN_SKILL)
-    assert_mirror(errors, CANONICAL_REVIEW, PLUGIN_REVIEW)
+    if not PLUGIN_BOOTSTRAP.exists():
+        errors.append(f"FAIL missing marketplace bootstrap: {PLUGIN_BOOTSTRAP}")
+        bootstrap_text = ""
+    else:
+        bootstrap_text = PLUGIN_BOOTSTRAP.read_text()
+    if LEGACY_PLUGIN_SETUP.exists():
+        errors.append(
+            f"FAIL marketplace still carries the full setup skill: {LEGACY_PLUGIN_SETUP}"
+        )
 
     if ASIDE_ROOT.is_dir():
         assert_mirror(errors, CANONICAL_REVIEW, MARGINS_REVIEW)
@@ -154,12 +196,21 @@ def check() -> None:
         if token in review_text:
             errors.append(f"FAIL review operational token found: {token!r}")
 
+    for anchor in BOOTSTRAP_ANCHORS:
+        if anchor not in bootstrap_text:
+            errors.append(f"FAIL marketplace bootstrap anchor missing: {anchor!r}")
+    for token in BOOTSTRAP_BANNED_TOKENS:
+        if token in bootstrap_text:
+            errors.append(f"FAIL marketplace bootstrap carries setup detail: {token!r}")
+    if len(bootstrap_text.splitlines()) > 80:
+        errors.append("FAIL marketplace bootstrap exceeds 80 lines")
+
     if errors:
         print("\n".join(errors), file=sys.stderr)
         raise SystemExit(1)
 
     print(
-        "check-workspace-skill: operational skill and shared review contract are in sync"
+        "check-workspace-skill: canonical setup, marketplace bootstrap, and shared review contract are in sync"
     )
 
 
@@ -177,9 +228,6 @@ def main() -> None:
     if args.check:
         check()
         return
-
-    sync_file(CANONICAL_SKILL, PLUGIN_SKILL)
-    sync_file(CANONICAL_REVIEW, PLUGIN_REVIEW)
 
     if not ASIDE_ROOT.is_dir():
         raise SystemExit(

@@ -1,6 +1,6 @@
 {
   "name": "enzyme",
-  "description": "Set up and keep Enzyme fresh for local knowledge vaults",
+  "description": "Connect Enzyme's durable agent skills to a local knowledge vault",
   "version": "0.5.15",
   "author": {
     "name": "Joshua Pham",

@@ -48,21 +48,34 @@ Do not invent a new information architecture, infer identity from a folder name,
 turn every candidate into configuration. When evidence is uncertain, prefer the
 product's adaptive/default behavior and keep the uncertainty visible.
 
-## Coach sparse handles without rewriting history
+## Help the user keep hold of one important thread
 
-When continuing work or relationships are real but no stable handle exists yet,
-offer at most two future capture habits. Each habit should:
+Sometimes the material shows something the user cares about — a project they want
+to finish, a relationship they want to tend, a question they keep returning to —
+but the trail fades between notes. Start with what they risk losing, not with
+missing metadata.
 
-1. name the real thread in the user's words;
-2. explain briefly what cannot be followed reliably yet;
-3. suggest the smallest future-only habit that creates continuity; and
-4. name the question that habit would make answerable.
+Offer one small habit for new notes when it would keep that trail alive. Offer a
+second only when it serves a clearly different part of the user's life or work.
+Phrase each one in ordinary language:
 
-A habit might be a date on new notes, one stable name for a recurring person or
-subject, one home or dated running log for a continuing thread, or a short Markdown
-record of a decision trapped in another format. Do not prescribe a generic folder
-taxonomy, rewrite old notes, or present coaching as a prerequisite or permission
-gate.
+> When you <something you already do>, add <one small, familiar cue>, so later you
+> can ask <a question worth being able to answer>.
+
+Use a moment that already happens and a cue the user already understands: the same
+name, link, tag, date style, folder, or running note. Show exactly what this would
+look like in their next note. Make clear that old notes do not need to be cleaned
+up first. Do not say “tag more,” “be consistent,” or “start daily notes” without
+connecting the suggestion to something the user wants to remember or revisit.
+
+If the product can remove a step by changing a template or other aid the user
+already uses, offer that help after explaining the value and ask before changing
+it. Do not introduce a new system merely to enforce the habit.
+
+Later, when the user has naturally made enough new material, test the promise. Show
+whether the thread can now be recovered and whether the question can be answered.
+If it cannot, revise or drop the suggestion; do not treat that as the user's
+failure.
 
 ## End insight-first
 

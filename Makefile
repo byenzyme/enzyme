@@ -27,8 +27,8 @@ sync-agent-skill:
 check-agent-skill:
 	python3 scripts/sync-agent-runtime-skill.py --check
 
-# Keep the operational setup skill mirrored into the Enzyme plugin and its
-# neutral practice-review reference mirrored into both the plugin and Margins.
+# Check the canonical setup skill and thin marketplace bootstrap, and mirror the
+# neutral practice-review reference into Margins.
 sync-workspace-skill:
 	python3 scripts/sync-workspace-setup-skill.py
 

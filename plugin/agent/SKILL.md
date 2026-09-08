@@ -24,7 +24,7 @@ Prerequisite: check the installed binary first with `enzyme --version`. If the b
 
 Auth and provider safety: let Enzyme decide when auth is needed. Do not preflight `~/.enzyme/auth.json` or start login before a command asks for it. If an Enzyme command reports that login is required, start device login in the background, read JSONL events from `/tmp/enzyme-login.log`, show the verification URI/code when present, wait for success/error/expiry, then retry the original command. Never ask the user to paste API keys or auth tokens.
 
-Never print API key values. During setup, before `enzyme init`, inspect only which LLM env variable names exist:
+Never print API key values. Only when the user explicitly requests their own provider, inspect which LLM environment variable names exist before `enzyme init`:
 
 ```bash
 env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'
@@ -32,14 +32,14 @@ env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER
 
 Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. If `OPENAI_API_KEY` is present, warn that using env credentials intentionally should normally include the complete OpenAI-compatible triple: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. A bare `OPENAI_API_KEY` falls back to OpenAI defaults, which can produce unauthorized/provider-mismatch errors when the key actually belongs to OpenRouter, a local proxy, or another compatible provider. If only model/base-url vars are present without a matching key, treat it as partial env config and do not use it.
 
-Default setup should omit `--use-env-llm` and let Enzyme use hosted bootstrap/auth. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of the needed env var names without printing values and pass `--use-env-llm`:
+Before init or generation, run `enzyme model status` and honor its configured and effective modes. With no user preference, preserve `auto`: it uses the selected local model when installed and hosted generation otherwise. Explain whether the effective path needs network access before setup proceeds. Do not download a model, run `model use`, or run `model disable` without explicit consent. If the user intentionally wants to use their own OpenAI/OpenRouter/OpenAI-compatible provider, verify only the presence of the needed env var names without printing values and pass `--use-env-llm`:
 
 ```bash
 enzyme init --quiet --use-env-llm
 enzyme refresh --quiet --use-env-llm
 ```
 
-Treat localhost/`ENZYME_LOCAL_MODEL=1` as the local-model path. If provider intent is unclear, ask before running expensive catalyst generation.
+The dedicated setup skill owns the full provider disclosure and consent flow. An app-level approval decision never substitutes for it.
 
 Enzyme does not replace the user's memory system. It indexes the markdown structure the user already has: folders, tags, wikilinks, dates, inboxes, daily notes, people pages, and frontmatter. Preserve that structure and use it as retrieval signal. Be exact about frontmatter: literal wikilinks work in every field, while plain string/list values become generic link entities only when the active vault/workspace config names that field in `frontmatter_link_fields`; the field name does not create a typed person/project model.
 
@@ -69,6 +69,13 @@ Explain setup/refresh simply when useful: init is the slow compile step that tur
 `enzyme refresh --quiet` JSON includes an `update` object with a two-state contract. Check `update.status`: `ok` means nothing to do (a `note` may explain a slower call such as vault regeneration); `action_required` means perform or relay the `action` string to the user — never interpret any other keys. Use `enzyme status` when you need full binary-update diagnostics.
 
 Claude/Codex plugin installation does not install Petri or refresh hooks by default. Do not create `.claude/hooks/enzyme-petri.sh`, mutate `.claude/settings.json`, or rely on automatic prompt injection during normal setup. Use `enzyme petri` and `enzyme catalyze` explicitly when context is needed.
+
+A recurring review the user has seen and asked for is not a hidden hook. Offer it
+only after showing a useful review from their own notes. Each run should call
+refresh and retrieval plainly, cite the notes that brought the thread back, say
+when there is not enough evidence, and stay read-only unless the user separately
+asks it to write. If the current app cannot create or manage scheduled tasks, say
+so instead of claiming the review was scheduled.
 
 What's automatic depends on your runtime:
 

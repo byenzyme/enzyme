@@ -9,7 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 echo "sync-contract"
 
-# Skill mirrors are byte-identical to canonical copies
+# Skill distribution boundaries and runtime mirrors
 check "workspace skill mirror in sync" \
   python3 "$REPO_ROOT/scripts/sync-workspace-setup-skill.py" --check
 check "agent runtime skill in sync" \
