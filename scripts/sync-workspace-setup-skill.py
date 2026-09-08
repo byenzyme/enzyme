@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_DIR = ROOT / "plugin" / "skills" / "enzyme-workspace-setup"
 CANONICAL_SKILL = CANONICAL_DIR / "SKILL.md"
 CANONICAL_REVIEW = CANONICAL_DIR / "references" / "knowledge-practice-review.md"
+ONBOARDING_ROLLOUT = ROOT / ".agents" / "skills" / "onboarding-rollout" / "SKILL.md"
 
 PLUGIN_BOOTSTRAP = (
     ROOT / "plugin" / "plugins" / "enzyme" / "skills" / "enzyme-bootstrap" / "SKILL.md"
@@ -68,8 +69,9 @@ SKILL_ANCHORS = [
     "No body edits",
     "No restructuring needed; your vault already compounds well",
     "One Decision",
-    "End With Something Worth Returning To",
-    "The user should leave with a",
+    "Bind Capture Help To Enzyme",
+    "Complete The Handoff",
+    "Choose what can keep returning",
     "Ground truth is Enzyme's view",
     "references/knowledge-practice-review.md",
 ]
@@ -97,6 +99,9 @@ SKILL_BANNED_TOKENS = [
     ".local/bin/enzyme",
     "projects add",
     "install Enzyme directly",
+    "When you <something you already do>",
+    "When the user already writes regularly",
+    "bring one thread like this back every Monday",
 ]
 
 REVIEW_ANCHORS = [
@@ -106,9 +111,11 @@ REVIEW_ANCHORS = [
     "Prefer meaningful continuity over structural noise",
     "Help the user keep hold of one important thread",
     "End insight-first",
+    "Choose what can keep returning",
     "When you <something you already do>",
     "old notes do not need",
     "two to four plain-language",
+    "operational receipt last",
 ]
 
 # The shared layer must remain safe to compose into either product. These tokens
@@ -148,6 +155,17 @@ BOOTSTRAP_BANNED_TOKENS = [
     "frontmatter_link_fields",
 ]
 
+ONBOARDING_ANCHORS = [
+    "plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md",
+    "This skill tests that",
+    "Apply and test the shared knowledge-practice review contract",
+]
+
+ONBOARDING_BANNED_TOKENS = [
+    "When you <something you already do>",
+    "bring one thread like this back every Monday",
+]
+
 
 def assert_mirror(errors: list[str], canonical: Path, mirror: Path) -> None:
     if not mirror.exists():
@@ -163,6 +181,7 @@ def check() -> None:
     errors: list[str] = []
     skill_text = CANONICAL_SKILL.read_text()
     review_text = CANONICAL_REVIEW.read_text()
+    onboarding_text = ONBOARDING_ROLLOUT.read_text()
     if not PLUGIN_BOOTSTRAP.exists():
         errors.append(f"FAIL missing marketplace bootstrap: {PLUGIN_BOOTSTRAP}")
         bootstrap_text = ""
@@ -204,6 +223,13 @@ def check() -> None:
             errors.append(f"FAIL marketplace bootstrap carries setup detail: {token!r}")
     if len(bootstrap_text.splitlines()) > 80:
         errors.append("FAIL marketplace bootstrap exceeds 80 lines")
+
+    for anchor in ONBOARDING_ANCHORS:
+        if anchor not in onboarding_text:
+            errors.append(f"FAIL onboarding contract-anchor missing: {anchor!r}")
+    for token in ONBOARDING_BANNED_TOKENS:
+        if token in onboarding_text:
+            errors.append(f"FAIL onboarding duplicates shared closing copy: {token!r}")
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

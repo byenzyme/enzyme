@@ -219,38 +219,24 @@ At the gate, you may offer exactly one additive proof note distilled from the us
 
 This proof note edits and moves nothing. If there is not enough content for a rich proof note, produce the smallest honest starting point or skip it; never fabricate to fill it.
 
-## Help The User Keep Hold Of One Important Thread
+## Bind Capture Help To Enzyme
 
-Use the shared knowledge-practice review contract. Offer this help only when the
-diagnosis found something the user cares about that is likely to disappear between
-notes. Lead with that human consequence. Do not lead with dates, tags, links,
-fields, or retrieval quality.
+Apply **Help the user keep hold of one important thread** from the shared review
+contract; do not create a second habit script here. Offer it only when the
+diagnosis found a meaningful trail that is likely to fade.
 
-Recommend one habit by default. It should fit in one sentence:
+Make Enzyme do its share. If an existing field merely needs recognition, or a real
+running note needs recording in settings, include that change in the consented
+setup plan. If the user already uses an Obsidian template and one small change
+would remove a step from the accepted practice, show the exact change and ask
+before making it. Core Obsidian Templates are enough for simple date and time
+placeholders, and Daily Notes can apply a daily template; do not require a new
+plugin. A template affects only notes made with it and does not choose where a note
+goes.
 
-> When you <something you already do>, add <one small cue>, so later you can ask
-> <a question worth answering>.
-
-Show the user what this would look like in their next real note and say plainly
-that they do not need to fix old notes. A good suggestion might help a project keep
-its history, let an old intention return, or make the story of a relationship easy
-to pick up before the next conversation. “Add more tags,” “be consistent,” and
-“start daily notes” are not useful suggestions on their own.
-
-Make Enzyme do its share. If an existing field merely needs to be recognized, or a
-real running note merely needs to be recorded in settings, include that small
-change in the consented setup plan. If the user already uses an Obsidian template
-and one small change would make the accepted habit nearly effortless, show the
-exact change and ask before making it. Core Obsidian Templates are enough for
-simple date and time placeholders, and Daily Notes can apply a daily template; do
-not require a new plugin. Be honest that a template only affects notes made with
-it and does not choose where a note goes.
-
-The first setup cannot prove that a habit works over time. It can show the value in
-the material already there, make the next note easy, and name what should become
-possible after the habit has repeated naturally. On a later setup check or repair,
-test that promise with the new notes. If the promised thread still cannot be
-recovered, change or drop the advice rather than blaming the user.
+On first setup, name the retrieval promise that the practice should make possible.
+On a later setup check or repair, test that promise against naturally accumulated
+notes and revise or drop the Enzyme binding when it does not hold.
 
 ## One Decision
 
@@ -289,34 +275,16 @@ The revert script must:
 
 After a successful repair, refresh Enzyme. If `enzyme refresh --quiet` returns `update.status == "action_required"`, perform or relay the `action` string before continuing.
 
-## End With Something Worth Returning To
+## Complete The Handoff
 
-Do not end with a setup receipt. Lead with one useful thing the user's own notes
-just brought back: a change they may not have noticed, an intention that slipped
-away, a project they can pick up again, or a connection worth following. Cite the
-notes that support it. Then offer to follow one natural question now.
+Apply **End insight-first** and **Choose what can keep returning** from the shared
+review contract instead of maintaining Enzyme-specific closing copy. Ground the
+opening insight in actual `petri` and `catalyze` source excerpts, or state plainly
+when they cannot support it.
 
-Choose what comes next from the life already visible in the vault:
-
-- **When the user already writes regularly:** If the evidence shows a real daily
-  or weekly note practice, first produce a short, cited look-back from those notes.
-  It might return one goal, commitment, recurring concern, or sign of movement.
-  The review itself should be the proof; scheduling is only a way to let that value
-  return. If the current app can create recurring tasks, offer one simple cadence
-  after the proof: “You already do the hard part by writing this down. I can bring
-  one thread like this back every Monday. Want that?” Create nothing without a
-  clear yes to the review, cadence, and where it will appear. Each run refreshes
-  Enzyme, cites the user's notes, says when there is not enough evidence, and stays
-  out of the vault unless the user separately asks it to write there. If the app
-  cannot schedule tasks, say so plainly and leave the user with the review prompt
-  they can use again.
-- **When the user does not write on a schedule:** Do not prescribe daily notes or
-  automation. If the diagnosis found one important trail that is easy to lose,
-  offer the small habit from the section above, show the next-note example, and
-  name what it should help the user recover later. Otherwise, leave the structure
-  alone and continue with the strongest question the existing vault can answer
-  now.
-
-Put the operational receipt last: what was prepared, what changed, what remains
-hard to recover, and how to undo any accepted change. The user should leave with a
-felt use for Enzyme, not a lesson about Enzyme.
+If the user accepts a recurring review and the current product surface can create
+one, its task must run `enzyme refresh --quiet`, use query-aware `petri` and
+`catalyze`, cite the notes that support the result, report insufficient evidence,
+and remain read-only unless the user separately permits a write. Put the Enzyme
+operational receipt last: what was prepared, what changed, what remains hard to
+recover, and how to undo any accepted change.

@@ -66,13 +66,6 @@ Explain setup/refresh simply when useful: init is the slow compile step that tur
 
 Claude/Codex plugin installation does not install Petri or refresh hooks by default. Do not create `.claude/hooks/enzyme-petri.sh`, mutate `.claude/settings.json`, or rely on automatic prompt injection during normal setup. Use `enzyme petri` and `enzyme catalyze` explicitly when context is needed.
 
-A recurring review the user has seen and asked for is not a hidden hook. Offer it
-only after showing a useful review from their own notes. Each run should call
-refresh and retrieval plainly, cite the notes that brought the thread back, say
-when there is not enough evidence, and stay read-only unless the user separately
-asks it to write. If the current app cannot create or manage scheduled tasks, say
-so instead of claiming the review was scheduled.
-
 What's automatic depends on your runtime:
 
 **Hermes** (hooks handle it):

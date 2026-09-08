@@ -16,6 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_SKILL = ROOT / "plugin" / "agent-runtime-skill.md"
 PACKAGED_SKILL = ROOT / "plugin" / "agent" / "SKILL.md"
 
+RUNTIME_BOUNDARY_ANCHORS = [
+    "it is the sole\nsource of truth for scan interpretation",
+    "Do not improvise a setup procedure from this runtime skill",
+    "bundled `references/knowledge-practice-review.md`",
+]
+
+RUNTIME_BOUNDARY_BANNED_TOKENS = [
+    "A recurring review",
+    "offer an optional recurring review",
+    "create or manage scheduled tasks",
+]
+
 PACKAGED_FRONTMATTER = """---
 name: enzyme
 description: >
@@ -47,11 +59,28 @@ def rendered_packaged_skill() -> str:
     return PACKAGED_FRONTMATTER + "\n" + markdown_body(RUNTIME_SKILL)
 
 
+def validate_runtime_boundary() -> None:
+    text = RUNTIME_SKILL.read_text()
+    errors = [
+        f"runtime setup-routing anchor missing: {anchor!r}"
+        for anchor in RUNTIME_BOUNDARY_ANCHORS
+        if anchor not in text
+    ]
+    errors.extend(
+        f"runtime skill duplicates setup closing policy: {token!r}"
+        for token in RUNTIME_BOUNDARY_BANNED_TOKENS
+        if token in text
+    )
+    if errors:
+        raise SystemExit("\n".join(errors))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if the packaged skill is out of sync")
     args = parser.parse_args()
 
+    validate_runtime_boundary()
     rendered = rendered_packaged_skill()
     if args.check:
         current = PACKAGED_SKILL.read_text() if PACKAGED_SKILL.exists() else ""

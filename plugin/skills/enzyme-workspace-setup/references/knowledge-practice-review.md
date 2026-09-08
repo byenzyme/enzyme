@@ -86,7 +86,30 @@ name the useful pattern, change, tension, or connection. If the evidence cannot
 support an honest insight, say so and offer a narrower next question.
 
 Then state what the setup now makes possible and give one natural next question.
-Put the operational receipt second: boundaries, settings in the user's language,
-successful preparation or refresh steps, and any consequential limitation. Do not
-mistake a successful command, a result count, or a nearby semantic match for proof
-of the user's actual question.
+Do not mistake a successful command, a result count, or a nearby semantic match
+for proof of the user's actual question.
+
+## Choose what can keep returning
+
+Choose the continuation from the practice the evidence actually shows.
+
+When the user already writes on a real daily or weekly rhythm, first produce a
+short, cited look-back from those notes. Return one goal, commitment, recurring
+concern, or sign of movement. The review itself is the proof; scheduling is only
+a way for that value to return. If the product can create recurring tasks, offer
+one simple cadence only after showing the review. Create nothing without a clear
+yes to the review, cadence, and destination. Each run should cite its sources,
+say when there is not enough evidence, and stay out of the source material unless
+the user separately permits writing there. If the product cannot schedule the
+review, leave the user with a reusable question instead of implying it was
+scheduled.
+
+When the user does not write on a schedule, do not prescribe daily notes or
+automation. If an important trail is easy to lose, use the small-habit guidance
+above and show the next-note example. Otherwise leave the practice alone and
+continue with the strongest question the existing material can answer now.
+
+Put the operational receipt last: boundaries, settings in the user's language,
+successful preparation or refresh steps, consequential limitations, and how to
+undo any accepted change. The user should leave with a felt use for the product,
+not a lesson about its machinery.
