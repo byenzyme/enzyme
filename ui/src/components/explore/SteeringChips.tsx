@@ -21,7 +21,7 @@ export function SteeringChips({
       }}
     >
       {/* Hint label */}
-      <span className="text-[10px] text-white/25 uppercase tracking-widest">
+      <span className="text-[10px] text-white/50 uppercase tracking-widest">
         Shift perspective
       </span>
 
@@ -32,9 +32,9 @@ export function SteeringChips({
             key={s.topic_name}
             onClick={() => onSelectPrompt(s.bent_prompt)}
             className="group flex items-center gap-1.5 px-3 py-1.5 rounded-full
-                       bg-white/[0.03] border border-white/[0.08]
-                       text-xs text-white/40
-                       hover:text-white/80 hover:bg-white/[0.07] hover:border-white/20
+                       bg-white/[0.07] border border-white/[0.14]
+                       text-xs text-white/65
+                       hover:text-white/90 hover:bg-white/[0.12] hover:border-white/25
                        transition-all duration-200 cursor-pointer"
             style={{
               animation:
@@ -49,7 +49,7 @@ export function SteeringChips({
               height="10"
               viewBox="0 0 16 16"
               fill="none"
-              className="text-white/20 group-hover:text-white/50 transition-colors flex-shrink-0"
+              className="text-white/45 group-hover:text-white/70 transition-colors flex-shrink-0"
             >
               <path
                 d="M3 8h10M9 4l4 4-4 4"

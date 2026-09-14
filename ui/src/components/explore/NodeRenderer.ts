@@ -169,7 +169,9 @@ export class NodeRenderer {
     roundedRect(ctx, x, y, width, height, 4);
 
     // Background — per-cluster hue with visible saturation
-    ctx.fillStyle = `hsl(${hue}, 15%, 10%)`;
+    // At overview zoom each node can be only a few screen pixels wide, so it
+    // needs substantially more luminance than a close-up card to stay legible.
+    ctx.fillStyle = `hsl(${hue}, 42%, 36%)`;
     ctx.fill();
 
     // Border — per-cluster bright hue for highlights
@@ -197,7 +199,7 @@ export class NodeRenderer {
 
     // Per-cluster hue with visible saturation
     const hue = pathHue(node.filePath);
-    ctx.fillStyle = `hsl(${hue}, 18%, 10%)`;
+    ctx.fillStyle = `hsl(${hue}, 20%, 17%)`;
     ctx.fill();
 
     // Border — per-cluster bright hue for highlights
@@ -235,8 +237,8 @@ export class NodeRenderer {
       if (/^[a-z,;:'\-]/.test(excerpt)) {
         const fadeW = 28;
         const fadeGrad = ctx.createLinearGradient(x + padding, 0, x + padding + fadeW, 0);
-        fadeGrad.addColorStop(0, `hsla(${hue}, 18%, 10%, 1)`);
-        fadeGrad.addColorStop(1, `hsla(${hue}, 18%, 10%, 0)`);
+        fadeGrad.addColorStop(0, `hsla(${hue}, 20%, 17%, 1)`);
+        fadeGrad.addColorStop(1, `hsla(${hue}, 20%, 17%, 0)`);
         ctx.fillStyle = fadeGrad;
         ctx.fillRect(x + padding, y + padding, fadeW, 16);
       }
@@ -306,7 +308,7 @@ export class NodeRenderer {
 
     const hue = pathHue(node.filePath);
     roundedRect(ctx, x, y, w, h, 10);
-    ctx.fillStyle = `hsl(${hue}, 20%, 12%)`;
+    ctx.fillStyle = `hsl(${hue}, 22%, 19%)`;
     ctx.fill();
     ctx.restore();
 
@@ -405,7 +407,7 @@ export class NodeRenderer {
 
     // Background (no shadow — keeps it lighter for multiple simultaneous expansions)
     roundedRect(ctx, x, y, w, h, 8);
-    ctx.fillStyle = `hsl(${hue}, 18%, 10%)`;
+    ctx.fillStyle = `hsl(${hue}, 20%, 17%)`;
     ctx.fill();
 
     // Higher saturation border to visually link nodes from same source

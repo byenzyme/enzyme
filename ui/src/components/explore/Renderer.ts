@@ -616,7 +616,9 @@ export class Renderer {
 
       // ~1.6s full cycle, visible but not aggressive
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 0.004);
-      const targetOpacity = 0.4 + 0.35 * pulse; // 0.4 → 0.75
+      // Keep the trough readable at overview zoom; the previous 0.4 floor
+      // made tiny nodes disappear against the near-black background.
+      const targetOpacity = 0.78 + 0.2 * pulse; // 0.78 → 0.98
       const opacity = 1 - (1 - targetOpacity) * fadeIn;
 
       ctx.globalAlpha = opacity;
@@ -630,8 +632,8 @@ export class Renderer {
     }
 
     // Search settling pulse: breathe non-result nodes while branches arrive.
-    // Node fills are ~10% lightness on a ~3% lightness background, so the
-    // alpha range must be wide (0.15–0.9) to produce a visible swing.
+    // Preserve a visible breathe without letting the overview collapse into
+    // black between search branches.
     if (
       this.currentState === "search_results" &&
       this.searchSettleStartTime !== null &&
@@ -642,9 +644,9 @@ export class Renderer {
       // Fade from full opacity into the pulse over 500ms
       const fadeIn = Math.min(1, elapsed / 500);
 
-      // Slow breathe (~2.5s full cycle), wide range for dark-on-dark visibility
+      // Slow breathe (~2.5s full cycle), with a legible minimum opacity.
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 0.0025);
-      const targetOpacity = 0.15 + 0.75 * pulse; // 0.15 → 0.9
+      const targetOpacity = 0.65 + 0.3 * pulse; // 0.65 → 0.95
       const opacity = 1 - (1 - targetOpacity) * fadeIn;
 
       ctx.globalAlpha = opacity;

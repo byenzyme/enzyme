@@ -87,8 +87,8 @@ function SaveNoteButton({
       : state === "error"
         ? "text-red-400/70 bg-red-500/10 border-red-500/20 hover:bg-red-500/15 hover:text-red-400/90"
         : state === "saving"
-          ? "text-white/30 bg-white/5 border-white/8"
-          : "text-white/40 bg-white/5 border-white/8 hover:bg-white/10 hover:text-white/60";
+          ? "text-white/50 bg-white/8 border-white/12"
+          : "text-white/60 bg-white/8 border-white/12 hover:bg-white/12 hover:text-white/85";
 
   return (
     <button
@@ -219,12 +219,12 @@ function SegmentBlock({
       }}
     >
       {/* Theme label */}
-      <div className="inline-block px-2 py-0.5 mb-2 rounded-md bg-white/8 border border-white/10 text-[11px] font-medium text-white/50 uppercase tracking-wider">
+      <div className="inline-block px-2 py-0.5 mb-2 rounded-md bg-white/12 border border-white/16 text-[11px] font-medium text-white/70 uppercase tracking-wider">
         {segment.theme}
       </div>
 
       {/* Explanation — streaming text */}
-      <div className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap mb-3">
+      <div className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap mb-3">
         {fullText.slice(0, displayedLen)}
         {!textComplete && (
           <span className="inline-block w-[2px] h-[1em] bg-white/40 align-text-bottom ml-px animate-pulse" />
@@ -251,8 +251,8 @@ function SegmentBlock({
                 }}
                 className={`group rounded-md border transition-colors duration-150 cursor-pointer ${
                   isAnchored
-                    ? "bg-white/10 border-white/20"
-                    : "bg-white/5 border-white/8 hover:bg-white/8 hover:border-white/15"
+                    ? "bg-white/14 border-white/25"
+                    : "bg-white/8 border-white/14 hover:bg-white/12 hover:border-white/22"
                 }`}
               >
                 {/* Filename row */}
@@ -264,8 +264,8 @@ function SegmentBlock({
                     fill="none"
                     className={`transition-colors flex-shrink-0 ${
                       isAnchored
-                        ? "text-white/60"
-                        : "text-white/30 group-hover:text-white/50"
+                        ? "text-white/75"
+                        : "text-white/50 group-hover:text-white/70"
                     }`}
                   >
                     <path
@@ -277,8 +277,8 @@ function SegmentBlock({
                   <span
                     className={`truncate text-[11px] transition-colors ${
                       isAnchored
-                        ? "text-white/80"
-                        : "text-white/50 group-hover:text-white/70"
+                        ? "text-white/90"
+                        : "text-white/70 group-hover:text-white/85"
                     }`}
                   >
                     {doc.filePath.split("/").pop() || doc.filePath}
@@ -312,10 +312,10 @@ function SegmentBlock({
                   >
                     <div className="overflow-hidden min-h-0">
                       <div className="px-2.5 pb-2 pt-0.5">
-                        <div className="text-[10px] text-white/30 font-mono mb-1 truncate">
+                        <div className="text-[10px] text-white/50 font-mono mb-1 truncate">
                           {embedRef}
                         </div>
-                        <div className="text-[12px] text-white/60 leading-relaxed line-clamp-4">
+                        <div className="text-[12px] text-white/75 leading-relaxed line-clamp-4">
                           {doc.excerpt}
                         </div>
                       </div>
@@ -354,7 +354,7 @@ export function SynthesisPanel({
 
   return (
     <div
-      className="absolute right-4 top-16 bottom-4 pointer-events-auto overflow-hidden rounded-xl border border-white/10 bg-[#0e0e18]/90 backdrop-blur-xl shadow-2xl"
+      className="absolute right-4 top-16 bottom-4 pointer-events-auto overflow-hidden rounded-xl border border-white/16 bg-[#12121e]/94 backdrop-blur-xl shadow-2xl"
       style={{
         width: width ?? 384,
         animation: "slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
@@ -367,13 +367,13 @@ export function SynthesisPanel({
       >
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-white/50 uppercase tracking-wider">
+            <h3 className="text-sm font-medium text-white/70 uppercase tracking-wider">
               Synthesis
             </h3>
             {hasAnchored && (
               <button
                 onClick={onClearAnchored}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-white/40 bg-white/5 border border-white/8 hover:bg-white/10 hover:text-white/60 transition-colors"
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] text-white/60 bg-white/8 border border-white/12 hover:bg-white/12 hover:text-white/85 transition-colors"
                 title="Clear selected documents"
               >
                 <span>{anchoredPaths!.size} selected</span>
@@ -399,7 +399,7 @@ export function SynthesisPanel({
           {onDismiss && (
             <button
               onClick={onDismiss}
-              className="text-white/50 hover:text-white/80 transition-colors p-1.5 -mr-1.5 rounded-lg hover:bg-white/5"
+              className="text-white/65 hover:text-white/90 transition-colors p-1.5 -mr-1.5 rounded-lg hover:bg-white/10"
               title="Dismiss synthesis"
             >
               <svg
@@ -438,7 +438,7 @@ export function SynthesisPanel({
               <SkeletonSegment index={2} />
             </>
           ) : text ? (
-            <div className="text-sm text-white/80 leading-relaxed whitespace-pre-wrap">
+            <div className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap">
               {text}
             </div>
           ) : null}

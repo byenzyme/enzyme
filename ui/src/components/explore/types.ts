@@ -125,18 +125,18 @@ export function hslToRgb(
 // Color constants
 export const COLORS = {
   background: "#0a0a0f",
-  nodeBg: "#141420",
-  nodeBorder: "#2a2a3a",
-  nodeText: "#c8c8d8",
-  nodeTextDim: "#8888a0",
-  titleText: "#e8e8f0",
+  nodeBg: "#181824",
+  nodeBorder: "#666680",
+  nodeText: "#d8d8e5",
+  nodeTextDim: "#aaaabd",
+  titleText: "#f2f2f7",
 
   // Highlight colors (search results)
   searchGlow: { r: 80, g: 160, b: 255 }, // blue
   searchBorder: "#50a0ff",
 
   // Dim state
-  dimOpacity: 0.25,
+  dimOpacity: 0.32,
 } as const;
 
 // Rendering thresholds

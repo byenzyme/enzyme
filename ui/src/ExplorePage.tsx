@@ -361,7 +361,7 @@ export function ExplorePage() {
             <button
               type="button"
               onClick={handleReset}
-              className="p-2 rounded-lg bg-white/5 border border-white/10 text-white/40 hover:bg-white/10 hover:text-white/60 transition-all flex-shrink-0"
+              className="p-2 rounded-lg bg-white/8 border border-white/15 text-white/60 hover:bg-white/12 hover:text-white/85 transition-all flex-shrink-0"
               title="Reset to original prompt"
               style={{
                 animation: "fadeSlideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both",
@@ -399,17 +399,17 @@ export function ExplorePage() {
                     : "w-80"
             } px-4 py-2.5 rounded-xl border ${
               isStale
-                ? "bg-white/3 border-white/6 text-white/40 placeholder-white/15"
-                : "bg-white/5 border-white/10 text-white/90 placeholder-white/30"
-            } outline-none focus:border-white/20 focus:bg-white/8 transition-[width,background-color,border-color,color] duration-300 backdrop-blur-sm text-sm resize-none overflow-hidden leading-relaxed animate-search-glow`}
+                ? "bg-white/5 border-white/10 text-white/55 placeholder-white/30"
+                : "bg-white/8 border-white/16 text-white/95 placeholder-white/50"
+            } outline-none focus:border-white/30 focus:bg-white/12 transition-[width,background-color,border-color,color] duration-300 backdrop-blur-sm text-sm resize-none overflow-hidden leading-relaxed animate-search-glow`}
           />
           <button
             type="submit"
             disabled={isExploring || !query.trim()}
             className={`px-4 py-2.5 rounded-xl border text-sm disabled:opacity-30 disabled:cursor-not-allowed transition-all flex-shrink-0 ${
               isStale
-                ? "bg-white/4 border-white/6 text-white/30 hover:bg-white/8 hover:text-white/50"
-                : "bg-white/8 border-white/10 text-white/70 hover:bg-white/12 hover:text-white/90"
+                ? "bg-white/6 border-white/10 text-white/45 hover:bg-white/10 hover:text-white/65"
+                : "bg-white/12 border-white/18 text-white/85 hover:bg-white/16 hover:text-white"
             }`}
           >
             {isExploring ? "..." : "Explore"}
@@ -420,7 +420,7 @@ export function ExplorePage() {
         {isExploring && !showSynthesis && statusText && (
           <div
             key={statusText}
-            className="text-center text-white/40 text-xs mt-2 animate-fade-in"
+            className="text-center text-white/60 text-xs mt-2 animate-fade-in"
           >
             {statusText}
           </div>
@@ -438,7 +438,7 @@ export function ExplorePage() {
       {nodes.length > 0 && (
         <button
           onClick={() => fitRef.current?.()}
-          className="absolute bottom-4 right-4 z-10 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-white/40 text-xs hover:bg-white/10 hover:text-white/60 transition-all"
+          className="absolute bottom-4 right-4 z-10 px-3 py-1.5 rounded-lg bg-white/8 border border-white/15 text-white/60 text-xs hover:bg-white/12 hover:text-white/85 transition-all"
           title="Fit all nodes in view"
         >
           Fit
