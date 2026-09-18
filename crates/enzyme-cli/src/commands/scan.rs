@@ -11,9 +11,9 @@ use enzyme_core::document::{
 };
 use enzyme_core::llm::CATALYST_PROFILES;
 use enzyme_core::llm::jev::JevClient;
-use enzyme_core::models::ROOT_FOLDER_ENTITY;
+use enzyme_core::models::{DateSource, ROOT_FOLDER_ENTITY};
 use enzyme_core::pipeline::jev_selection::{
-    JevSelectionPipeline, SelectionCandidate, SelectionSample,
+    JevSelectionPipeline, SelectionCandidate, SelectionContext, SelectionSample,
 };
 use enzyme_core::pipeline::selection_steps::{EXPANDABLE_DENSITY_THRESHOLD, MAX_FOLDER_CHILDREN};
 use enzyme_core::sqlite_source::validate_sqlite_source;
@@ -74,7 +74,7 @@ pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
     );
     let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
     eprintln!(
-        "Jev evaluated {} candidates in {} ms; {} retained without evaluation.",
+        "Jev evaluated {} candidates in {} ms; {} deferred without evaluation.",
         proposal.decisions.len(),
         proposal.request_ms,
         proposal.unevaluated_entities.len()
@@ -127,11 +127,21 @@ fn jev_candidates(
     docs: &[ProcessedDocument],
     suggestion: &ScanSuggestion,
 ) -> Vec<SelectionCandidate> {
-    // Unlike the display-only scan samples (first 12 entities), each candidate
-    // reaching Jev gets its own evidence. The core request builder bounds both
-    // candidates and bytes and reports the untouched tail as unevaluated.
-    let specs: Vec<String> = suggestion
-        .entities
+    // The display scan's top-20 tags are not a semantic candidate ceiling.
+    // Include recurring tags independently, including meaningful child tags.
+    // Existing configured entities are deliberately withheld from model input.
+    let metrics = build_metrics(docs);
+    let mut pool: Vec<String> = top_evidence_by_type(&metrics, "tag", 128)
+        .into_iter()
+        .filter(|e| e.file_count >= 3)
+        .map(|e| e.spec)
+        .collect();
+    for spec in &suggestion.entities {
+        if !pool.contains(spec) {
+            pool.push(spec.clone());
+        }
+    }
+    let specs: Vec<String> = pool
         .iter()
         .filter(|spec| {
             !suggestion
@@ -223,17 +233,87 @@ fn jev_candidates(
             }
             SelectionCandidate {
                 spec: spec.clone(),
-                file_count: suggestion
-                    .top_entities
-                    .iter()
-                    .find(|e| &e.spec == spec)
-                    .map(|e| e.file_count)
-                    .unwrap_or(0),
+                file_count: metrics.get(spec).map(|e| e.files.len()).unwrap_or(0),
                 samples: evidence,
                 expandable: group.is_some(),
                 page_entities: group
                     .map(|g| g.page_entities.iter().map(|p| p.spec.clone()).collect())
                     .unwrap_or_default(),
+                context: {
+                    let matching: Vec<_> = docs
+                        .iter()
+                        .filter(|doc| {
+                            metrics
+                                .get(spec)
+                                .is_some_and(|m| m.files.contains(&doc.source_ref))
+                        })
+                        .collect();
+                    let mut tags = HashMap::new();
+                    for doc in &matching {
+                        for tag in &doc.tags {
+                            if format!("#{tag}") != *spec && !is_structural_tag(tag) {
+                                *tags.entry(tag.clone()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    let mut files = matching;
+                    files.sort_by(|a, b| {
+                        b.modified_at
+                            .cmp(&a.modified_at)
+                            .then_with(|| a.source_ref.cmp(&b.source_ref))
+                    });
+                    let now = Utc::now().timestamp_millis();
+                    let dates: Vec<i64> = files
+                        .iter()
+                        .filter_map(|doc| {
+                            let created = (doc.created_source != DateSource::Filesystem)
+                                .then_some(doc.created_at);
+                            let modified = (doc.modified_source != DateSource::Filesystem)
+                                .then_some(doc.modified_at);
+                            created
+                                .into_iter()
+                                .chain(modified)
+                                .filter(|date| *date <= now)
+                                .max()
+                        })
+                        .collect();
+                    SelectionContext {
+                        dated_files: dates.len(),
+                        recent_90d_files: dates
+                            .iter()
+                            .filter(|date| **date >= now - 90 * 86_400_000)
+                            .count(),
+                        recent_365d_files: dates
+                            .iter()
+                            .filter(|date| **date >= now - 365 * 86_400_000)
+                            .count(),
+                        latest_note_date: dates
+                            .iter()
+                            .max()
+                            .and_then(|date| millis_to_rfc3339(*date)),
+                        parent_tag: spec
+                            .strip_prefix('#')
+                            .and_then(|tag| tag.rsplit_once('/'))
+                            .map(|(parent, _)| format!("#{parent}")),
+                        child_tags: top_evidence_by_type(&metrics, "tag", usize::MAX)
+                            .into_iter()
+                            .filter(|e| e.spec.starts_with(&format!("{spec}/")))
+                            .take(12)
+                            .map(|e| e.spec)
+                            .collect(),
+                        related_tags: sorted_counts(&tags)
+                            .into_iter()
+                            .take(8)
+                            .map(|(tag, _)| format!("#{tag}"))
+                            .collect(),
+                        representative_files: files
+                            .iter()
+                            .take(6)
+                            .map(|d| d.source_ref.clone())
+                            .collect(),
+                        vault_file_count: docs.len(),
+                    }
+                },
             }
         })
         .collect()

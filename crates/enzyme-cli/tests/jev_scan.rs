@@ -110,6 +110,32 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
         .find(|c| c["spec"] == "folder:people")
         .unwrap();
     assert_eq!(people["expandable"], true);
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let proposed_path = home.join("proposal.toml");
+    std::fs::write(
+        &proposed_path,
+        format!(
+            "[vaults.{}]\n{}",
+            serde_json::to_string(vault.to_str().unwrap()).unwrap(),
+            result["suggested_entities_toml"].as_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let proposed =
+        enzyme_core::config::enzyme_config::EnzymeConfig::load_at(&vault, &proposed_path)
+            .unwrap()
+            .unwrap();
+    let people_options = proposed
+        .catalyzed_entities
+        .iter()
+        .find_map(|entity| match entity {
+            enzyme_core::config::enzyme_config::CatalyzedEntity::WithOptions(options) => {
+                options.get("folder:people")
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(people_options.expandable);
     assert!(
         people["page_entities"]
             .as_array()
@@ -271,5 +297,79 @@ async fn plain_scan_never_calls_jev_even_with_a_key() {
     assert_eq!(
         std::fs::read_to_string(vault.join(".enzyme/enzyme.log")).unwrap(),
         "existing log"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(Decisions)
+        .mount(&server)
+        .await;
+    let (_root, vault, home) = fixture();
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[update]\nauto = false\n[vaults.{}]\nentities = [\"#private-reference-only\"]\n",
+            serde_json::to_string(vault.to_str().unwrap()).unwrap()
+        ),
+    )
+    .unwrap();
+    let tags = (0..25)
+        .map(|i| format!("#theme{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for i in 0..3 {
+        std::fs::write(vault.join(format!("projects/{i}.md")), format!("---\ncreated: 2020-01-01\n---\n{tags} #relationships #relationships/dating\nWe are learning how to communicate our expectations and support each other through changes.")).unwrap();
+    }
+    let output = command(&vault, &home, &server.uri())
+        .arg("--jev")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|r| !String::from_utf8_lossy(&r.body).contains("private-reference-only"))
+    );
+    let candidates: Vec<Value> = requests
+        .iter()
+        .flat_map(|r| {
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            body["state"]["candidates"].as_array().unwrap().clone()
+        })
+        .collect();
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|c| c["spec"].as_str().unwrap().starts_with('#'))
+            .count(),
+        27
+    );
+    let child = candidates
+        .iter()
+        .find(|c| c["spec"] == "#relationships/dating")
+        .unwrap();
+    assert_eq!(child["context"]["parent_tag"], "#relationships");
+    assert_eq!(child["file_count"], 3);
+    assert_eq!(child["context"]["dated_files"], 3);
+    assert_eq!(child["context"]["recent_90d_files"], 0);
+    assert_eq!(child["context"]["recent_365d_files"], 0);
+    assert!(!child["samples"].as_array().unwrap().is_empty());
+    let parent = candidates
+        .iter()
+        .find(|c| c["spec"] == "#relationships")
+        .unwrap();
+    assert!(
+        parent["context"]["child_tags"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("#relationships/dating"))
     );
 }
