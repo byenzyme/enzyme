@@ -1,6 +1,7 @@
-import { compile } from './compiler.mjs';
+// Parsing and compilation live in enzyme-spec (Rust).
 const $ = id => document.getElementById(id);
 const editor = $('source');
+let compileVersion = 0;
 let result, tab = 'reading', timer, loadVersion = 0;
 const drafts = new Map();
 let activeExample = 'vault';
@@ -30,7 +31,7 @@ function diagnosticView() {
   for (const d of unique) {
     const row = el('div', undefined, `diagnostic ${d.severity}`); row.append(el('strong', d.severity === 'error' ? 'ERROR' : d.code === 'path' ? 'PATH' : d.blocksConfig ? 'PROPOSED' : 'NOTE'), sourceButton(d.line, d.column), el('span', d.message)); container.append(row);
   }
-  if (!unique.length) container.append(el('div', 'Valid syntax. All reading settings map to the current config schema. Agent policies compile separately to instructions.', 'diagnostic'));
+  if (!unique.length) container.append(el('div', 'Compiled by the Rust runtime parser. Config drives init/refresh; agent policies compile separately to instructions.', 'diagnostic'));
 }
 function badge(text, proposed = false) { return el('span', text, `badge${proposed ? ' proposed' : ''}`); }
 function renderReading(container) {
@@ -45,10 +46,10 @@ function renderReading(container) {
       if (profile.kind === 'custom') {
         const list = el('ul'); for (const text of profile.definition.notice) list.append(el('li', text)); card.append(list);
       }
-      card.append(badge(profile.kind === 'custom' ? profile.name ?? 'inline profile' : profile.key ?? 'auto', profile.kind === 'custom'));
-      if (reading.includeLinkedPages) card.append(badge('including linked pages', true));
-      if (reading.learning.sample) card.append(badge('sample across time', true));
-      if (reading.learning.favor) card.append(badge(reading.learning.favor === 'recent' ? 'favor recent periods' : 'all periods equally', true));
+      card.append(badge(profile.kind === 'custom' ? profile.name ?? 'inline profile' : profile.key ?? 'auto', false));
+      if (reading.includeLinkedPages) card.append(badge('including linked pages'));
+      if (reading.learning.sample) card.append(badge('sample across time'));
+      if (reading.learning.favor) card.append(badge(reading.learning.favor === 'recent' ? 'favor recent periods' : 'all periods equally'));
       card.append(badge(`base budget ${reading.learning.budget}`)); container.append(card);
     }
     for (const memory of vault.memories) {
@@ -65,9 +66,9 @@ function renderReading(container) {
 }
 function render() {
   const container = $('result'); const scroll = container.scrollTop; container.replaceChildren();
-  $('status').textContent = result.ok ? result.configReady ? 'Compiled · export ready' : 'Compiled · preview' : 'Check syntax';
+  $('status').textContent = result.ok ? result.configReady ? 'Compiled · Rust' : 'Compiled · preview' : 'Check syntax';
   $('status').className = result.ok ? '' : 'error';
-  const names = { reading: ['Resolved reading plan', 'Download plan ↓'], plan: ['JSON · complete semantics', 'Download plan ↓'], config: ['TOML · current engine', 'Download TOML ↓'], instructions: ['Markdown · agent guidance', 'Download instructions ↓'] };
+  const names = { reading: ['Resolved reading plan', 'Download plan ↓'], plan: ['JSON · complete semantics', 'Download plan ↓'], config: ['.enzyme · runtime configuration', 'Download .enzyme ↓'], instructions: ['Markdown · agent guidance', 'Download instructions ↓'] };
   $('output-label').textContent = names[tab][0]; $('download').textContent = names[tab][1];
   $('download').disabled = !result.ok || (tab === 'config' && !result.configReady);
   if (!result.ok) {
@@ -75,11 +76,23 @@ function render() {
   } else if (tab === 'reading') renderReading(container);
   else if (tab === 'config' && !result.configReady) {
     const box = el('div', undefined, 'empty'); box.append(el('h3', 'This reading goes beyond today’s config.'), el('p', 'The complete plan preserves your intent. TOML export is withheld because it would discard or change part of that intent.'), el('p', 'Try “Current engine” for an exportable program, or inspect the compiler notes below.')); container.append(box);
-  } else container.append(el('pre', tab === 'plan' ? JSON.stringify(result.plan, null, 2) : tab === 'config' ? result.configToml : result.instructions, 'code-output'));
+  } else container.append(el('pre', tab === 'plan' ? JSON.stringify(result.runtimePlan ?? result.plan, null, 2) : tab === 'config' ? result.configSource : result.instructions, 'code-output'));
   container.scrollTop = scroll; diagnosticView();
 }
-function run() { clearTimeout(timer); result = compile(editor.value); render(); }
+async function run() {
+  clearTimeout(timer); const version = ++compileVersion;
+  $('status').textContent = 'Compiling…';
+  try {
+    const response = await fetch('/api/compile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: editor.value });
+    if (!response.ok) throw new Error(`Compiler returned ${response.status}`);
+    const next = await response.json(); if (version !== compileVersion) return;
+    result = next; render();
+  } catch (error) { if (version === compileVersion) { $('status').textContent = error.message; $('download').disabled = true; } }
+}
 async function loadExample(name) {
+  ++compileVersion; clearTimeout(timer);
+  $('status').textContent = 'Loading example…';
+  $('download').disabled = true;
   const version = ++loadVersion; drafts.set(activeExample, editor.value); activeExample = name;
   try {
     let source = drafts.get(name);
@@ -96,6 +109,7 @@ editor.addEventListener('keydown', event => {
 $('compile').onclick = run; $('example').onchange = event => loadExample(event.target.value);
 const tabs = [...document.querySelectorAll('[data-tab]')];
 function selectTab(button) {
+  if (!result) return;
   tab = button.dataset.tab;
   for (const candidate of tabs) { candidate.setAttribute('aria-selected', String(candidate === button)); candidate.tabIndex = candidate === button ? 0 : -1; }
   $('result').setAttribute('aria-labelledby', button.id); render();
@@ -110,8 +124,8 @@ for (const button of tabs) {
   };
 }
 $('download').onclick = () => {
-  const ext = tab === 'config' ? 'toml' : tab === 'instructions' ? 'md' : 'json';
-  const content = ext === 'toml' ? result.configToml : ext === 'md' ? result.instructions : JSON.stringify(result.plan, null, 2);
+  const ext = tab === 'config' ? 'enzyme' : tab === 'instructions' ? 'md' : 'json';
+  const content = ext === 'enzyme' ? result.configSource : ext === 'md' ? result.instructions : JSON.stringify(result.runtimePlan ?? result.plan, null, 2);
   const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' })); const link = el('a'); link.href = url; link.download = `enzyme-reading.${ext}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
 // Start without overwriting the initial example with an empty draft.

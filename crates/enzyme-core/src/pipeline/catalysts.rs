@@ -814,8 +814,41 @@ pub struct CatalystStats {
     pub suppressed_entities: Vec<(String, String)>,
 }
 
+/// Replace the preset-specific preamble while preserving sampled evidence and output rules.
+fn apply_reading_profile(prompt: &str, name: &str, profile: &enzyme_spec::Profile) -> String {
+    let boundary = prompt
+        .find("<vault_context")
+        .or_else(|| prompt.find("<entity>"))
+        .unwrap_or(0);
+    let mut guidance = format!(
+        "SELECTED READING PROFILE: {name}\nSeek: {}\nNotice:\n- {}\n",
+        profile.seek,
+        profile.notice.join("\n- ")
+    );
+    if !profile.ask.is_empty() {
+        guidance.push_str(&format!(
+            "Example retrieval questions (adapt to the evidence):\n- {}\n",
+            profile.ask.join("\n- ")
+        ));
+    }
+    if let Some(note) = &profile.note {
+        guidance.push_str(note);
+        guidance.push('\n');
+    }
+    if !profile.recognize.is_empty() {
+        guidance.push_str(&format!(
+            "Source patterns: {}\n",
+            profile.recognize.join("; ")
+        ));
+    }
+    guidance.push_str("Use this reading profile instead of a built-in profile. Preserve the core grounding and output-format rules.\n\n");
+    guidance.push_str(&prompt[boundary..]);
+    guidance
+}
+
 /// Configuration for a catalyst generation run.
 pub struct CatalystConfig<'a> {
+    pub reading_spec: Option<&'a enzyme_spec::Vault>,
     /// Per-entity catalyst profile overrides (entity name -> profile key).
     pub entity_profiles: &'a HashMap<String, String>,
     /// Number of catalysts to generate per entity.
@@ -867,6 +900,7 @@ impl<'a> Default for CatalystConfig<'a> {
         static EMPTY_MAP: std::sync::LazyLock<HashMap<String, String>> =
             std::sync::LazyLock::new(HashMap::new);
         Self {
+            reading_spec: None,
             entity_profiles: &EMPTY_MAP,
             catalysts_per_entity: 7,
             default_profile: DEFAULT_PROFILE_KEY,
@@ -1326,21 +1360,47 @@ impl<'a> CatalystPipeline<'a> {
 
             let occurrences = self.db.get_entity_occurrences(entity_id)?;
 
+            let reading = config
+                .reading_spec
+                .and_then(|v| v.reading(entity_name, entity.entity_type.as_str()));
+            let selected_profile_key = config
+                .entity_profiles
+                .get(entity_name)
+                .map(String::as_str)
+                .unwrap_or(config.default_profile);
+            let custom_profile = config.reading_spec.and_then(|v| {
+                reading
+                    .and_then(|r| r.definition.as_ref())
+                    .or_else(|| v.profiles.get(selected_profile_key))
+                    .or_else(|| {
+                        v.readings
+                            .iter()
+                            .find(|r| r.profile == selected_profile_key)
+                            .and_then(|r| r.definition.as_ref())
+                    })
+            });
             let profile: &CatalystProfile = config
                 .entity_profiles
                 .get(entity_name)
                 .and_then(|key| get_profile(key))
                 .unwrap_or(default_profile);
 
-            let num_catalysts = config
+            let mut num_catalysts = config
                 .per_entity_allocations
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
+            if let (Some(spec), Some(reading)) = (config.reading_spec, reading) {
+                if reading.learning.budget != spec.learning.budget {
+                    if let Some(budget) = reading.learning.budget {
+                        num_catalysts = budget;
+                    }
+                }
+            }
             let max_samples = resolve_sample_limit(config.max_samples, is_local, num_catalysts);
 
             let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
             apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
-            let selected_context = match self.build_chunk_context(
+            let mut selected_context = match self.build_chunk_context(
                 entity,
                 &occurrences,
                 &eras,
@@ -1367,6 +1427,17 @@ impl<'a> CatalystPipeline<'a> {
                     )
                 }
             };
+            let policy = reading
+                .map(|r| &r.learning)
+                .or_else(|| config.reading_spec.map(|v| &v.learning));
+            if policy.and_then(|p| p.favor.as_deref()) == Some("equal") {
+                if let Some(context) = &mut selected_context.era_context {
+                    let n = context.eras.len();
+                    context.era_allocations = (0..n)
+                        .map(|i| num_catalysts / n + usize::from(i < num_catalysts % n))
+                        .collect();
+                }
+            }
             if selected_context.flat_samples.is_empty() && selected_context.era_context.is_none() {
                 debug!(
                     entity_name = entity_name.as_str(),
@@ -1400,7 +1471,7 @@ impl<'a> CatalystPipeline<'a> {
             let era_context = selected_context.era_context.as_ref();
             let context_samples = selected_context.flat_samples.as_slice();
 
-            let user_prompt = if is_local {
+            let mut user_prompt = if is_local {
                 build_local_user_prompt(
                     entity_name,
                     context_samples,
@@ -1419,6 +1490,19 @@ impl<'a> CatalystPipeline<'a> {
                     era_context,
                 )
             };
+            if let Some(custom) = custom_profile {
+                user_prompt = apply_reading_profile(&user_prompt, selected_profile_key, custom);
+            }
+            if policy.and_then(|p| p.favor.as_deref()) == Some("equal") {
+                if let Some(context) = era_context {
+                    user_prompt.push_str(
+                        "\nRequested question allocation across periods (equal priority):\n",
+                    );
+                    for (era, count) in context.eras.iter().zip(&context.era_allocations) {
+                        user_prompt.push_str(&format!("- {}: {} questions\n", era.label, count));
+                    }
+                }
+            }
             debug!(
                 entity_name = entity_name.as_str(),
                 profile = profile.key,
@@ -2767,5 +2851,37 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged, 0, "the tag has no fingerprint of its own");
         assert_eq!(fresh.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod readable_profile_tests {
+    use super::*;
+    #[test]
+    fn custom_profile_replaces_preset_for_both_prompt_shapes() {
+        let profile = enzyme_spec::Profile {
+            seek: "CUSTOM PURPOSE".into(),
+            notice: vec!["CUSTOM EVIDENCE".into()],
+            ask: vec!["CUSTOM QUESTION?".into()],
+            note: Some("CUSTOM FOOTER".into()),
+            recognize: vec!["CUSTOM PATTERN".into()],
+        };
+        for original in [
+            "SELECTED PROFILE: old\n\n<vault_context>actual evidence</vault_context>\n<entity>x</entity>\nReturn JSON",
+            "SELECTED PROFILE: old\nOld local guidance\n<vault_context era=\"2026\">actual evidence</vault_context>\nGenerate 3 questions",
+        ] {
+            let applied = apply_reading_profile(original, "mine", &profile);
+            assert!(!applied.contains("SELECTED PROFILE: old"));
+            for text in [
+                "CUSTOM PURPOSE",
+                "CUSTOM EVIDENCE",
+                "CUSTOM QUESTION?",
+                "CUSTOM FOOTER",
+                "CUSTOM PATTERN",
+                "actual evidence",
+            ] {
+                assert!(applied.contains(text));
+            }
+        }
     }
 }

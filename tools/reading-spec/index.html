@@ -6,7 +6,7 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header><a class="brand" href="./"><span class="mark">e</span> enzyme <span class="divider">/</span> <span class="muted">reading spec</span></a><span class="version">LANGUAGE LAB · 0.1</span></header>
+  <header><a class="brand" href="./"><span class="mark">e</span> enzyme <span class="divider">/</span> <span class="muted">reading spec</span></a><span class="version">RUST RUNTIME · 0.2</span></header>
   <main>
     <section class="intro">
       <div><p class="eyebrow">YOUR NOTES. YOUR WAY OF READING.</p><h1>Teach it what to notice.</h1><p class="lede">Learn questions from your notes.<br>Find your notes through those questions.</p></div>
@@ -14,7 +14,7 @@
     </section>
     <section class="workspace" aria-label="Reading specification playground">
       <div class="editor-pane">
-        <div class="panel-heading"><label for="example">01 / WRITE A READING</label><select id="example" aria-label="Example program"><option value="vault">Personal vault</option><option value="memory">Memory loop</option><option value="current-engine">Current engine</option><option value="overrides">Learning defaults</option></select></div>
+        <div class="panel-heading"><label for="example">01 / WRITE A READING</label><select id="example" aria-label="Example program"><option value="vault">Personal vault</option><option value="memory">Memory loop</option><option value="current-engine">Built-in profiles</option><option value="overrides">Learning defaults</option></select></div>
         <div class="editor-wrap"><pre id="highlight" aria-hidden="true"></pre><textarea id="source" aria-label="Reading program" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea></div>
         <div class="editor-footer"><span id="position">Ln 1, Col 1</span><span>⌘ / Ctrl + Enter to compile</span><button id="compile">Compile <span>↗</span></button></div>
       </div>
@@ -41,16 +41,16 @@
   sample across time
   favor recent periods
   question budget 40
-}</pre><p>Global → vault → reading. The last scope wins. Sampling choices are proposed policies; current-engine export stays blocked until supported.</p></div>
+}</pre><p>Global → vault → reading. The last scope wins. Sampling and recency settings feed generation. Changes become part of the refresh fingerprint.</p></div>
       <div><h3>Guidance stays guidance</h3><pre>when asked {
   "Use grep for exact phrases."
   retrieve passages through learned questions
   answer with sources
 }</pre><p>Quotes compile to agent instructions. They are not model-evaluated conditions, automatic hooks, or permission to write. Nothing runs against your vault here.</p></div>
-      <div><h3>Honest compilation</h3><p>Custom profiles, explicit linked-page expansion, per-reading budgets, and sampling policies remain in the plan. They never silently collapse to a supported preset. Choose “Current engine” for a TOML-exportable example.</p><p>Question budget means the largest entity’s allocation, scaled by document count with a floor of 3. It is separate from the document embedding limit. No expiry policy is implemented.</p></div>
+      <div><h3>Honest compilation</h3><p>The same Rust parser powers this playground and init/refresh. Custom profiles enter generation prompts; linked pages inherit explicit parent readings unless separately configured. Download a .enzyme file for your configs directory.</p><p>Question budget means the largest entity’s allocation, scaled by document count with a floor of 3. It is separate from the document embedding limit. No expiry policy is implemented.</p></div>
     </div></details>
   </main>
-  <footer><span>Enzyme / Reading Spec</span><span>Local compilation. No model calls. No vault access.</span><a href="https://probably-lang.southpolesteve.workers.dev/" target="_blank" rel="noreferrer">Inspired by Probably ↗</a></footer>
+  <footer><span>Enzyme / Reading Spec</span><span>Rust compilation. No model calls. No vault access.</span><a href="https://probably-lang.southpolesteve.workers.dev/" target="_blank" rel="noreferrer">Inspired by Probably ↗</a></footer>
   <script type="module" src="app.mjs"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
-// Built-in profiles compile to today's config.toml.
-// Use your actual absolute vault path before installing.
+// Reuse built-in profiles without redefining them.
+// Save this file in ~/.enzyme/configs/ with your vault path.
 learning {
   question budget 40
 }

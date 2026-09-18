@@ -130,6 +130,16 @@ Do not impose a new memory schema.
 
 Optional backfills must be reviewed before running. Good candidates are date frontmatter inferred from filenames/paths, note-level entity fields already covered by `frontmatter_link_fields` or matched to existing wikilinks, and repeated person/company names that the user confirms should become CRM pages.
 
+## Readable workspace policy
+
+Readable configuration lives in `~/.enzyme/configs/*.enzyme`. When present, run
+`enzyme spec inspect "$PWD" --instructions` from the active vault before routine
+retrieval or memory capture. Follow the compiled workspace retrieval and capture
+guidance alongside this skill and the user's current instructions. A `remember`
+declaration supplies conditions and a destination; it does not install a hook or
+authorize unrelated writes. If the vault has no readable policy, use this skill's
+defaults. Report malformed configuration rather than silently ignoring it.
+
 ## Working Memory
 
 `enzyme petri` returns current entities and catalysts, which are thematic phrases from the vault.

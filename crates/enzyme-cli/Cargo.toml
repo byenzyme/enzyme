@@ -9,6 +9,8 @@ name = "enzyme"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
+enzyme-spec = { path = "../enzyme-spec" }
 enzyme-core = { path = "../enzyme-core", features = ["account"] }
 reqwest = { workspace = true, features = ["multipart", "stream"] }
 flate2 = "1"

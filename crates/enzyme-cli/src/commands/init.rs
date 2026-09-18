@@ -1015,6 +1015,7 @@ pub async fn run_init(
         let allocations = calculate_allocations(&sel_result.entities, effective_min_top);
 
         let cat_config = CatalystConfig {
+            reading_spec: enzyme_config.reading_spec.as_ref(),
             entity_profiles: &sel_result.entity_profiles,
             catalysts_per_entity: 7,
             default_profile: DEFAULT_PROFILE_KEY,
@@ -1363,7 +1364,19 @@ pub async fn run_init(
     // Show starter prompt on interactive init
     if !quiet && !json_progress {
         if let Ok(config_path) = EnzymeConfig::config_path() {
-            eprintln!("  Config saved to {}", config_path.display());
+            eprintln!(
+                "  Configuration: {}",
+                if enzyme_config.reading_spec.is_some() {
+                    config_path
+                        .parent()
+                        .unwrap()
+                        .join("configs")
+                        .display()
+                        .to_string()
+                } else {
+                    config_path.display().to_string()
+                }
+            );
             eprintln!();
         }
         eprintln!();
@@ -1981,6 +1994,7 @@ async fn build_and_activate_epoch(
     let allocations = calculate_allocations(&sel_result.entities, contract.min_top_catalysts);
 
     let cat_config = CatalystConfig {
+        reading_spec: frozen_config.reading_spec.as_ref(),
         entity_profiles: &sel_result.entity_profiles,
         catalysts_per_entity: contract.catalysts_per_entity,
         default_profile: &contract.catalyst_profile,

@@ -33,6 +33,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Compile, migrate, or preview readable .enzyme configuration
+    Spec {
+        #[command(subcommand)]
+        command: commands::spec::SpecCommand,
+    },
     /// Build or update the vault index and catalysts
     Init {
         /// Internal background worker mode
@@ -355,6 +360,9 @@ async fn main() -> Result<()> {
 
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
+        Commands::Spec { command } => {
+            return commands::spec::run(command).await;
+        }
         Commands::Mcp => {
             init_tracing(cli.verbose, None);
             return commands::mcp::run_mcp(cli.vault).await;
@@ -392,6 +400,14 @@ async fn main() -> Result<()> {
     };
     init_tracing(cli.verbose, Some(&vault_path));
     info!(?vault_path, "resolved vault path");
+
+    // Validate readable configuration before any init/refresh stage can mutate the vault.
+    if matches!(
+        &cli.command,
+        Commands::Init { .. } | Commands::Refresh { .. }
+    ) {
+        enzyme_core::config::EnzymeConfig::load(&vault_path)?;
+    }
 
     match cli.command {
         Commands::Init {
@@ -532,7 +548,7 @@ async fn main() -> Result<()> {
             commands::doctor::run_doctor(&vault_path, json).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
-        Commands::Mcp | Commands::Model { .. } => unreachable!(),
+        Commands::Mcp | Commands::Model { .. } | Commands::Spec { .. } => unreachable!(),
     }
 
     Ok(())

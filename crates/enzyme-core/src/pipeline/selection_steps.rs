@@ -85,6 +85,51 @@ pub fn build_curated_selection(
     })
 }
 
+/// Explicit readable expansion keeps the folder and promotes its linked pages.
+/// Child readings inherit the parent's profile unless explicitly configured themselves.
+pub fn build_readable_selection(
+    db: &Database,
+    base: Vec<Entity>,
+    overrides: &HashMap<String, String>,
+    spec: &enzyme_spec::Vault,
+) -> Result<MaterializedSelection> {
+    let mut folders = auto_expandable_folders(db, &base)?;
+    let explicit: HashMap<String, i64> = base
+        .iter()
+        .filter(|e| {
+            spec.reading(&e.name, e.entity_type.as_str())
+                .is_some_and(|r| r.include_linked_pages)
+        })
+        .map(|e| (e.name.clone(), e.frequency))
+        .collect();
+    folders.extend(load_expandable_folder_children(db, &explicit, false)?);
+    let entities = expand_with_folder_children(db, &base, &folders)?;
+    let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
+    let mut inherited = HashMap::<String, String>::new();
+    for parent in explicit.keys() {
+        if let Some(profile) = overrides.get(parent) {
+            for child in folders.get(parent).into_iter().flatten() {
+                if let Some(previous) = inherited.insert(child.clone(), profile.clone()) {
+                    anyhow::ensure!(
+                        previous == *profile || overrides.contains_key(child),
+                        "linked page {child} inherits conflicting profiles; declare an explicit reading for it"
+                    );
+                }
+            }
+        }
+    }
+    profiles.extend(inherited);
+    profiles.extend(overrides.clone());
+    let entity_map = EntityMap::from_entities(db, &entities)?;
+    Ok(MaterializedSelection {
+        base_entities: base,
+        entity_map,
+        expandable_folders: folders,
+        final_entities: entities,
+        entity_profiles: profiles,
+    })
+}
+
 /// Deterministically rank a folder's page entities for catalyst/display use.
 ///
 /// Ranking prefers children that are highly referenced from within the folder,
@@ -335,6 +380,30 @@ mod tests {
             },
             metadata: serde_json::Value::Null,
         }
+    }
+
+    #[test]
+    fn readable_expansion_inherits_profile_below_auto_density() {
+        let db = test_db();
+        insert_entity(&db, "people", "folder", 100, 10);
+        insert_entity(&db, "alice", "link", 4, 1);
+        insert_doc(&db, "people/alice.md");
+        for i in 0..99 {
+            insert_doc(&db, &format!("people/other-{i}.md"));
+        }
+        let program=enzyme_spec::resolve(vec![enzyme_spec::parse(r#"vault "/notes" { learn questions from folder "people" including linked pages about relationships }"#).unwrap()],std::path::Path::new("/home/test")).unwrap();
+        let spec = &program.vaults[0];
+        let base = vec![make_entity("people", EntityType::Folder, 100)];
+        let overrides = HashMap::from([("people".into(), "relational".into())]);
+        assert!(
+            build_curated_selection(&db, base.clone(), &overrides)
+                .unwrap()
+                .expandable_folders
+                .is_empty()
+        );
+        let result = build_readable_selection(&db, base, &overrides, spec).unwrap();
+        assert!(result.final_entities.iter().any(|e| e.name == "alice"));
+        assert_eq!(result.entity_profiles["alice"], "relational");
     }
 
     #[test]

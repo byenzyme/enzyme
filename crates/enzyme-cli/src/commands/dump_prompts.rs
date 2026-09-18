@@ -49,6 +49,7 @@ pub async fn run_dump_prompts(
     let allocations = calculate_allocations(&entities, effective_min_top);
 
     let cat_config = CatalystConfig {
+        reading_spec: enzyme_config.reading_spec.as_ref(),
         entity_profiles: &selection.entity_profiles,
         catalysts_per_entity: 7,
         default_profile: DEFAULT_PROFILE_KEY,
