@@ -1,0 +1,39 @@
+// Teach Enzyme what to notice.
+profile relationships {
+  seek "what matters between people"
+  notice ["meaningful exchanges", "shared interests", "unfinished conversations"]
+}
+
+profile decisions {
+  seek "why one path won and what could change that"
+  notice ["rejected alternatives", "assumptions", "turning points"]
+}
+
+learning {
+  sample across time
+  favor recent periods
+  question budget 40
+}
+
+vault "~/notes" {
+  learn questions from folder "people"
+    including linked pages
+    about relationships
+
+  learn questions from folder "inbox" about profile {
+    seek "what is emerging across scattered thoughts"
+    notice ["recurring ideas", "unexpected connections", "open questions"]
+  }
+
+  learn questions from folder "meetings" about decisions
+  learn questions from tags ["startup", "design"] about decisions
+
+  project questions into "~/notes/Readwise"
+}
+
+when asked {
+  "Use grep for names, titles, and exact phrases."
+  retrieve passages through learned questions
+  "Read surrounding context when an excerpt is ambiguous."
+  answer with sources
+}

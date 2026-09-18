@@ -1,0 +1,26 @@
+// Built-in profiles compile to today's config.toml.
+// Use your actual absolute vault path before installing.
+learning {
+  question budget 40
+}
+
+vault "/workspace/notes" {
+  leave out folders ["templates", "attachments", ".obsidian"]
+  prepare up to 2048 documents per run newest first
+
+  learn questions from folder "inbox" about reflection
+  learn questions from folder "people" about relationships
+  learn questions from folder "meetings" about operational
+  learn questions from tags ["startup", "design"] about decisions
+  learn questions from folder "Readwise" about resonance
+  learn questions from tags ["storytelling", "capture", "roots"] about auto
+
+  project questions into "/workspace/notes/Readwise"
+}
+
+when asked {
+  "Use grep for names, titles, and exact phrases."
+  retrieve passages through learned questions
+  "Say when the evidence is missing."
+  answer with sources
+}

@@ -1,0 +1,10 @@
+{
+  "name": "enzyme-reading-spec",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test compiler.test.mjs",
+    "start": "python3 -m http.server 4178 --bind 0.0.0.0 --directory .",
+    "check": "node cli.mjs examples/vault.enzyme"
+  }
+}
