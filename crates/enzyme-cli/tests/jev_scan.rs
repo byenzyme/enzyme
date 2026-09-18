@@ -87,10 +87,15 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
     let (_root, vault, home) = fixture();
     std::fs::create_dir(vault.join("people")).unwrap();
     std::fs::create_dir(vault.join("inbox")).unwrap();
+    let mut extra_links = Vec::new();
+    for i in 0..12 {
+        std::fs::write(vault.join(format!("people/Person{i:02}.md")), "").unwrap();
+        extra_links.push(format!("[[Person{i:02}]]"));
+    }
     std::fs::write(vault.join("people/Alice.md"), "").unwrap();
     std::fs::write(vault.join("people/Bob.md"), "").unwrap();
     for i in 0..3 {
-        std::fs::write(vault.join(format!("inbox/{i}.md")), "Met [[Alice]] and [[Bob]] to discuss how our collaboration has changed and what each of us needs from the relationship.").unwrap();
+        std::fs::write(vault.join(format!("inbox/{i}.md")), format!("Met [[Alice]] and [[Bob]] with {} to discuss how our collaboration has changed and what each of us needs from the relationship.", extra_links.join(" "))).unwrap();
     }
     let output = command(&vault, &home, &server.uri())
         .arg("--jev")
@@ -110,6 +115,32 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
         .find(|c| c["spec"] == "folder:people")
         .unwrap();
     assert_eq!(people["expandable"], true);
+    assert_eq!(people["page_entities"].as_array().unwrap().len(), 10);
+    assert!(
+        body["state"]["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| !c["spec"].as_str().unwrap().starts_with("[["))
+    );
+    let scan = command(&vault, &home, &server.uri()).output().unwrap();
+    assert!(scan.status.success());
+    let scan: Value = serde_json::from_slice(&scan.stdout).unwrap();
+    let group = scan["folder_page_entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["folder"] == "people")
+        .unwrap();
+    assert_eq!(group["page_entities"].as_array().unwrap().len(), 10);
+    assert!(
+        scan["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| !s.as_str().unwrap().starts_with("[["))
+    );
+
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let proposed_path = home.join("proposal.toml");
     std::fs::write(

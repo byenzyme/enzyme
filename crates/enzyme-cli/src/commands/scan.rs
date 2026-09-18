@@ -170,7 +170,7 @@ fn jev_candidates(
         .iter()
         .map(|spec| {
             let group = suggestion
-                .folder_page_entities
+                .folder_memberships
                 .iter()
                 .find(|group| &group.spec == spec && group.expandable_candidate);
             let mut evidence: Vec<SelectionSample> = samples
@@ -192,7 +192,7 @@ fn jev_candidates(
             // through the exact child links (never infer relationships from names).
             if let Some(group) = group {
                 let mut added = 0;
-                for child in &group.page_entities {
+                for child in group.page_entities.iter().take(MAX_FOLDER_CHILDREN) {
                     let mut references: Vec<_> = docs
                         .iter()
                         .filter(|doc| {
@@ -237,7 +237,13 @@ fn jev_candidates(
                 samples: evidence,
                 expandable: group.is_some(),
                 page_entities: group
-                    .map(|g| g.page_entities.iter().map(|p| p.spec.clone()).collect())
+                    .map(|g| {
+                        g.page_entities
+                            .iter()
+                            .take(MAX_FOLDER_CHILDREN)
+                            .map(|p| p.spec.clone())
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 context: {
                     let matching: Vec<_> = docs
@@ -343,7 +349,12 @@ struct ScanSuggestion {
     top_links: Vec<EntityEvidence>,
     top_folders: Vec<EntityEvidence>,
     folder_stats: Vec<FolderStat>,
-    folder_page_entities: Vec<FolderPageEntityGroup>,
+    // Complete membership internally; only the serialized evidence is sampled.
+    #[serde(
+        rename = "folder_page_entities",
+        serialize_with = "serialize_folder_evidence"
+    )]
+    folder_memberships: Vec<FolderPageEntityGroup>,
     folder_children: Vec<ChildGroup>,
     tag_children: Vec<ChildGroup>,
     frontmatter_samples: Vec<FrontmatterSample>,
@@ -549,14 +560,13 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         }
     }
 
-    let folder_page_entities =
-        folder_page_entities(docs, &folder_counts, &link_counts, 25, MAX_FOLDER_CHILDREN);
+    let folder_memberships = discover_folder_memberships(docs, &folder_counts, &link_counts);
     let entities = suggested_entities(
         docs,
         &folder_counts,
         &tag_counts,
         &link_counts,
-        &folder_page_entities,
+        &folder_memberships,
     );
     let metrics = build_metrics(docs);
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
@@ -598,8 +608,8 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         top_tags: top_evidence_by_type(&metrics, "tag", 25),
         top_links: top_evidence_by_type(&metrics, "link", 25),
         top_folders: top_evidence_by_type(&metrics, "folder", 25),
-        folder_stats: folder_stats(docs, &metrics, &folder_page_entities, 50),
-        folder_page_entities,
+        folder_stats: folder_stats(docs, &metrics, &folder_memberships, 50),
+        folder_memberships,
         folder_children: folder_children(&metrics, 25, 25),
         tag_children: tag_children(&metrics, 25, 25),
         frontmatter_samples: frontmatter_samples(docs, 12),
@@ -821,12 +831,10 @@ fn sort_evidence(entries: &mut [EntityEvidence]) {
     });
 }
 
-fn folder_page_entities(
+fn discover_folder_memberships(
     docs: &[ProcessedDocument],
     folder_counts: &HashMap<String, usize>,
     link_counts: &HashMap<String, usize>,
-    parent_limit: usize,
-    child_limit: usize,
 ) -> Vec<FolderPageEntityGroup> {
     let mut direct_pages: HashMap<String, Vec<FolderPageEntity>> = HashMap::new();
 
@@ -879,7 +887,6 @@ fn folder_page_entities(
             let expandable_candidate =
                 active_page_entity_count as f64 / file_count as f64 >= EXPANDABLE_DENSITY_THRESHOLD;
 
-            page_entities.truncate(child_limit);
             Some(FolderPageEntityGroup {
                 spec: entity_spec("folder", &folder),
                 folder,
@@ -897,8 +904,24 @@ fn folder_page_entities(
             .then_with(|| b.file_count.cmp(&a.file_count))
             .then_with(|| a.folder.cmp(&b.folder))
     });
-    groups.truncate(parent_limit);
     groups
+}
+
+/// JSON evidence has its own budget; truncation never changes structural membership.
+fn serialize_folder_evidence<S: serde::Serializer>(
+    memberships: &[FolderPageEntityGroup],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    let evidence: Vec<_> = memberships
+        .iter()
+        .take(25)
+        .map(|group| {
+            let mut sample = group.clone();
+            sample.page_entities.truncate(MAX_FOLDER_CHILDREN);
+            sample
+        })
+        .collect();
+    evidence.serialize(serializer)
 }
 
 fn direct_child_stem(source_ref: &str) -> Option<(&str, &str)> {
@@ -913,7 +936,7 @@ fn direct_child_stem(source_ref: &str) -> Option<(&str, &str)> {
 fn folder_stats(
     docs: &[ProcessedDocument],
     metrics: &HashMap<String, Metric>,
-    folder_page_entities: &[FolderPageEntityGroup],
+    folder_memberships: &[FolderPageEntityGroup],
     limit: usize,
 ) -> Vec<FolderStat> {
     let mut word_counts: HashMap<String, i64> = HashMap::new();
@@ -925,7 +948,7 @@ fn folder_stats(
         }
     }
 
-    let page_entity_by_folder: HashMap<&str, &FolderPageEntityGroup> = folder_page_entities
+    let page_entity_by_folder: HashMap<&str, &FolderPageEntityGroup> = folder_memberships
         .iter()
         .map(|group| (group.folder.as_str(), group))
         .collect();
@@ -947,6 +970,7 @@ fn folder_stats(
                             group
                                 .page_entities
                                 .iter()
+                                .take(MAX_FOLDER_CHILDREN)
                                 .map(|entity| entity.name.clone())
                                 .collect()
                         })
@@ -1302,7 +1326,7 @@ fn suggested_entities(
     folder_counts: &HashMap<String, usize>,
     tag_counts: &HashMap<String, usize>,
     link_counts: &HashMap<String, usize>,
-    folder_page_entities: &[FolderPageEntityGroup],
+    folder_memberships: &[FolderPageEntityGroup],
 ) -> Vec<String> {
     let mut entities = Vec::new();
     let mut seen = HashSet::new();
@@ -1317,9 +1341,9 @@ fn suggested_entities(
         }
     }
 
-    let covered_page_links: HashSet<&str> = folder_page_entities
+    let covered_page_links: HashSet<&str> = folder_memberships
         .iter()
-        .filter(|group| selected_folders.contains(&group.folder))
+        .filter(|group| group.expandable_candidate && selected_folders.contains(&group.folder))
         .flat_map(|group| {
             group
                 .page_entities
@@ -1578,6 +1602,68 @@ mod tests {
                 None => std::env::remove_var("ENZYME_HOME"),
             }
         }
+    }
+
+    #[test]
+    fn membership_suppression_requires_a_represented_expandable_parent() {
+        let group = FolderPageEntityGroup {
+            folder: "people".into(),
+            spec: "folder:people".into(),
+            file_count: 1,
+            expandable_candidate: true,
+            page_entities: vec![FolderPageEntity {
+                name: "alice".into(),
+                spec: "[[alice]]".into(),
+                source_ref: "people/Alice.md".into(),
+                link_frequency: 3,
+                latest_modified: None,
+            }],
+        };
+        let folders = HashMap::from([("people".into(), 1)]);
+        let links = HashMap::from([("alice".into(), 3)]);
+        let select = |groups: &[FolderPageEntityGroup], folders: &HashMap<String, usize>| {
+            suggested_entities(&[], folders, &HashMap::new(), &links, groups)
+        };
+        assert!(!select(&[group.clone()], &folders).contains(&"[[alice]]".into()));
+        assert!(select(&[group.clone()], &HashMap::new()).contains(&"[[alice]]".into()));
+        let not_expandable = FolderPageEntityGroup {
+            expandable_candidate: false,
+            ..group
+        };
+        assert!(select(&[not_expandable], &folders).contains(&"[[alice]]".into()));
+    }
+
+    #[test]
+    fn folder_display_limit_does_not_limit_membership_discovery() {
+        let mut docs = Vec::new();
+        let mut folders = HashMap::new();
+        let mut links = HashMap::new();
+        for i in 0..26 {
+            let folder = format!("group-{i:02}");
+            let name = format!("person-{i:02}");
+            docs.push(doc_with(
+                vec![&folder],
+                vec![],
+                vec![],
+                None,
+                &format!("{folder}/{name}.md"),
+                1_700_000_000_000,
+                "",
+            ));
+            folders.insert(folder, 1);
+            links.insert(name, 3);
+        }
+        let groups = discover_folder_memberships(&docs, &folders, &links);
+        assert_eq!(groups.len(), 26);
+        let selected = suggested_entities(&docs, &folders, &HashMap::new(), &links, &groups);
+        assert_eq!(selected.len(), 26);
+        assert!(selected.iter().all(|s| s.starts_with("folder:")));
+        #[derive(Serialize)]
+        struct Evidence<'a>(
+            #[serde(serialize_with = "serialize_folder_evidence")] &'a [FolderPageEntityGroup],
+        );
+        let displayed = serde_json::to_value(Evidence(&groups)).unwrap();
+        assert_eq!(displayed.as_array().unwrap().len(), 25);
     }
 
     #[test]
