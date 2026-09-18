@@ -203,7 +203,14 @@ fn highlight(source: &str, enabled: bool) -> String {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            if matches!(
+            if matches!(word.as_str(), "question" | "questions") {
+                style = "1;35";
+            } else if matches!(
+                word.as_str(),
+                "folder" | "folders" | "tag" | "tags" | "link" | "links" | "log" | "logs"
+            ) {
+                style = "1;34";
+            } else if matches!(
                 word.as_str(),
                 "vault"
                     | "profile"

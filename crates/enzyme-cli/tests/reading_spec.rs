@@ -168,7 +168,14 @@ fn compile_highlights_complete_phrases_and_profile_strings() {
         "disabled",
     ] {
         assert!(
-            output.stdout.contains(&format!("\x1b[1;36m{word}\x1b[0m")),
+            output.stdout.contains(&format!(
+                "\x1b[{}m{word}\x1b[0m",
+                match word {
+                    "question" | "questions" => "1;35",
+                    "tag" => "1;34",
+                    _ => "1;36",
+                }
+            )),
             "uncolored keyword: {word}"
         );
     }
