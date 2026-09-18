@@ -1,3 +1,4 @@
+pub mod compile;
 pub mod agents;
 pub mod benchmark;
 pub mod catalyze;

@@ -104,3 +104,30 @@ fn invalid_spec_fails_before_init_writes() {
     out.assert_failure();
     assert!(!f.vault_enzyme_dir().join("enzyme.db").exists());
 }
+
+#[test]
+fn compile_creates_setup_before_init_and_preserves_edits() {
+    let f = VaultFixture::new();
+    let first = f.cli().args(["compile", "-v", "--color", "never"]).run();
+    first.assert_success();
+    assert!(first.stdout.contains("learn questions from"));
+    assert!(!first.stdout.contains('\u{1b}'));
+    assert!(!f.vault_path().join(".enzyme").exists());
+    assert!(!f.enzyme_home().join("config.toml").exists());
+    let files = enzyme_spec::source_files(&f.enzyme_home().join("configs")).unwrap();
+    assert_eq!(files.len(), 1);
+    let path = &files[0].0;
+    let original = format!("// Keep my comment\n{}", fs::read_to_string(path).unwrap());
+    fs::write(path, &original).unwrap();
+    let again = f.cli().args(["compile", "-v", "--color", "always"]).run();
+    again.assert_success();
+    assert!(again.stdout.contains("\x1b[1;36m"));
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+    let no_color = f.cli().args(["compile", "-v"]).env("NO_COLOR", "1").run();
+    no_color.assert_success();
+    assert!(!no_color.stdout.contains('\u{1b}'));
+    fs::write(path, "vault broken {").unwrap();
+    let invalid = f.cli().args(["compile", "-v"]).run();
+    assert!(!invalid.success);
+    assert_eq!(fs::read_to_string(path).unwrap(), "vault broken {");
+}

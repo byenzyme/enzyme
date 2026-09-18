@@ -33,6 +33,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Generate or validate the readable setup before init; -v prints the program
+    Compile {
+        #[arg(long, value_enum, default_value = "auto")]
+        color: commands::compile::ColorChoice,
+    },
     /// Compile, migrate, or preview readable .enzyme configuration
     Spec {
         #[command(subcommand)]
@@ -398,6 +403,13 @@ async fn main() -> Result<()> {
     } else {
         resolve_vault_path(cli.vault)?
     };
+    if let Commands::Compile { color } = &cli.command {
+        anyhow::ensure!(
+            cli.collection.is_none(),
+            "compile currently supports Markdown vaults, not named collections"
+        );
+        return commands::compile::run(&vault_path, cli.verbose > 0, *color);
+    }
     init_tracing(cli.verbose, Some(&vault_path));
     info!(?vault_path, "resolved vault path");
 
@@ -548,7 +560,10 @@ async fn main() -> Result<()> {
             commands::doctor::run_doctor(&vault_path, json).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
-        Commands::Mcp | Commands::Model { .. } | Commands::Spec { .. } => unreachable!(),
+        Commands::Mcp
+        | Commands::Model { .. }
+        | Commands::Spec { .. }
+        | Commands::Compile { .. } => unreachable!(),
     }
 
     Ok(())

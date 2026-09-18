@@ -50,6 +50,26 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
     Ok(())
 }
 
+/// Reuse the pre-init scanner without writing settings or creating an index.
+pub(super) fn starter_config(vault_path: &Path) -> Result<EnzymeConfig> {
+    let docs = process_docs(vault_path)?;
+    anyhow::ensure!(
+        !docs.is_empty(),
+        "no Markdown documents found in {}",
+        vault_path.display()
+    );
+    let suggestion = build_scan_suggestion(vault_path, &docs)?;
+    Ok(EnzymeConfig {
+        catalyzed_entities: suggestion
+            .entities
+            .into_iter()
+            .map(CatalyzedEntity::Simple)
+            .collect(),
+        excluded_folders: suggestion.excluded_folders,
+        ..Default::default()
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct ScanSuggestion {
     /// Existing flat fields are intentionally kept for older setup clients.
