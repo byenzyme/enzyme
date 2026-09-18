@@ -4,6 +4,7 @@ mod client;
 pub mod gbnf;
 mod generator;
 pub mod hardware;
+pub mod jev;
 #[cfg(feature = "local-llm")]
 pub mod local_engine;
 pub mod model_registry;

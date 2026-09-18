@@ -183,6 +183,9 @@ enum Commands {
         /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
         #[arg(long)]
         write_config: bool,
+        /// Experimental: send bounded note excerpts to TypeSafe for entity/profile selection (requires TYPESAFE_API_KEY)
+        #[arg(long)]
+        jev: bool,
     },
 
     /// Install or update this workspace's agent integration
@@ -331,7 +334,10 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
     }
 
     // Fallback: stderr (non-vault commands, or if file creation failed).
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
@@ -390,7 +396,13 @@ async fn main() -> Result<()> {
     } else {
         resolve_vault_path(cli.vault)?
     };
-    init_tracing(cli.verbose, Some(&vault_path));
+    // Scan is a setup preview: even an existing index must remain untouched.
+    let log_vault = if matches!(&cli.command, Commands::Scan { .. }) {
+        None
+    } else {
+        Some(vault_path.as_path())
+    };
+    init_tracing(cli.verbose, log_vault);
     info!(?vault_path, "resolved vault path");
 
     match cli.command {
@@ -499,8 +511,12 @@ async fn main() -> Result<()> {
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan { write_config } => {
-            commands::scan::run_scan(&vault_path, write_config)?;
+        Commands::Scan { write_config, jev } => {
+            if jev {
+                commands::scan::run_scan_jev(&vault_path, write_config).await?;
+            } else {
+                commands::scan::run_scan(&vault_path, write_config)?;
+            }
         }
         Commands::Install { target, source } => {
             commands::agents::run_agents_install(&vault_path, target, source).await?;

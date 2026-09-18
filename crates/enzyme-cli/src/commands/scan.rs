@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
 
@@ -10,7 +10,11 @@ use enzyme_core::document::{
     DocumentProcessor, FileDiscovery, ProcessedDocument, strip_frontmatter,
 };
 use enzyme_core::llm::CATALYST_PROFILES;
+use enzyme_core::llm::jev::JevClient;
 use enzyme_core::models::ROOT_FOLDER_ENTITY;
+use enzyme_core::pipeline::jev_selection::{
+    JevSelectionPipeline, SelectionCandidate, SelectionSample,
+};
 use enzyme_core::pipeline::selection_steps::{EXPANDABLE_DENSITY_THRESHOLD, MAX_FOLDER_CHILDREN};
 use enzyme_core::sqlite_source::validate_sqlite_source;
 
@@ -48,6 +52,191 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
 
     println!("{}", serde_json::to_string(&suggestion)?);
     Ok(())
+}
+
+/// Explicit hosted setup experiment. Preview does not create an index or write
+/// config. Existing curated settings are never overwritten by --write-config.
+pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
+    let start = std::time::Instant::now();
+    let client = JevClient::from_env()?;
+    let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    ensure!(
+        !write_config || !config.has_curated_entities(),
+        "This workspace already has entities. Run scan --jev without --write-config to review a proposal; existing settings were not changed."
+    );
+    let docs = process_docs(vault_path)?;
+    let suggestion = build_scan_suggestion(vault_path, &docs)?;
+    let candidates = jev_candidates(&docs, &suggestion);
+    let scan_ms = start.elapsed().as_millis();
+    eprintln!(
+        "Jev selection: considering {} candidates with bounded excerpts sent to TypeSafe; vault files remain unchanged.",
+        candidates.len()
+    );
+    let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
+    eprintln!(
+        "Jev evaluated {} candidates in {} ms; {} retained without evaluation.",
+        proposal.decisions.len(),
+        proposal.request_ms,
+        proposal.unevaluated_entities.len()
+    );
+    let proposal_ms = start.elapsed().as_millis();
+    let config_toml = proposal.entities_toml()?;
+    if write_config {
+        ensure!(
+            !proposal.entities.is_empty(),
+            "Jev selected no entities; refusing to write an empty configuration. Review the scan evidence."
+        );
+        // Reload so a concurrently added curated setup is not blindly replaced.
+        config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+        ensure!(
+            !config.has_curated_entities(),
+            "Configuration acquired curated entities during selection; refusing to overwrite them"
+        );
+        config.catalyzed_entities = proposal.entities.clone();
+        for folder in &suggestion.excluded_folders {
+            if !config.excluded_folders.contains(folder) {
+                config.excluded_folders.push(folder.clone());
+            }
+        }
+        config.save(vault_path)?;
+    }
+    let current_config = current_config_summary(vault_path)?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": "scan.jev.v1",
+            "vault_path": suggestion.vault_path,
+            "files": suggestion.files,
+            "status": if write_config { "written" } else { "suggested" },
+            "scan_ms": scan_ms,
+            "proposal_ms": proposal_ms,
+            "total_ms": start.elapsed().as_millis(),
+            "deterministic_entities": suggestion.entities,
+            "current_config": current_config,
+            "source_checks": suggestion.source_checks,
+            "excluded_folders": suggestion.excluded_folders,
+            "config_path": if write_config { Some(EnzymeConfig::config_path()?.to_string_lossy().to_string()) } else { None },
+            "suggested_entities_toml": config_toml,
+            "selection": proposal,
+        })
+    );
+    Ok(())
+}
+
+fn jev_candidates(
+    docs: &[ProcessedDocument],
+    suggestion: &ScanSuggestion,
+) -> Vec<SelectionCandidate> {
+    // Unlike the display-only scan samples (first 12 entities), each candidate
+    // reaching Jev gets its own evidence. The core request builder bounds both
+    // candidates and bytes and reports the untouched tail as unevaluated.
+    let specs: Vec<String> = suggestion
+        .entities
+        .iter()
+        .filter(|spec| {
+            !suggestion
+                .current_config
+                .excluded_tags
+                .iter()
+                .any(|tag| spec.as_str() == format!("#{tag}"))
+                && !suggestion
+                    .current_config
+                    .excluded_links
+                    .iter()
+                    .any(|link| spec.as_str() == format!("[[{link}]]"))
+        })
+        .cloned()
+        .collect();
+    let samples = entity_samples(
+        docs,
+        &specs,
+        specs
+            .len()
+            .min(enzyme_core::pipeline::jev_selection::MAX_CANDIDATES),
+        2,
+        true,
+    );
+    specs
+        .iter()
+        .map(|spec| {
+            let group = suggestion
+                .folder_page_entities
+                .iter()
+                .find(|group| &group.spec == spec && group.expandable_candidate);
+            let mut evidence: Vec<SelectionSample> = samples
+                .iter()
+                .find(|e| &e.spec == spec)
+                .map(|e| {
+                    e.samples
+                        .iter()
+                        .map(|s| SelectionSample {
+                            source_ref: s.source_ref.clone(),
+                            excerpt: s.excerpt.chars().take(360).collect(),
+                            via_entity: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // An identity folder can have empty pages and rich context in backlinks.
+            // Keep that structural fact, and retrieve source-grounded occurrences
+            // through the exact child links (never infer relationships from names).
+            if let Some(group) = group {
+                let mut added = 0;
+                for child in &group.page_entities {
+                    let mut references: Vec<_> = docs
+                        .iter()
+                        .filter(|doc| {
+                            doc.links.iter().any(|link| link == &child.name)
+                                && strip_frontmatter(&doc.content)
+                                    .trim()
+                                    .chars()
+                                    .take(40)
+                                    .count()
+                                    >= 40
+                                && !evidence.iter().any(|s| s.source_ref == doc.source_ref)
+                        })
+                        .collect();
+                    references.sort_by(|a, b| {
+                        b.modified_at
+                            .cmp(&a.modified_at)
+                            .then_with(|| a.source_ref.cmp(&b.source_ref))
+                    });
+                    if let Some(doc) = references.first() {
+                        let entity_ref = EntityRef {
+                            entity_type: "link",
+                            name: &child.name,
+                        };
+                        evidence.push(SelectionSample {
+                            source_ref: doc.source_ref.clone(),
+                            excerpt: excerpt_for_entity(doc, &entity_ref)
+                                .chars()
+                                .take(360)
+                                .collect(),
+                            via_entity: Some(child.spec.clone()),
+                        });
+                        added += 1;
+                        if added == 2 {
+                            break;
+                        }
+                    }
+                }
+            }
+            SelectionCandidate {
+                spec: spec.clone(),
+                file_count: suggestion
+                    .top_entities
+                    .iter()
+                    .find(|e| &e.spec == spec)
+                    .map(|e| e.file_count)
+                    .unwrap_or(0),
+                samples: evidence,
+                expandable: group.is_some(),
+                page_entities: group
+                    .map(|g| g.page_entities.iter().map(|p| p.spec.clone()).collect())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -334,7 +523,7 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
         folder_children: folder_children(&metrics, 25, 25),
         tag_children: tag_children(&metrics, 25, 25),
         frontmatter_samples: frontmatter_samples(docs, 12),
-        entity_samples: entity_samples(docs, &entities, 12, 3),
+        entity_samples: entity_samples(docs, &entities, 12, 3, false),
         sample_files: sample_files(docs, 30),
         current_config,
         available_profiles: available_profiles(),
@@ -394,6 +583,12 @@ fn build_metrics(docs: &[ProcessedDocument]) -> HashMap<String, Metric> {
         }
         for link in &doc.links {
             add_metric(&mut metrics, entity_spec("link", link), doc);
+        }
+        if doc.is_log
+            && doc.append_log.is_some()
+            && let Some(name) = enzyme_core::document::log_entity_name(doc)
+        {
+            add_metric(&mut metrics, format!("log:{name}"), doc);
         }
     }
 
@@ -807,6 +1002,7 @@ fn entity_samples(
     entity_specs: &[String],
     entity_limit: usize,
     samples_per_entity: usize,
+    substantive_only: bool,
 ) -> Vec<EntitySample> {
     entity_specs
         .iter()
@@ -816,6 +1012,15 @@ fn entity_samples(
             let mut matching_docs: Vec<_> = docs
                 .iter()
                 .filter(|doc| doc_matches_entity(doc, &entity_ref))
+                .filter(|doc| {
+                    !substantive_only
+                        || strip_frontmatter(&doc.content)
+                            .trim()
+                            .chars()
+                            .take(40)
+                            .count()
+                            >= 40
+                })
                 .collect();
             matching_docs.sort_by(|a, b| {
                 b.modified_at
@@ -877,6 +1082,11 @@ fn doc_matches_entity(doc: &ProcessedDocument, entity_ref: &EntityRef<'_>) -> bo
             .any(|folder| folder == entity_ref.name),
         "tag" => doc.tags.iter().any(|tag| tag == entity_ref.name),
         "link" => doc.links.iter().any(|link| link == entity_ref.name),
+        "log" => {
+            doc.is_log
+                && doc.append_log.is_some()
+                && enzyme_core::document::log_entity_name(doc).as_deref() == Some(entity_ref.name)
+        }
         _ => false,
     }
 }
@@ -967,6 +1177,11 @@ fn entity_ref_from_spec(spec: &str) -> Option<EntityRef<'_>> {
     } else if let Some(name) = spec.strip_prefix('#') {
         Some(EntityRef {
             entity_type: "tag",
+            name,
+        })
+    } else if let Some(name) = spec.strip_prefix("log:") {
+        Some(EntityRef {
+            entity_type: "log",
             name,
         })
     } else if spec.starts_with("[[") && spec.ends_with("]]") {

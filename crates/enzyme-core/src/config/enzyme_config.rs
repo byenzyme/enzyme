@@ -269,7 +269,10 @@ pub enum CatalyzedEntity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityOptions {
     pub profile: Option<String>,
-    #[serde(default)]
+    // Legacy read compatibility. Current selection detects expansion from page
+    // entities; do not emit a misleading `expandable = false` for profile-only
+    // configurations such as the Jev proposal.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub expandable: bool,
     #[serde(
         default,
@@ -277,6 +280,10 @@ pub struct EntityOptions {
         deserialize_with = "deserialize_null_as_empty_vec"
     )]
     pub children: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn deserialize_null_as_empty_vec<'de, D>(
