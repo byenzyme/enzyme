@@ -171,3 +171,35 @@ fn append_log_runtime_kind_resolves_its_reading() {
         Some(8)
     );
 }
+
+#[test]
+fn newline_blocks_preserve_array_semantics_in_migrated_programs() {
+    let source = r#"
+profile people {
+  seek "relationships"
+  notice ["shared interests", "changing priorities"]
+  ask ["What matters now?"]
+  recognize ["meeting notes", "personal notes"]
+}
+vault "/notes" {
+  leave out folders ["archive", "templates"]
+  leave out tags ["private", "draft"]
+  leave out links ["Excluded"]
+  references in fields ["people", "attendees"]
+  learn questions from tags ["friends", "work"] about people
+}
+"#;
+    let parsed = parse(source).unwrap();
+    let rendered = render_program(&parsed);
+    assert!(!rendered.contains('['));
+    assert!(
+        rendered.contains("notice {\n    \"shared interests\"\n    \"changing priorities\"\n  }")
+    );
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+    assert_eq!(compile(&rendered), compile(source));
+    assert!(parse("profile p { seek \"x\" notice { } }").is_err());
+    assert!(parse("profile p { seek \"x\" notice { \"y\" ] }").is_err());
+    let grouped =
+        compile("vault \"/notes\" { learn questions from tags { \"a\" \"b\" } about auto }");
+    assert_eq!(grouped.vaults[0].readings.len(), 2);
+}

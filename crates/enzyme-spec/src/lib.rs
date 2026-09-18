@@ -253,15 +253,21 @@ impl Parser {
         Ok(n.unwrap())
     }
     fn list(&mut self) -> Result<Vec<String>> {
-        self.need("[")?;
+        let block = self.eat("{");
+        let end = if block {
+            "}"
+        } else {
+            self.need("[")?;
+            "]"
+        };
         let mut v = vec![];
-        while !self.at("]") {
+        while !self.at(end) {
             v.push(self.string()?);
-            if !self.eat(",") {
+            if !block && !self.eat(",") {
                 break;
             }
         }
-        self.need("]")?;
+        self.need(end)?;
         ensure!(!v.is_empty(), "lists must not be empty");
         Ok(v)
     }
@@ -899,17 +905,22 @@ pub fn config_value(p: &Program) -> serde_json::Value {
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
+fn render_list(items: &[String], indent: &str) -> String {
+    let mut s = String::from("{\n");
+    for item in items {
+        s.push_str(&format!("{indent}  {}\n", quote(item)));
+    }
+    s.push_str(&format!("{indent}}}"));
+    s
+}
 pub fn render_profile(name: &str, p: &Profile) -> String {
     let mut s = format!(
         "profile {name} {{\n  seek {}\n  notice {}\n",
         quote(&p.seek),
-        serde_json::to_string(&p.notice).unwrap()
+        render_list(&p.notice, "  ")
     );
     if !p.ask.is_empty() {
-        s.push_str(&format!(
-            "  ask {}\n",
-            serde_json::to_string(&p.ask).unwrap()
-        ));
+        s.push_str(&format!("  ask {}\n", render_list(&p.ask, "  ")));
     }
     if let Some(n) = &p.note {
         s.push_str(&format!("  note {}\n", quote(n)));
@@ -917,7 +928,7 @@ pub fn render_profile(name: &str, p: &Profile) -> String {
     if !p.recognize.is_empty() {
         s.push_str(&format!(
             "  recognize {}\n",
-            serde_json::to_string(&p.recognize).unwrap()
+            render_list(&p.recognize, "  ")
         ));
     }
     s.push_str("}\n\n");
@@ -931,10 +942,7 @@ pub fn render_vault(v: &Vault) -> String {
         ("links", &v.excluded_links),
     ] {
         if !list.is_empty() {
-            s.push_str(&format!(
-                "  leave out {kind} {}\n",
-                serde_json::to_string(list).unwrap()
-            ));
+            s.push_str(&format!("  leave out {kind} {}\n", render_list(list, "  ")));
         }
     }
     if let Some(n) = v.embedding_limit {
@@ -956,7 +964,7 @@ pub fn render_vault(v: &Vault) -> String {
     if !v.frontmatter_link_fields.is_empty() {
         s.push_str(&format!(
             "  references in fields {}\n",
-            serde_json::to_string(&v.frontmatter_link_fields).unwrap()
+            render_list(&v.frontmatter_link_fields, "  ")
         ));
     }
     s.push('\n');
