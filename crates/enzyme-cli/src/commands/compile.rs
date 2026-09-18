@@ -153,7 +153,7 @@ fn display(
     Ok(())
 }
 
-/// Theme-owned ANSI colors; prose retains the user's default foreground.
+/// Theme-owned ANSI colors for keywords, strings, names, and numbers.
 fn highlight(source: &str, enabled: bool) -> String {
     // Never let source text inject terminal control sequences, even without color.
     let source: String = source
@@ -192,12 +192,7 @@ fn highlight(source: &str, enabled: bool) -> String {
                     i += 1;
                 }
             }
-            if matches!(
-                previous.as_str(),
-                "vault" | "folder" | "tag" | "link" | "log" | "into" | "in"
-            ) {
-                style = "32";
-            }
+            style = "32";
         } else if chars[i].is_ascii_digit() {
             while i < chars.len() && chars[i].is_ascii_digit() {
                 i += 1;
@@ -208,15 +203,25 @@ fn highlight(source: &str, enabled: bool) -> String {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            if matches!(previous.as_str(), "profile" | "about" | "let") {
-                style = "35";
-            } else if matches!(
+            if matches!(
                 word.as_str(),
                 "vault"
                     | "profile"
                     | "learn"
-                    | "project"
-                    | "remember"
+                    | "questions"
+                    | "from"
+                    | "folder"
+                    | "folders"
+                    | "tag"
+                    | "tags"
+                    | "link"
+                    | "links"
+                    | "log"
+                    | "logs"
+                    | "including"
+                    | "linked"
+                    | "pages"
+                    | "about"
                     | "seek"
                     | "notice"
                     | "ask"
@@ -225,20 +230,65 @@ fn highlight(source: &str, enabled: bool) -> String {
                     | "learning"
                     | "settings"
                     | "when"
+                    | "asked"
                     | "retrieve"
+                    | "passages"
+                    | "across"
+                    | "the"
+                    | "through"
+                    | "learned"
                     | "answer"
+                    | "with"
+                    | "sources"
                     | "leave"
+                    | "out"
                     | "prepare"
+                    | "up"
+                    | "to"
+                    | "documents"
+                    | "per"
+                    | "run"
+                    | "newest"
+                    | "first"
                     | "references"
+                    | "in"
+                    | "fields"
                     | "produce"
+                    | "theses"
+                    | "claims"
                     | "sample"
+                    | "time"
                     | "favor"
+                    | "recent"
+                    | "periods"
+                    | "all"
+                    | "equally"
                     | "question"
-                    | "including"
+                    | "budget"
+                    | "project"
+                    | "into"
+                    | "remember"
                     | "append"
+                    | "observation"
                     | "let"
+                    | "generation"
+                    | "auto"
+                    | "local"
+                    | "hosted"
+                    | "model"
+                    | "updates"
+                    | "enabled"
+                    | "disabled"
+                    | "embedding"
+                    | "limit"
+                    | "format"
+                    | "thesis"
+                    | "claim"
+                    | "selection"
             ) {
                 style = "1;36";
+            } else if matches!(previous.as_str(), "profile" | "about" | "let") {
+                style = "35";
             }
             previous = word;
         } else {

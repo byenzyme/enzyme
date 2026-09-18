@@ -131,3 +131,55 @@ fn compile_creates_setup_before_init_and_preserves_edits() {
     assert!(!invalid.success);
     assert_eq!(fs::read_to_string(path).unwrap(), "vault broken {");
 }
+
+#[test]
+fn compile_highlights_complete_phrases_and_profile_strings() {
+    let f = VaultFixture::empty();
+    write_spec(&f, "highlight me");
+    let output = f.cli().args(["compile", "-v", "--color", "always"]).run();
+    output.assert_success();
+    for word in [
+        "learning",
+        "question",
+        "budget",
+        "sample",
+        "across",
+        "time",
+        "favor",
+        "recent",
+        "periods",
+        "learn",
+        "questions",
+        "from",
+        "tag",
+        "about",
+        "when",
+        "asked",
+        "retrieve",
+        "passages",
+        "through",
+        "learned",
+        "answer",
+        "with",
+        "sources",
+        "generation",
+        "hosted",
+        "updates",
+        "disabled",
+    ] {
+        assert!(
+            output.stdout.contains(&format!("\x1b[1;36m{word}\x1b[0m")),
+            "uncolored keyword: {word}"
+        );
+    }
+    assert!(
+        output
+            .stdout
+            .contains("\x1b[32m\"highlight me: recover why one approach won\"\x1b[0m")
+    );
+    assert!(output.stdout.contains("\x1b[32m\"tradeoffs\"\x1b[0m"));
+    assert!(output.stdout.contains("\x1b[35mdecisions\x1b[0m"));
+    let plain = f.cli().args(["compile", "-v", "--color", "never"]).run();
+    plain.assert_success();
+    assert!(!plain.stdout.contains('\u{1b}'));
+}
