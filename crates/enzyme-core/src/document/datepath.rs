@@ -280,21 +280,12 @@ fn parse_month_year(after: &str, month: u32) -> Option<DateTime<Utc>> {
 
 /// Strategy 5: YYYY/MM/DD as consecutive path components.
 fn parse_ymd_path_components(components: &[&str]) -> Option<DateTime<Utc>> {
-    if components.len() < 3 {
-        return None;
-    }
-    for window in components.windows(3) {
+    components.windows(3).find_map(|window| {
         let year = parse_four_digit_year(window[0])?;
         let month: u32 = window[1].parse().ok()?;
         let day: u32 = window[2].parse().ok()?;
-        if (1..=12).contains(&month)
-            && (1..=31).contains(&day)
-            && let Some(date) = NaiveDate::from_ymd_opt(year, month, day)
-        {
-            return Some(naive_date_to_utc(date));
-        }
-    }
-    None
+        NaiveDate::from_ymd_opt(year, month, day).map(naive_date_to_utc)
+    })
 }
 
 /// Strategy 6: YYYY/MonthName as consecutive path components (day defaults to 1).
@@ -420,6 +411,25 @@ mod tests {
     fn ymd_path_components() {
         let p = PathBuf::from("2024/01/15/note.md");
         assert_eq!(extract_date_from_path(&p), Some(dt(2024, 1, 15)));
+    }
+
+    #[test]
+    fn ymd_path_skips_prefixes_and_invalid_date_fragments() {
+        for path in [
+            "projects/2024/05/06/note.md",
+            "archive/2023/not-a-month/2024/05/06/note.md",
+            "archive/2024/02/30/2024/05/06/note.md",
+        ] {
+            assert_eq!(
+                extract_date_from_path(Path::new(path)),
+                Some(dt(2024, 5, 6)),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            extract_date_from_path(Path::new("archive/2024/02/30/note.md")),
+            None
+        );
     }
 
     // --- Strategy 6: YYYY/MonthName path components ---

@@ -28,6 +28,9 @@ const MAX_REQUEST_BYTES: usize = 180_000;
 pub struct SelectionSample {
     pub source_ref: String,
     pub excerpt: String,
+    pub title: Option<String>,
+    pub date: Option<String>,
+    pub date_source: Option<String>,
     /// Exact page-link through which an expandable folder owns this evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_entity: Option<String>,
@@ -457,6 +460,9 @@ mod tests {
                 context: SelectionContext::default(),
                 samples: vec![SelectionSample {
                     source_ref: "note.md".into(),
+                    title: None,
+                    date: None,
+                    date_source: None,
                     via_entity: None,
                     excerpt: "We decided to prioritize the launch.".into(),
                 }],
@@ -531,6 +537,9 @@ mod tests {
                 file_count: 5,
                 samples: vec![SelectionSample {
                     source_ref: "note.md".into(),
+                    title: None,
+                    date: None,
+                    date_source: None,
                     excerpt: "A substantive recurring topic with useful context.".into(),
                     via_entity: None,
                 }],
@@ -629,6 +638,9 @@ mod tests {
                 context: SelectionContext::default(),
                 samples: vec![SelectionSample {
                     source_ref: "note.md".into(),
+                    title: None,
+                    date: None,
+                    date_source: None,
                     via_entity: None,
                     excerpt: "é".repeat(360),
                 }],

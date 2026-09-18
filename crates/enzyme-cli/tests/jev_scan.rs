@@ -404,3 +404,83 @@ async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
             .contains(&json!("#relationships/dating"))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jev_samples_use_five_library_dated_notes_with_titles_and_paths() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(Decisions)
+        .mount(&server)
+        .await;
+    let (_root, vault, home) = fixture();
+    let files = [
+        (
+            "projects/2019-01-01.md",
+            "---\ntitle: A library dated note\ncreated: 2024-06-01\nmodified: 2025-01-01\n---\n",
+        ),
+        ("projects/2024/05/06/note.md", "# Hierarchical date\n"),
+        ("projects/2024-04-01.md", "# April\n"),
+        ("projects/2024-03-01.md", "# March\n"),
+        ("projects/2024-02-01.md", "# February\n"),
+        ("projects/2024-01-01.md", "# Copied old note\n"),
+        ("projects/2023-01-01.md", "# Older\n"),
+    ];
+    for (path, header) in files {
+        let path = vault.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{header}#research\nWe compared the evidence from several sources and recorded the reasons behind the conclusion.")).unwrap();
+    }
+    // A recent filesystem timestamp must not outrank explicit document dates.
+    std::fs::File::open(vault.join("projects/2024-01-01.md"))
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(86_400),
+            ),
+        )
+        .unwrap();
+    std::fs::write(vault.join("projects/undated.md"), "# Undated\n#research #undated\nThis note has useful evidence but no explicit date and must not inherit import recency.").unwrap();
+    let output = command(&vault, &home, &server.uri())
+        .arg("--jev")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = server.received_requests().await.unwrap();
+    let candidates: Vec<Value> = requests
+        .iter()
+        .flat_map(|r| {
+            let body: Value = serde_json::from_slice(&r.body).unwrap();
+            body["state"]["candidates"].as_array().unwrap().clone()
+        })
+        .collect();
+    let research = candidates
+        .iter()
+        .find(|c| c["spec"] == "#research")
+        .unwrap();
+    let samples = research["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 5);
+    assert_eq!(samples[0]["source_ref"], "projects/2019-01-01.md");
+    assert_eq!(samples[0]["title"], "A library dated note");
+    assert_eq!(samples[0]["date"], "2025-01-01T00:00:00+00:00");
+    assert_eq!(samples[0]["date_source"], "frontmatter");
+    assert_eq!(samples[1]["source_ref"], "projects/2024/05/06/note.md");
+    assert_eq!(samples[1]["date_source"], "filename");
+    assert_eq!(samples[1]["date"], "2024-05-06T00:00:00+00:00");
+    assert_eq!(
+        research["context"]["representative_files"][0],
+        samples[0]["source_ref"]
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|s| s["source_ref"] != "projects/2024-01-01.md"
+                && s["source_ref"] != "projects/undated.md")
+    );
+    let undated = candidates.iter().find(|c| c["spec"] == "#undated").unwrap();
+    assert!(undated["samples"][0]["date"].is_null());
+    assert!(undated["samples"][0]["date_source"].is_null());
+}

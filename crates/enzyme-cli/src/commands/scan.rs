@@ -131,6 +131,11 @@ fn jev_candidates(
     // Include recurring tags independently, including meaningful child tags.
     // Existing configured entities are deliberately withheld from model input.
     let metrics = build_metrics(docs);
+    let now = Utc::now().timestamp_millis();
+    let docs_by_ref: HashMap<_, _> = docs
+        .iter()
+        .map(|doc| (doc.source_ref.as_str(), doc))
+        .collect();
     let mut pool: Vec<String> = top_evidence_by_type(&metrics, "tag", 128)
         .into_iter()
         .filter(|e| e.file_count >= 3)
@@ -163,7 +168,7 @@ fn jev_candidates(
         specs
             .len()
             .min(enzyme_core::pipeline::jev_selection::MAX_CANDIDATES),
-        2,
+        5,
         true,
     );
     specs
@@ -179,10 +184,13 @@ fn jev_candidates(
                 .map(|e| {
                     e.samples
                         .iter()
-                        .map(|s| SelectionSample {
-                            source_ref: s.source_ref.clone(),
-                            excerpt: s.excerpt.chars().take(360).collect(),
-                            via_entity: None,
+                        .map(|s| {
+                            jev_sample(
+                                docs_by_ref[s.source_ref.as_str()],
+                                s.excerpt.clone(),
+                                None,
+                                now,
+                            )
                         })
                         .collect()
                 })
@@ -207,8 +215,9 @@ fn jev_candidates(
                         })
                         .collect();
                     references.sort_by(|a, b| {
-                        b.modified_at
-                            .cmp(&a.modified_at)
+                        evidence_date(b, now)
+                            .map(|(date, _)| date)
+                            .cmp(&evidence_date(a, now).map(|(date, _)| date))
                             .then_with(|| a.source_ref.cmp(&b.source_ref))
                     });
                     if let Some(doc) = references.first() {
@@ -216,14 +225,12 @@ fn jev_candidates(
                             entity_type: "link",
                             name: &child.name,
                         };
-                        evidence.push(SelectionSample {
-                            source_ref: doc.source_ref.clone(),
-                            excerpt: excerpt_for_entity(doc, &entity_ref)
-                                .chars()
-                                .take(360)
-                                .collect(),
-                            via_entity: Some(child.spec.clone()),
-                        });
+                        evidence.push(jev_sample(
+                            doc,
+                            excerpt_for_entity(doc, &entity_ref),
+                            Some(child.spec.clone()),
+                            now,
+                        ));
                         added += 1;
                         if added == 2 {
                             break;
@@ -264,24 +271,14 @@ fn jev_candidates(
                     }
                     let mut files = matching;
                     files.sort_by(|a, b| {
-                        b.modified_at
-                            .cmp(&a.modified_at)
+                        evidence_date(b, now)
+                            .map(|(date, _)| date)
+                            .cmp(&evidence_date(a, now).map(|(date, _)| date))
                             .then_with(|| a.source_ref.cmp(&b.source_ref))
                     });
-                    let now = Utc::now().timestamp_millis();
                     let dates: Vec<i64> = files
                         .iter()
-                        .filter_map(|doc| {
-                            let created = (doc.created_source != DateSource::Filesystem)
-                                .then_some(doc.created_at);
-                            let modified = (doc.modified_source != DateSource::Filesystem)
-                                .then_some(doc.modified_at);
-                            created
-                                .into_iter()
-                                .chain(modified)
-                                .filter(|date| *date <= now)
-                                .max()
-                        })
+                        .filter_map(|doc| evidence_date(doc, now).map(|(date, _)| date))
                         .collect();
                     SelectionContext {
                         dated_files: dates.len(),
@@ -1101,13 +1098,43 @@ fn frontmatter_samples(docs: &[ProcessedDocument], limit: usize) -> Vec<Frontmat
         .collect()
 }
 
+/// Reuse the document library's frontmatter/path/content resolution. Import or
+/// copy timestamps are not evidence of recent writing; future dates do not rank.
+fn evidence_date(doc: &ProcessedDocument, now: i64) -> Option<(i64, &DateSource)> {
+    [
+        (doc.created_at, &doc.created_source),
+        (doc.modified_at, &doc.modified_source),
+    ]
+    .into_iter()
+    .filter(|(date, source)| **source != DateSource::Filesystem && *date <= now)
+    .max_by_key(|(date, _)| *date)
+}
+
+fn jev_sample(
+    doc: &ProcessedDocument,
+    excerpt: String,
+    via_entity: Option<String>,
+    now: i64,
+) -> SelectionSample {
+    let date = evidence_date(doc, now);
+    SelectionSample {
+        source_ref: doc.source_ref.clone(),
+        title: doc.title.clone(),
+        date: date.and_then(|(date, _)| millis_to_rfc3339(date)),
+        date_source: date.map(|(_, source)| source.as_str().to_string()),
+        excerpt: excerpt.chars().take(360).collect(),
+        via_entity,
+    }
+}
+
 fn entity_samples(
     docs: &[ProcessedDocument],
     entity_specs: &[String],
     entity_limit: usize,
     samples_per_entity: usize,
-    substantive_only: bool,
+    setup_evidence: bool,
 ) -> Vec<EntitySample> {
+    let now = Utc::now().timestamp_millis();
     entity_specs
         .iter()
         .take(entity_limit)
@@ -1117,7 +1144,7 @@ fn entity_samples(
                 .iter()
                 .filter(|doc| doc_matches_entity(doc, &entity_ref))
                 .filter(|doc| {
-                    !substantive_only
+                    !setup_evidence
                         || strip_frontmatter(&doc.content)
                             .trim()
                             .chars()
@@ -1127,8 +1154,15 @@ fn entity_samples(
                 })
                 .collect();
             matching_docs.sort_by(|a, b| {
-                b.modified_at
-                    .cmp(&a.modified_at)
+                let key = |doc: &ProcessedDocument| {
+                    if setup_evidence {
+                        evidence_date(doc, now).map(|(date, _)| date)
+                    } else {
+                        Some(doc.modified_at)
+                    }
+                };
+                key(b)
+                    .cmp(&key(a))
                     .then_with(|| a.source_ref.cmp(&b.source_ref))
             });
             let samples = matching_docs
