@@ -133,51 +133,41 @@ fn compile_creates_setup_before_init_and_preserves_edits() {
 }
 
 #[test]
-fn compile_highlights_complete_phrases_and_profile_strings() {
+fn compile_highlights_semantic_hierarchy_and_profile_strings() {
     let f = VaultFixture::empty();
     write_spec(&f, "highlight me");
     let output = f.cli().args(["compile", "-v", "--color", "always"]).run();
     output.assert_success();
-    for word in [
-        "learning",
-        "question",
-        "budget",
-        "sample",
-        "across",
-        "time",
-        "favor",
-        "recent",
-        "periods",
-        "learn",
-        "questions",
-        "from",
-        "tag",
-        "about",
-        "when",
-        "asked",
-        "retrieve",
-        "passages",
-        "through",
-        "learned",
-        "answer",
-        "with",
-        "sources",
-        "generation",
-        "hosted",
-        "updates",
-        "disabled",
+    for (word, style) in [
+        ("learning", "36"),
+        ("question", "1;35"),
+        ("questions", "1;35"),
+        ("sample", "1;36"),
+        ("favor", "1;36"),
+        ("learn", "1;36"),
+        ("tag", "34"),
+        ("retrieve", "1;36"),
+        ("answer", "1;36"),
     ] {
         assert!(
-            output.stdout.contains(&format!(
-                "\x1b[{}m{word}\x1b[0m",
-                match word {
-                    "question" | "questions" => "1;35",
-                    "tag" => "1;34",
-                    _ => "1;36",
-                }
-            )),
-            "uncolored keyword: {word}"
+            output
+                .stdout
+                .contains(&format!("\x1b[{style}m{word}\x1b[0m")),
+            "incorrect style: {word}"
         );
+    }
+    for word in [
+        "from", "about", "across", "through", "with", "budget", "recent", "periods",
+    ] {
+        assert!(output.stdout.contains(word));
+        for style in ["36", "1;36", "35", "1;35", "34"] {
+            assert!(
+                !output
+                    .stdout
+                    .contains(&format!("\x1b[{style}m{word}\x1b[0m")),
+                "connective text should stay quiet: {word}"
+            );
+        }
     }
     assert!(
         output
