@@ -140,13 +140,17 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     let draft = f.enzyme_home().join("proposal.enzyme");
     let out = f
         .cli()
-        .args(["compile", "--color", "never", "--output"])
+        .args(["compile", "-v", "--color", "never", "--output"])
         .arg(draft.to_string_lossy())
         .env("TYPESAFE_API_KEY", "test-key")
         .env("TYPESAFE_BASE_URL", server.uri())
         .run();
     out.assert_success();
     assert!(!out.stdout.contains('\u{1b}'));
+    assert!(!out.stdout.contains("// Enzyme reading configuration"));
+    assert_eq!(out.stderr.lines().count(), 1);
+    assert!(out.stderr.starts_with("Saved proposal: "));
+    assert!(out.stderr.trim().ends_with("s)"));
     assert_eq!(fs::read_to_string(&draft).unwrap(), out.stdout);
     assert_eq!(fs::read_to_string(&file).unwrap(), original);
     assert!(!f.vault_path().join(".enzyme").exists());
@@ -194,7 +198,7 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     assert_eq!(fs::read_to_string(&draft).unwrap(), out.stdout);
     let colored = f
         .cli()
-        .args(["compile", "--color", "always"])
+        .args(["compile", "-v", "--dry-run", "--color", "always"])
         .env("TYPESAFE_API_KEY", "test-key")
         .env("TYPESAFE_BASE_URL", server.uri())
         .run();
@@ -202,6 +206,29 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     assert!(colored.stdout.contains("\x1b[1;36mlearn\x1b[0m"));
     assert!(colored.stdout.contains("\x1b[35mdecision_trace\x1b[0m"));
     assert!(colored.stdout.contains("\x1b[32m"));
+    assert!(colored.stderr.is_empty());
+    assert_eq!(fs::read_to_string(&file).unwrap(), out.stdout);
+    fs::write(&file, format!("{}\nsettings {{ updates disabled }}\nvault \"/sibling\" {{ learn questions from tag \"shared\" about decision_trace }}\n", out.stdout)).unwrap();
+    let quiet = f
+        .cli()
+        .arg("compile")
+        .env("TYPESAFE_API_KEY", "test-key")
+        .env("TYPESAFE_BASE_URL", server.uri())
+        .run();
+    quiet.assert_success();
+    assert!(quiet.stdout.is_empty());
+    assert_eq!(quiet.stderr.lines().count(), 1);
+    assert!(quiet.stderr.starts_with("Saved proposal: "));
+    assert_eq!(
+        enzyme_spec::source_files(&f.enzyme_home().join("configs"))
+            .unwrap()
+            .len(),
+        1
+    );
+    let saved_program = enzyme_spec::parse(&fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved_program.vaults.len(), 2);
+    assert_eq!(saved_program.settings.updates, Some(false));
+    assert!(saved_program.vaults.iter().any(|v| v.path == "/sibling"));
     fs::write(&file, "vault broken {").unwrap();
     let invalid = f.cli().arg("compile").run();
     invalid.assert_failure();
@@ -215,4 +242,42 @@ fn compile_requires_jev_instead_of_silently_using_scan_defaults() {
     out.assert_failure();
     assert!(out.stdout.is_empty());
     assert!(!f.vault_path().join(".enzyme").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compile_dry_run_leaves_new_workspace_unconfigured_then_default_saves() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(JevDecisions)
+        .mount(&server)
+        .await;
+    let f = VaultFixture::new();
+    let dry = f
+        .cli()
+        .args(["compile", "--dry-run"])
+        .env("TYPESAFE_API_KEY", "test-key")
+        .env("TYPESAFE_BASE_URL", server.uri())
+        .run();
+    dry.assert_success();
+    assert!(dry.stderr.is_empty());
+    assert!(dry.stdout.contains("learn questions from"));
+    assert!(!f.enzyme_home().join("configs").exists());
+    assert!(!f.vault_path().join(".enzyme").exists());
+    let saved = f
+        .cli()
+        .args(["compile", "-v", "--color", "never"])
+        .env("TYPESAFE_API_KEY", "test-key")
+        .env("TYPESAFE_BASE_URL", server.uri())
+        .run();
+    saved.assert_success();
+    let files = enzyme_spec::source_files(&f.enzyme_home().join("configs")).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(fs::read_to_string(&files[0].0).unwrap(), saved.stdout);
+    let inspect = f
+        .cli()
+        .args(["spec", "inspect"])
+        .arg(f.vault_path().to_string_lossy())
+        .run();
+    inspect.assert_success();
+    assert!(inspect.stdout.contains("decision_trace"));
 }

@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, ensure};
 use enzyme_core::config::{
-    EnzymeConfig,
+    EnzymeConfig, EnzymePaths,
     enzyme_config::{CatalyzedEntity, readable_builtin_profiles},
 };
 use enzyme_spec::{Learning, Program, Reading};
 use std::{
     io::{self, IsTerminal, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -17,7 +17,13 @@ pub enum ColorChoice {
 }
 
 /// Generate structured choices first; rendering never invokes a model.
-pub async fn run(path: &Path, color: ColorChoice, output: Option<&Path>) -> Result<()> {
+pub async fn run(
+    path: &Path,
+    color: ColorChoice,
+    output: Option<&Path>,
+    verbose: bool,
+    dry_run: bool,
+) -> Result<()> {
     let start = std::time::Instant::now();
     let path = path.canonicalize().context("resolve vault directory")?;
     ensure!(path.is_dir(), "vault must be a directory");
@@ -29,6 +35,12 @@ pub async fn run(path: &Path, color: ColorChoice, output: Option<&Path>) -> Resu
         );
     }
     let mut config = EnzymeConfig::load(&path)?.unwrap_or_default();
+    let directory = EnzymePaths::enzyme_home()?.join("configs");
+    let namespace = enzyme_spec::source_files(&directory)?;
+    let snapshots: Vec<_> = namespace
+        .iter()
+        .map(|(file, _)| Ok((file.clone(), std::fs::read_to_string(file)?)))
+        .collect::<Result<_>>()?;
     ensure!(
         config.sources.is_empty() && config.notes_path.is_none() && config.notes_roots.is_empty(),
         "compile supports a single Markdown vault; structured sources must keep their existing configuration"
@@ -45,10 +57,12 @@ pub async fn run(path: &Path, color: ColorChoice, output: Option<&Path>) -> Resu
     }
     config.catalyzed_entities = generated.proposal.entities;
     let program = structured_setup(&path, config)?;
-    let source = enzyme_spec::render_program(&program);
+    let source = render(&program);
     // Exercise the same parser/resolver as init before emitting any configuration.
     enzyme_spec::resolve(vec![enzyme_spec::parse(&source)?], &path)?;
-    if let Some(file) = output {
+    let saved = if dry_run {
+        None
+    } else if let Some(file) = output {
         let parent = file
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -59,8 +73,12 @@ pub async fn run(path: &Path, color: ColorChoice, output: Option<&Path>) -> Resu
         temporary
             .persist_noclobber(file)
             .context("save new proposal")?;
-        eprintln!("Saved proposal: {}", file.display());
-    }
+        Some(file.to_path_buf())
+    } else {
+        Some(save_setup(
+            &path, &directory, &program, namespace, snapshots,
+        )?)
+    };
     let enabled = match color {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
@@ -70,15 +88,104 @@ pub async fn run(path: &Path, color: ColorChoice, output: Option<&Path>) -> Resu
                 && std::env::var("TERM").as_deref() != Ok("dumb")
         }
     };
-    io::stdout()
-        .lock()
-        .write_all(highlight(&source, enabled).as_bytes())?;
-    eprintln!(
-        "Generated {} readings in {} ms. Review the proposal before adding it to your Enzyme configs.",
-        program.vaults[0].readings.len(),
-        start.elapsed().as_millis()
-    );
+    if verbose || dry_run {
+        io::stdout()
+            .lock()
+            .write_all(highlight(&source, enabled).as_bytes())?;
+    }
+    if let Some(file) = saved {
+        eprintln!(
+            "Saved proposal: {} ({:.2}s)",
+            file.display(),
+            start.elapsed().as_secs_f64()
+        );
+    }
     Ok(())
+}
+
+fn render(program: &Program) -> String {
+    enzyme_spec::render_program(program)
+        .strip_prefix("// Enzyme reading configuration\n\n")
+        .expect("renderer header")
+        .to_owned()
+}
+
+/// Replace only this vault's setup while retaining sibling vaults, shared settings,
+/// and unused profile definitions in its file. Validate the complete namespace.
+fn save_setup(
+    path: &Path,
+    directory: &Path,
+    generated: &Program,
+    mut namespace: Vec<(PathBuf, Program)>,
+    snapshots: Vec<(PathBuf, String)>,
+) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let home = std::env::var_os("HOME").context("HOME missing")?;
+    let user_home = Path::new(&home);
+    let location = namespace
+        .iter()
+        .enumerate()
+        .find_map(|(file_index, (_, program))| {
+            program
+                .vaults
+                .iter()
+                .position(|vault| {
+                    let expanded = if vault.path == "~" {
+                        user_home.to_path_buf()
+                    } else if let Some(p) = vault.path.strip_prefix("~/") {
+                        user_home.join(p)
+                    } else {
+                        PathBuf::from(&vault.path)
+                    };
+                    expanded.canonicalize().unwrap_or(expanded) == path
+                })
+                .map(|vault_index| (file_index, vault_index))
+        });
+    let index = if let Some((index, vault)) = location {
+        namespace[index].1.vaults[vault] = generated.vaults[0].clone();
+        namespace[index]
+            .1
+            .profiles
+            .extend(generated.profiles.clone());
+        index
+    } else {
+        let name: String = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let digest = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
+        let file = directory.join(format!("{name}-{}.enzyme", &digest[..8]));
+        ensure!(
+            !file.exists(),
+            "destination already exists: {}",
+            file.display()
+        );
+        namespace.push((file, generated.clone()));
+        namespace.len() - 1
+    };
+    enzyme_spec::resolve(
+        namespace.iter().map(|(_, p)| p.clone()).collect(),
+        user_home,
+    )?;
+    for (file, previous) in snapshots {
+        ensure!(
+            std::fs::read_to_string(&file)? == previous,
+            "configuration changed during generation: {}",
+            file.display()
+        );
+    }
+    let (file, program) = &namespace[index];
+    enzyme_spec::atomic_write(file, &render(program))?;
+    Ok(file.clone())
 }
 
 /// Preserve deterministic workspace policies; only entities and profile choices

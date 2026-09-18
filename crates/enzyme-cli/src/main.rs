@@ -33,13 +33,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate a readable setup with Jev and print it for review
+    /// Generate and save readable setup; -v prints the configuration
     Compile {
         #[arg(long, value_enum, default_value = "auto")]
         color: commands::compile::ColorChoice,
         /// Save the proposal to a new file; existing files are never overwritten
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Print generated configuration without saving it
+        #[arg(long, conflicts_with = "output")]
+        dry_run: bool,
     },
     /// Compile, migrate, or preview readable .enzyme configuration
     Spec {
@@ -421,14 +424,26 @@ async fn main() -> Result<()> {
     } else {
         Some(vault_path.as_path())
     };
-    init_tracing(cli.verbose, log_vault);
-    if let Commands::Compile { color, output } = &cli.command {
+    if let Commands::Compile {
+        color,
+        output,
+        dry_run,
+    } = &cli.command
+    {
         anyhow::ensure!(
             cli.collection.is_none(),
             "compile supports Markdown vaults, not named collections"
         );
-        return commands::compile::run(&vault_path, *color, output.as_deref()).await;
+        return commands::compile::run(
+            &vault_path,
+            *color,
+            output.as_deref(),
+            cli.verbose > 0,
+            *dry_run,
+        )
+        .await;
     }
+    init_tracing(cli.verbose, log_vault);
     info!(?vault_path, "resolved vault path");
 
     // Validate readable configuration before any init/refresh stage can mutate the vault.

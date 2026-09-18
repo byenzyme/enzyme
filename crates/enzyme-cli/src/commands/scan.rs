@@ -129,17 +129,7 @@ pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSet
     let suggestion = build_scan_suggestion(vault_path, &docs)?;
     let candidates = jev_candidates(&docs, &suggestion);
     let scan_ms = start.elapsed().as_millis();
-    eprintln!(
-        "Jev selection: considering {} candidates with bounded excerpts sent to TypeSafe; vault files remain unchanged.",
-        candidates.len()
-    );
     let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
-    eprintln!(
-        "Jev evaluated {} candidates in {} ms; {} deferred without evaluation.",
-        proposal.decisions.len(),
-        proposal.request_ms,
-        proposal.unevaluated_entities.len()
-    );
     Ok(GeneratedSetup {
         suggestion,
         proposal,
