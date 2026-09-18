@@ -406,7 +406,7 @@ async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_samples_use_five_library_dated_notes_with_titles_and_paths() {
+async fn jev_samples_use_two_library_dated_notes_with_titles_and_paths() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -462,7 +462,7 @@ async fn jev_samples_use_five_library_dated_notes_with_titles_and_paths() {
         .find(|c| c["spec"] == "#research")
         .unwrap();
     let samples = research["samples"].as_array().unwrap();
-    assert_eq!(samples.len(), 5);
+    assert_eq!(samples.len(), 2);
     assert_eq!(samples[0]["source_ref"], "projects/2019-01-01.md");
     assert_eq!(samples[0]["title"], "A library dated note");
     assert_eq!(samples[0]["date"], "2025-01-01T00:00:00+00:00");

@@ -168,7 +168,7 @@ fn jev_candidates(
         specs
             .len()
             .min(enzyme_core::pipeline::jev_selection::MAX_CANDIDATES),
-        5,
+        2,
         true,
     );
     specs
