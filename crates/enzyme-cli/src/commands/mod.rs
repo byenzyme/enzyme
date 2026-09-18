@@ -1,3 +1,4 @@
+pub mod compile;
 pub mod agents;
 pub mod benchmark;
 pub mod catalyze;
@@ -18,3 +19,5 @@ pub mod status;
 pub mod target;
 pub mod update;
 pub mod vault_summary;
+
+pub mod spec;

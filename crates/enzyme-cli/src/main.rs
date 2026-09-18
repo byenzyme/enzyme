@@ -33,6 +33,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Generate a readable setup with Jev and print it for review
+    Compile {
+        #[arg(long, value_enum, default_value = "auto")]
+        color: commands::compile::ColorChoice,
+        /// Save the proposal to a new file; existing files are never overwritten
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Compile, migrate, or preview readable .enzyme configuration
+    Spec {
+        #[command(subcommand)]
+        command: commands::spec::SpecCommand,
+    },
     /// Build or update the vault index and catalysts
     Init {
         /// Internal background worker mode
@@ -361,6 +374,9 @@ async fn main() -> Result<()> {
 
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
+        Commands::Spec { command } => {
+            return commands::spec::run(command).await;
+        }
         Commands::Mcp => {
             init_tracing(cli.verbose, None);
             return commands::mcp::run_mcp(cli.vault).await;
@@ -396,14 +412,32 @@ async fn main() -> Result<()> {
     } else {
         resolve_vault_path(cli.vault)?
     };
-    // Scan is a setup preview: even an existing index must remain untouched.
-    let log_vault = if matches!(&cli.command, Commands::Scan { .. }) {
+    // Setup previews must not write to an existing vault's log or index.
+    let log_vault = if matches!(
+        &cli.command,
+        Commands::Scan { .. } | Commands::Compile { .. }
+    ) {
         None
     } else {
         Some(vault_path.as_path())
     };
     init_tracing(cli.verbose, log_vault);
+    if let Commands::Compile { color, output } = &cli.command {
+        anyhow::ensure!(
+            cli.collection.is_none(),
+            "compile supports Markdown vaults, not named collections"
+        );
+        return commands::compile::run(&vault_path, *color, output.as_deref()).await;
+    }
     info!(?vault_path, "resolved vault path");
+
+    // Validate readable configuration before any init/refresh stage can mutate the vault.
+    if matches!(
+        &cli.command,
+        Commands::Init { .. } | Commands::Refresh { .. }
+    ) {
+        enzyme_core::config::EnzymeConfig::load(&vault_path)?;
+    }
 
     match cli.command {
         Commands::Init {
@@ -548,7 +582,10 @@ async fn main() -> Result<()> {
             commands::doctor::run_doctor(&vault_path, json).await?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
-        Commands::Mcp | Commands::Model { .. } => unreachable!(),
+        Commands::Mcp
+        | Commands::Model { .. }
+        | Commands::Spec { .. }
+        | Commands::Compile { .. } => unreachable!(),
     }
 
     Ok(())

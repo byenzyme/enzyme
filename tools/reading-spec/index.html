@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enzyme — a language for remembering</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header><a class="brand" href="./"><span class="mark">e</span> enzyme <span class="divider">/</span> <span class="muted">reading spec</span></a><span class="version">RUST RUNTIME · 0.2</span></header>
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">YOUR NOTES. YOUR WAY OF READING.</p><h1>Teach it what to notice.</h1><p class="lede">Learn questions from your notes.<br>Find your notes through those questions.</p></div>
+      <div class="intro-aside"><span class="dot"></span> A working syntax playground<p>Edit a reading. Inspect its meaning.<br>See the config and instructions it becomes.</p></div>
+    </section>
+    <section class="workspace" aria-label="Reading specification playground">
+      <div class="editor-pane">
+        <div class="panel-heading"><label for="example">01 / WRITE A READING</label><select id="example" aria-label="Example program"><option value="vault">Personal vault</option><option value="memory">Memory loop</option><option value="current-engine">Built-in profiles</option><option value="overrides">Learning defaults</option></select></div>
+        <div class="editor-wrap"><pre id="highlight" aria-hidden="true"></pre><textarea id="source" aria-label="Reading program" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"></textarea></div>
+        <div class="editor-footer"><span id="position">Ln 1, Col 1</span><span>⌘ / Ctrl + Enter to compile</span><button id="compile">Compile <span>↗</span></button></div>
+      </div>
+      <div class="output-pane">
+        <div class="panel-heading"><span>02 / SEE WHAT IT MEANS</span><span id="status" role="status" aria-live="polite">Ready</span></div>
+        <div class="tabs" role="tablist" aria-label="Compiler output"><button role="tab" aria-selected="true" id="tab-reading" aria-controls="result" data-tab="reading">Reading</button><button role="tab" aria-selected="false" id="tab-instructions" aria-controls="result" data-tab="instructions" tabindex="-1">Agent instructions</button><button role="tab" aria-selected="false" id="tab-config" aria-controls="result" data-tab="config" tabindex="-1">Config</button><button role="tab" aria-selected="false" id="tab-plan" aria-controls="result" data-tab="plan" tabindex="-1">Plan</button></div>
+        <div id="result" role="tabpanel" aria-labelledby="tab-reading" tabindex="0"></div>
+        <div class="output-footer"><span id="output-label">Resolved reading plan</span><button id="download" class="secondary">Download plan ↓</button></div>
+      </div>
+    </section>
+    <section class="diagnostics-section"><div class="diagnostics-title"><span class="eyebrow">COMPILER NOTES</span><span id="diagnostic-count"></span></div><div id="diagnostics" aria-live="polite"></div></section>
+    <section class="guide">
+      <div><p class="eyebrow">THREE CONNECTED IDEAS</p><h2>A memory you can read.</h2></div>
+      <article><span class="step">01</span><h3>Remember in…</h3><p>Give the agent conditions for appending observations to ordinary notes. Keep the evidence and context.</p></article>
+      <article><span class="step">02</span><h3>Learn questions from…</h3><p>A profile names what to seek and notice. Enzyme develops questions grounded in that material.</p></article>
+      <article><span class="step">03</span><h3>Retrieve through…</h3><p>The agent uses relevant questions to find source passages, then answers with evidence.</p></article>
+    </section>
+    <details class="reference"><summary>Language reference & execution boundaries</summary><div class="reference-grid">
+      <div><h3>Profiles are values</h3><pre>profile decisions {
+  seek "why one path won"
+  notice ["assumptions", "tradeoffs"]
+}</pre><p>Use a name after <code>about</code>, or embed <code>profile { … }</code> directly. <code>let decisions = profile { … }</code> is equivalent. Built-in names work without a declaration.</p></div>
+      <div><h3>Defaults flow downward</h3><pre>learning {
+  sample across time
+  favor recent periods
+  question budget 40
+}</pre><p>Global → vault → reading. The last scope wins. Sampling and recency settings feed generation. Changes become part of the refresh fingerprint.</p></div>
+      <div><h3>Guidance stays guidance</h3><pre>when asked {
+  "Use grep for exact phrases."
+  retrieve passages through learned questions
+  answer with sources
+}</pre><p>Quotes compile to agent instructions. They are not model-evaluated conditions, automatic hooks, or permission to write. Nothing runs against your vault here.</p></div>
+      <div><h3>Honest compilation</h3><p>The same Rust parser powers this playground and init/refresh. Custom profiles enter generation prompts; linked pages inherit explicit parent readings unless separately configured. Download a .enzyme file for your configs directory.</p><p>Question budget means the largest entity’s allocation, scaled by document count with a floor of 3. It is separate from the document embedding limit. No expiry policy is implemented.</p></div>
+    </div></details>
+  </main>
+  <footer><span>Enzyme / Reading Spec</span><span>Rust compilation. No model calls. No vault access.</span><a href="https://probably-lang.southpolesteve.workers.dev/" target="_blank" rel="noreferrer">Inspired by Probably ↗</a></footer>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>

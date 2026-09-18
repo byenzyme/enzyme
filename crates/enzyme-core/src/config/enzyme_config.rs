@@ -82,6 +82,9 @@ const CONFIG_HEADER: &str = "\
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnzymeConfig {
+    /// Resolved readable configuration; included in refresh generation fingerprints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_spec: Option<enzyme_spec::Vault>,
     #[serde(default)]
     pub catalyzed_entities: Vec<CatalyzedEntity>,
     #[serde(default)]
@@ -350,6 +353,8 @@ pub struct EntityPreferences {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct GlobalTomlConfig {
+    #[serde(skip)]
+    readings: std::collections::BTreeMap<String, enzyme_spec::Vault>,
     #[serde(default)]
     defaults: DefaultsTomlSection,
     #[serde(default)]
@@ -548,10 +553,6 @@ impl EnzymeConfig {
     }
 
     pub fn configured_vault_keys_at(config_path: &Path) -> Result<Vec<String>> {
-        if !config_path.exists() {
-            return Ok(Vec::new());
-        }
-
         let global = load_global_toml(&config_path)?;
         let mut keys: Vec<_> = global.workspaces.keys().cloned().collect();
         keys.extend(global.vaults.keys().cloned());
@@ -568,9 +569,6 @@ impl EnzymeConfig {
 
     /// Load machine-wide catalyst preferences from an explicit file.
     pub fn catalyst_llm_config_at(path: &Path) -> Result<CatalystLlmConfig> {
-        if !path.exists() {
-            return Ok(CatalystLlmConfig::default());
-        }
         Ok(load_global_toml(&path)?.llm)
     }
 
@@ -582,9 +580,6 @@ impl EnzymeConfig {
     }
 
     pub fn automatic_updates_enabled_at(path: &Path) -> Result<bool> {
-        if !path.exists() {
-            return Ok(true);
-        }
         Ok(load_global_toml(path)?.update.auto)
     }
 
@@ -595,6 +590,20 @@ impl EnzymeConfig {
     }
 
     pub fn save_catalyst_llm_config_at(path: &Path, llm: CatalystLlmConfig) -> Result<()> {
+        let directory = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("configs");
+        let files = enzyme_spec::source_files(&directory)?;
+        if !files.is_empty() && !path.exists() {
+            let (target, mut program) = files
+                .into_iter()
+                .find(|(_, p)| p.settings.generation.is_some() || p.settings.local_model.is_some())
+                .unwrap_or_else(|| (directory.join("settings.enzyme"), Default::default()));
+            program.settings.generation = Some(llm.mode.to_string());
+            program.settings.local_model = llm.local_model;
+            return enzyme_spec::atomic_write(&target, &enzyme_spec::render_program(&program));
+        }
         let mut global = if path.exists() {
             load_global_toml(&path)?
         } else {
@@ -620,7 +629,11 @@ impl EnzymeConfig {
     /// Legacy vault-local YAML remains the fallback only when that explicit
     /// file does not exist, preserving the CLI's compatibility behavior.
     pub fn load_at(vault_path: &Path, config_path: &Path) -> Result<Option<Self>> {
-        if config_path.exists() {
+        if config_path.exists()
+            || config_path
+                .parent()
+                .is_some_and(|p| p.join("configs").exists())
+        {
             debug!(?config_path, "loading enzyme config from global TOML");
             let global = load_global_toml(&config_path)?;
             let home = config_path.parent().unwrap_or_else(|| Path::new("."));
@@ -669,9 +682,14 @@ impl EnzymeConfig {
         };
 
         Self {
+            reading_spec: global.readings.get(&key).cloned(),
             catalyzed_entities: vault.map(|v| v.entities.clone()).unwrap_or_default(),
             trending: Some(trending),
-            catalyst_format: global.defaults.catalyst_format.clone(),
+            catalyst_format: global
+                .readings
+                .get(&key)
+                .and_then(|v| v.format.clone())
+                .or_else(|| global.defaults.catalyst_format.clone()),
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
             excluded_links: vault.map(|v| v.excluded_links.clone()).unwrap_or_default(),
             excluded_folders: vault
@@ -738,6 +756,7 @@ impl EnzymeConfig {
             .unwrap_or_default();
 
         Self {
+            reading_spec: None,
             catalyzed_entities: workspace.map(|w| w.entities.clone()).unwrap_or_default(),
             trending: Some(trending),
             catalyst_format: workspace
@@ -812,6 +831,7 @@ impl EnzymeConfig {
             .with_context(|| format!("failed to parse {}", config_path.display()))?;
 
         Ok(Some(Self {
+            reading_spec: None,
             catalyzed_entities: legacy.catalyzed_entities,
             trending: legacy.trending,
             catalyst_format: legacy.catalyst_format,
@@ -940,12 +960,119 @@ impl EnzymeConfig {
         self.save_at(vault_path, config_path, header)
     }
 
+    fn save_readable(&self, vault_path: &Path, config_path: &Path) -> Result<bool> {
+        let directory = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("configs");
+        let home = dirs::home_dir().context("cannot resolve home")?;
+        let key = canonical_vault_key(vault_path);
+        for (path, mut program) in enzyme_spec::source_files(&directory)? {
+            for vault in &mut program.vaults {
+                let expanded = if let Some(rest) = vault.path.strip_prefix("~/") {
+                    home.join(rest)
+                } else {
+                    PathBuf::from(&vault.path)
+                };
+                if canonical_vault_key(&expanded) != key {
+                    continue;
+                }
+                vault.exclusions = self.excluded_folders.clone();
+                vault.excluded_tags = self.excluded_tags.clone();
+                vault.excluded_links = self.excluded_links.clone();
+                vault.frontmatter_link_fields = self.frontmatter_link_fields.clone();
+                vault.targets = self.targets.clone();
+                vault.embedding_limit = self.max_embedding_files;
+                vault.learning.budget = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
+                let mut readings = Vec::new();
+                for entity in &self.catalyzed_entities {
+                    let (name, options) = match entity {
+                        CatalyzedEntity::Simple(name) => (name.clone(), EntityOptions::default()),
+                        CatalyzedEntity::WithOptions(map) => {
+                            let Some((name, options)) = map.iter().next() else {
+                                continue;
+                            };
+                            (name.clone(), options.clone())
+                        }
+                    };
+                    if let Some(existing) = vault.readings.iter().find(|r| r.entity == name) {
+                        readings.push(existing.clone());
+                    } else {
+                        readings.push(enzyme_spec::Reading {
+                            entity: name,
+                            profile: options.profile.unwrap_or_else(|| "auto".into()),
+                            definition: None,
+                            learning: Default::default(),
+                            include_linked_pages: options.expandable,
+                        });
+                    }
+                }
+                vault.readings = readings;
+                enzyme_spec::atomic_write(&path, &enzyme_spec::render_program(&program))?;
+                return Ok(true);
+            }
+        }
+        if !enzyme_spec::source_files(&directory)?.is_empty() && !config_path.exists() {
+            let mut vault = enzyme_spec::Vault {
+                path: key.clone(),
+                exclusions: self.excluded_folders.clone(),
+                excluded_tags: self.excluded_tags.clone(),
+                excluded_links: self.excluded_links.clone(),
+                frontmatter_link_fields: self.frontmatter_link_fields.clone(),
+                targets: self.targets.clone(),
+                embedding_limit: self.max_embedding_files,
+                learning: enzyme_spec::Learning {
+                    budget: self.trending.as_ref().and_then(|t| t.min_top_catalysts),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            for entity in &self.catalyzed_entities {
+                match entity {
+                    CatalyzedEntity::Simple(name) => vault.readings.push(enzyme_spec::Reading {
+                        entity: name.clone(),
+                        profile: "auto".into(),
+                        definition: None,
+                        learning: Default::default(),
+                        include_linked_pages: false,
+                    }),
+                    CatalyzedEntity::WithOptions(map) => {
+                        for (name, opt) in map {
+                            vault.readings.push(enzyme_spec::Reading {
+                                entity: name.clone(),
+                                profile: opt.profile.clone().unwrap_or_else(|| "auto".into()),
+                                definition: None,
+                                learning: Default::default(),
+                                include_linked_pages: opt.expandable,
+                            });
+                        }
+                    }
+                }
+            }
+            use sha2::{Digest, Sha256};
+            let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
+            let program = enzyme_spec::Program {
+                vaults: vec![vault],
+                ..Default::default()
+            };
+            enzyme_spec::atomic_write(
+                &directory.join(format!("vault-{}.enzyme", &digest[..12])),
+                &enzyme_spec::render_program(&program),
+            )?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub fn save(&self, vault_path: &Path) -> Result<()> {
         let config_path = Self::config_path()?;
         self.save_at(vault_path, &config_path, CONFIG_HEADER)
     }
 
     fn save_at(&self, vault_path: &Path, config_path: &Path, header: &str) -> Result<()> {
+        if self.save_readable(vault_path, config_path)? {
+            return Ok(());
+        }
         let mut global = if config_path.exists() {
             load_global_toml(&config_path)?
         } else {
@@ -1172,12 +1299,46 @@ impl EnzymeConfig {
 }
 
 fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
-    let contents =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    if contents.trim().is_empty() {
-        return Ok(GlobalTomlConfig::default());
+    let mut value = if path.exists() {
+        let contents = fs::read_to_string(path)?;
+        if contents.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::to_value(
+                toml::from_str::<toml::Value>(&contents)
+                    .with_context(|| format!("failed to parse {}", path.display()))?,
+            )?
+        }
+    } else {
+        serde_json::json!({})
+    };
+    let directory = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("configs");
+    let user_home = dirs::home_dir().context("cannot resolve home directory")?;
+    let program = enzyme_spec::load_directory(&directory, &user_home)?;
+    if let Some(program) = &program {
+        let incoming = enzyme_spec::config_value(program);
+        // Defaults/settings merge by field; a readable vault replaces its legacy section.
+        for (section, entries) in incoming.as_object().unwrap() {
+            if !value[section].is_object() {
+                value[section] = serde_json::json!({});
+            }
+            for (key, entry) in entries.as_object().unwrap() {
+                value[section][key] = entry.clone();
+            }
+        }
     }
-    toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+    let mut global: GlobalTomlConfig = serde_json::from_value(value)?;
+    if let Some(program) = program {
+        global.readings = program
+            .vaults
+            .into_iter()
+            .map(|v| (v.path.clone(), v))
+            .collect();
+    }
+    Ok(global)
 }
 
 fn canonical_vault_key(vault_path: &Path) -> String {
@@ -1487,6 +1648,7 @@ excludedTags:
         let config: LegacyYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.catalyzed_entities.len(), 4);
         let merged = EnzymeConfig {
+            reading_spec: None,
             catalyzed_entities: config.catalyzed_entities,
             trending: config.trending,
             catalyst_format: config.catalyst_format,
@@ -1790,6 +1952,7 @@ local_model = "catalyst-135m-v3"
         .unwrap();
 
         let config = EnzymeConfig {
+            reading_spec: None,
             catalyzed_entities: vec![
                 CatalyzedEntity::Simple("#enzyme".to_string()),
                 CatalyzedEntity::Simple("[[Test Note]]".to_string()),
@@ -1880,4 +2043,185 @@ local_model = "catalyst-135m-v3"
             }
         }
     }
+}
+
+/// Export the complete built-in profile definitions as readable, reusable values.
+pub fn readable_builtin_profiles() -> std::collections::BTreeMap<String, enzyme_spec::Profile> {
+    crate::llm::CATALYST_PROFILES
+        .iter()
+        .map(|p| {
+            (
+                p.key.to_string(),
+                enzyme_spec::Profile {
+                    seek: p.description.to_string(),
+                    notice: p.guidance_lines.iter().map(|s| s.to_string()).collect(),
+                    ask: p.sample_prompts.iter().map(|s| s.to_string()).collect(),
+                    note: p.footer.map(str::to_string),
+                    recognize: p.detection_patterns.iter().map(|s| s.to_string()).collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Migrate supported legacy Markdown vaults without changing their selections or provider.
+/// Reject unsupported sections rather than dropping them. The legacy file becomes a backup.
+pub fn migrate_readable_configs(
+    home: &Path,
+    embed_profiles_in: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    let path = home.join("config.toml");
+    let contents = fs::read_to_string(&path).context("read config.toml for migration")?;
+    let raw: toml::Value = toml::from_str(&contents)?;
+    let global: GlobalTomlConfig = toml::from_str(&contents)?;
+    anyhow::ensure!(
+        global.workspaces.is_empty(),
+        "named/structured workspaces are not migrated yet; keep config.toml for those workspaces"
+    );
+    anyhow::ensure!(
+        global.vaults.values().all(|v| v.sources.is_empty()),
+        "SQLite sources are not migrated yet; no files changed"
+    );
+    let serialized = toml::Value::try_from(&global)?;
+    fn keys_known(raw: &toml::Value, known: &toml::Value) -> bool {
+        match (raw, known) {
+            (toml::Value::Table(r), toml::Value::Table(k)) => r
+                .iter()
+                .all(|(name, v)| k.get(name).is_some_and(|x| keys_known(v, x))),
+            _ => true,
+        }
+    }
+    anyhow::ensure!(
+        keys_known(&raw, &serialized),
+        "unknown legacy configuration fields; refusing lossy migration"
+    );
+    let directory = home.join("configs");
+    anyhow::ensure!(
+        !directory.exists(),
+        "configs directory already exists; refusing to overwrite it"
+    );
+    let staged = home.join(format!(".configs-migration-{}", std::process::id()));
+    anyhow::ensure!(
+        !staged.exists(),
+        "migration staging directory already exists: {}",
+        staged.display()
+    );
+    fs::create_dir_all(&staged)?;
+    let result = (|| -> Result<Vec<PathBuf>> {
+        let settings = enzyme_spec::Settings {
+            generation: Some(global.llm.mode.to_string()),
+            local_model: global.llm.local_model.clone(),
+            updates: Some(global.update.auto),
+            embedding_limit: global.defaults.max_embedding_files,
+            minimum_tags: Some(global.defaults.minimum_tags),
+            minimum_links: Some(global.defaults.minimum_links),
+            minimum_folders: Some(global.defaults.minimum_folders),
+            total_limit: Some(global.defaults.total_limit),
+            format: global.defaults.catalyst_format.clone(),
+        };
+        let machine = enzyme_spec::Program {
+            settings,
+            ..Default::default()
+        };
+        enzyme_spec::atomic_write(
+            &staged.join("settings.enzyme"),
+            &enzyme_spec::render_program(&machine),
+        )?;
+        let mut paths: Vec<_> = global.vaults.keys().cloned().collect();
+        paths.sort();
+        let mut wrote_profiles = false;
+        for (index, key) in paths.iter().enumerate() {
+            let old = &global.vaults[key];
+            let mut vault = enzyme_spec::Vault {
+                path: key.clone(),
+                exclusions: old.excluded_folders.clone(),
+                excluded_tags: old.excluded_tags.clone(),
+                excluded_links: old.excluded_links.clone(),
+                frontmatter_link_fields: old.frontmatter_link_fields.clone(),
+                targets: old.targets.clone(),
+                embedding_limit: old.max_embedding_files,
+                learning: enzyme_spec::Learning {
+                    budget: old.min_top_catalysts,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            for entry in &old.entities {
+                let (name, options) = match entry {
+                    CatalyzedEntity::Simple(name) => (name.clone(), EntityOptions::default()),
+                    CatalyzedEntity::WithOptions(map) => {
+                        anyhow::ensure!(map.len() == 1, "ambiguous entity options for {key}");
+                        let (n, o) = map.iter().next().unwrap();
+                        (n.clone(), o.clone())
+                    }
+                };
+                // `expandable` was an ignored hint in TOML. Preserve its explicit true intent.
+                vault.readings.push(enzyme_spec::Reading {
+                    entity: name,
+                    profile: options.profile.unwrap_or_else(|| "auto".into()),
+                    definition: None,
+                    learning: Default::default(),
+                    include_linked_pages: options.expandable,
+                });
+            }
+            let mut program = enzyme_spec::Program {
+                vaults: vec![vault],
+                ..Default::default()
+            };
+            let main = embed_profiles_in
+                .is_some_and(|p| canonical_vault_key(p) == canonical_vault_key(Path::new(key)));
+            let filename = if main {
+                program.profiles = readable_builtin_profiles();
+                wrote_profiles = true;
+                "obsidian.enzyme".to_string()
+            } else {
+                format!("vault-{index:02}.enzyme")
+            };
+            enzyme_spec::atomic_write(
+                &staged.join(filename),
+                &enzyme_spec::render_program(&program),
+            )?;
+        }
+        if !wrote_profiles {
+            enzyme_spec::atomic_write(
+                &staged.join("profiles.enzyme"),
+                &enzyme_spec::render_program(&enzyme_spec::Program {
+                    profiles: readable_builtin_profiles(),
+                    ..Default::default()
+                }),
+            )?;
+        }
+        let loaded =
+            enzyme_spec::load_directory(&staged, &dirs::home_dir().context("home directory")?)?
+                .context("empty migration")?;
+        anyhow::ensure!(
+            loaded.vaults.len() == global.vaults.len(),
+            "migration changed vault count"
+        );
+        // Round-trip every supported field before publishing or retiring legacy config.
+        let lowered: GlobalTomlConfig = serde_json::from_value(enzyme_spec::config_value(&loaded))?;
+        anyhow::ensure!(
+            serde_json::to_value(&lowered)? == serde_json::to_value(&global)?,
+            "migration changed configuration semantics"
+        );
+        fs::rename(&staged, &directory)?;
+        let backup = home.join(format!(
+            "config.toml.before-enzyme-{}",
+            chrono::Utc::now().timestamp_millis()
+        ));
+        if let Err(error) = fs::rename(&path, &backup) {
+            let _ = fs::rename(&directory, &staged);
+            return Err(error.into());
+        }
+        let mut files: Vec<_> = enzyme_spec::source_files(&directory)?
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        files.push(backup);
+        Ok(files)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staged);
+    }
+    result
 }

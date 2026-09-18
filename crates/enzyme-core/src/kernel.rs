@@ -426,6 +426,7 @@ fn ensure_searchable_owned(
             };
             let epoch_id = db.begin_inline_catalyst_epoch(&contract, now_ms())?;
             let config = CatalystConfig {
+                reading_spec: selection_config.as_ref().and_then(|c| c.reading_spec.as_ref()),
                 model: &model,
                 entity_profiles: &selection.entity_profiles,
                 min_context_documents: min_catalyst_context_documents,

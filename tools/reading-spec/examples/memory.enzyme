@@ -1,0 +1,29 @@
+// Ordinary observations become material for future questions.
+learning {
+  question budget 30
+}
+
+vault "/workspace/notes" {
+  remember in "observations.md" when {
+    "The user corrects an assumption or explains a preference."
+    "A decision changes how future work should proceed."
+
+    append observation {
+      "Record what happened, its context, and the supporting evidence."
+      "Link the relevant people, projects, and sources."
+      "Preserve uncertainty. Don't invent a reason."
+    }
+  }
+
+  learn questions from log "observations" about preferences
+  learn questions from folder "people" about relationships
+  learn questions from folder "meetings" about decisions
+
+  when asked {
+    "Use grep for names, titles, and exact phrases."
+    retrieve passages across the vault through learned questions
+    "Apply observations only where their original context fits."
+    "The current request takes precedence."
+    answer with sources
+  }
+}

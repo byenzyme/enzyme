@@ -58,27 +58,15 @@ pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
 /// config. Existing curated settings are never overwritten by --write-config.
 pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
     let start = std::time::Instant::now();
-    let client = JevClient::from_env()?;
     let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     ensure!(
         !write_config || !config.has_curated_entities(),
         "This workspace already has entities. Run scan --jev without --write-config to review a proposal; existing settings were not changed."
     );
-    let docs = process_docs(vault_path)?;
-    let suggestion = build_scan_suggestion(vault_path, &docs)?;
-    let candidates = jev_candidates(&docs, &suggestion);
-    let scan_ms = start.elapsed().as_millis();
-    eprintln!(
-        "Jev selection: considering {} candidates with bounded excerpts sent to TypeSafe; vault files remain unchanged.",
-        candidates.len()
-    );
-    let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
-    eprintln!(
-        "Jev evaluated {} candidates in {} ms; {} deferred without evaluation.",
-        proposal.decisions.len(),
-        proposal.request_ms,
-        proposal.unevaluated_entities.len()
-    );
+    let generated = generate_jev_setup(vault_path).await?;
+    let suggestion = generated.suggestion;
+    let proposal = generated.proposal;
+    let scan_ms = generated.scan_ms;
     let proposal_ms = start.elapsed().as_millis();
     let config_toml = proposal.entities_toml()?;
     if write_config {
@@ -121,6 +109,42 @@ pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
         })
     );
     Ok(())
+}
+
+/// Shared discovery and hosted selection for JSON inspection and language generation.
+pub(super) struct GeneratedSetup {
+    suggestion: ScanSuggestion,
+    pub proposal: enzyme_core::pipeline::jev_selection::JevSelectionProposal,
+    scan_ms: u128,
+}
+impl GeneratedSetup {
+    pub fn excluded_folders(&self) -> &[String] {
+        &self.suggestion.excluded_folders
+    }
+}
+pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSetup> {
+    let start = std::time::Instant::now();
+    let client = JevClient::from_env()?;
+    let docs = process_docs(vault_path)?;
+    let suggestion = build_scan_suggestion(vault_path, &docs)?;
+    let candidates = jev_candidates(&docs, &suggestion);
+    let scan_ms = start.elapsed().as_millis();
+    eprintln!(
+        "Jev selection: considering {} candidates with bounded excerpts sent to TypeSafe; vault files remain unchanged.",
+        candidates.len()
+    );
+    let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
+    eprintln!(
+        "Jev evaluated {} candidates in {} ms; {} deferred without evaluation.",
+        proposal.decisions.len(),
+        proposal.request_ms,
+        proposal.unevaluated_entities.len()
+    );
+    Ok(GeneratedSetup {
+        suggestion,
+        proposal,
+        scan_ms,
+    })
 }
 
 fn jev_candidates(

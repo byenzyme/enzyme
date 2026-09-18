@@ -1,0 +1,9 @@
+{
+  "name": "enzyme-reading-spec-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "enzyme spec serve --bind 0.0.0.0 --port 4178",
+    "test": "../../scripts/cargo-lane disposable -- cargo test -p enzyme-spec"
+  }
+}

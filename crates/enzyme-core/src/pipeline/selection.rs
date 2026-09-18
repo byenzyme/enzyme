@@ -126,8 +126,11 @@ impl<'a> SelectionPipeline<'a> {
             }
         }
 
-        let materialized =
-            selection_steps::build_curated_selection(self.db, found, &prefs.entity_profiles)?;
+        let materialized = if let Some(spec) = &config.reading_spec {
+            selection_steps::build_readable_selection(self.db, found, &prefs.entity_profiles, spec)?
+        } else {
+            selection_steps::build_curated_selection(self.db, found, &prefs.entity_profiles)?
+        };
 
         info!(
             count = materialized.final_entities.len(),
@@ -146,7 +149,8 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Select entities using coverage-aware catalyst-candidate selection + deterministic profiles.
     fn select_catalyst_candidates(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
-        let materialized = selection_steps::build_catalyst_candidate_selection(self.db, 20, exclusions)?;
+        let materialized =
+            selection_steps::build_catalyst_candidate_selection(self.db, 20, exclusions)?;
 
         info!(
             count = materialized.final_entities.len(),

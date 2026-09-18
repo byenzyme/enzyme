@@ -1,0 +1,218 @@
+mod support;
+use std::{fs, time::Duration};
+use support::{fixture::VaultFixture, mock::MockLlm};
+
+fn write_spec(f: &VaultFixture, marker: &str) {
+    let dir = f.enzyme_home().join("configs");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("vault.enzyme"),format!(r#"
+settings {{ generation hosted updates disabled }}
+profile decisions {{ seek "{marker}: recover why one approach won" notice ["tradeoffs", "rejected alternatives"] }}
+learning {{ question budget 3 sample across time favor recent periods }}
+vault {:?} {{
+ leave out folders ["private"]
+ learn questions from tag "focus" about decisions
+ when asked {{ "Use grep for exact phrases." retrieve passages through learned questions answer with sources }}
+}}
+"#,f.vault_path().to_string_lossy())).unwrap();
+}
+#[test]
+fn init_and_refresh_use_rust_spec_and_regenerate_after_profile_edit() {
+    let f = VaultFixture::empty();
+    let llm = MockLlm::start();
+    llm.set_ok_content(r#"{"catalysts":["Which migration tradeoff preserves source evidence?","What rejected alternative changes the audit decision?","Which constraint made the migration reversible?"],"topicNames":["migration evidence","audit alternatives","reversible migration"]}"#);
+    for i in 0..3 {
+        f.write_note(&format!("note-{i}.md"),&format!("---\ntags: [focus]\ncreated: 2026-08-0{}\n---\n# Migration evidence\n{}",i+1,"The team chose a reversible migration with auditable source evidence. Rejected alternatives traded traceability for speed. The decision depends on keeping old records available for comparison. ".repeat(20)));
+    }
+    f.write_note(
+        "private/secret.md",
+        "This excluded note must not be indexed. #focus",
+    );
+    write_spec(&f, "FIRST_PROFILE");
+    let out = f
+        .cli()
+        .args(["init", "--quiet", "--use-env-llm"])
+        .env_llm(&llm)
+        .run();
+    out.assert_success();
+    assert!(
+        llm.requests().iter().any(|s| s.contains("FIRST_PROFILE")),
+        "custom seek never reached LLM: {}",
+        out.combined()
+    );
+    assert!(!f.enzyme_home().join("config.toml").exists());
+    let db_path = f.vault_enzyme_dir().join("enzyme.db");
+    // Locate the canonical database filename used by this checkout.
+    let db_path = if db_path.exists() {
+        db_path
+    } else {
+        f.vault_enzyme_dir().join("index.db")
+    };
+    let db = enzyme_core::db::Database::open(&db_path).unwrap();
+    assert!(
+        !db.get_all_document_hashes()
+            .unwrap()
+            .keys()
+            .any(|p| p.contains("secret"))
+    );
+    let count = llm.request_count();
+    write_spec(&f, "SECOND_PROFILE");
+    let refreshed = f
+        .cli()
+        .args(["refresh", "--quiet", "--use-env-llm"])
+        .env_llm(&llm)
+        .run();
+    refreshed.assert_success();
+    let payload: serde_json::Value = serde_json::from_str(&refreshed.stdout).unwrap();
+    let epoch = support::epoch::build_epoch_id(&payload);
+    let worker = f
+        .cli()
+        .args(["refresh", "--detached", "--quiet", "--use-env-llm"])
+        .env_llm(&llm)
+        .run();
+    worker.assert_success();
+    let state = support::epoch::wait_for_epoch_terminal(&db_path, &epoch, Duration::from_secs(60));
+    assert_eq!(state, "active");
+    assert!(llm.request_count() > count);
+    assert!(
+        llm.requests()
+            .iter()
+            .skip(count)
+            .any(|s| s.contains("SECOND_PROFILE"))
+    );
+    let inspect = f
+        .cli()
+        .args(["spec", "inspect"])
+        .arg(f.vault_path().to_string_lossy())
+        .arg("--instructions")
+        .run();
+    inspect.assert_success();
+    assert!(inspect.stdout.contains("petri --query"));
+    let search = f
+        .cli()
+        .args(["catalyze", "reversible migration audit evidence"])
+        .run();
+    search.assert_success();
+    assert!(search.stdout.contains("note-"));
+}
+#[test]
+fn invalid_spec_fails_before_init_writes() {
+    let f = VaultFixture::empty();
+    fs::create_dir(f.enzyme_home().join("configs")).unwrap();
+    fs::write(f.enzyme_home().join("configs/bad.enzyme"), "vault oops").unwrap();
+    let out = f.cli().args(["init", "--stage", "index"]).run();
+    out.assert_failure();
+    assert!(!f.vault_enzyme_dir().join("enzyme.db").exists());
+}
+
+struct JevDecisions;
+impl wiremock::Respond for JevDecisions {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        use serde_json::{Value, json};
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, q)| {
+            let choice = if id.starts_with("select_") { "include" } else { "decision_trace" };
+            let probabilities: serde_json::Map<String, Value> = q["criteria"].as_object().unwrap().keys().map(|k| (k.clone(), json!(if k == choice { 1.0 } else { 0.0 }))).collect();
+            (id.clone(), json!({"type":"choice", "choice":choice,"probabilities":probabilities,"confidence":0.95}))
+        }).collect();
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({"model":"jev-1.13.0","answers":answers}))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(JevDecisions)
+        .mount(&server)
+        .await;
+    let f = VaultFixture::empty();
+    for i in 0..3 {
+        f.write_note(
+            &format!("note-{i}.md"),
+            "#focus We chose a reversible migration after comparing alternatives and their costs.",
+        );
+    }
+    write_spec(&f, "OLD_CUSTOM_PROFILE");
+    let file = f.enzyme_home().join("configs/vault.enzyme");
+    let original = fs::read_to_string(&file).unwrap();
+    let draft = f.enzyme_home().join("proposal.enzyme");
+    let out = f
+        .cli()
+        .args(["compile", "--color", "never", "--output"])
+        .arg(draft.to_string_lossy())
+        .env("TYPESAFE_API_KEY", "test-key")
+        .env("TYPESAFE_BASE_URL", server.uri())
+        .run();
+    out.assert_success();
+    assert!(!out.stdout.contains('\u{1b}'));
+    assert_eq!(fs::read_to_string(&draft).unwrap(), out.stdout);
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    assert!(!f.vault_path().join(".enzyme").exists());
+    assert!(!out.stdout.contains("OLD_CUSTOM_PROFILE"));
+    let parsed = enzyme_spec::parse(&out.stdout).unwrap();
+    let canonical = enzyme_core::config::enzyme_config::readable_builtin_profiles();
+    assert_eq!(
+        parsed.profiles["decision_trace"],
+        canonical["decision_trace"]
+    );
+    let resolved = enzyme_spec::resolve(vec![parsed], &f.vault_path()).unwrap();
+    let vault = &resolved.vaults[0];
+    assert!(
+        vault
+            .readings
+            .iter()
+            .any(|r| r.entity == "#focus" && r.profile == "decision_trace")
+    );
+    assert_eq!(vault.learning.budget, Some(3));
+    assert_eq!(vault.learning.sample.as_deref(), Some("across_time"));
+    assert!(vault.exclusions.contains(&"private".into()));
+    assert!(
+        vault
+            .retrieval
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("grep"))
+    );
+    // Install the reviewed proposal in the fixture and exercise the real config loader.
+    fs::write(&file, &out.stdout).unwrap();
+    let inspect = f
+        .cli()
+        .args(["spec", "inspect"])
+        .arg(f.vault_path().to_string_lossy())
+        .run();
+    inspect.assert_success();
+    assert!(inspect.stdout.contains("decision_trace"));
+    let again = f
+        .cli()
+        .args(["compile", "--output"])
+        .arg(draft.to_string_lossy())
+        .run();
+    again.assert_failure();
+    assert_eq!(fs::read_to_string(&draft).unwrap(), out.stdout);
+    let colored = f
+        .cli()
+        .args(["compile", "--color", "always"])
+        .env("TYPESAFE_API_KEY", "test-key")
+        .env("TYPESAFE_BASE_URL", server.uri())
+        .run();
+    colored.assert_success();
+    assert!(colored.stdout.contains("\x1b[1;36mlearn\x1b[0m"));
+    assert!(colored.stdout.contains("\x1b[35mdecision_trace\x1b[0m"));
+    assert!(colored.stdout.contains("\x1b[32m"));
+    fs::write(&file, "vault broken {").unwrap();
+    let invalid = f.cli().arg("compile").run();
+    invalid.assert_failure();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "vault broken {");
+}
+
+#[test]
+fn compile_requires_jev_instead_of_silently_using_scan_defaults() {
+    let f = VaultFixture::new();
+    let out = f.cli().arg("compile").env("TYPESAFE_API_KEY", "").run();
+    out.assert_failure();
+    assert!(out.stdout.is_empty());
+    assert!(!f.vault_path().join(".enzyme").exists());
+}
