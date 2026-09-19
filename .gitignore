@@ -1,7 +1,8 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is tracked: this repo ships binaries, and an unpinned transitive
+# dependency (llama-cpp-sys-2 0.1.156) broke a release build with no code change.
 /.cargo/config
 /.cargo/config.toml
 
