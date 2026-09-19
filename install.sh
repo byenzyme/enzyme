@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Install enzyme — local-first knowledge indexing for markdown vaults
-# Usage: curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash
 
 set -euo pipefail
 
-REPO="useenzyme/enzyme"
+REPO="byenzyme/enzyme"
 INSTALL_DIR="$HOME/.local/bin"
 
 # Detect platform

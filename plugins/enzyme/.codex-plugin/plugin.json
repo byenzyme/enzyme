@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
-  "description": "Set up and keep Enzyme fresh for local knowledge vaults",
-  "version": "0.9.2",
+  "description": "Connect Enzyme's durable agent skills to a local knowledge vault",
+  "version": "0.10.0",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/useenzyme"
@@ -13,11 +13,11 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Enzyme",
-    "shortDescription": "Set up semantic memory for your vault",
-    "longDescription": "Enzyme scans a local Markdown or Obsidian vault, confirms the entities and exclusions to persist, initializes the local index, and gives agents explicit retrieval and refresh workflows.",
+    "shortDescription": "Connect Enzyme to your vault",
+    "longDescription": "Adds Enzyme's durable runtime and setup skills to a local Markdown or Obsidian vault, then hands setup to the vault-local guidance.",
     "developerName": "Joshua Pham",
     "category": "Productivity",
-    "capabilities": ["Local indexing", "Explicit refresh", "Vault setup"],
+    "capabilities": ["Vault connection", "Durable agent skills"],
     "websiteURL": "https://memory.enzyme.garden",
     "defaultPrompt": [
       "Set up Enzyme for this vault.",
