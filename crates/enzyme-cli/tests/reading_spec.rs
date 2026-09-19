@@ -142,8 +142,8 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
         .cli()
         .args(["compile", "-v", "--color", "never", "--output"])
         .arg(draft.to_string_lossy())
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", server.uri())
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", server.uri())
         .run();
     out.assert_success();
     assert!(!out.stdout.contains('\u{1b}'));
@@ -199,8 +199,8 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     let colored = f
         .cli()
         .args(["compile", "-v", "--dry-run", "--color", "always"])
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", server.uri())
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", server.uri())
         .run();
     colored.assert_success();
     assert!(colored.stdout.contains("\x1b[1;36mlearn\x1b[0m"));
@@ -212,8 +212,8 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     let quiet = f
         .cli()
         .arg("compile")
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", server.uri())
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", server.uri())
         .run();
     quiet.assert_success();
     assert!(quiet.stdout.is_empty());
@@ -238,7 +238,7 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
 #[test]
 fn compile_requires_jev_instead_of_silently_using_scan_defaults() {
     let f = VaultFixture::new();
-    let out = f.cli().arg("compile").env("TYPESAFE_API_KEY", "").run();
+    let out = f.cli().arg("compile").env("OPENROUTER_API_KEY", "").run();
     out.assert_failure();
     assert!(out.stdout.is_empty());
     assert!(!f.vault_path().join(".enzyme").exists());
@@ -255,8 +255,8 @@ async fn compile_dry_run_leaves_new_workspace_unconfigured_then_default_saves() 
     let dry = f
         .cli()
         .args(["compile", "--dry-run"])
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", server.uri())
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", server.uri())
         .run();
     dry.assert_success();
     assert!(dry.stderr.is_empty());
@@ -266,8 +266,8 @@ async fn compile_dry_run_leaves_new_workspace_unconfigured_then_default_saves() 
     let saved = f
         .cli()
         .args(["compile", "-v", "--color", "never"])
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", server.uri())
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", server.uri())
         .run();
     saved.assert_success();
     let files = enzyme_spec::source_files(&f.enzyme_home().join("configs")).unwrap();

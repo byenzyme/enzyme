@@ -127,6 +127,8 @@ enzyme model verify      # verify the selected file and registry checksum
 
 `--use-env-llm` remains an explicit one-run override for OpenAI/OpenRouter-compatible credentials; inherited provider variables do not silently change `auto`, `local`, or `hosted` mode. `ENZYME_LOCAL_ENGINE=0` remains a legacy process-level opt-out. Concurrency, threads, and the prompt context budget adapt to the machine; `ENZYME_LLM_CONCURRENCY` and `ENZYME_MAX_CONTEXT_CHARS` still override them.
 
+`enzyme compile` is an explicit OpenRouter Decisions operation. It uses `OPENROUTER_API_KEY` with `OPENROUTER_JEV_MODEL` (default `typesafe/jev-1.13`), independently of the catalyst model in `OPENROUTER_MODEL`. `OPENROUTER_BASE_URL` is shared; its standard `/api/v1` path maps to `/api/alpha/decisions` for this call.
+
 The default fine-tuned weights are hosted on Enzyme's public GitHub release, so
 `enzyme model install` requires no account or API token.
 

@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 
 use crate::config::enzyme_config::{CatalyzedEntity, EntityOptions};
 use crate::llm::CATALYST_PROFILES;
-use crate::llm::jev::{
-    DEFAULT_JEV_MODEL, JevAnswer, JevClient, JevQuestion, JevRequest, JevResponse,
-};
+#[cfg(test)]
+use crate::llm::jev::DEFAULT_JEV_MODEL;
+use crate::llm::jev::{JevAnswer, JevClient, JevQuestion, JevRequest, JevResponse};
 
 // Experimental policy, not claimed calibrated. Uncertainty retains the scan
 // candidate/default profile for the shortlist rather than treating doubt as a rejection.
@@ -164,7 +164,7 @@ impl JevSelectionPipeline {
         let batches =
             futures::stream::iter(evaluated_candidates.chunks(CANDIDATES_PER_REQUEST).map(
                 |batch| async move {
-                    let (request, evaluated) = Self::request(batch)?;
+                    let (request, evaluated) = Self::request(batch, client.model())?;
                     let (response, elapsed) = client.evaluate(&request).await?;
                     Self::materialize(batch, evaluated, &request, response, elapsed)
                 },
@@ -174,7 +174,7 @@ impl JevSelectionPipeline {
             .await?;
         let mut combined = JevSelectionProposal {
             schema_version: "jev-selection.v2",
-            model: DEFAULT_JEV_MODEL.into(),
+            model: String::new(),
             request_ms: start.elapsed().as_millis(),
             batch_request_ms: Vec::new(),
             usage: json!({"input_tokens":0,"output_tokens":0}),
@@ -186,10 +186,14 @@ impl JevSelectionPipeline {
             profile_confidence_threshold: PROFILE_CONFIDENCE,
         };
         for (i, batch) in batches.into_iter().enumerate() {
-            ensure!(
-                batch.model == DEFAULT_JEV_MODEL,
-                "Jev returned a different model than the pinned selection model"
-            );
+            if combined.model.is_empty() {
+                combined.model = batch.model.clone();
+            } else {
+                ensure!(
+                    batch.model == combined.model,
+                    "Jev returned inconsistent model identities across batches"
+                );
+            }
             combined.batch_request_ms.push(batch.request_ms);
             for field in ["input_tokens", "output_tokens"] {
                 combined.usage[field] = json!(
@@ -280,7 +284,7 @@ impl JevSelectionPipeline {
         }
     }
 
-    fn request(candidates: &[SelectionCandidate]) -> Result<(JevRequest, usize)> {
+    fn request(candidates: &[SelectionCandidate], model: &str) -> Result<(JevRequest, usize)> {
         ensure!(
             !candidates.is_empty(),
             "No Markdown candidates to evaluate with Jev"
@@ -298,7 +302,7 @@ impl JevSelectionPipeline {
             })
             .collect();
         let mut request = JevRequest {
-            model: DEFAULT_JEV_MODEL.into(),
+            model: model.into(),
             state: json!({
                 "candidates": [],
                 "profile_catalog": profile_catalog,
@@ -464,7 +468,8 @@ mod tests {
                 }],
             })
             .collect();
-        let (request, count) = JevSelectionPipeline::request(&candidates).unwrap();
+        let (request, count) =
+            JevSelectionPipeline::request(&candidates, DEFAULT_JEV_MODEL).unwrap();
         let answers = request
             .questions
             .iter()
@@ -549,7 +554,7 @@ mod tests {
         // Match production batching: the shared profile guidance is intentionally
         // richer than the former compact rubric and bounded per request.
         let mut batches = candidates.chunks(CANDIDATES_PER_REQUEST).map(|batch| {
-            let (request, count) = JevSelectionPipeline::request(batch).unwrap();
+            let (request, count) = JevSelectionPipeline::request(batch, DEFAULT_JEV_MODEL).unwrap();
             assert_eq!(count, batch.len());
             let answers = request
                 .questions
@@ -652,7 +657,8 @@ mod tests {
                 }],
             })
             .collect();
-        let (request, count) = JevSelectionPipeline::request(&candidates).unwrap();
+        let (request, count) =
+            JevSelectionPipeline::request(&candidates, DEFAULT_JEV_MODEL).unwrap();
         assert!(count > 0 && count < 100);
         assert!(serde_json::to_vec(&request).unwrap().len() <= MAX_REQUEST_BYTES);
         assert!(serde_json::to_vec(&request.state).unwrap().len() <= MAX_STATE_BYTES);

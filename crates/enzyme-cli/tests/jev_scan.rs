@@ -1,4 +1,4 @@
-//! Exercise the actual CLI with a local TypeSafe server; no real credentials or
+//! Exercise the actual CLI with a local OpenRouter Decisions server; no real credentials or
 //! network access required. Config must be usable by the existing selection path.
 use serde_json::{Value, json};
 use std::process::Command;
@@ -21,6 +21,7 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
         std::fs::write(dir.join("note.md"), "We chose a small launch to learn from real users before committing to the larger project.").unwrap();
     }
     let output = command(&vault, &home, &server.uri())
+        .env("OPENROUTER_JEV_MODEL", "typesafe/jev-test")
         .arg("--jev")
         .output()
         .unwrap();
@@ -60,6 +61,13 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
             .unwrap()
             .contains("expandable = false")
     );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests.iter().all(|request| {
+        request.url.path() == "/api/alpha/decisions"
+            && request.headers.get("authorization").unwrap() == "Bearer test-key"
+            && serde_json::from_slice::<Value>(&request.body).unwrap()["model"]
+                == "typesafe/jev-test"
+    }));
 }
 impl Respond for Decisions {
     fn respond(&self, request: &Request) -> ResponseTemplate {
@@ -198,8 +206,8 @@ fn command(vault: &std::path::Path, home: &std::path::Path, base: &str) -> Comma
         .arg(vault)
         .arg("scan")
         .env("ENZYME_HOME", home)
-        .env("TYPESAFE_API_KEY", "test-key")
-        .env("TYPESAFE_BASE_URL", base);
+        .env("OPENROUTER_API_KEY", "test-key")
+        .env("OPENROUTER_BASE_URL", base);
     command
 }
 

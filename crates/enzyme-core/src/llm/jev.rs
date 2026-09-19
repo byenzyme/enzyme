@@ -1,5 +1,5 @@
-//! TypeSafe's decision API. Separate from generative catalyst providers: no
-//! OpenAI compatibility shim, account credentials, or implicit provider fallback.
+//! Jev through OpenRouter's Decisions API. This shares OpenRouter credentials
+//! with catalyst generation, but uses a distinct endpoint and model setting.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,19 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const DEFAULT_JEV_MODEL: &str = "jev-1.13.0";
+pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.13";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+fn decisions_endpoint(base: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(base).context("Invalid OPENROUTER_BASE_URL")?;
+    if url.path().trim_end_matches('/') == "/api/v1" {
+        url.set_path("/api/alpha/decisions");
+    } else {
+        let path = format!("{}/api/alpha/decisions", url.path().trim_end_matches('/'));
+        url.set_path(&path);
+    }
+    Ok(url.to_string())
+}
 
 #[derive(Debug, Serialize)]
 pub struct JevRequest {
@@ -131,33 +143,40 @@ pub struct JevClient {
     http: reqwest::Client,
     endpoint: String,
     api_key: String,
+    model: String,
 }
 
 impl JevClient {
-    /// Called only after explicit opt-in to hosted selection.
+    /// Compile and `scan --jev` are explicit OpenRouter operations, so they may
+    /// use the same key as catalyst generation without `--use-env-llm`.
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("TYPESAFE_API_KEY").context("--jev requires TYPESAFE_API_KEY")?;
-        let base = std::env::var("TYPESAFE_BASE_URL")
-            .unwrap_or_else(|_| "https://api.typesafe.ai/v1".into());
-        let url = reqwest::Url::parse(&base).context("Invalid TYPESAFE_BASE_URL")?;
+        let key = std::env::var("OPENROUTER_API_KEY")
+            .context("Jev selection requires OPENROUTER_API_KEY")?;
+        let model =
+            std::env::var("OPENROUTER_JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.into());
+        let base = std::env::var("OPENROUTER_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.into());
+        let endpoint = decisions_endpoint(&base)?;
+        let url = reqwest::Url::parse(&endpoint).context("Invalid OpenRouter Decisions URL")?;
         ensure!(
             url.username().is_empty()
                 && url.password().is_none()
                 && url.query().is_none()
                 && url.fragment().is_none(),
-            "TYPESAFE_BASE_URL must not contain credentials, query, or fragment"
+            "OpenRouter Decisions URL must not contain credentials, query, or fragment"
         );
         ensure!(
             url.scheme() == "https"
                 || (url.scheme() == "http"
                     && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))),
-            "TYPESAFE_BASE_URL requires HTTPS except for loopback testing"
+            "OpenRouter Decisions URL requires HTTPS except for loopback testing"
         );
-        Self::new(&format!("{}/systemone", base.trim_end_matches('/')), key)
+        Self::new(url.as_str(), key, model)
     }
 
-    fn new(endpoint: &str, api_key: String) -> Result<Self> {
-        ensure!(!api_key.trim().is_empty(), "TYPESAFE_API_KEY is empty");
+    fn new(endpoint: &str, api_key: String, model: String) -> Result<Self> {
+        ensure!(!api_key.trim().is_empty(), "OPENROUTER_API_KEY is empty");
+        ensure!(!model.trim().is_empty(), "OPENROUTER_JEV_MODEL is empty");
         Ok(Self {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
@@ -166,7 +185,12 @@ impl JevClient {
                 .build()?,
             endpoint: endpoint.to_string(),
             api_key,
+            model,
         })
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     /// One request, no hidden retries: latency and failures remain observable.
@@ -176,11 +200,17 @@ impl JevClient {
             !request.questions.is_empty(),
             "Jev needs at least one question"
         );
+        ensure!(
+            request.model == self.model,
+            "Jev request used an unexpected model"
+        );
         let start = Instant::now();
         let response = self
             .http
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
+            .header("HTTP-Referer", "https://github.com/useenzyme/enzyme-rust")
+            .header("X-Title", "Enzyme")
             .json(request)
             .send()
             .await
@@ -224,24 +254,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn openrouter_chat_base_maps_to_decisions_endpoint() {
+        assert_eq!(
+            decisions_endpoint("https://openrouter.ai/api/v1").unwrap(),
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        assert_eq!(
+            decisions_endpoint("http://localhost:3000").unwrap(),
+            "http://localhost:3000/api/alpha/decisions"
+        );
+    }
+
     fn response() -> Value {
         json!({"model":DEFAULT_JEV_MODEL,"answers":{"select":{"type":"choice","choice":"yes","probabilities":{"yes":0.9,"no":0.1},"confidence":0.8}},"usage":{"input_tokens":42}})
     }
 
     #[tokio::test]
-    async fn jev_client_uses_native_api_and_validates_answers() {
+    async fn jev_client_uses_openrouter_decisions_api_and_validates_answers() {
         let server = MockServer::start().await;
         let request = request();
         Mock::given(method("POST"))
-            .and(path("/v1/systemone"))
+            .and(path("/api/alpha/decisions"))
             .and(header("authorization", "Bearer test-key"))
             .and(body_json(serde_json::to_value(&request).unwrap()))
             .respond_with(ResponseTemplate::new(200).set_body_json(response()))
             .expect(1)
             .mount(&server)
             .await;
-        let client =
-            JevClient::new(&format!("{}/v1/systemone", server.uri()), "test-key".into()).unwrap();
+        let client = JevClient::new(
+            &format!("{}/api/alpha/decisions", server.uri()),
+            "test-key".into(),
+            DEFAULT_JEV_MODEL.into(),
+        )
+        .unwrap();
         let (result, _) = client.evaluate(&request).await.unwrap();
         assert_eq!(result.answers["select"].choice(), "yes");
     }
@@ -254,7 +300,8 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let client = JevClient::new(&server.uri(), "test-key".into()).unwrap();
+        let client =
+            JevClient::new(&server.uri(), "test-key".into(), DEFAULT_JEV_MODEL.into()).unwrap();
         let error = client.evaluate(&request()).await.unwrap_err().to_string();
         assert!(error.contains("429"));
         assert!(!error.contains("private"));
