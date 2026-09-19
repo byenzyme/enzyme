@@ -2,15 +2,12 @@
 
 # 🧬 Enzyme
 
-**A compile step for your Markdown wiki.**
-**Questions your agent can route through, generated from how you already write.**
-
 [![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
 [![License](https://img.shields.io/github/license/useenzyme/enzyme?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
 
-[Website](https://memory.enzyme.garden) · [Docs](https://memory.enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Get started](#get-started)
+[Website](https://memory.enzyme.garden) · [Get started](#get-started)
 
 </div>
 
