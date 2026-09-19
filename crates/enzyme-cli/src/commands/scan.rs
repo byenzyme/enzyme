@@ -176,6 +176,7 @@ fn jev_candidates(
         })
         .cloned()
         .collect();
+    let scan_selected: HashSet<_> = suggestion.entities.iter().map(String::as_str).collect();
     let samples = entity_samples(
         docs,
         &specs,
@@ -255,6 +256,7 @@ fn jev_candidates(
             SelectionCandidate {
                 spec: spec.clone(),
                 file_count: metrics.get(spec).map(|e| e.files.len()).unwrap_or(0),
+                scan_selected: scan_selected.contains(spec.as_str()),
                 samples: evidence,
                 expandable: group.is_some(),
                 page_entities: group

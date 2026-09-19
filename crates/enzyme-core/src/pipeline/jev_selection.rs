@@ -13,13 +13,14 @@ use crate::llm::CATALYST_PROFILES;
 use crate::llm::jev::DEFAULT_JEV_MODEL;
 use crate::llm::jev::{JevAnswer, JevClient, JevQuestion, JevRequest, JevResponse};
 
-// Experimental policy, not claimed calibrated. Uncertainty retains the scan
-// candidate/default profile for the shortlist rather than treating doubt as a rejection.
+// Experimental policy, not claimed calibrated. Uncertainty retains only the
+// deterministic scan's bounded choices rather than every semantic candidate.
 pub const SELECTION_CONFIDENCE: f64 = 0.80;
 pub const PROFILE_CONFIDENCE: f64 = 0.65;
 pub const MAX_CANDIDATES: usize = 192;
-pub const CANDIDATES_PER_REQUEST: usize = 8;
-pub const MAX_PROPOSED_ENTITIES: usize = 40;
+pub const CANDIDATES_PER_REQUEST: usize = 16;
+pub const MAX_PROPOSED_ENTITIES: usize = 30;
+const MAX_CONCURRENT_REQUESTS: usize = 12;
 const PREFERRED_FOLDER_SLOTS: usize = 8;
 const MAX_STATE_BYTES: usize = 60_000;
 const MAX_REQUEST_BYTES: usize = 180_000;
@@ -40,6 +41,9 @@ pub struct SelectionSample {
 pub struct SelectionCandidate {
     pub spec: String,
     pub file_count: usize,
+    /// The deterministic scan included this candidate in its bounded proposal.
+    #[serde(skip_serializing)]
+    pub scan_selected: bool,
     pub samples: Vec<SelectionSample>,
     pub expandable: bool,
     pub page_entities: Vec<String>,
@@ -161,17 +165,23 @@ impl JevSelectionPipeline {
         // Keep each decision local while avoiding serial model round trips.
         let start = std::time::Instant::now();
         let evaluated_candidates = &candidates[..candidates.len().min(MAX_CANDIDATES)];
-        let batches =
-            futures::stream::iter(evaluated_candidates.chunks(CANDIDATES_PER_REQUEST).map(
-                |batch| async move {
+        let mut batches = futures::stream::iter(
+            evaluated_candidates
+                .chunks(CANDIDATES_PER_REQUEST)
+                .enumerate()
+                .map(|(batch_index, batch)| async move {
                     let (request, evaluated) = Self::request(batch, client.model())?;
                     let (response, elapsed) = client.evaluate(&request).await?;
-                    Self::materialize(batch, evaluated, &request, response, elapsed)
-                },
-            ))
-            .buffered(8)
-            .try_collect::<Vec<_>>()
-            .await?;
+                    Ok::<_, anyhow::Error>((
+                        batch_index,
+                        Self::materialize(batch, evaluated, &request, response, elapsed)?,
+                    ))
+                }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_REQUESTS)
+        .try_collect::<Vec<_>>()
+        .await?;
+        batches.sort_by_key(|(batch_index, _)| *batch_index);
         let mut combined = JevSelectionProposal {
             schema_version: "jev-selection.v2",
             model: String::new(),
@@ -185,7 +195,7 @@ impl JevSelectionPipeline {
             selection_confidence_threshold: SELECTION_CONFIDENCE,
             profile_confidence_threshold: PROFILE_CONFIDENCE,
         };
-        for (i, batch) in batches.into_iter().enumerate() {
+        for (i, batch) in batches {
             if combined.model.is_empty() {
                 combined.model = batch.model.clone();
             } else {
@@ -388,10 +398,14 @@ impl JevSelectionPipeline {
                 .samples
                 .iter()
                 .all(|s| s.excerpt.trim().is_empty());
-            let retained_default = no_evidence
-                || selection.choice() == "uncertain"
-                || !selection.is_decisive(SELECTION_CONFIDENCE);
-            let selected = retained_default || selection.choice() != "skip";
+            let decisive = !no_evidence && selection.is_decisive(SELECTION_CONFIDENCE);
+            let decisive_include = decisive && selection.choice() == "include";
+            let decisive_skip = decisive && selection.choice() == "skip";
+            // Jev uncertainty is an abstention. The deterministic scan may
+            // rescue only candidates it independently selected; a confident
+            // Jev skip still wins.
+            let retained_default = candidate.scan_selected && !decisive_include && !decisive_skip;
+            let selected = decisive_include || retained_default;
             let profile = (!no_evidence
                 && profile_answer.choice() != "uncertain"
                 && profile_answer.is_decisive(PROFILE_CONFIDENCE))
@@ -412,7 +426,11 @@ impl JevSelectionPipeline {
                     .collect(),
                 retained_default,
                 shortlist_score: 0.0,
-                omission_reason: (!selected).then_some("model_skip"),
+                omission_reason: (!selected).then_some(if decisive_skip {
+                    "model_skip"
+                } else {
+                    "model_abstention"
+                }),
                 expandable: candidate.expandable,
                 page_entities: candidate.page_entities.clone(),
             });
@@ -449,12 +467,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jev_selection_keeps_uncertainty_and_persists_only_validated_profiles() {
+    fn jev_uncertainty_only_retains_deterministic_scan_choices() {
         let candidates: Vec<_> = ["folder:projects", "#status", "log:journal"]
             .iter()
             .map(|s| SelectionCandidate {
                 spec: s.to_string(),
                 file_count: 3,
+                scan_selected: *s != "log:journal",
                 expandable: false,
                 page_entities: vec![],
                 context: SelectionContext::default(),
@@ -507,9 +526,14 @@ mod tests {
             12,
         )
         .unwrap();
-        assert_eq!(proposal.entities.len(), 2);
+        assert_eq!(proposal.entities.len(), 1);
         assert!(!proposal.decisions[1].selected);
         assert!(proposal.decisions[0].retained_default);
+        assert!(!proposal.decisions[2].selected);
+        assert_eq!(
+            proposal.decisions[2].omission_reason,
+            Some("model_abstention")
+        );
         let text = proposal.entities_toml().unwrap();
         assert!(!text.contains("[[entities]]"));
         let pasted: toml::Value = toml::from_str(&format!("[vaults.test]\n{text}")).unwrap();
@@ -518,7 +542,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            1
         );
         let config = crate::config::enzyme_config::EnzymeConfig {
             catalyzed_entities: proposal.entities,
@@ -536,6 +560,7 @@ mod tests {
             .map(|i| SelectionCandidate {
                 spec: format!("#topic-{i:02}"),
                 file_count: 5,
+                scan_selected: false,
                 samples: vec![SelectionSample {
                     source_ref: "note.md".into(),
                     title: None,
@@ -607,7 +632,7 @@ mod tests {
                 .iter()
                 .filter(|d| d.omission_reason == Some("shortlist_budget"))
                 .count(),
-            10
+            50 - MAX_PROPOSED_ENTITIES
         );
         assert!(
             proposal
@@ -626,6 +651,7 @@ mod tests {
         let candidate = SelectionCandidate {
             spec: "folder:people".into(),
             file_count: 2,
+            scan_selected: true,
             samples: vec![],
             expandable: true,
             page_entities: vec!["[[alice]]".into()],
@@ -644,6 +670,7 @@ mod tests {
             .map(|i| SelectionCandidate {
                 spec: format!("folder:{i}"),
                 file_count: 3,
+                scan_selected: false,
                 expandable: false,
                 page_entities: vec![],
                 context: SelectionContext::default(),
@@ -657,6 +684,10 @@ mod tests {
                 }],
             })
             .collect();
+        let (_, batch_count) =
+            JevSelectionPipeline::request(&candidates[..CANDIDATES_PER_REQUEST], DEFAULT_JEV_MODEL)
+                .unwrap();
+        assert_eq!(batch_count, CANDIDATES_PER_REQUEST);
         let (request, count) =
             JevSelectionPipeline::request(&candidates, DEFAULT_JEV_MODEL).unwrap();
         assert!(count > 0 && count < 100);

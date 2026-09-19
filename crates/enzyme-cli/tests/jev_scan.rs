@@ -11,7 +11,7 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
-        .expect(3)
+        .expect(2)
         .mount(&server)
         .await;
     let (_root, vault, home) = fixture();
@@ -40,7 +40,7 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
             .as_array()
             .unwrap()
             .len(),
-        3
+        2
     );
     assert!(
         result["selection"]["unevaluated_entities"]
