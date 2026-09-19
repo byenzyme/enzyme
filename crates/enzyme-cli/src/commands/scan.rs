@@ -770,7 +770,7 @@ fn available_profiles() -> Vec<ProfileSummary> {
         .map(|profile| ProfileSummary {
             key: profile.key.to_string(),
             display_name: profile.display_name.to_string(),
-            description: profile.description.to_string(),
+            description: profile.user_description.to_string(),
         })
         .collect()
 }

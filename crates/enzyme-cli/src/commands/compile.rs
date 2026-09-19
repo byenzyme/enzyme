@@ -1,10 +1,8 @@
 use anyhow::{Context, Result, ensure};
-use enzyme_core::config::{
-    EnzymeConfig, EnzymePaths,
-    enzyme_config::{CatalyzedEntity, readable_builtin_profiles},
-};
+use enzyme_core::config::{EnzymeConfig, EnzymePaths, enzyme_config::CatalyzedEntity};
 use enzyme_spec::{Learning, Program, Reading};
 use std::{
+    collections::BTreeSet,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
@@ -123,10 +121,54 @@ pub async fn run(
 }
 
 fn render(program: &Program) -> String {
-    enzyme_spec::render_program(program)
+    let source = enzyme_spec::render_program(program)
         .strip_prefix("// Enzyme reading configuration\n\n")
         .expect("renderer header")
-        .to_owned()
+        .to_owned();
+    let mut described = BTreeSet::new();
+    let mut rendered = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let profile = trimmed
+            .strip_prefix("about ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(|key| key.trim_end_matches('{'))
+            .and_then(enzyme_core::llm::get_profile);
+        if let Some(profile) = profile.filter(|profile| described.insert(profile.key)) {
+            let indent = &line[..line.len() - trimmed.len()];
+            rendered.push_str(&format!(
+                "{indent}// {} (`{}`)\n",
+                profile.display_name, profile.key
+            ));
+            rendered.push_str(&render_comment(profile.user_description, indent));
+            rendered.push_str(&format!(
+                "{indent}// Change this `about` name if the material should be read through a different lens.\n"
+            ));
+        }
+        rendered.push_str(line);
+    }
+    rendered
+}
+
+fn render_comment(text: &str, indent: &str) -> String {
+    const WIDTH: usize = 80;
+    let mut rendered = String::new();
+    let prefix = format!("{indent}// ");
+    let mut line = prefix.clone();
+    for word in text.split_whitespace() {
+        if line.len() > prefix.len() && line.len() + 1 + word.len() > WIDTH {
+            rendered.push_str(&line);
+            rendered.push('\n');
+            line.clone_from(&prefix);
+        }
+        if line.len() > prefix.len() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    rendered.push_str(&line);
+    rendered.push('\n');
+    rendered
 }
 
 /// Replace only this vault's setup while retaining sibling vaults, shared settings,
@@ -226,7 +268,6 @@ fn structured_setup(path: &Path, config: EnzymeConfig) -> Result<Program> {
         .budget
         .or(config.trending.and_then(|t| t.min_top_catalysts));
     let mut program = Program::default();
-    let catalog = readable_builtin_profiles();
     for item in config.catalyzed_entities {
         let choices: Vec<_> = match item {
             CatalyzedEntity::Simple(entity) => vec![(entity, None, false)],
@@ -238,10 +279,8 @@ fn structured_setup(path: &Path, config: EnzymeConfig) -> Result<Program> {
         for (entity, profile, expandable) in choices {
             let profile = profile.unwrap_or_else(|| "auto".into());
             if profile != "auto" {
-                let definition = catalog
-                    .get(&profile)
+                enzyme_core::llm::get_profile(&profile)
                     .with_context(|| format!("unknown generated profile: {profile}"))?;
-                program.profiles.insert(profile.clone(), definition.clone());
             }
             let learning = previous
                 .iter()

@@ -159,11 +159,31 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     assert!(!f.vault_path().join(".enzyme").exists());
     assert!(!out.stdout.contains("OLD_CUSTOM_PROFILE"));
     let parsed = enzyme_spec::parse(&out.stdout).unwrap();
-    let canonical = enzyme_core::config::enzyme_config::readable_builtin_profiles();
+    assert!(parsed.profiles.is_empty());
     assert_eq!(
-        parsed.profiles["decision_trace"],
-        canonical["decision_trace"]
+        out.stdout
+            .matches("// Decision Trace (`decision_trace`)")
+            .count(),
+        1,
+        "a built-in lens should be explained only at its first use"
     );
+    let comment_prose = out
+        .stdout
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("//"))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        comment_prose.contains(
+            enzyme_core::llm::get_profile("decision_trace")
+                .unwrap()
+                .user_description
+        )
+    );
+    let explanation = out.stdout.find("// Decision Trace").unwrap();
+    let first_use = out.stdout.find("about decision_trace").unwrap();
+    assert!(explanation < first_use);
     let resolved = enzyme_spec::resolve(vec![parsed], &f.vault_path()).unwrap();
     let vault = &resolved.vaults[0];
     assert!(
@@ -171,6 +191,16 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
             .readings
             .iter()
             .any(|r| r.entity == "#focus" && r.profile == "decision_trace")
+    );
+    assert!(
+        vault
+            .readings
+            .iter()
+            .find(|r| r.entity == "#focus")
+            .unwrap()
+            .definition
+            .is_none(),
+        "built-in profile references must not become frozen custom definitions"
     );
     assert_eq!(vault.learning.budget, Some(3));
     assert_eq!(vault.learning.sample.as_deref(), Some("across_time"));

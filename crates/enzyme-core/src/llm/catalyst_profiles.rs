@@ -13,6 +13,10 @@
 pub struct CatalystProfile {
     pub key: &'static str,
     pub display_name: &'static str,
+    /// Public explanation of how this lens changes the way Enzyme reads material.
+    /// Suitable for generated configuration, selection UI, and documentation.
+    pub user_description: &'static str,
+    /// Detailed generation guidance supplied to the model.
     pub description: &'static str,
     pub guidance_lines: &'static [&'static str],
     pub sample_prompts: &'static [&'static str],
@@ -128,6 +132,7 @@ pub const CATALYST_FORMATS: &[&CatalystFormat] = &[&FORMAT_QUESTION, &FORMAT_THE
 pub const PROFILE_PREFERENCE_EVIDENCE: CatalystProfile = CatalystProfile {
     key: "preference_evidence",
     display_name: "Preference Evidence",
+    user_description: "Read activity and feedback as evidence of stable preferences: what worked or failed, which constraints mattered, and which adjustments keep recurring.",
     description: "You create retrieval handles for stable preference signals across activity logs: what worked, \
 what failed, what the user repeated, adapted, avoided, reduced, intensified, or chose under constraint. \
 The domain can be cooking, design, product behavior, agent traces, or any log where taste and preference \
@@ -159,6 +164,7 @@ are inferred from concrete actions.",
 pub const PROFILE_TENSION_TRACE: CatalystProfile = CatalystProfile {
     key: "tension_trace",
     display_name: "Tension Trace",
+    user_description: "Read this material for unresolved pressure: costs, assumptions, contradictions, avoided tradeoffs, and the positions that keep pulling against each other.",
     description: "You create retrieval handles for costs, assumptions, contradictions, avoided tradeoffs, and live \
 frictions. This lens is useful for personal reflection, technical uncertainty, design disagreement, strategy, \
 and any material where the important retrieval target is the unresolved pressure rather than the surface topic.",
@@ -190,6 +196,7 @@ and any material where the important retrieval target is the unresolved pressure
 pub const PROFILE_RESONANCE_TRACE: CatalystProfile = CatalystProfile {
     key: "resonance_trace",
     display_name: "Resonance Trace",
+    user_description: "Read saved material through its connection to active work: what repeatedly draws attention, challenges settled thinking, or gives language to an unfinished thread.",
     description: "You create retrieval handles for reference material that keeps connecting to the user's own \
 thinking. Imported highlights, saved articles, research notes, design references, and inspiration boards are \
 valuable because they reveal what repeatedly draws attention and where it resonates with active work.",
@@ -220,6 +227,7 @@ valuable because they reveal what repeatedly draws attention and where it resona
 pub const PROFILE_RELATIONAL: CatalystProfile = CatalystProfile {
     key: "relational",
     display_name: "Relational",
+    user_description: "Read people notes for the meaning and movement of relationships: what each connection gives or asks, which dynamics repeat, and what could move it forward.",
     description: "You surface the value in relationships and what might move them forward. Not just \
 tracking contacts, but understanding what each relationship means, what patterns show up \
 across relationships, and where there's energy for the next meaningful step. You help \
@@ -251,6 +259,7 @@ users reflect on who matters and why.",
 pub const PROFILE_OPERATIONAL: CatalystProfile = CatalystProfile {
     key: "operational",
     display_name: "Operational",
+    user_description: "Read project material for what affects progress: what is stuck, what keeps returning unresolved, which decisions lack an owner, and what is actually working.",
     description: "You surface what's stuck, what needs attention, and what's actually working. Projects \
 accumulate notes but lose clarity. Meetings happen but actions slip. Your catalysts cut \
 through the pile to find what's unresolved, what's blocking progress, and what the user \
@@ -282,6 +291,7 @@ might be avoiding.",
 pub const PROFILE_DECISION_TRACE: CatalystProfile = CatalystProfile {
     key: "decision_trace",
     display_name: "Decision Trace",
+    user_description: "Read this material as a trail of choices: which alternatives were considered, what constraints made one path win, and what evidence could reopen it.",
     description: "You create retrieval handles for bets, options, reversals, rejected alternatives, assumptions, \
 constraints, and evidence thresholds. This lens works across technical decisions, product strategy, canvas \
 design choices, agent traces, architecture logs, and any domain where the artifact records why one path won.",
@@ -311,6 +321,7 @@ design choices, agent traces, architecture logs, and any domain where the artifa
 pub const PROFILE_REFLECTIVE: CatalystProfile = CatalystProfile {
     key: "reflective",
     display_name: "Reflective",
+    user_description: "Read entries across time for what keeps returning, what is changing, and what may be ready to become a decision, conversation, or piece of work.",
     description: "You surface what's emerging and what's ready. Journals capture the raw material of \
 thinking. Creative work develops over time. Your catalysts notice patterns across \
 entries, probe what keeps coming back, and sense when something is ready to become \
