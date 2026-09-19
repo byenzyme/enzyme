@@ -7,8 +7,6 @@
 [![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
 
-[Website](https://memory.enzyme.garden) · [Get started](#get-started)
-
 </div>
 
 Enzyme introduces a compile step for your Markdown wiki that:
@@ -66,16 +64,6 @@ App plugins are optional and installed separately inside Claude Code or Codex:
 claude plugin marketplace add useenzyme/enzyme
 claude plugin install enzyme
 ```
-
-### MCP server
-
-If you prefer MCP over the plugin, Enzyme ships a stdio MCP server that works with any MCP-compatible client (Claude Desktop, Cursor, etc):
-
-```bash
-claude mcp add enzyme -- enzyme mcp
-```
-
-The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you can initialize and explore your vault entirely from the client without running CLI commands separately.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
@@ -209,15 +197,3 @@ The first configured vault on a machine initializes without login. Refresh, publ
 To bring your own OpenAI-compatible key, pass `--use-env-llm`, which reads `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. Without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
 
 `enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).
-
-## Requirements
-
-- A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
-- macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
-- First vault init works out of the box via Enzyme's hosted bootstrap; login is used for refresh, publishing, account credits, and additional vaults. You can also bring your own OpenAI-compatible key with `--use-env-llm`.
-
-## Links
-
-- [memory.enzyme.garden](https://memory.enzyme.garden) — landing page
-- [Docs](https://memory.enzyme.garden/docs) — how it works, catalysts, target search, for teams
-- [Setup guide](https://memory.enzyme.garden/setup) — install and configure
