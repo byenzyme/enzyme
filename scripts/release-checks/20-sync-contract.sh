@@ -34,8 +34,15 @@ for pj in "$REPO_ROOT"/plugin/plugins/enzyme/.claude-plugin/plugin.json \
   fi
 done
 
-# install.sh parity with sibling repos, when they are checked out locally
-for sibling in "$HOME/Hacks/enzyme/install.sh" "$HOME/Hacks/enzyme-site/public/install.sh"; do
+# install.sh parity with sibling repos, when they are checked out locally.
+# Checkout roots differ per machine, so search the known layouts rather than
+# only the macOS one; a path that matches nothing skips silently and would let
+# the copies drift unnoticed.
+sibling_candidates=()
+for root in "$HOME/Hacks" /workspace/projects; do
+  sibling_candidates+=("$root/enzyme/install.sh" "$root/enzyme-site/public/install.sh")
+done
+for sibling in "${sibling_candidates[@]}"; do
   if [ -f "$sibling" ]; then
     # The site copy carries a usage-comment header; compare bodies from the
     # first non-comment line.
