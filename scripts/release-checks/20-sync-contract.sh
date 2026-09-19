@@ -14,6 +14,8 @@ check "workspace skill mirror in sync" \
   python3 "$REPO_ROOT/scripts/sync-workspace-setup-skill.py" --check
 check "agent runtime skill in sync" \
   python3 "$REPO_ROOT/scripts/sync-agent-runtime-skill.py" --check
+check "public README mirror in sync" \
+  python3 "$REPO_ROOT/scripts/sync-public-readme.py" --check
 check "source installers in sync" \
   cmp "$REPO_ROOT/plugin/install.sh" "$REPO_ROOT/plugin/agent/install.sh"
 check "installers preserve existing ~/.enzyme data" \
