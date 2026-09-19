@@ -1380,6 +1380,23 @@ pub async fn run_init(
             eprintln!();
         }
         eprintln!();
+        // The Try line below sends the user to their agent, which is useless until
+        // the agent has Enzyme's instructions. Say so before suggesting it, and name
+        // what the install writes so the edit is not a surprise.
+        if !super::agents::agent_instructions_installed(vault_path) {
+            eprintln!(
+                "  {}Your agent can't see this vault yet.{} Install instructions with:",
+                crossterm::style::SetForegroundColor(crossterm::style::Color::White),
+                crossterm::style::ResetColor,
+            );
+            eprintln!(
+                "    {}enzyme install claude{}          (also: codex, hermes, openclaw)",
+                crossterm::style::SetForegroundColor(crate::display::colors::ENZYME_PURPLE),
+                crossterm::style::ResetColor,
+            );
+            eprintln!("    Adds a marked section to AGENTS.md and skills under .claude/skills/");
+            eprintln!();
+        }
         eprintln!(
             "  {}Try:{} claude {}\"explore with enzyme and tell me what i'm not seeing\"{}",
             crossterm::style::SetForegroundColor(crossterm::style::Color::White),

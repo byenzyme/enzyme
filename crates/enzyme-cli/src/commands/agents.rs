@@ -381,6 +381,20 @@ const CONTEXT_FILES: &[&str] = &[
     ".cursorrules",
 ];
 
+/// Whether any agent context file in this workspace already carries Enzyme's
+/// marked section.
+///
+/// `init` uses this to decide whether to suggest `enzyme install`. It deliberately
+/// checks the marker rather than the presence of `AGENTS.md`, `CLAUDE.md`, or a
+/// skills directory: those exist in plenty of workspaces for unrelated reasons, and
+/// the installed instructions say not to treat them as proof of setup.
+pub fn agent_instructions_installed(vault_path: &Path) -> bool {
+    CONTEXT_FILES.iter().any(|name| {
+        fs::read_to_string(vault_path.join(name))
+            .is_ok_and(|content| content.contains(MARKER_START))
+    })
+}
+
 fn find_context_file_for_target(vault_path: &Path, target: AgentTarget) -> PathBuf {
     if matches!(target, AgentTarget::Codex | AgentTarget::Claude) {
         return vault_path.join("AGENTS.md");
@@ -649,5 +663,40 @@ mod tests {
         unsafe {
             env::remove_var("OPENCLAW_HOME");
         }
+    }
+
+    #[test]
+    fn instruction_detection_keys_on_the_marker_not_the_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        assert!(!agent_instructions_installed(vault));
+
+        // A workspace can have these files for unrelated reasons; that is not setup.
+        fs::write(vault.join("AGENTS.md"), "# Team conventions\n").unwrap();
+        fs::write(vault.join("CLAUDE.md"), "Cite filenames.\n").unwrap();
+        assert!(!agent_instructions_installed(vault));
+
+        // The marked section is what counts, in any supported context file.
+        fs::write(
+            vault.join("AGENTS.md"),
+            format!("# Team conventions\n\n{MARKER_START}\nEnzyme\n{MARKER_END}\n"),
+        )
+        .unwrap();
+        assert!(agent_instructions_installed(vault));
+    }
+
+    #[test]
+    fn a_real_install_satisfies_detection_and_preserves_existing_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        fs::write(vault.join("CLAUDE.md"), "# Research vault\n\nCite filenames.\n").unwrap();
+
+        write_agents_section(vault, AgentTarget::Claude, "## Enzyme Workspace Context").unwrap();
+        ensure_claude_import(vault, &vault.join("AGENTS.md")).unwrap();
+
+        assert!(agent_instructions_installed(vault));
+        let claude = fs::read_to_string(vault.join("CLAUDE.md")).unwrap();
+        assert!(claude.starts_with("@AGENTS.md\n\n"));
+        assert!(claude.contains("Cite filenames."));
     }
 }
