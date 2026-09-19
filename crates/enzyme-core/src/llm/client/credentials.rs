@@ -13,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
-use super::{
-    Backend, DEFAULT_BASE_URL, DEFAULT_MODEL, LOCAL_BASE_URL_SCHEME, LlmClient,
-    completion_http_client,
-};
+use super::{Backend, DEFAULT_MODEL, LOCAL_BASE_URL_SCHEME, LlmClient, completion_http_client};
 use crate::config::enzyme_config::{CatalystMode, EnzymeConfig};
 
 const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -56,7 +53,7 @@ pub enum LlmCredentialMode {
     Local,
     /// Use Enzyme hosted bootstrap/auth, bypassing installed local models.
     Hosted,
-    /// Use OPENAI_*/OPENROUTER_* env configuration only.
+    /// Use OPENAI_* environment configuration only.
     Env,
 }
 
@@ -649,7 +646,7 @@ async fn fetch_free_config_from(
 
     if identity.authorization.is_none() && matches!(resp.status().as_u16(), 401 | 403) {
         bail!(
-            "Enzyme anonymous hosted bootstrap is unavailable; retry later or pass `--use-env-llm` to intentionally use OPENAI_API_KEY or OPENROUTER_API_KEY."
+            "Enzyme anonymous hosted bootstrap is unavailable; retry later or pass `--use-env-llm` to intentionally use OPENAI_API_KEY."
         );
     }
 
@@ -694,8 +691,6 @@ fn first_env_value<'a>(
 
 fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Option<ResolvedConfig>> {
     let openai_key = first_env_value(["OPENAI_API_KEY"], &get_env);
-    let openrouter_key = first_env_value(["OPENROUTER_API_KEY"], &get_env);
-
     if let Some(key) = openai_key {
         let base_url = first_env_value(["OPENAI_BASE_URL"], &get_env)
             .unwrap_or_else(|| OPENAI_DEFAULT_BASE_URL.to_string());
@@ -711,27 +706,7 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
         }));
     }
 
-    if let Some(key) = openrouter_key {
-        let base_url = first_env_value(["OPENROUTER_BASE_URL"], &get_env)
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let model = first_env_value(["OPENROUTER_MODEL"], &get_env)
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        debug!("Resolved API key from OPENROUTER_API_KEY (base_url={base_url}, model={model})");
-        return Ok(Some(ResolvedConfig {
-            api_key: key,
-            base_url,
-            model,
-            provider: ConfigProvider::Env,
-            expires_at: None,
-        }));
-    }
-
-    for var in [
-        "OPENAI_BASE_URL",
-        "OPENAI_MODEL",
-        "OPENROUTER_BASE_URL",
-        "OPENROUTER_MODEL",
-    ] {
+    for var in ["OPENAI_BASE_URL", "OPENAI_MODEL"] {
         if get_env(var).is_some() {
             warn!("{var} is set but no LLM API key env var is set — ignoring partial env config");
             break;
@@ -844,7 +819,7 @@ fn hosted_config_unavailable_message(cause: &anyhow::Error) -> String {
     format!(
         "{cause:#}. No hosted Enzyme LLM config is available — run `enzyme login` and \
          check network access, or pass `--use-env-llm` to intentionally \
-         use OPENAI_API_KEY or OPENROUTER_API_KEY."
+         use OPENAI_API_KEY."
     )
 }
 
@@ -911,8 +886,8 @@ pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<Reso
         LlmCredentialMode::Hosted => resolve_hosted_api_config().await,
         LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "No env LLM config found. Set OPENAI_API_KEY or OPENROUTER_API_KEY, \
-                 or omit `--use-env-llm` to use Enzyme hosted credits."
+                "No env LLM config found. Set OPENAI_API_KEY, or omit \
+                 `--use-env-llm` to use Enzyme hosted credits."
             )
         }),
     }
@@ -1124,16 +1099,6 @@ mod tests {
             credits: Some(0.0),
         });
         assert!(legacy.downcast_ref::<EnzymeCreditsExhausted>().is_some());
-    }
-
-    #[test]
-    fn openrouter_env_uses_openrouter_defaults() {
-        let config = resolved_env_config(env(&[("OPENROUTER_API_KEY", "openrouter-key")]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(config.base_url, DEFAULT_BASE_URL);
-        assert_eq!(config.model, DEFAULT_MODEL);
-        assert!(matches!(config.provider, ConfigProvider::Env));
     }
 
     #[test]

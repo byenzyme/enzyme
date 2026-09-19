@@ -88,7 +88,7 @@ enum Commands {
         #[arg(long, hide = true)]
         stream_partial_catalysts: bool,
 
-        /// Use OPENAI_*/OPENROUTER_* env LLM credentials instead of Enzyme hosted credits.
+        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
         #[arg(long)]
         use_env_llm: bool,
 
@@ -115,7 +115,7 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
-        /// Use OPENAI_*/OPENROUTER_* env LLM credentials instead of Enzyme hosted credits.
+        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
         #[arg(long)]
         use_env_llm: bool,
 
@@ -199,7 +199,7 @@ enum Commands {
         /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
         #[arg(long)]
         write_config: bool,
-        /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OpenRouter credentials)
+        /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OPENAI_API_KEY and an OpenRouter OPENAI_BASE_URL)
         #[arg(long)]
         jev: bool,
     },

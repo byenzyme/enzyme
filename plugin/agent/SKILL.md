@@ -9,7 +9,7 @@ description: >
 license: MIT
 compatibility: Requires shell access (macOS arm64/x86_64, Linux x86_64/arm64). Install the enzyme CLI if it is not on PATH.
 allowed-tools: Bash Read Glob Grep
-metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENROUTER_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.6.0", "homepage": "https://memory.enzyme.garden" }
+metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv": "OPENAI_API_KEY", "requires": { "anyBins": ["enzyme"] }, "install": [{ "id": "curl", "kind": "download", "url": "https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh", "bins": ["enzyme"], "label": "Install enzyme (curl)" }] }, "author": "jshph", "version": "0.6.0", "homepage": "https://memory.enzyme.garden" }
 ---
 
 # Enzyme
@@ -27,7 +27,7 @@ Auth and provider safety: let Enzyme decide when auth is needed. Do not prefligh
 Never print API key values. Only when the user explicitly requests their own provider, inspect which LLM environment variable names exist before `enzyme init`:
 
 ```bash
-env | cut -d= -f1 | grep -E '^(OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER_MODEL|ENZYME_JEV_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'
+env | cut -d= -f1 | grep -E '^(ENZYME_JEV_MODEL|OPENAI_API_KEY|OPENAI_BASE_URL|OPENAI_MODEL|ENZYME_LOCAL_MODEL)$'
 ```
 
 Enzyme ignores inherited LLM env keys by default. Do not unset env vars as a workaround, and do not silently spend the user's personal OpenAI/OpenRouter key just because it exists in the shell. If `OPENAI_API_KEY` is present, warn that using env credentials intentionally should normally include the complete OpenAI-compatible triple: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. A bare `OPENAI_API_KEY` falls back to OpenAI defaults, which can produce unauthorized/provider-mismatch errors when the key actually belongs to OpenRouter, a local proxy, or another compatible provider. If only model/base-url vars are present without a matching key, treat it as partial env config and do not use it.

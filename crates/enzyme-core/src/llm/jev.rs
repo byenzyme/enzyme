@@ -1,5 +1,6 @@
-//! Jev through OpenRouter's Decisions API. This shares OpenRouter credentials
-//! with catalyst generation, but uses a distinct endpoint and model setting.
+//! Jev through OpenRouter's Decisions API. This shares the OpenAI-compatible
+//! provider configuration with catalyst generation, but uses a distinct
+//! endpoint and model setting.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -153,7 +154,7 @@ impl JevClient {
     /// route it to OpenRouter's Decisions endpoint with a stage-specific model.
     pub fn from_env() -> Result<Self> {
         let config = resolve_env_api_config()?.context(
-            "Jev selection requires OPENAI_API_KEY/OPENAI_BASE_URL or OPENROUTER_API_KEY",
+            "Jev selection requires OPENAI_API_KEY and an OPENAI_BASE_URL pointing at OpenRouter",
         )?;
         let model = std::env::var("ENZYME_JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.into());
         let endpoint = decisions_endpoint(&config.base_url)?;

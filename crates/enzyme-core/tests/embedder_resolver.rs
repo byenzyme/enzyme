@@ -23,9 +23,6 @@ impl HostedEnv {
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",
             "OPENAI_MODEL",
-            "OPENROUTER_API_KEY",
-            "OPENROUTER_BASE_URL",
-            "OPENROUTER_MODEL",
             "ENZYME_LOCAL_ENGINE",
         ];
         let saved = names

@@ -42,7 +42,6 @@ setup_vault_copy() {
 # under $HOME, so HOME alone does not isolate credential state.
 enz() {
   env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u OPENAI_MODEL \
-      -u OPENROUTER_API_KEY -u OPENROUTER_BASE_URL -u OPENROUTER_MODEL \
       HOME="$ISO_HOME" ENZYME_HOME="$ISO_HOME/.enzyme" \
       "$ENZYME_BIN" "$@"
 }

@@ -60,9 +60,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         CatalystMode::Local => "local-missing",
         CatalystMode::Hosted => "hosted",
     };
-    let api_key_configured = ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]
-        .iter()
-        .any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()));
+    let api_key_configured = std::env::var("OPENAI_API_KEY").is_ok_and(|value| !value.is_empty());
 
     let model_path = enzyme_core::embedding::model_description(&paths.home);
 

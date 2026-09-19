@@ -96,12 +96,11 @@ If no entities are configured, Enzyme selects from trending analysis automatical
 
 ## API keys
 
-Enzyme needs an API key only for catalyst generation. By default, `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` / `OPENROUTER_*` variables so it does not silently spend your personal key. The first configured vault on a machine can initialize without login; refresh, publishing, account credits, and additional vaults require `enzyme login`.
+Enzyme needs an API key only for catalyst generation. By default, `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not silently spend your personal key. The first configured vault on a machine can initialize without login; refresh, publishing, account credits, and additional vaults require `enzyme login`.
 
-If you intentionally want to bring your own OpenAI/OpenRouter/OpenAI-compatible key, pass `--use-env-llm`. In that mode Enzyme reads:
+If you intentionally want to bring your own OpenAI-compatible key, pass `--use-env-llm`. In that mode Enzyme reads:
 
-1. `OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL`, `OPENAI_MODEL`)
-2. `OPENROUTER_API_KEY` env var (+ optional `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL`)
+`OPENAI_API_KEY` env var (+ optional `OPENAI_BASE_URL`, `OPENAI_MODEL`)
 
 If no hosted or env key is available, catalyst generation is skipped and the rest of the pipeline (indexing, embedding, local search) still works.
 
@@ -131,7 +130,7 @@ enzyme model verify      # verify the selected file and registry checksum
 resolved environment provider configuration, including the common
 `OPENAI_API_KEY` + `OPENAI_BASE_URL=https://openrouter.ai/api/v1` form. Catalyst
 generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default
-`typesafe/jev-1.13`). The existing `OPENROUTER_*` aliases remain supported.
+`typesafe/jev-1.13`).
 
 The default fine-tuned weights are hosted on Enzyme's public GitHub release, so
 `enzyme model install` requires no account or API token.

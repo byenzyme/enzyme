@@ -206,8 +206,8 @@ fn command(vault: &std::path::Path, home: &std::path::Path, base: &str) -> Comma
         .arg(vault)
         .arg("scan")
         .env("ENZYME_HOME", home)
-        .env("OPENROUTER_API_KEY", "test-key")
-        .env("OPENROUTER_BASE_URL", base);
+        .env("OPENAI_API_KEY", "test-key")
+        .env("OPENAI_BASE_URL", base);
     command
 }
 
