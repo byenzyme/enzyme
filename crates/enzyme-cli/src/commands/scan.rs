@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
 
@@ -23,71 +23,25 @@ use enzyme_core::sqlite_source::validate_sqlite_source;
 /// This command intentionally does not read the Enzyme DB. Its job is to
 /// propose the config that init should later consume and validate configured
 /// source databases read-only.
-pub fn run_scan(vault_path: &Path, write_config: bool) -> Result<()> {
+/// Report what Enzyme can see. Analysis only: `enzyme compile` owns writing
+/// configuration, so there is one way for settings to reach disk.
+pub fn run_scan(vault_path: &Path) -> Result<()> {
     let docs = process_docs(vault_path)?;
-    let mut suggestion = build_scan_suggestion(vault_path, &docs)?;
-
-    if write_config {
-        let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-        if EnzymeConfig::markdown_roots(vault_path)?.is_empty() {
-            append_message(
-                &mut suggestion.message,
-                "--write-config only derives settings from a configured Markdown source; SQLite source contracts are unchanged",
-            );
-        } else if config.has_curated_entities() {
-            suggestion.status = ScanStatus::AlreadyConfigured;
-            append_message(
-                &mut suggestion.message,
-                "config already has entities for this vault; not overwriting",
-            );
-        } else {
-            config.excluded_folders = suggestion.excluded_folders.clone();
-            config.set_auto_selected_entities(vault_path, suggestion.entities.clone())?;
-            suggestion.status = ScanStatus::Written;
-            suggestion.config_path =
-                Some(EnzymeConfig::config_path()?.to_string_lossy().to_string());
-            suggestion.current_config = current_config_summary(vault_path)?;
-        }
-    }
-
+    let suggestion = build_scan_suggestion(vault_path, &docs)?;
     println!("{}", serde_json::to_string(&suggestion)?);
     Ok(())
 }
 
 /// Explicit hosted setup experiment. Preview does not create an index or write
 /// config. Existing curated settings are never overwritten by --write-config.
-pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
+pub async fn run_scan_jev(vault_path: &Path) -> Result<()> {
     let start = std::time::Instant::now();
-    let mut config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-    ensure!(
-        !write_config || !config.has_curated_entities(),
-        "This workspace already has entities. Run scan --jev without --write-config to review a proposal; existing settings were not changed."
-    );
     let generated = generate_jev_setup(vault_path).await?;
     let suggestion = generated.suggestion;
     let proposal = generated.proposal;
     let scan_ms = generated.scan_ms;
     let proposal_ms = start.elapsed().as_millis();
     let config_toml = proposal.entities_toml()?;
-    if write_config {
-        ensure!(
-            !proposal.entities.is_empty(),
-            "Jev selected no entities; refusing to write an empty configuration. Review the scan evidence."
-        );
-        // Reload so a concurrently added curated setup is not blindly replaced.
-        config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-        ensure!(
-            !config.has_curated_entities(),
-            "Configuration acquired curated entities during selection; refusing to overwrite them"
-        );
-        config.catalyzed_entities = proposal.entities.clone();
-        for folder in &suggestion.excluded_folders {
-            if !config.excluded_folders.contains(folder) {
-                config.excluded_folders.push(folder.clone());
-            }
-        }
-        config.save(vault_path)?;
-    }
     let current_config = current_config_summary(vault_path)?;
     println!(
         "{}",
@@ -95,7 +49,7 @@ pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
             "schema_version": "scan.jev.v1",
             "vault_path": suggestion.vault_path,
             "files": suggestion.files,
-            "status": if write_config { "written" } else { "suggested" },
+            "status": "suggested",
             "scan_ms": scan_ms,
             "proposal_ms": proposal_ms,
             "total_ms": start.elapsed().as_millis(),
@@ -103,7 +57,7 @@ pub async fn run_scan_jev(vault_path: &Path, write_config: bool) -> Result<()> {
             "current_config": current_config,
             "source_checks": suggestion.source_checks,
             "excluded_folders": suggestion.excluded_folders,
-            "config_path": if write_config { Some(EnzymeConfig::config_path()?.to_string_lossy().to_string()) } else { None },
+            "config_path": serde_json::Value::Null,
             "suggested_entities_toml": config_toml,
             "selection": proposal,
         })
@@ -382,8 +336,6 @@ struct ScanSuggestion {
 #[serde(rename_all = "snake_case")]
 enum ScanStatus {
     Suggested,
-    Written,
-    AlreadyConfigured,
 }
 
 #[derive(Debug, Serialize)]
@@ -2006,7 +1958,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_write_config_persists_base_folders_not_descendants_or_page_children() {
+    fn scan_suggests_base_folders_not_descendants_or_page_children() {
         let _lock = ENV_LOCK.lock().unwrap();
         let old = std::env::var("ENZYME_HOME").ok();
         let home = TempDir::new().unwrap();
@@ -2034,10 +1986,14 @@ mod tests {
             std::fs::write(path, content).unwrap();
         }
 
-        run_scan(vault.path(), true).unwrap();
-        let config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
-        let refs = config_entity_refs(&config.catalyzed_entities);
+        // Assert on the suggestion itself. Scan no longer writes configuration,
+        // so this covers the selection rollup rather than a persistence path;
+        // `enzyme compile` consumes exactly these entities.
+        let docs = process_docs(vault.path()).unwrap();
+        let refs = build_scan_suggestion(vault.path(), &docs).unwrap().entities;
 
+        // Analysis must leave the configured SQLite source untouched.
+        let config = EnzymeConfig::load(vault.path()).unwrap().unwrap();
         assert_eq!(config.sources.get("entries"), Some(&original_source));
 
         assert!(refs.contains(&"folder:readwise".to_string()), "{refs:?}");

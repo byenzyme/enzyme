@@ -57,7 +57,7 @@ SKILL_ANCHORS = [
     "runtime installation has already succeeded",
     "Downloading a model or switching modes requires",
     "approval reviewer",
-    "`scan --write-config` is a settings mutation",
+    "`compile` is a settings mutation",
     "Do not inspect, print, unset, or rely on API-key environment variables",
     "Already usable",
     "Weakly indexable",

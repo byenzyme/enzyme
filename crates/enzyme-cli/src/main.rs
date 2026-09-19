@@ -194,11 +194,8 @@ enum Commands {
         command: ModelCommands,
     },
 
-    /// Scan vault structure and suggest config without initializing
+    /// Report what Enzyme can see in a vault; writes nothing
     Scan {
-        /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
-        #[arg(long)]
-        write_config: bool,
         /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OPENAI_API_KEY and an OpenRouter OPENAI_BASE_URL)
         #[arg(long)]
         jev: bool,
@@ -560,11 +557,11 @@ async fn main() -> Result<()> {
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan { write_config, jev } => {
+        Commands::Scan { jev } => {
             if jev {
-                commands::scan::run_scan_jev(&vault_path, write_config).await?;
+                commands::scan::run_scan_jev(&vault_path).await?;
             } else {
-                commands::scan::run_scan(&vault_path, write_config)?;
+                commands::scan::run_scan(&vault_path)?;
             }
         }
         Commands::Install { target, source } => {

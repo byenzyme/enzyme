@@ -63,7 +63,7 @@ Mechanism facts:
 - Retrieval compounds when related notes share one home and dedupes by file; scattered notes cannot stack as strongly.
 - Undated notes fall out of time-aware ranking, and only the most-recent slice is embedded; old or undated content can go dark.
 - Frequency and recency rank entities, so a large recent generated/reference/template folder can outrank real notes. Treat authored reference material as real content unless evidence says otherwise.
-- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single file of dated entries** — a `journal.md` that grows by appending, or a generated transcript with day-by-day sections — is different: without recognition Enzyme would read it as one note on one date, collapsing its internal timeline. Enzyme auto-recognizes this shape structurally and broadly: date headers may be ISO (`2026-07-28`), numeric (`07/28/2026`), prose (`July 28, 2026`), or weekday-prefixed (`Monday, July 28, 2026`), in mostly one chronological direction, with at least three entries that have real content beneath their headers (a page that merely *lists* dates, a metrics table, or an essay citing dates does not qualify). Recognized files are read as internal timelines automatically. What recognition looks like to the user: `scan --write-config` records each recognized file as a `log:` line in their settings, next to the folders and tags — a legible ledger of what Enzyme noticed. Removing a line withdraws the file from anchor treatment; adding one promotes a log the detector missed or judged too small. Enzyme never splits or edits the file itself, and never writes recognition into the note's own metadata.
+- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single file of dated entries** — a `journal.md` that grows by appending, or a generated transcript with day-by-day sections — is different: without recognition Enzyme would read it as one note on one date, collapsing its internal timeline. Enzyme auto-recognizes this shape structurally and broadly: date headers may be ISO (`2026-07-28`), numeric (`07/28/2026`), prose (`July 28, 2026`), or weekday-prefixed (`Monday, July 28, 2026`), in mostly one chronological direction, with at least three entries that have real content beneath their headers (a page that merely *lists* dates, a metrics table, or an essay citing dates does not qualify). Recognized files are read as internal timelines automatically. What recognition looks like to the user: `compile` records each recognized file as a `learn questions from log "<name>"` reading in their program, next to the folders and tags — a legible ledger of what Enzyme noticed. Removing a line withdraws the file from anchor treatment; adding one promotes a log the detector missed or judged too small. Enzyme never splits or edits the file itself, and never writes recognition into the note's own metadata.
 
 Before you read anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. After diagnosis, repeat both checks, prove byte identity, and clean up the snapshots. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
 
@@ -85,9 +85,9 @@ State each invariant, then prove it:
 - **Full backup before first mutation**: create a self-sufficient backup of every affected file before moving it, stamping it, or changing a template. A temporary backup workspace is acceptable if it is retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
 - **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
 
-Only moves/renames, date-repair frontmatter stamps, settings edits (`log:` lines, `frontmatter_link_fields`, exclusions, targets in Enzyme's config), and one small change to a template used for new notes are allowed. The user must explicitly accept every change. Each change must follow evidence already present in filenames, metadata, exact entity matches, or the user's established template conventions. Configure a frontmatter link field only when scan/file evidence shows it is an established identity/reference field with scalar or list string values; never map broad metadata such as `status`, `type`, `aliases`, IDs, or arbitrary objects. A template change may make a future date, link, or existing field easier to add; it never authorizes edits to existing note bodies. No invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
+Only moves/renames, date-repair frontmatter stamps, settings edits (`log` readings, reference fields, exclusions, targets in Enzyme's program), and one small change to a template used for new notes are allowed. The user must explicitly accept every change. Each change must follow evidence already present in filenames, metadata, exact entity matches, or the user's established template conventions. Configure a frontmatter link field only when scan/file evidence shows it is an established identity/reference field with scalar or list string values; never map broad metadata such as `status`, `type`, `aliases`, IDs, or arbitrary objects. A template change may make a future date, link, or existing field easier to add; it never authorizes edits to existing note bodies. No invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
 
-Log recognition is a **settings edit, never a note edit**. When a single file of dated entries is confirmed (see the two-shapes mechanism fact), the remedy is its `log:` line in Enzyme's config: keep the line `scan --write-config` already recorded, or add one for a real recurring log the detector missed (too few entries, say). Narrate the lines at the gate in the user's terms — "Enzyme recognized these files as running logs and reads each as a timeline; here are their lines, remove any I misread" — and treat removal as a first-class correction, not a failure. Because a false recognition is one deletable line in one settings file, this is the lightest mutation in the skill; it still passes through consent because it changes what Enzyme anchors on. Do not stamp `type:` metadata into the user's files to mark logs — the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their settings, not buried in per-file metadata. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
+Log recognition is a **settings edit, never a note edit**. When a single file of dated entries is confirmed (see the two-shapes mechanism fact), the remedy is its `from log "<name>"` reading in Enzyme's program: keep the reading `compile` already recorded, or add one for a real recurring log the detector missed (too few entries, say). Narrate the lines at the gate in the user's terms — "Enzyme recognized these files as running logs and reads each as a timeline; here are their lines, remove any I misread" — and treat removal as a first-class correction, not a failure. Because a false recognition is one deletable line in one settings file, this is the lightest mutation in the skill; it still passes through consent because it changes what Enzyme anchors on. Do not stamp `type:` metadata into the user's files to mark logs — the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their settings, not buried in per-file metadata. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
 
 Never delete a user's file, not even an exact duplicate. If a duplicate must be retired, move it to a backup/retired location with a non-Markdown suffix and record the move so revert restores it.
 
@@ -167,27 +167,33 @@ consent requirement still applies.
 
 ## Diagnose Read-Only, Then Initialize After Consent
 
-Before the gate, diagnose without writing settings:
+Before the gate, diagnose and preview without writing settings:
 
 ```bash
 "$ENZYME_BIN" -p "<vault path>" doctor
 "$ENZYME_BIN" -p "<vault path>" scan
-# Use scan output plus doctor/DB evidence to diagnose what Enzyme can see.
+# Evidence: what Enzyme can and cannot see. Writes nothing.
+"$ENZYME_BIN" -p "<vault path>" compile --dry-run
+# The proposed program, exactly as it would be written. Writes nothing.
 ```
 
-`scan --write-config` is a settings mutation. Do not run it, `init`, `refresh`, or
-generation before the gate. After the user accepts the narrated setup plan and
+Narrate the proposed program at the gate. `compile --dry-run` prints the same
+bytes `compile` will save, so what the user accepts is what lands.
+
+`compile` is a settings mutation. Do not run it, `init`, `refresh`, or
+generation before the gate. Selection is a hosted model call; if it is
+unavailable, stop and say setup needs connectivity rather than falling back to
+a different setup path. After the user accepts the narrated setup plan and
 generation path, back up every affected existing setting and run:
 
 ```bash
-"$ENZYME_BIN" -p "<vault path>" scan --write-config
-# Read ~/.enzyme/config.toml. This is the vault's anchor ledger: the entities
-# (folders, tags, links), any configured plain frontmatter link fields, and
-# recognized running logs (`log:` lines) that Enzyme will anchor on. Tune only
-# the minimum entity/field/log/exclusion/target choices supported by scan/doctor
-# evidence before init. If the written proposal differs materially from what the
-# user accepted at the gate, stop and reconfirm instead of initializing. This is
-# an exceptional scope change, not a routine second setup gate.
+"$ENZYME_BIN" -p "<vault path>" compile -v
+# Read ~/.enzyme/configs/<vault>-<hash>.enzyme. This is the vault's anchor
+# ledger: each `learn questions from ...` reading names what Enzyme anchors on
+# and the profile it reads that material for, alongside exclusions, reference
+# fields, and recognized running logs (`from log "<name>"`). Tune only the
+# minimum reading/profile/field/log/exclusion/target choices supported by
+# scan/doctor evidence before init.
 
 "$ENZYME_BIN" -p "<vault path>" model status
 # Compare effective mode and Network with what the user accepted. Stop if either
@@ -201,7 +207,7 @@ generation path, back up every affected existing setting and run:
 When the user accepted BYOK, append `--use-env-llm` to `init` and later
 `refresh`; never append it merely because provider variables exist.
 
-Do not skip `scan --write-config` and config review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
+Do not skip `compile` and config review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
 
 If init or generation reports a deterministic error, do not repeat the same
 command unchanged or continue to another generation command. Stop the generation
