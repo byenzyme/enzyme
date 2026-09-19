@@ -61,6 +61,11 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         CatalystMode::Hosted => "hosted",
     };
     let api_key_configured = std::env::var("OPENAI_API_KEY").is_ok_and(|value| !value.is_empty());
+    let api_access = if api_key_configured {
+        "environment"
+    } else {
+        "enzyme-managed"
+    };
 
     let model_path = enzyme_core::embedding::model_description(&paths.home);
 
@@ -121,6 +126,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "catalyst_model": local_model,
         "catalyst_model_installed": local_model_installed,
         "api_key_configured": api_key_configured,
+        "api_access": api_access,
         "last_background_refresh": last_background_refresh,
         "sources": sources,
         "update": update,
@@ -242,11 +248,13 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
                 Some(path) => println!("Embedding:  {}", path),
                 None => println!("Embedding:  not found"),
             }
-            if json["api_key_configured"].as_bool().unwrap_or(false) {
-                println!("API key:    configured");
-            } else {
-                println!("API key:    not configured");
-            }
+            println!(
+                "API access: {}",
+                match json["api_access"].as_str() {
+                    Some("environment") => "environment key",
+                    _ => "Enzyme-managed (resolved on demand)",
+                }
+            );
             if let Some(sources) = json["sources"].as_array()
                 && !sources.is_empty()
             {

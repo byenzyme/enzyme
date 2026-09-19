@@ -2,7 +2,10 @@
 //! network access required. Config must be usable by the existing selection path.
 use serde_json::{Value, json};
 use std::process::Command;
-use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate, matchers::method};
+use wiremock::{
+    Mock, MockServer, Request, Respond, ResponseTemplate,
+    matchers::{method, path},
+};
 
 struct Decisions;
 
@@ -82,6 +85,54 @@ impl Respond for Decisions {
             json!({"model":"jev-1.13.0","answers":answers,"usage":{"input_tokens":123}}),
         )
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jev_scan_uses_hosted_free_config_without_an_environment_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/llm/free-config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "api_key": "hosted-test-key",
+            "base_url": server.uri(),
+            "model": "catalyst-model"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/alpha/decisions"))
+        .respond_with(Decisions)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_root, vault, home) = fixture();
+    let output = command(&vault, &home, &server.uri())
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("OPENAI_BASE_URL")
+        .env_remove("OPENAI_MODEL")
+        .env(
+            "ENZYME_FREE_CONFIG_URL",
+            format!("{}/llm/free-config", server.uri()),
+        )
+        .env("ENZYME_API_CACHE_PATH", home.join("hosted-cache.json"))
+        .arg("--jev")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = server.received_requests().await.unwrap();
+    let decision = requests
+        .iter()
+        .find(|request| request.url.path() == "/api/alpha/decisions")
+        .unwrap();
+    assert_eq!(
+        decision.headers.get("authorization").unwrap(),
+        "Bearer hosted-test-key"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

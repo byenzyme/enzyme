@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::llm::resolve_env_api_config;
+use crate::llm::{LlmCredentialMode, resolve_api_config_for_mode, resolve_env_api_config};
 
 pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.13";
 
@@ -149,13 +149,15 @@ pub struct JevClient {
 }
 
 impl JevClient {
-    /// Compile and `scan --jev` are explicit remote operations. Resolve the
-    /// same OpenAI-compatible environment config as catalyst generation, then
-    /// route it to OpenRouter's Decisions endpoint with a stage-specific model.
-    pub fn from_env() -> Result<Self> {
-        let config = resolve_env_api_config()?.context(
-            "Jev selection requires OPENAI_API_KEY and an OPENAI_BASE_URL pointing at OpenRouter",
-        )?;
+    /// Prefer an explicit OpenAI-compatible environment override. Otherwise,
+    /// fetch the same Enzyme-managed hosted lease used by catalyst generation.
+    pub async fn resolve() -> Result<Self> {
+        let config = match resolve_env_api_config()? {
+            Some(config) => config,
+            None => resolve_api_config_for_mode(LlmCredentialMode::Hosted)
+                .await
+                .context("Jev selection could not resolve Enzyme hosted access")?,
+        };
         let model = std::env::var("ENZYME_JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.into());
         let endpoint = decisions_endpoint(&config.base_url)?;
         let url = reqwest::Url::parse(&endpoint).context("Invalid OpenRouter Decisions URL")?;
