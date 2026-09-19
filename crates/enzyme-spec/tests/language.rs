@@ -219,3 +219,30 @@ fn identical_exported_profiles_share_a_namespace_but_conflicts_fail() {
     changed.profiles.get_mut("decisions").unwrap().seek = "different".into();
     assert!(enzyme_spec::resolve(vec![one, changed], std::path::Path::new("/home/test")).is_err());
 }
+
+#[test]
+fn omitted_profiles_default_to_auto_and_roundtrip_with_reading_options() {
+    let source = r#"vault "/notes" {
+        learn questions from tag "spirit"
+        learn questions from tags { "taste" "comms" } about auto
+        learn questions from folder "people" including linked pages { question budget 12 }
+        learn questions from log "journal" { favor all periods equally }
+        learn questions from tag "bestill" about reflective
+    }"#;
+    let parsed = parse(source).unwrap();
+    let readings = &parsed.vaults[0].readings;
+    assert_eq!(readings.len(), 6);
+    assert!(
+        readings[..5]
+            .iter()
+            .all(|r| r.profile == "auto" && r.definition.is_none())
+    );
+    assert!(readings[3].include_linked_pages);
+    assert_eq!(readings[3].learning.budget, Some(12));
+    let rendered = render_program(&parsed);
+    assert!(!rendered.contains("about auto"));
+    assert!(rendered.contains("about reflective"));
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+    assert_eq!(compile(&rendered), compile(source));
+    assert!(parse(r#"vault "/notes" { learn questions from tag "x" about }"#).is_err());
+}

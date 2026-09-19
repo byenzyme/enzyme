@@ -357,11 +357,14 @@ impl Parser {
             self.need("pages")?;
             include = true;
         }
-        self.need("about")?;
-        let (profile, definition) = if self.eat("profile") {
-            ("inline".into(), Some(self.profile()?))
+        let (profile, definition) = if self.eat("about") {
+            if self.eat("profile") {
+                ("inline".into(), Some(self.profile()?))
+            } else {
+                (self.word()?, None)
+            }
         } else {
-            (self.word()?, None)
+            ("auto".into(), None)
         };
         let mut learning = if self.at("{") {
             self.learning()?
@@ -985,7 +988,7 @@ pub fn render_vault(v: &Vault) -> String {
                     .replacen("profile  {", "profile {", 1)
                     .trim_end()
             ));
-        } else {
+        } else if r.profile != "auto" {
             s.push_str(&format!("\n    about {}", r.profile));
         }
         let local = Learning {
