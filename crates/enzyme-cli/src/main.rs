@@ -199,7 +199,7 @@ enum Commands {
         /// Write suggested entities to ~/.enzyme/config.toml if this vault has no entities yet
         #[arg(long)]
         write_config: bool,
-        /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OPENROUTER_API_KEY)
+        /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OpenRouter credentials)
         #[arg(long)]
         jev: bool,
     },

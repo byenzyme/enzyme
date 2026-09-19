@@ -740,6 +740,12 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
     Ok(None)
 }
 
+/// Resolve the same explicit OpenAI-compatible environment configuration used
+/// by `--use-env-llm`, without applying the persisted local/hosted mode.
+pub fn resolve_env_api_config() -> Result<Option<ResolvedConfig>> {
+    resolved_env_config(env_value)
+}
+
 async fn resolve_hosted_api_config() -> Result<ResolvedConfig> {
     resolve_hosted_api_config_with(hosted_identity()?, api_cache_path()).await
 }

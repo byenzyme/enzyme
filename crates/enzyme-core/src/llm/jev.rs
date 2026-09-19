@@ -7,11 +7,12 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::llm::resolve_env_api_config;
+
 pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.13";
-const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 fn decisions_endpoint(base: &str) -> Result<String> {
-    let mut url = reqwest::Url::parse(base).context("Invalid OPENROUTER_BASE_URL")?;
+    let mut url = reqwest::Url::parse(base).context("Invalid provider base URL")?;
     if url.path().trim_end_matches('/') == "/api/v1" {
         url.set_path("/api/alpha/decisions");
     } else {
@@ -147,16 +148,15 @@ pub struct JevClient {
 }
 
 impl JevClient {
-    /// Compile and `scan --jev` are explicit OpenRouter operations, so they may
-    /// use the same key as catalyst generation without `--use-env-llm`.
+    /// Compile and `scan --jev` are explicit remote operations. Resolve the
+    /// same OpenAI-compatible environment config as catalyst generation, then
+    /// route it to OpenRouter's Decisions endpoint with a stage-specific model.
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("OPENROUTER_API_KEY")
-            .context("Jev selection requires OPENROUTER_API_KEY")?;
-        let model =
-            std::env::var("OPENROUTER_JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.into());
-        let base = std::env::var("OPENROUTER_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_OPENROUTER_BASE_URL.into());
-        let endpoint = decisions_endpoint(&base)?;
+        let config = resolve_env_api_config()?.context(
+            "Jev selection requires OPENAI_API_KEY/OPENAI_BASE_URL or OPENROUTER_API_KEY",
+        )?;
+        let model = std::env::var("ENZYME_JEV_MODEL").unwrap_or_else(|_| DEFAULT_JEV_MODEL.into());
+        let endpoint = decisions_endpoint(&config.base_url)?;
         let url = reqwest::Url::parse(&endpoint).context("Invalid OpenRouter Decisions URL")?;
         ensure!(
             url.username().is_empty()
@@ -171,12 +171,12 @@ impl JevClient {
                     && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))),
             "OpenRouter Decisions URL requires HTTPS except for loopback testing"
         );
-        Self::new(url.as_str(), key, model)
+        Self::new(url.as_str(), config.api_key, model)
     }
 
     fn new(endpoint: &str, api_key: String, model: String) -> Result<Self> {
-        ensure!(!api_key.trim().is_empty(), "OPENROUTER_API_KEY is empty");
-        ensure!(!model.trim().is_empty(), "OPENROUTER_JEV_MODEL is empty");
+        ensure!(!api_key.trim().is_empty(), "Jev API key is empty");
+        ensure!(!model.trim().is_empty(), "ENZYME_JEV_MODEL is empty");
         Ok(Self {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))

@@ -21,7 +21,7 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
         std::fs::write(dir.join("note.md"), "We chose a small launch to learn from real users before committing to the larger project.").unwrap();
     }
     let output = command(&vault, &home, &server.uri())
-        .env("OPENROUTER_JEV_MODEL", "typesafe/jev-test")
+        .env("ENZYME_JEV_MODEL", "typesafe/jev-test")
         .arg("--jev")
         .output()
         .unwrap();
