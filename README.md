@@ -55,14 +55,8 @@ curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | b
 cd <your markdown folder root>
 # Optional: enzyme login, or configure OpenRouter by setting OPENAI_API_KEY
 enzyme compile -v
+enzyme install claude # (or: codex, hermes)
 enzyme init
-```
-
-App plugins are optional and installed separately inside Claude Code or Codex:
-
-```bash
-claude plugin marketplace add byenzyme/enzyme
-claude plugin install enzyme
 ```
 
 Enzyme was built for knowledge bases that grow rapidly:
