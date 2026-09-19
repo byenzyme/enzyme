@@ -222,31 +222,10 @@ pub async fn run_status(vault_path: &Path) -> Result<()> {
             }
             println!("Database: {}", json["database"].as_str().unwrap_or(""));
             println!();
-            println!("Documents:  {}", json["documents"]);
-            println!("Embedded:   {}/{}", json["embedded"], json["documents"]);
-            println!("Awaiting:   {} embeddings", json["awaiting_embedding"]);
-            println!("Entities:   {}", json["entities"]);
-            println!("Catalysts:  {}", json["catalysts"]);
             if let Some(outcome) = &outcome {
                 if outcome.status == OutcomeStatus::Succeeded {
                     println!("Refreshed:  {}", format_finished_at(outcome.finished_at_ms));
                 }
-            }
-            println!("Catalysts:  {}", json["catalyst_mode"]);
-            if json["catalyst_mode"] == "local" || json["catalyst_mode"] == "local-missing" {
-                println!(
-                    "Local LLM:  {} ({})",
-                    json["catalyst_model"].as_str().unwrap_or("unknown"),
-                    if json["catalyst_model_installed"].as_bool().unwrap_or(false) {
-                        "installed"
-                    } else {
-                        "not installed"
-                    }
-                );
-            }
-            match json["model"].as_str() {
-                Some(path) => println!("Embedding:  {}", path),
-                None => println!("Embedding:  not found"),
             }
             println!(
                 "API access: {}",
