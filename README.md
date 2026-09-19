@@ -171,7 +171,7 @@ enzyme init            # index, embed, generate catalysts
 
 Selection is a model call (OpenRouter Decisions, see [API keys](#api-keys)); rendering the program is deterministic. If the vault already has a readable setup, compile validates it and leaves the file untouched, comments included.
 
-The generated program is a starting point, not a verdict. Edit it before running `init`. Later edits are picked up by `init` and `refresh` directly; rerunning `compile` is optional revalidation, not regeneration.
+Edit the generated program before running `init`. Later edits are picked up by `init` and `refresh` directly; rerunning `compile` is optional revalidation, not regeneration.
 
 ### Migrating from config.toml
 
