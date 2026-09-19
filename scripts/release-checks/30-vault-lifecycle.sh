@@ -117,13 +117,14 @@ full_tier() {
   echo "full tier: canary fixture via loginless hosted bootstrap"
 
   run_check "full: init via hosted bootstrap" -p "$WORK_VAULT" init --quiet
-  run_check "full: all docs embedded" --expect 'Embedded:   6/6' -p "$WORK_VAULT" status
-  if grep -q 'Catalysts:  0' "$OUT"; then
-    FAIL=$((FAIL + 1)); FAILED_CHECKS+=("full: catalysts generated")
-    echo "  FAIL full: catalysts generated (count is 0)" >&2
-  else
-    PASS=$((PASS + 1)); echo "  ok   full: catalysts generated"
-  fi
+  # Assert against `doctor --json`, not human `status`. The counts were removed
+  # from human status output; grepping it made "all docs embedded" fail and
+  # "catalysts generated" pass vacuously, since the absent line cannot match 0.
+  run_check "full: all docs embedded" \
+    --expect '"embedded_docs": 6' -p "$WORK_VAULT" doctor --json
+  # `doctor` reports no catalyst counts, so assert through petri, where a
+  # catalyst's "text" field appears only inside a populated catalysts array.
+  run_check "full: catalysts generated" --expect '"text"' -p "$WORK_VAULT" petri
 
   run_check "full: canary retrieval (antenna -> heliograph note)" \
     --expect 'heliograph' -p "$WORK_VAULT" catalyze "antenna mounting decision"
