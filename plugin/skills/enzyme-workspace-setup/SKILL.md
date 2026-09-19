@@ -48,9 +48,15 @@ Everything below is derived from asking these two questions honestly. Prescribe 
 
 Ground truth is Enzyme's view, not the folder's appearance. Do not tier a cluster from a file count or a folder name. A `meetings/` folder can be stale exports; a `notes/` folder can be source code.
 
-Run `"$ENZYME_BIN" doctor` when available and account for every fact it reports before tiering anything. For every claim about what Enzyme can leverage, back it with what Enzyme actually extracted. When needed, inspect `.enzyme/enzyme.db` and compare representative files in each cluster against the indexed view, especially source path, date source, and parsed date.
+Before `init`, `scan` is the ground truth: it reports what Enzyme can see without
+requiring an index. `doctor` needs an initialized vault and will only tell a
+first-time setup that the vault is uninitialized; run it after `init` and account
+for every fact it reports then. When an already-initialized vault is being
+re-checked, `doctor` and `.enzyme/enzyme.db` are available from the start — compare
+representative files in each cluster against the indexed view, especially source
+path, date source, and parsed date.
 
-A claim you can show against the doctor report or DB is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified.
+A claim you can show against `scan`, the doctor report, or the DB is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified.
 
 Every gap between how the vault looks and what Enzyme sees is a finding. The mechanism facts below explain why gaps appear. They are a lens, not a checklist. If nothing rises above "leave it alone," say **"No restructuring needed; your vault already compounds well"** and stop. Never manufacture a finding to fill a template or justify a restructure.
 
@@ -67,23 +73,28 @@ Mechanism facts:
 
 Before you read anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. After diagnosis, repeat both checks, prove byte identity, and clean up the snapshots. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
 
-Read the tiers off the program and the doctor report you already have. Do not
-walk the vault again to build them; `compile --dry-run` and `doctor` are the
-evidence, and a tier you cannot source from them is a hypothesis.
+Read the tiers off evidence you already have: the `scan` inventory and the
+generated program. Do not walk the vault again to build them, and do not reach
+for `doctor` here — `doctor` requires an initialized vault and reports nothing
+before `init`, which is the state every first-time setup is in.
 
 The useful frame is a diff: **what the program reads, what it does not, and
-why.** The program states what Enzyme will read; doctor states what Enzyme could
-see at all. Neither alone shows the gap, and the gap is what the user needs.
+why.** `scan` states what Enzyme can see at all; the program states what Enzyme
+will read. Neither alone shows the gap, and the gap is what the user needs.
 
-1. **Already usable** — a reading in the program, backed by content doctor sees.
-   Name the reading and what it now answers.
-2. **Weakly indexable** — doctor sees it, the program reads it, but the content
-   is degraded: missing dates, malformed metadata, thin bodies.
-3. **Would improve retrieval** — doctor sees it and the program does *not* read
+1. **Already usable** — a reading in the program, backed by content `scan`
+   inventoried. Name the reading and what it now answers.
+2. **Weakly indexable** — `scan` sees it and the program reads it, but the
+   content is degraded: missing dates, malformed metadata, thin bodies.
+3. **Would improve retrieval** — `scan` sees it and the program does *not* read
    it, or reads it less well than a small deterministic change would allow.
    This tier is the whole reason to keep diagnosing after compile.
 4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports,
    build outputs, foreign-domain material. Say so and leave it alone.
+
+After `init`, `doctor` becomes available and is the right tool to verify these
+tiers against the built index. Before `init` it can only tell you the vault is
+uninitialized.
 
 Raw transcripts and evidence bundles stay put. Never move, edit, or summarize raw JSON, logs, transcripts, or exports during setup. Never bulk-invent `people:` or `tags:` frontmatter from body inference.
 
@@ -181,21 +192,26 @@ consent requirement still applies.
 Before the gate, diagnose and preview without writing settings:
 
 ```bash
-"$ENZYME_BIN" -p "<vault path>" doctor
 "$ENZYME_BIN" -p "<vault path>" scan
-# Evidence: what Enzyme can and cannot see. Writes nothing.
-"$ENZYME_BIN" -p "<vault path>" compile --dry-run
-# The proposed program, exactly as it would be written. Writes nothing.
+# Inventory: what Enzyme can and cannot see. Writes nothing.
+"$ENZYME_BIN" -p "<vault path>" compile -v
+# Proposes a program and saves it to ~/.enzyme/configs/. Touches no note and
+# builds no index. Backing out is deleting that one file.
 ```
 
-Narrate the proposed program at the gate by showing it and annotating it. It is
-written to be read; paraphrasing it into other vocabulary only creates drift
-between what you say and what gets written. `compile --dry-run` prints the same
-bytes `compile` will save, so what the user accepts is what lands.
+Run `compile` **once**. Selection is a model call, so a second run re-selects
+and can legitimately return different readings and profiles; `--dry-run` is a
+preview of a *different* selection, not of the one you will keep. Narrate the
+file that was actually written.
 
-Propose changes as concrete edits to that program — this reading removed, this
-profile changed, this log added — and let the user accept them. Do not silently
-tune the program on their behalf.
+Narrate it at the gate by showing it and annotating it. It is written to be
+read; paraphrasing it into other vocabulary only creates drift between what you
+say and what gets written.
+
+Propose changes as concrete edits to that saved program — this reading removed,
+this profile changed, this log added — and apply them only after the user
+accepts. Do not silently tune the program on their behalf, and do not re-run
+`compile` to "refresh" it.
 
 `compile` is a settings mutation. Do not run it, `init`, `refresh`, or
 generation before the gate.
@@ -279,8 +295,10 @@ Everything before this changed nothing except an explicitly requested CLI instal
    the tier 2 and 3 gap between the program and what doctor sees.
 3. **How the slow generation step will run**: quote the effective local/hosted/BYOK result; for hosted, say selected note excerpts leave the machine; for a proposed local install, include its current download size.
 
-A yes here writes the program and initializes. Nothing in the user's notes is
-touched, so no backup contract is required and none should be implied.
+A yes here initializes. The program file is already on disk and is the thing
+being reviewed; no note and no index has been touched, so backing out is
+deleting that file. No backup contract is required here and none should be
+implied.
 
 **If diagnosis found nothing in tier 2 or 3, this is the whole interaction.**
 Say **"No restructuring needed; your vault already compounds well"**, init,
