@@ -306,6 +306,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut catalysts_generated: Option<usize> = None;
     let mut catalyst_errors: Option<(usize, usize)> = None; // (errors_count, rate_limited)
     let mut embedding_status: Option<String> = None;
+    let mut discovery_anchor_active = false;
 
     // Keep indexing messages for display
     let mut _indexing_messages: Vec<String> = Vec::new();
@@ -323,7 +324,8 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         spinner: &mut HelixSpinner,
                         catalysts_generated: &mut Option<usize>,
                         catalyst_errors: &mut Option<(usize, usize)>,
-                        embedding_status: &mut Option<String>|
+                        embedding_status: &mut Option<String>,
+                        discovery_anchor_active: &mut bool|
      -> bool {
         match event {
             DisplayEvent::ApiConfig {
@@ -362,8 +364,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 files_updated,
                 files_deleted,
             } => {
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 *stage = DisplayStage::Idle;
                 let _ = writeln!(
                     out,
@@ -452,8 +453,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 rate_limited,
             } => {
                 // Flush the cycling entity tree and print catalyst summary immediately
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
+                clear_animated_region(out, lines_written, discovery_anchor_active);
 
                 let err_suffix = if errors_count > 0 && rate_limited > 0 {
                     format!(" ({} failed, {} rate-limited)", errors_count, rate_limited)
@@ -509,8 +509,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 // Completion is permanent output, not part of the animated
                 // frame. Redrawing it above the discovery tree duplicates the
                 // line whenever a wrapped tree row defeats logical line counts.
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 let _ = writeln!(
                     out,
                     "  {}Embedded:{} {}",
@@ -526,10 +525,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             DisplayEvent::EmbeddingSkipped(reason) => {
                 // EmbeddingSkipped fires early (before discovery), so flush
                 // any cycling display if it's active.
-                if *stage == DisplayStage::Discovery && !rolling_window.is_empty() {
-                    clear_lines(out, *lines_written);
-                    *lines_written = 0;
-                }
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 embedding_status.take();
                 let _ = writeln!(
                     out,
@@ -540,8 +536,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 );
             }
             DisplayEvent::EmbeddingFailed(err) => {
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 *stage = DisplayStage::Embedding;
                 embedding_status.take();
 
@@ -567,8 +562,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             }
             DisplayEvent::SimilarityProgress { done, total } => {
                 if total > 0 && done % 10 == 0 {
-                    clear_lines(out, *lines_written);
-                    *lines_written = 0;
+                    clear_animated_region(out, lines_written, discovery_anchor_active);
                     let frame = spinner.tick();
                     let _ = writeln!(
                         out,
@@ -586,8 +580,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 catalysts,
                 documents,
             } => {
-                clear_lines(out, *lines_written);
-                *lines_written = 0;
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 let _ = writeln!(
                     out,
                     "  {}Similarities:{} {} catalysts \u{00d7} {} documents",
@@ -602,7 +595,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 status,
                 message,
             } => {
-                clear_lines(out, *lines_written);
+                clear_animated_region(out, lines_written, discovery_anchor_active);
                 let secs = duration_ms as f64 / 1000.0;
                 let (label, color) = match status {
                     CompletionStatus::Done => ("Done!", colors::FOREST_GREEN),
@@ -646,6 +639,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     &mut catalysts_generated,
                     &mut catalyst_errors,
                     &mut embedding_status,
+                    &mut discovery_anchor_active,
                 ) {
                     return;
                 }
@@ -664,6 +658,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         &mut catalysts_generated,
                         &mut catalyst_errors,
                         &mut embedding_status,
+                        &mut discovery_anchor_active,
                     ) {
                         return;
                     }
@@ -673,7 +668,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 // Fall through to render
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                clear_lines(&mut out, lines_written);
+                clear_animated_region(&mut out, &mut lines_written, &mut discovery_anchor_active);
                 let _ = out.flush();
                 return;
             }
@@ -682,7 +677,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
         // Render once per frame
         frame_counter = frame_counter.wrapping_add(1);
         if stage == DisplayStage::Discovery && !rolling_window.is_empty() {
-            clear_lines(&mut out, lines_written);
+            begin_discovery_frame(&mut out, &mut discovery_anchor_active);
             lines_written = 0;
 
             let frame = spinner.tick();
@@ -755,8 +750,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
 
             let _ = out.flush();
         } else if stage == DisplayStage::Indexing {
-            clear_lines(&mut out, lines_written);
-            lines_written = 0;
+            clear_animated_region(&mut out, &mut lines_written, &mut discovery_anchor_active);
 
             let frame = spinner.tick();
             let _ = writeln!(
@@ -771,8 +765,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
             let _ = out.flush();
         } else if embedding_status.is_some() {
             // Standalone embedding spinner (no discovery tree, e.g. catalyze target prep)
-            clear_lines(&mut out, lines_written);
-            lines_written = 0;
+            clear_animated_region(&mut out, &mut lines_written, &mut discovery_anchor_active);
 
             let frame = spinner.tick();
             let _ = writeln!(
@@ -1107,7 +1100,7 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
 // Terminal helpers
 // ---------------------------------------------------------------------------
 
-fn clear_lines(out: &mut io::Stdout, count: u16) {
+fn clear_lines(out: &mut impl Write, count: u16) {
     if count == 0 {
         return;
     }
@@ -1117,6 +1110,34 @@ fn clear_lines(out: &mut io::Stdout, count: u16) {
         let _ = out.execute(cursor::MoveDown(1));
     }
     let _ = out.execute(cursor::MoveUp(count));
+}
+
+/// Anchor discovery frames at an exact cursor position. Unlike logical line
+/// counts, restoring an anchor remains correct when a catalyst preview wraps.
+fn begin_discovery_frame(out: &mut impl Write, anchor_active: &mut bool) {
+    if *anchor_active {
+        let _ = out.execute(cursor::RestorePosition);
+        let _ = out.execute(terminal::Clear(ClearType::FromCursorDown));
+    } else {
+        let _ = out.execute(cursor::SavePosition);
+        *anchor_active = true;
+    }
+}
+
+/// Remove the current animated region before printing permanent output.
+fn clear_animated_region(
+    out: &mut impl Write,
+    lines_written: &mut u16,
+    discovery_anchor_active: &mut bool,
+) {
+    if *discovery_anchor_active {
+        let _ = out.execute(cursor::RestorePosition);
+        let _ = out.execute(terminal::Clear(ClearType::FromCursorDown));
+        *discovery_anchor_active = false;
+    } else {
+        clear_lines(out, *lines_written);
+    }
+    *lines_written = 0;
 }
 
 fn format_chunk_rate(chunks: usize, encode_ms: u64) -> String {
@@ -1188,5 +1209,25 @@ mod tests {
             .unwrap();
 
         assert!(label.contains("Embedding docs [4/9]"));
+    }
+
+    #[test]
+    fn discovery_anchor_resets_after_wrapped_output() {
+        let mut output = Vec::new();
+        let mut anchor_active = false;
+        let mut lines_written = 3;
+
+        begin_discovery_frame(&mut output, &mut anchor_active);
+        assert!(anchor_active);
+        output.extend_from_slice(b"a logical row that wrapped onto several physical rows\n");
+        let first_frame_len = output.len();
+
+        begin_discovery_frame(&mut output, &mut anchor_active);
+        assert!(anchor_active);
+        assert!(output.len() > first_frame_len);
+
+        clear_animated_region(&mut output, &mut lines_written, &mut anchor_active);
+        assert!(!anchor_active);
+        assert_eq!(lines_written, 0);
     }
 }
