@@ -56,6 +56,15 @@ optional = true
 default-features = false
 features = ["common"]
 
+# Pin the sys crate too. `llama-cpp-2 = "=0.1.154"` alone does not constrain it,
+# and its bindings are not semver-stable either: llama-cpp-sys-2 0.1.156
+# (2026-09-02) changed function arities, so 0.1.154 no longer compiles against
+# it. Because Cargo.lock is untracked, release CI resolves the newest 0.1.x and
+# broke the v0.10.0 build. Bump the two together, deliberately.
+[dependencies.llama-cpp-sys-2]
+version = "=0.1.154"
+optional = true
+
 [dependencies.encoding_rs]
 version = "0.8"
 optional = true
