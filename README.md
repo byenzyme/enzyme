@@ -2,89 +2,87 @@
 
 # 🧬 Enzyme
 
-**Don't let your agent get lost in your knowledge base.**
-**Enzyme compiles 1,000+ documents into a concept graph in under 20 seconds. 8ms queries on device.**
-
 [![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
-[![License](https://img.shields.io/github/license/useenzyme/enzyme?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
-
-[Website](https://memory.enzyme.garden) · [Docs](https://memory.enzyme.garden/docs) · [Discord](https://discord.gg/nhvsqtKjQd) · [Getting Started](#install)
+[![License](https://img.shields.io/github/license/byenzyme/enzyme?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/byenzyme/enzyme?style=flat-square)](https://github.com/byenzyme/enzyme/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/byenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/byenzyme/enzyme/releases)
 
 </div>
 
-Enzyme reads a knowledge base — markdown files, Obsidian vaults, Readwise exports, any text corpus — and compiles it into a concept graph. The graph captures the cross-cutting themes in your material as **catalysts**: pre-computed questions that an agent can search through instead of grepping through your files.
+Enzyme introduces a compile step for your Markdown wiki that:
 
-No conversation history needed. No runtime reasoning. The expensive work happens once at init. After that, queries run locally in ~8ms on an on-device embedding model.
+1. Uses temporally grounded context sampling that captures the contextual use of tags and wikilinks, or natural accumulation in folders (i.e. pseudo-[Zettelkasten](https://zettelkasten.de/introduction/))
+2. With this context, generate questions (called **catalysts**) and embed them as semantic routes to the whole knowledge base
+3. Keeps refreshing, but separates new doc ingestion (local, fast) from catalyst evolution (cheap, periodic)
 
-## Install
+When your agent passes queries through the catalysts, it gets a more personalized way to get caught up on the knowledge base.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
+**New:** Enzyme relies on a program that [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev) generates through a deterministic scan:
+
+```
+profile relationships {
+  seek "what matters between people"
+  notice ["meaningful exchanges", "shared interests", "unfinished conversations"]
+}
+
+vault "~/notes" {
+  question budget 40
+  sample across time
+  favor recent periods
+
+  learn questions from folder "people"
+    including linked pages
+    about relationships
+  learn questions from folder "meetings" about operational
+  learn questions from tags ["founding", "ai-ux"] about decisions
+  learn questions from folder "inbox"
+
+  project questions into "~/notes/Readwise"
+
+  // Guidance compiled for your agent, not an enforced hook.
+  when asked {
+    "Use grep for names, titles, and exact phrases."
+    retrieve passages through learned questions
+    answer with sources
+  }
+}
 ```
 
-On macOS you can also use Homebrew:
+## Get started
 
-```bash
-brew install useenzyme/enzyme/enzyme-cli
+```
+curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash
+cd <your markdown folder root>
+# Optional: enzyme login, or configure OpenRouter by setting OPENAI_API_KEY
+enzyme compile -v
+enzyme install claude # (or: codex, hermes)
+enzyme init
 ```
 
-App plugins are optional and installed separately inside Claude Code or Codex:
+Enzyme was built for knowledge bases that grow rapidly:
 
-```bash
-claude plugin marketplace add useenzyme/enzyme
-claude plugin install enzyme
-```
+* Agent memory corpora
+* Zettelkasten practices in Obsidian that accumulate new dated notes into singular folders
+* Meeting transcriptions built around AI-native, Markdown CRM setups.
 
-The repo includes marketplace metadata at the root and the actual plugin bundle under `plugins/enzyme/`. That nested layout is intentional: Claude Code and Codex marketplaces discover installable plugins from repository subdirectories, while the root files point each marketplace at the shared bundle.
+It's designed to support knowledge captures that might be later be important, even if they don't serve a current task. Enzyme is focused on doing one thing well: **giving agents the tools to make ideas compound**.
 
-### MCP server
+And it ships with a set of `profiles` designed around a personal knowledge base, that were refined over [2 years of personal use](https://joshpham.com/kit/how-i-use-enzyme). Here are some examples of how they are used:
 
-If you prefer MCP over the plugin, Enzyme ships a stdio MCP server that works with any MCP-compatible client (Claude Desktop, Cursor, etc):
 
-```bash
-claude mcp add enzyme -- enzyme mcp
-```
+| Read...                  | For...                                          | Profile               |
+|--------------------------|-------------------------------------------------|-----------------------|
+| Project notes            | what's stuck and what keeps blocking            | `operational`         |
+| Decision records         | why a choice won, what would change it          | `decision_trace`      |
+| Saved articles           | connections to what you're already working on   | `resonance_trace`     |
+| Journals                 | what keeps returning across entries             | `reflective`          |
+| People notes             | what matters in these relationships             | `relational`          |
+| Feedback / activity logs | what works for you, under what constraints      | `preference_evidence` |
+| *(default)*              | costs, assumptions, live tensions               | `tension_trace`       |
 
-The MCP server exposes `init`, `petri`, `catalyze`, and `status` tools — you can initialize and explore your vault entirely from the client without running CLI commands separately.
+## Agent tools for retrieval
 
-## Quick start
-
-For agent-guided setup, install the runtime instructions from your markdown vault:
-
-```bash
-cd /path/to/your/vault
-enzyme install codex      # Codex / Pi / generic .agents
-enzyme install claude     # Claude Code
-```
-
-Then ask your agent: "Use Enzyme to inspect and initialize this vault." The skill will scan the workspace, confirm the setup stance, persist `~/.enzyme/config.toml`, run `enzyme init`, and demonstrate `petri`/`catalyze`.
-
-Terminal-only setup is also supported:
-
-```bash
-enzyme scan --write-config
-$EDITOR ~/.enzyme/config.toml
-enzyme init                # compiles concept graph — under 20s for 1k docs
-```
-
-## What it does
-
-Enzyme reads the structure of your knowledge base — tags, links, folders, timestamps — and builds semantic clusters with temporal weight on every entity. From those clusters it generates **catalysts**: thematic questions that cut across your content and surface connections keyword search can't reach.
-
-A search for "why we keep rewriting the auth layer" finds the ADR from six months ago, a retro note about scope creep, and a Readwise highlight on accidental complexity — even if none of those share keywords with the query.
-
-### Core concepts
-
-- **Entities** — the tags, links, and folders in your content. Each one becomes a semantic cluster.
-- **Catalysts** — pre-computed themes Enzyme discovers across your material. Searching through catalysts connects content that keyword and vector search miss.
-- **Petri** — the compiled index: what's trending, what entities exist, and what catalysts are anchored to each.
-- **Target search** — search an unfamiliar corpus through your vault's catalysts with `enzyme catalyze "query" --target /path/to/other/repo`. Enzyme prepares the target automatically on first use.
-
-### Example: petri output
-
-`enzyme petri` renders a readable tree in an interactive terminal. When stdout is piped or captured, it emits JSON for tools like `jq`:
+`enzyme petri` shows what Enzyme found worth asking about. In an interactive terminal it renders a tree; piped, it emits JSON:
 
 ```bash
 enzyme petri | jq '.entities[:2]'
@@ -131,9 +129,7 @@ enzyme petri | jq '.entities[:2]'
 ]
 ```
 
-Each entity has catalysts spanning different eras — questions that cut across months of writing. These are what the agent searches through, not your raw text.
-
-### Example: catalyze query
+Each entity carries catalysts spanning different eras — questions that cut across months of content.
 
 ```bash
 enzyme catalyze "why we keep rewriting the auth layer"
@@ -169,22 +165,31 @@ enzyme catalyze "why we keep rewriting the auth layer"
 }
 ```
 
-The query matched no keywords in the retro or the ADR. The catalyst bridged them — the retro talked about "scope creep" and the ADR talked about "separation of concerns," but the underlying tension was the same.
+*Output above is illustrative — it shows the shape of a result, not a captured run.*
 
-### Why compile-time?
+## message archives (_experimental_)
 
-Most memory tools build understanding at runtime — they need conversation history before they know anything about your content. Enzyme works the other way: it extracts the conceptual structure from what already exists. The first agent conversation is as rich as the hundredth.
+Enzyme indexes SQLite tables alongside Markdown — iMessage, WhatsApp, Mail, or any table of dated rows.
 
-This matters when you're building on imported content (reading highlights, curated collections, research corpora). There's no cold start. The intelligence layer is ready from the moment the content is indexed.
+None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both collapse to entity occurrences with effective dates, and nothing downstream knows which one it came from: the same profiles, budgets, and catalysts apply to a message thread and a folder of meeting notes.
 
-## Requirements
+A source names columns by the role they play rather than by the app they came from:
 
-- A folder of markdown files (Obsidian vaults, Readwise exports, any `.md` corpus)
-- macOS (Apple Silicon or Intel) or Linux (x86_64 or aarch64)
-- First vault init works out of the box via Enzyme's hosted bootstrap; login is used for refresh, publishing, account credits, and additional vaults. You can also bring your own OpenAI-compatible key with `--use-env-llm`.
+| Role     | Means                                           |
+|----------|-------------------------------------------------|
+| `id`     | the row's identity                              |
+| `who`    | participants; scalar, JSON array, or delimited  |
+| `when`   | the row's timestamp                             |
+| `what`   | the text to read                                |
+| `where`  | the container the row belongs to (optional)     |
+| `weight` | numeric significance per occurrence (optional)  |
 
-## Links
+## API keys
 
-- [memory.enzyme.garden](https://memory.enzyme.garden) — landing page
-- [Docs](https://memory.enzyme.garden/docs) — how it works, catalysts, target search, for teams
-- [Setup guide](https://memory.enzyme.garden/setup) — install and configure
+Enzyme needs an API key only for catalyst generation and for `enzyme compile`'s selection step. By default `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not spend your personal key. Credential resolution is explicit key → configured local model → anonymous brokered free config, with no additional configuration.
+
+The first configured vault on a machine initializes without login. Refresh, publishing, account credits, and additional vaults require `enzyme login`.
+
+To bring your own OpenAI-compatible key, pass `--use-env-llm`, which reads `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. Without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
+
+`enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).
