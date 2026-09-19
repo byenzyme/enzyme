@@ -3,9 +3,9 @@
 # 🧬 Enzyme
 
 [![Discord](https://img.shields.io/discord/1191288276536008745?label=Discord&logo=discord&style=flat-square)](https://discord.gg/nhvsqtKjQd)
-[![License](https://img.shields.io/github/license/useenzyme/enzyme?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/useenzyme/enzyme?style=flat-square)](https://github.com/useenzyme/enzyme/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/useenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/useenzyme/enzyme/releases)
+[![License](https://img.shields.io/github/license/byenzyme/enzyme?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/byenzyme/enzyme?style=flat-square)](https://github.com/byenzyme/enzyme/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/byenzyme/enzyme/total?style=flat-square&label=Downloads&color=6c757d)](https://github.com/byenzyme/enzyme/releases)
 
 </div>
 
@@ -51,7 +51,7 @@ vault "~/notes" {
 ## Get started
 
 ```
-curl -fsSL https://raw.githubusercontent.com/useenzyme/enzyme/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash
 cd <your markdown folder root>
 # Optional: enzyme login, or configure OpenRouter by setting OPENAI_API_KEY
 enzyme compile -v
@@ -61,7 +61,7 @@ enzyme init
 App plugins are optional and installed separately inside Claude Code or Codex:
 
 ```bash
-claude plugin marketplace add useenzyme/enzyme
+claude plugin marketplace add byenzyme/enzyme
 claude plugin install enzyme
 ```
 
@@ -170,6 +170,8 @@ enzyme catalyze "why we keep rewriting the auth layer"
   ]
 }
 ```
+
+*Output above is illustrative — it shows the shape of a result, not a captured run.*
 
 ## message archives (_experimental_)
 
