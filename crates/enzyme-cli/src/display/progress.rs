@@ -306,7 +306,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
     let mut catalysts_generated: Option<usize> = None;
     let mut catalyst_errors: Option<(usize, usize)> = None; // (errors_count, rate_limited)
     let mut embedding_status: Option<String> = None;
-    let mut embedding_done_line: Option<String> = None;
 
     // Keep indexing messages for display
     let mut _indexing_messages: Vec<String> = Vec::new();
@@ -324,8 +323,7 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         spinner: &mut HelixSpinner,
                         catalysts_generated: &mut Option<usize>,
                         catalyst_errors: &mut Option<(usize, usize)>,
-                        embedding_status: &mut Option<String>,
-                        embedding_done_line: &mut Option<String>|
+                        embedding_status: &mut Option<String>|
      -> bool {
         match event {
             DisplayEvent::ApiConfig {
@@ -507,25 +505,23 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                 embedding_status.take();
                 let summary =
                     format_embedding_complete_summary(chunks, pruned, oldest_date_ms, encode_ms);
-                *embedding_done_line = Some(format!(
+
+                // Completion is permanent output, not part of the animated
+                // frame. Redrawing it above the discovery tree duplicates the
+                // line whenever a wrapped tree row defeats logical line counts.
+                clear_lines(out, *lines_written);
+                *lines_written = 0;
+                let _ = writeln!(
+                    out,
                     "  {}Embedded:{} {}",
                     crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                     crossterm::style::ResetColor,
                     summary,
-                ));
-
-                // Print immediately only when discovery is not active.
-                // During discovery, cache the finished line so it renders once
-                // above the tree without double-printing.
-                if should_print_embedding_done_immediately(stage) {
-                    clear_lines(out, *lines_written);
-                    *lines_written = 0;
+                );
+                if *stage != DisplayStage::Discovery {
                     *stage = DisplayStage::Embedding;
-                    if let Some(line) = embedding_done_line.as_ref() {
-                        let _ = writeln!(out, "{}", line);
-                        *lines_written = 1;
-                    }
                 }
+                let _ = out.flush();
             }
             DisplayEvent::EmbeddingSkipped(reason) => {
                 // EmbeddingSkipped fires early (before discovery), so flush
@@ -650,7 +646,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     &mut catalysts_generated,
                     &mut catalyst_errors,
                     &mut embedding_status,
-                    &mut embedding_done_line,
                 ) {
                     return;
                 }
@@ -669,7 +664,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         &mut catalysts_generated,
                         &mut catalyst_errors,
                         &mut embedding_status,
-                        &mut embedding_done_line,
                     ) {
                         return;
                     }
@@ -690,12 +684,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
         if stage == DisplayStage::Discovery && !rolling_window.is_empty() {
             clear_lines(&mut out, lines_written);
             lines_written = 0;
-
-            // Show embedding completion above the entity tree
-            if let Some(line) = embedding_done_line.as_ref() {
-                let _ = writeln!(&mut out, "{}", line);
-                lines_written += 1;
-            }
 
             let frame = spinner.tick();
 
@@ -1131,10 +1119,6 @@ fn clear_lines(out: &mut io::Stdout, count: u16) {
     let _ = out.execute(cursor::MoveUp(count));
 }
 
-fn should_print_embedding_done_immediately(stage: &DisplayStage) -> bool {
-    *stage != DisplayStage::Discovery
-}
-
 fn format_chunk_rate(chunks: usize, encode_ms: u64) -> String {
     let encode_secs = encode_ms as f64 / 1000.0;
     let rate = if encode_secs > 0.0 {
@@ -1204,18 +1188,5 @@ mod tests {
             .unwrap();
 
         assert!(label.contains("Embedding docs [4/9]"));
-    }
-
-    #[test]
-    fn embedding_done_prints_immediately_only_outside_discovery() {
-        assert!(should_print_embedding_done_immediately(
-            &DisplayStage::Embedding
-        ));
-        assert!(should_print_embedding_done_immediately(
-            &DisplayStage::Similarity
-        ));
-        assert!(!should_print_embedding_done_immediately(
-            &DisplayStage::Discovery
-        ));
     }
 }
