@@ -24,6 +24,7 @@ vault "~/notes" {
 
   project questions into "~/notes/Readwise"
 
+  // Guidance compiled for your agent, not an enforced hook.
   when asked {
     "Use grep for names, titles, and exact phrases."
     retrieve passages through learned questions
@@ -32,7 +33,7 @@ vault "~/notes" {
 }
 ```
 
-This is the whole configuration format. It replaces `config.toml`, and `enzyme init` reads it directly.
+For most vaults this is the whole configuration format, replacing `config.toml`; `enzyme init` reads it directly. Named workspaces and structured sources still use `config.toml` (see [Message archives](#message-archives) and [Migrating](#migrating-from-configtoml)).
 
 Enzyme is an intelligence layer, not a harness. It has no tools, permissions, approvals, or API surface for taking actions. It decides what your agent reads, not what it does.
 
@@ -55,6 +56,97 @@ Each has a shorter alias in the language: `relationships`, `decisions`, `resonan
 Omit `about` and Enzyme picks a profile from the entity's name, folder, and content.
 
 Run `enzyme spec profiles` to print the full built-in definitions.
+
+## What a reading produces
+
+`enzyme petri` shows what Enzyme found worth asking about. In an interactive terminal it renders a tree; piped, it emits JSON:
+
+```bash
+enzyme petri | jq '.entities[:2]'
+```
+
+```json
+[
+  {
+    "name": "system-design",
+    "type": "tag",
+    "activity_trend": "active",
+    "frequency_12m": 84,
+    "catalysts": [
+      {
+        "text": "What does the commitment to simplicity cost when the pressure to ship keeps winning?",
+        "context": "velocity vs craft in infrastructure",
+        "era": "2024-Q3"
+      },
+      {
+        "text": "Where does the analysis of user needs gather information that delays rather than clarifies the core value?",
+        "context": "research as avoidance",
+        "era": "2025-Q1"
+      }
+    ]
+  },
+  {
+    "name": "working-with-others",
+    "type": "tag",
+    "activity_trend": "rising",
+    "frequency_12m": 47,
+    "catalysts": [
+      {
+        "text": "What assumptions about leadership are held by those who are good at building things?",
+        "context": "craft vs delegation",
+        "era": "2024-Q4"
+      },
+      {
+        "text": "How does the goal of not depending on others shape the approach to collaboration?",
+        "context": "independence vs team trust",
+        "era": "2025-Q2"
+      }
+    ]
+  }
+]
+```
+
+Each entity carries catalysts spanning different eras — questions that cut across months of writing. These are what the agent searches, not your raw text. Every catalyst also carries a `receipts` block naming the documents behind it.
+
+Searching goes through those questions rather than around them:
+
+```bash
+enzyme catalyze "why we keep rewriting the auth layer"
+```
+
+```json
+{
+  "query": "why we keep rewriting the auth layer",
+  "results": [
+    {
+      "file_path": "retros/2024-q3-platform-retro.md",
+      "content": "scoped auth extraction as a two-week project for the third time. real blocker wasn't the token service — nobody wanted to own the session model. every proposal added a layer instead of removing one.",
+      "similarity": 1.46
+    },
+    {
+      "file_path": "adrs/007-auth-service-extraction.md",
+      "content": "the monolith's session handling has become the bottleneck for every team shipping independently. chose separation of concerns over the coordination cost of a new service boundary.",
+      "similarity": 1.24
+    },
+    {
+      "file_path": "reading/highlights-accelerate.md",
+      "content": "'Teams that can deploy independently are twice as likely to be in the high-performer category.' — we keep choosing the rewrite over the boundary.",
+      "similarity": 1.13
+    }
+  ],
+  "top_contributing_catalysts": [
+    {
+      "entity": "system-design",
+      "text": "What does the commitment to simplicity cost when the pressure to ship keeps winning?",
+      "relevance_score": 0.74
+    }
+  ]
+}
+```
+
+The query shares no keywords with the retro or the ADR. The catalyst bridged them: the retro said "scope creep," the ADR said "separation of concerns," and the underlying tension was the same.
+
+*The examples above are illustrative, in the same spirit as the program at the top — they show the shape of the output, not a captured run against a specific vault.*
 
 ## Install
 
@@ -79,7 +171,7 @@ enzyme init            # index, embed, generate catalysts
 
 Selection is a model call (OpenRouter Decisions, see [API keys](#api-keys)); rendering the program is deterministic. If the vault already has a readable setup, compile validates it and leaves the file untouched, comments included.
 
-Edit the generated program before running `init`. Later edits are picked up by `init` and `refresh` directly; rerunning `compile` is optional revalidation, not regeneration.
+The generated program is a starting point, not a verdict. Edit it before running `init`. Later edits are picked up by `init` and `refresh` directly; rerunning `compile` is optional revalidation, not regeneration.
 
 ### Migrating from config.toml
 
@@ -172,9 +264,30 @@ vault "~/notes" {
 
 Enzyme samples rather than reading everything. Hosted generation aims for about one excerpt per requested catalyst, keeps at least 10 available for small entities, and caps at 40.
 
-Each catalyst carries a `receipts` block naming the documents behind it; the text is canonical and the tables are a rebuildable index. Where evidence is thin — too few distinct documents or too little substantive text — Enzyme emits nothing rather than a generic question. An entity with no catalysts is usually correct.
+Each catalyst carries a `receipts` block naming the documents behind it; the text is canonical and the tables are a rebuildable index. Where evidence is thin — too few distinct documents or too little substantive text — Enzyme emits nothing rather than a generic question. An entity producing no catalysts is usually correct behavior, not a failure.
 
 Broad recurring themes retrieve well immediately. Narrow queries anchored to one person or one year depend on entity anchoring and are more sensitive to how the vault names things.
+
+## Message archives
+
+Enzyme indexes SQLite tables alongside Markdown — iMessage, WhatsApp, Mail, or any table of dated rows.
+
+None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both collapse to entity occurrences with effective dates, and nothing downstream knows which one it came from: the same profiles, budgets, and catalysts apply to a message thread and a folder of meeting notes.
+
+A source names columns by the role they play rather than by the app they came from:
+
+| Role     | Means                                           |
+|----------|-------------------------------------------------|
+| `id`     | the row's identity                              |
+| `who`    | participants; scalar, JSON array, or delimited  |
+| `when`   | the row's timestamp                             |
+| `what`   | the text to read                                |
+| `where`  | the container the row belongs to (optional)     |
+| `weight` | numeric significance per occurrence (optional)  |
+
+An omitted or NULL `weight` counts as one, the same as a single Markdown mention.
+
+Structured sources are configured in `config.toml` today; `enzyme spec migrate` refuses to convert them rather than dropping detail it cannot yet express.
 
 ## Why compile-time?
 
@@ -236,7 +349,7 @@ The curl installer is CLI-only. Claude Code and Codex plugins are app-based inst
 
 ## Architecture
 
-~12,800 lines of Rust, ~33% tests.
+~74,000 lines of Rust, ~38% tests.
 
 | Component | Detail |
 |-----------|--------|
@@ -245,7 +358,8 @@ The curl installer is CLI-only. Claude Code and Codex plugins are app-based inst
 | Embedding runtime | ONNX Runtime, 4 threads, Unix socket daemon |
 | Search | HNSW + BM25, catalyst-mediated |
 | Database | SQLite with WAL mode |
-| LLM | Local fine-tuned SmolLM2 via llama.cpp, or hosted Gemini Flash Lite (structured output) |
+| Catalyst generation | Local fine-tuned SmolLM2 via llama.cpp, or hosted Gemini Flash via OpenRouter (structured output) |
+| Setup selection (`enzyme compile`) | OpenRouter Decisions, `typesafe/jev-1.13` |
 | Catalyst profiles | `tension_trace`, `resonance_trace`, `decision_trace`, `relational`, `operational`, `reflective`, `preference_evidence` |
 | Catalyst formats | `question`, `thesis`, `claim` |
 
