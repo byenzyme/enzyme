@@ -66,28 +66,16 @@ impl FileDiscovery {
             vault_path,
             notes_roots: None,
             include_patterns: vec!["**/*.md".to_string()],
-            exclude_patterns: vec![
-                ".agents/**".to_string(),
-                ".claude/**".to_string(),
-                ".codex/**".to_string(),
-                ".codex-work/**".to_string(),
-                ".conversations/**".to_string(),
-                ".enzyme/**".to_string(),
-                ".enzyme-embeddings/**".to_string(),
-                ".git/**".to_string(),
-                ".hermes/**".to_string(),
-                ".local/**".to_string(),
-                ".obsidian/**".to_string(),
-                ".pi/**".to_string(),
-                ".trash/**".to_string(),
-                "__pycache__/**".to_string(),
-                "build/**".to_string(),
-                "dist/**".to_string(),
-                "node_modules/**".to_string(),
-                "target/**".to_string(),
-                "ENZYME_GUIDE.md".to_string(),
-                "enzyme-config.yaml".to_string(),
-            ],
+            // Single source of truth, shared with the readable language so generated
+            // programs can omit what is excluded here unconditionally.
+            exclude_patterns: enzyme_spec::IMPLICIT_EXCLUSIONS
+                .iter()
+                .map(|folder| format!("{folder}/**"))
+                .chain([
+                    "ENZYME_GUIDE.md".to_string(),
+                    "enzyme-config.yaml".to_string(),
+                ])
+                .collect(),
         }
     }
 

@@ -912,30 +912,77 @@ pub fn config_value(p: &Program) -> serde_json::Value {
 fn quote(s: &str) -> String {
     serde_json::to_string(s).unwrap()
 }
-fn render_list(items: &[String], indent: &str) -> String {
-    let mut s = String::from("{\n");
+/// Longest element that still reads as a short scalar token rather than prose.
+const SHORT_ELEMENT: usize = 30;
+/// Column budget a filled inline list tries to stay within.
+const LINE_BUDGET: usize = 80;
+
+/// Lists render by element shape, not by which construct holds them. Short scalar
+/// tokens (exclusions, reference fields, terse profile guidance) fill inline across
+/// continuation lines; prose elements keep one per line so they stay legible.
+/// Render `{indent}{label}<list>`. The label is part of the signature because a
+/// filled list must know the column its opening bracket actually lands on.
+fn render_clause(label: &str, items: &[String], indent: &str) -> String {
+    let prefix = format!("{indent}{label}");
+    if items
+        .iter()
+        .all(|i| i.chars().count() <= SHORT_ELEMENT && !i.contains('\n'))
+    {
+        return format!("{prefix}{}", render_filled_list(items, indent, prefix.len()));
+    }
+    let mut s = prefix;
+    s.push_str("{\n");
     for item in items {
         s.push_str(&format!("{indent}  {}\n", quote(item)));
     }
     s.push_str(&format!("{indent}}}"));
     s
 }
+
+/// Fill quoted items across as few lines as the budget allows. A long list wraps
+/// rather than falling back to a block, so exclusions stay visually compact.
+fn render_filled_list(items: &[String], indent: &str, start_column: usize) -> String {
+    let continuation = format!("{indent}  ");
+    let mut s = String::from("[");
+    let mut column = start_column + 1;
+    for (i, item) in items.iter().enumerate() {
+        let quoted = quote(item);
+        let separator = if i == 0 { "" } else { "," };
+        if i > 0 && column + separator.len() + 1 + quoted.chars().count() > LINE_BUDGET {
+            s.push_str(separator);
+            s.push('\n');
+            s.push_str(&continuation);
+            column = continuation.len();
+        } else {
+            s.push_str(separator);
+            if i > 0 {
+                s.push(' ');
+                column += 1;
+            }
+            column += separator.len();
+        }
+        s.push_str(&quoted);
+        column += quoted.chars().count();
+    }
+    s.push(']');
+    s
+}
 pub fn render_profile(name: &str, p: &Profile) -> String {
     let mut s = format!(
-        "profile {name} {{\n  seek {}\n  notice {}\n",
+        "profile {name} {{\n  seek {}\n{}\n",
         quote(&p.seek),
-        render_list(&p.notice, "  ")
+        render_clause("notice ", &p.notice, "  ")
     );
     if !p.ask.is_empty() {
-        s.push_str(&format!("  ask {}\n", render_list(&p.ask, "  ")));
+        s.push_str(&format!("{}\n", render_clause("ask ", &p.ask, "  ")));
     }
     if let Some(n) = &p.note {
         s.push_str(&format!("  note {}\n", quote(n)));
     }
     if !p.recognize.is_empty() {
         s.push_str(&format!(
-            "  recognize {}\n",
-            render_list(&p.recognize, "  ")
+            "{}\n",
+            render_clause("recognize ", &p.recognize, "  ")
         ));
     }
     s.push_str("}\n\n");
@@ -943,15 +990,6 @@ pub fn render_profile(name: &str, p: &Profile) -> String {
 }
 pub fn render_vault(v: &Vault) -> String {
     let mut s = format!("vault {} {{\n", quote(&v.path));
-    for (kind, list) in [
-        ("folders", &v.exclusions),
-        ("tags", &v.excluded_tags),
-        ("links", &v.excluded_links),
-    ] {
-        if !list.is_empty() {
-            s.push_str(&format!("  leave out {kind} {}\n", render_list(list, "  ")));
-        }
-    }
     if let Some(n) = v.embedding_limit {
         s.push_str(&format!(
             "  prepare up to {n} documents per run newest first\n"
@@ -968,13 +1006,11 @@ pub fn render_vault(v: &Vault) -> String {
             }
         ));
     }
-    if !v.frontmatter_link_fields.is_empty() {
-        s.push_str(&format!(
-            "  references in fields {}\n",
-            render_list(&v.frontmatter_link_fields, "  ")
-        ));
+    // Separate the preamble from the readings only when there is a preamble; with
+    // exclusions moved below, a vault now commonly opens straight on its readings.
+    if s.lines().count() > 1 {
+        s.push('\n');
     }
-    s.push('\n');
     for r in &v.readings {
         let (k, n) = split_entity(&r.entity);
         s.push_str(&format!("  learn questions from {k} {}", quote(n)));
@@ -1010,6 +1046,31 @@ pub fn render_vault(v: &Vault) -> String {
             s.push_str("    }");
         }
         s.push('\n');
+    }
+    // Mechanical qualifiers follow the readings. What the vault is read *for* is the
+    // point of the file; what it skips is bookkeeping and should not open it.
+    let mut qualifiers = String::new();
+    for (kind, list) in [
+        ("folders", &v.exclusions),
+        ("tags", &v.excluded_tags),
+        ("links", &v.excluded_links),
+    ] {
+        if !list.is_empty() {
+            qualifiers.push_str(&format!(
+                "{}\n",
+                render_clause(&format!("leave out {kind} "), list, "  ")
+            ));
+        }
+    }
+    if !v.frontmatter_link_fields.is_empty() {
+        qualifiers.push_str(&format!(
+            "{}\n",
+            render_clause("references in fields ", &v.frontmatter_link_fields, "  ")
+        ));
+    }
+    if !qualifiers.is_empty() {
+        s.push('\n');
+        s.push_str(&qualifiers);
     }
     for t in &v.targets {
         s.push_str(&format!("\n  project questions into {}\n", quote(t)));
@@ -1194,4 +1255,39 @@ pub fn playground(source: &str) -> serde_json::Value {
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})
         }
     }
+}
+
+/// Tooling and build directories the index gate always excludes, regardless of
+/// configuration. [`crate::document::discovery`]-equivalent defaults in
+/// `enzyme-core` are built from this list, and `with_excluded_folders` appends to
+/// rather than replaces them, so naming one of these in a program is a no-op.
+///
+/// Generated programs therefore omit them: a reader should see the vault's own
+/// choices, not universal junk. Folders that a scan excludes but the index gate
+/// does not enforce (`templates`, `.aside`) are real choices and stay explicit.
+pub const IMPLICIT_EXCLUSIONS: &[&str] = &[
+    ".agents",
+    ".claude",
+    ".codex",
+    ".codex-work",
+    ".conversations",
+    ".enzyme",
+    ".enzyme-embeddings",
+    ".git",
+    ".hermes",
+    ".local",
+    ".obsidian",
+    ".pi",
+    ".trash",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+];
+
+/// Whether the index gate already excludes `name` without being told to.
+pub fn is_implicit_exclusion(name: &str) -> bool {
+    let name = name.trim().trim_matches('/');
+    IMPLICIT_EXCLUSIONS.iter().any(|d| d.eq_ignore_ascii_case(name))
 }

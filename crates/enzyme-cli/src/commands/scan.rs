@@ -1467,27 +1467,10 @@ fn push_entity(entities: &mut Vec<String>, seen: &mut HashSet<String>, entity: S
 }
 
 fn default_excluded_folders() -> Vec<String> {
-    vec![
-        ".agents".to_string(),
-        ".aside".to_string(),
-        ".claude".to_string(),
-        ".codex".to_string(),
-        ".codex-work".to_string(),
-        ".conversations".to_string(),
-        ".enzyme".to_string(),
-        ".git".to_string(),
-        ".hermes".to_string(),
-        ".local".to_string(),
-        ".obsidian".to_string(),
-        ".pi".to_string(),
-        ".trash".to_string(),
-        "__pycache__".to_string(),
-        "build".to_string(),
-        "dist".to_string(),
-        "node_modules".to_string(),
-        "target".to_string(),
-        "templates".to_string(),
-    ]
+    // Only folders the index gate does not already enforce. The rest are in
+    // `enzyme_spec::IMPLICIT_EXCLUSIONS` and would be inert noise in a generated
+    // program, so a reader sees this vault's own choices instead.
+    vec![".aside".to_string(), "templates".to_string()]
 }
 
 fn is_structural_folder(folder: &str) -> bool {
@@ -1884,11 +1867,15 @@ mod tests {
 
         assert_eq!(value["files"], 2);
         assert!(value["entities"].is_array());
+        // A suggestion names only folders the index gate does not already enforce;
+        // repeating `enzyme_spec::IMPLICIT_EXCLUSIONS` would be inert noise.
+        let excluded = value["excluded_folders"].as_array().unwrap();
+        assert!(excluded.contains(&serde_json::json!("templates")));
+        assert!(!excluded.contains(&serde_json::json!(".agents")));
         assert!(
-            value["excluded_folders"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!(".agents"))
+            excluded
+                .iter()
+                .all(|f| !enzyme_spec::is_implicit_exclusion(f.as_str().unwrap()))
         );
         assert_eq!(value["schema_version"], "scan.v2");
         assert_eq!(value["summary"]["file_count"], 2);

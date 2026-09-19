@@ -191,10 +191,22 @@ vault "/notes" {
 "#;
     let parsed = parse(source).unwrap();
     let rendered = render_program(&parsed);
-    assert!(!rendered.contains('['));
-    assert!(
-        rendered.contains("notice {\n    \"shared interests\"\n    \"changing priorities\"\n  }")
-    );
+    // Prose elements keep one per line: a long guidance string stays legible only
+    // as a block, whatever construct holds it.
+    let prose = parse(
+        r#"profile p {
+  seek "x"
+  notice ["Make trade-offs explicit-what does choosing A foreclose about B?"]
+}
+vault "/notes" { learn questions from tag "a" about p }
+"#,
+    )
+    .unwrap();
+    let prose_rendered = render_program(&prose);
+    assert!(prose_rendered.contains(
+        "notice {\n    \"Make trade-offs explicit-what does choosing A foreclose about B?\"\n  }"
+    ));
+    assert_eq!(parse(&prose_rendered).unwrap(), prose);
     assert_eq!(parse(&rendered).unwrap(), parsed);
     assert_eq!(compile(&rendered), compile(source));
     assert!(parse("profile p { seek \"x\" notice { } }").is_err());
@@ -202,6 +214,47 @@ vault "/notes" {
     let grouped =
         compile("vault \"/notes\" { learn questions from tags { \"a\" \"b\" } about auto }");
     assert_eq!(grouped.vaults[0].readings.len(), 2);
+}
+
+#[test]
+fn short_token_lists_fill_inline_below_the_readings() {
+    let long: Vec<String> = [
+        ".agents", ".claude", ".codex", ".conversations", ".enzyme", ".git", ".obsidian", ".trash",
+        "__pycache__", "build", "dist", "node_modules", "target", "templates",
+    ]
+    .iter()
+    .map(|s| format!("\"{s}\""))
+    .collect();
+    let source = format!(
+        r#"vault "/notes" {{
+  leave out folders [{}]
+  references in fields ["people", "attendees"]
+  learn questions from folder "people" about relationships
+  learn questions from folder "inbox"
+}}
+"#,
+        long.join(", ")
+    );
+    let parsed = parse(&source).unwrap();
+    let rendered = render_program(&parsed);
+
+    // Short scalar tokens fill inline rather than taking a line each.
+    assert!(rendered.contains("leave out folders [\".agents\", \".claude\""));
+    assert!(rendered.contains("references in fields [\"people\", \"attendees\"]"));
+    // A list too long for one line wraps instead of reverting to a block.
+    assert!(!rendered.contains("leave out folders {"));
+    assert!(rendered.lines().all(|l| l.chars().count() <= 84), "{rendered}");
+
+    // The file opens on the readings; bookkeeping follows them.
+    let readings = rendered.find("learn questions").unwrap();
+    let exclusions = rendered.find("leave out folders").unwrap();
+    let fields = rendered.find("references in fields").unwrap();
+    assert!(readings < exclusions, "{rendered}");
+    assert!(readings < fields, "{rendered}");
+
+    // Wrapping is presentation only.
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+    assert_eq!(compile(&rendered), compile(&source));
 }
 
 #[test]
@@ -245,4 +298,30 @@ fn omitted_profiles_default_to_auto_and_roundtrip_with_reading_options() {
     assert_eq!(parse(&rendered).unwrap(), parsed);
     assert_eq!(compile(&rendered), compile(source));
     assert!(parse(r#"vault "/notes" { learn questions from tag "x" about }"#).is_err());
+}
+
+#[test]
+fn implicit_exclusions_are_omitted_but_real_choices_survive() {
+    // Naming an index-gate default is inert: discovery appends the user's list to
+    // its own defaults rather than replacing them, so suppressing these cannot
+    // change what is indexed. Folders it does not enforce must stay explicit.
+    assert!(enzyme_spec::is_implicit_exclusion("node_modules"));
+    assert!(enzyme_spec::is_implicit_exclusion(".git"));
+    assert!(enzyme_spec::is_implicit_exclusion("Node_Modules"));
+    assert!(enzyme_spec::is_implicit_exclusion("target/"));
+    assert!(!enzyme_spec::is_implicit_exclusion("templates"));
+    assert!(!enzyme_spec::is_implicit_exclusion(".aside"));
+    assert!(!enzyme_spec::is_implicit_exclusion("archive"));
+
+    // Suppression happens where the program is generated, so rendering stays
+    // faithful: anything a program does say still round-trips verbatim.
+    let source = r#"vault "/notes" {
+  learn questions from folder "people"
+  leave out folders ["node_modules", "archive"]
+}
+"#;
+    let parsed = parse(source).unwrap();
+    let rendered = render_program(&parsed);
+    assert!(rendered.contains("leave out folders [\"node_modules\", \"archive\"]"));
+    assert_eq!(parse(&rendered).unwrap(), parsed);
 }
