@@ -83,19 +83,28 @@ why.** `evidence` states what Enzyme can see at all; the program states what
 Enzyme will read. Neither alone shows the gap, and the gap is what the user
 needs.
 
-1. **Already usable** — a reading in the program, backed by content `scan`
-   inventoried. Name the reading and what it now answers.
-2. **Weakly indexable** — the evidence shows it and the program reads it, but the
-   content is degraded: missing dates, malformed metadata, thin bodies.
-3. **Would improve retrieval** — the evidence shows it and the program does *not* read
-   it, or reads it less well than a small deterministic change would allow.
-   This tier is the whole reason to keep diagnosing after compile.
-4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports,
-   build outputs, foreign-domain material. Say so and leave it alone.
+**Before `init`, only tiers 1 and 3 are knowable**, and both are set operations
+on the `compile --json` payload:
 
-After `init`, `doctor` becomes available and is the right tool to verify these
-tiers against the built index. Before `init` it can only tell you the vault is
-uninitialized.
+1. **Already usable** — a reading in the program, drawn from
+   `evidence.candidate_entities`. Name the reading and what it now answers.
+3. **Would improve retrieval** — in `candidate_entities` but *not* read by the
+   program, or read under a profile worth arguing with. Every reading appears in
+   the candidate pool, so the leftovers are exactly this tier.
+
+**Tiers 2 and 4 need `doctor`, which needs an initialized vault.** Do not guess
+them at the setup gate:
+
+2. **Weakly indexable** — read but read poorly: `undated_docs`,
+   `frontmatter_anomalies`, thin bodies. Only doctor counts these, and it names
+   the files.
+4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports,
+   build outputs. The pre-init evidence covers Markdown only, so the
+   non-Markdown inventory does not exist until doctor reports it.
+
+This is why repairs follow `init`: the evidence justifying a repair does not
+exist until the index does. Saying "your notes are undated" at the setup gate
+would be a guess wearing the clothes of a finding.
 
 Raw transcripts and evidence bundles stay put. Never move, edit, or summarize raw JSON, logs, transcripts, or exports during setup. Never bulk-invent `people:` or `tags:` frontmatter from body inference.
 
@@ -229,19 +238,23 @@ say setup needs a connection, and leave the vault and settings untouched. Do not
 substitute another configuration route. After the user accepts the narrated setup plan and
 generation path, back up every affected existing setting and run:
 
+The program is already on disk from diagnosis. Do not run `compile` again —
+apply the edits the user accepted by editing that file directly:
+
 ```bash
-"$ENZYME_BIN" -p "<vault path>" compile -v
-# Read ~/.enzyme/configs/<vault>-<hash>.enzyme. This is the vault's anchor
-# ledger: each `learn questions from ...` reading names what Enzyme anchors on
-# and the profile it reads that material for, alongside exclusions, reference
-# fields, and recognized running logs (`from log "<name>"`). Apply only the
-# edits the user accepted at the gate.
+# ~/.enzyme/configs/<vault>-<hash>.enzyme is the vault's anchor ledger: each
+# `learn questions from ...` reading names what Enzyme anchors on and the
+# profile it reads that material for, alongside exclusions, reference fields,
+# and recognized running logs (`from log "<name>"`). Edit only what was accepted.
 
 "$ENZYME_BIN" -p "<vault path>" model status
 # Compare effective mode and Network with what the user accepted. Stop if either
 # changed; auto can resolve differently if machine state changed after the gate.
 "$ENZYME_BIN" -p "<vault path>" init --quiet
 # Returns a compact outcome summary. For entities and catalysts, ask petri.
+"$ENZYME_BIN" -p "<vault path>" doctor
+# Only works now. This is where tiers 2 and 4 come from, and what the repairs
+# gate is argued from: undated_docs and frontmatter_anomalies name their files.
 "$ENZYME_BIN" -p "<vault path>" petri --query "<one real setup proof prompt>"
 # Query-scoped on purpose. A bare `petri` returns every top entity with its
 # children and is far more than a setup proof needs.
@@ -251,7 +264,7 @@ generation path, back up every affected existing setting and run:
 When the user accepted BYOK, append `--use-env-llm` to `init` and later
 `refresh`; never append it merely because provider variables exist.
 
-Do not skip `compile` and config review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
+Do not skip diagnosis and program review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
 
 If init or generation reports a deterministic error, do not repeat the same
 command unchanged or continue to another generation command. Stop the generation
@@ -263,7 +276,7 @@ state the reason.
 
 Never delete `~/.enzyme/auth.json` or run `"$ENZYME_BIN" logout` without explicit confirmation.
 
-## Prove It On One Real Note After Consent
+## Prove It On One Real Note After The Repairs Gate
 
 At the repairs gate, you may offer exactly one additive proof note distilled from the user's own best existing content, if doing so would prove Enzyme's value. Name its exact path and create it only after the user accepts it as part of the setup plan. Lead with the user's own words and file attribution. Place two to four short real excerpts beside each other. End with one concrete next question.
 
@@ -322,9 +335,9 @@ produced a concrete, doctor-backed change. Quote the counts.
 This is where the backup and revert contract lives, because this is the only
 place the user's own files move:
 
-4. **Exactly what I would move, exclude, record in your program, create as the one proof note, or change in an existing template**, with concrete paths, lines, and fields.
-5. **The backup promise**, including where the backup/revert package will live for this run.
-6. **The revert story**: "I will check that every affected file comes back exactly as it was."
+1. **Exactly what I would move, exclude, record in your program, create as the one proof note, or change in an existing template**, with concrete paths, lines, and fields, each traced to the doctor fact that justifies it.
+2. **The backup promise**, including where the backup/revert package will live for this run.
+3. **The revert story**: "I will check that every affected file comes back exactly as it was."
 
 When the plan mixes work of clearly different weight, offer at most two separately acceptable pieces, such as "just the duplicate cleanup" and "the broader re-file." A partial yes runs only the accepted piece under the same backup contract.
 

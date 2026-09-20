@@ -165,6 +165,7 @@ fn jev_candidates(
         2,
         true,
     );
+    let ranked_tags = top_evidence_by_type(&metrics, "tag", usize::MAX);
     specs
         .iter()
         .map(|spec| {
@@ -248,14 +249,18 @@ fn jev_candidates(
                     })
                     .unwrap_or_default(),
                 context: {
-                    let matching: Vec<_> = docs
-                        .iter()
-                        .filter(|doc| {
-                            metrics
-                                .get(spec)
-                                .is_some_and(|m| m.files.contains(&doc.source_ref))
+                    let matching: Vec<_> = metrics
+                        .get(spec)
+                        .map(|metric| {
+                            metric
+                                .files
+                                .iter()
+                                .filter_map(|source_ref| {
+                                    docs_by_ref.get(source_ref.as_str()).copied()
+                                })
+                                .collect()
                         })
-                        .collect();
+                        .unwrap_or_default();
                     let mut tags = HashMap::new();
                     for doc in &matching {
                         for tag in &doc.tags {
@@ -293,11 +298,11 @@ fn jev_candidates(
                             .strip_prefix('#')
                             .and_then(|tag| tag.rsplit_once('/'))
                             .map(|(parent, _)| format!("#{parent}")),
-                        child_tags: top_evidence_by_type(&metrics, "tag", usize::MAX)
-                            .into_iter()
+                        child_tags: ranked_tags
+                            .iter()
                             .filter(|e| e.spec.starts_with(&format!("{spec}/")))
                             .take(12)
-                            .map(|e| e.spec)
+                            .map(|e| e.spec.clone())
                             .collect(),
                         related_tags: sorted_counts(&tags)
                             .into_iter()
@@ -518,17 +523,16 @@ fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
     let frontmatter_link_fields = EnzymeConfig::load(vault_path)?
         .unwrap_or_default()
         .frontmatter_link_fields;
-    Ok(discovery
-        .discover_named()?
-        .iter()
-        .map(|file| {
-            DocumentProcessor::process_discovered_with_link_fields(
-                file,
-                frontmatter_link_fields.iter().cloned(),
-            )
-        })
+    let files = discovery.discover_named()?;
+    Ok(
+        DocumentProcessor::process_all_discovered_with_link_fields(
+            &files,
+            &frontmatter_link_fields,
+        )
+        .into_iter()
         .flatten()
-        .collect())
+        .collect(),
+    )
 }
 
 fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Result<ScanSuggestion> {
@@ -549,6 +553,7 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
             *link_counts.entry(link.clone()).or_default() += 1;
         }
     }
+
     let folder_memberships = discover_folder_memberships(docs, &folder_counts, &link_counts);
     let entities = suggested_entities(
         docs,

@@ -260,6 +260,18 @@ impl DocumentProcessor {
             .collect()
     }
 
+    /// Process named-root discovery results in parallel while preserving their
+    /// discovery order in the returned vector.
+    pub fn process_all_discovered_with_link_fields(
+        files: &[DiscoveredFile],
+        fields: &[String],
+    ) -> Vec<Result<ProcessedDocument>> {
+        files
+            .par_iter()
+            .map(|file| Self::process_discovered_with_link_fields(file, fields.iter().cloned()))
+            .collect()
+    }
+
     /// Process a file returned by named-root discovery. The configured root
     /// name becomes the leading textual folder only when source refs are
     /// namespaced (multi-root mode); single-root behavior stays byte-compatible.
