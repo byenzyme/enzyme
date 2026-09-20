@@ -69,6 +69,10 @@ pub async fn run_scan_jev(vault_path: &Path) -> Result<()> {
 pub(super) struct GeneratedSetup {
     suggestion: ScanSuggestion,
     pub proposal: enzyme_core::pipeline::jev_selection::JevSelectionProposal,
+    /// Every entity the selection actually chose from, not just the bounded
+    /// display list. Selection draws on a wider recurring-tag pool, so the two
+    /// differ and only this one makes "considered but not read" answerable.
+    candidates: Vec<String>,
     scan_ms: u128,
 }
 impl GeneratedSetup {
@@ -76,7 +80,7 @@ impl GeneratedSetup {
         &self.suggestion.excluded_folders
     }
 
-    /// The deterministic inventory this selection was drawn from.
+    /// The inventory this selection was drawn from.
     ///
     /// `compile` already pays for this scan, so exposing it lets a setup agent
     /// build the "seen but not read" diff from one command instead of running
@@ -85,7 +89,8 @@ impl GeneratedSetup {
         Ok(serde_json::json!({
             "files": self.suggestion.files,
             "summary": serde_json::to_value(&self.suggestion.summary)?,
-            "candidate_entities": self.suggestion.entities,
+            "candidate_entities": self.candidates,
+            "scan_shortlist": self.suggestion.entities,
             "excluded_folders": self.suggestion.excluded_folders,
             "top_folders": serde_json::to_value(&self.suggestion.top_folders)?,
             "top_tags": serde_json::to_value(&self.suggestion.top_tags)?,
@@ -100,11 +105,13 @@ pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSet
     let docs = process_docs(vault_path)?;
     let suggestion = build_scan_suggestion(vault_path, &docs)?;
     let candidates = jev_candidates(&docs, &suggestion);
+    let candidate_specs: Vec<String> = candidates.iter().map(|c| c.spec.clone()).collect();
     let scan_ms = start.elapsed().as_millis();
     let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
     Ok(GeneratedSetup {
         suggestion,
         proposal,
+        candidates: candidate_specs,
         scan_ms,
     })
 }

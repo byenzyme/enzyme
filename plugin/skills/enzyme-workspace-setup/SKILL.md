@@ -199,9 +199,12 @@ Before the gate, diagnose and preview without writing settings:
 # index. Backing out is deleting that one file.
 ```
 
-`evidence.candidate_entities` is everything the scan found; the program's
-readings are what was chosen from it. The difference between them is the tier
-diff, already computed — do not run `scan` separately to rebuild it.
+`evidence.candidate_entities` is the full pool selection drew from, so every
+reading in the program appears in it and the leftovers are exactly what was
+considered and not read. That difference is the tier-3 diff, already computed —
+do not run `scan` separately to rebuild it. (`evidence.scan_shortlist` is the
+narrower deterministic list, useful for seeing what the scan would have picked
+on its own.)
 
 Run `compile` **once**. Selection is a model call, so a second run re-selects
 and can legitimately return different readings and profiles; `--dry-run` is a
@@ -306,15 +309,16 @@ being reviewed; no note and no index has been touched, so backing out is
 deleting that file. No backup contract is required here and none should be
 implied.
 
-**If diagnosis found nothing in tier 2 or 3, this is the whole interaction.**
+**If tier 3 is empty and doctor later reports nothing worth repairing, this is the whole interaction.**
 Say **"No restructuring needed; your vault already compounds well"**, init,
 prove it, and close. Do not open the second gate to have something to offer. A
 healthy vault still deserves the full program reveal — the user should leave
 knowing exactly which of their places Enzyme watches and what to ask it.
 
-### Gate 2: repairs (only when notes would change)
+### Gate 2: repairs, after `init` (only when notes would change)
 
-Open this only when tier 2 or 3 produced a concrete, evidence-backed change.
+Run `doctor` first — it works now — and open this gate only when tier 2, 3, or 4
+produced a concrete, doctor-backed change. Quote the counts.
 This is where the backup and revert contract lives, because this is the only
 place the user's own files move:
 

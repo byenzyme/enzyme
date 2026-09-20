@@ -70,7 +70,7 @@ SKILL_ANCHORS = [
     "No restructuring needed; your vault already compounds well",
     "Two Gates, Not One",
     "Gate 1: setup (always)",
-    "Gate 2: repairs (only when notes would change)",
+    "Gate 2: repairs, after `init` (only when notes would change)",
     "Bind Capture Help To Enzyme",
     "Complete The Handoff",
     "Choose what can keep returning",
