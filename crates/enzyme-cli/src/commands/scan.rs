@@ -100,13 +100,16 @@ impl GeneratedSetup {
     }
 }
 pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSetup> {
-    let client = JevClient::resolve().await?;
     let start = std::time::Instant::now();
     let docs = process_docs(vault_path)?;
     let suggestion = build_scan_suggestion(vault_path, &docs)?;
     let candidates = jev_candidates(&docs, &suggestion);
     let candidate_specs: Vec<String> = candidates.iter().map(|c| c.spec.clone()).collect();
     let scan_ms = start.elapsed().as_millis();
+
+    // Finish deterministic preparation before requesting hosted access. This
+    // keeps local preparation failures local and makes scan_ms purely local work.
+    let client = JevClient::resolve().await?;
     let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
     Ok(GeneratedSetup {
         suggestion,
