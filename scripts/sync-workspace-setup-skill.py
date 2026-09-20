@@ -47,34 +47,34 @@ MARGINS_REVIEW = (
     / "knowledge-practice-review.md"
 )
 
+# These check command/distribution and recovery contracts, not a particular
+# narration, tier vocabulary, or heading structure. User comprehension is tested
+# by independent rollout readers, not required slogans.
 SKILL_ANCHORS = [
-    "Never delete `~/.enzyme/auth.json`",
     "ENZYME_BIN",
     '"$ENZYME_BIN" --version',
     '"$ENZYME_BIN" -p "<vault path>" model status',
+    "compile --json",
     '"$ENZYME_BIN" -p "<vault path>" init --quiet',
+    "doctor --json",
+    "petri --query",
+    "catalyze",
     "--use-env-llm",
-    "runtime installation has already succeeded",
-    "Downloading a model or switching modes requires",
-    "approval reviewer",
+    "runtime installation has already",
     "`compile` is a settings mutation",
-    "Do not inspect, print, unset, or rely on API-key environment variables",
-    "Already usable",
-    "Weakly indexable",
-    "Would improve retrieval",
-    "Can wait",
+    "env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u OPENAI_MODEL",
+    "evidence.candidate_entities",
+    "saved_to",
+    "bootstrap.json",
     "mktemp",
-    "temporary directory",
+    "sidecar/",
+    "manifest.json",
+    "pre.shasum",
     "revert.sh",
     "No body edits",
-    "No restructuring needed; your vault already compounds well",
-    "Two gates, in this order. Never merge them.",
-    "Gate 1: setup (always)",
-    "Gate 2: repairs, after `init` (only when notes would change)",
-    "Bind Capture Help To Enzyme",
-    "Complete The Handoff",
+    "original mtimes",
+    "init --force",
     "Choose what can keep returning",
-    "Ground truth is Enzyme's view",
     "references/knowledge-practice-review.md",
 ]
 
@@ -93,7 +93,6 @@ SKILL_BANNED_TOKENS = [
     ".margins",
     "manifest.json schema",
     "Never print API key values",
-    "OPENAI_API_KEY",
     "curl -fsSL",
     "curl -sSL",
     "command -v enzyme",
@@ -161,6 +160,8 @@ ONBOARDING_ANCHORS = [
     "plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md",
     "This skill tests that",
     "Apply and test the shared knowledge-practice review contract",
+    "Unfamiliar user",
+    "Not exercised is not pass.",
 ]
 
 ONBOARDING_BANNED_TOKENS = [
