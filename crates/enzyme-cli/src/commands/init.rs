@@ -451,9 +451,13 @@ pub struct InitResult {
 }
 
 impl InitResult {
-    /// Build the JSON output for quiet mode, including petri data.
-    pub fn to_json(&self, vault_path: &Path) -> Result<serde_json::Value> {
-        let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
+    /// Build the JSON summary for quiet mode.
+    ///
+    /// Reports the outcome a caller needs to decide what to say or do next.
+    /// It deliberately does not embed the petri: callers that want entities and
+    /// catalysts run `enzyme petri`, and inlining it here made `--quiet` emit
+    /// six figures of JSON while claiming to suppress output.
+    pub fn to_json(&self, _vault_path: &Path) -> Result<serde_json::Value> {
         let mut output = json!({
             "status": match self.status {
                 CompletionStatus::Done => "completed",
@@ -468,14 +472,12 @@ impl InitResult {
                 "files_deleted": self.files_deleted,
             },
             "catalysts_generated": self.catalysts_generated,
-            "cache_epoch": self.cache_epoch,
             "capabilities": {
                 "semantic_search": self.semantic_search,
                 "catalysts": self.catalysts_available,
             },
             "warnings": &self.warnings,
             "duration_ms": self.duration_ms,
-            "petri": petri,
         });
 
         if let (Some(docs), Some(pruned)) = (self.embeddings_documents, self.embeddings_pruned) {

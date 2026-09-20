@@ -48,15 +48,15 @@ Everything below is derived from asking these two questions honestly. Prescribe 
 
 Ground truth is Enzyme's view, not the folder's appearance. Do not tier a cluster from a file count or a folder name. A `meetings/` folder can be stale exports; a `notes/` folder can be source code.
 
-Before `init`, `scan` is the ground truth: it reports what Enzyme can see without
-requiring an index. `doctor` needs an initialized vault and will only tell a
+Before `init`, the `evidence` block from `compile --json` is the ground truth:
+it reports what Enzyme can see without requiring an index. `doctor` needs an initialized vault and will only tell a
 first-time setup that the vault is uninitialized; run it after `init` and account
 for every fact it reports then. When an already-initialized vault is being
 re-checked, `doctor` and `.enzyme/enzyme.db` are available from the start — compare
 representative files in each cluster against the indexed view, especially source
 path, date source, and parsed date.
 
-A claim you can show against `scan`, the doctor report, or the DB is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified.
+A claim you can show against that evidence, the doctor report, or the DB is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified.
 
 Every gap between how the vault looks and what Enzyme sees is a finding. The mechanism facts below explain why gaps appear. They are a lens, not a checklist. If nothing rises above "leave it alone," say **"No restructuring needed; your vault already compounds well"** and stop. Never manufacture a finding to fill a template or justify a restructure.
 
@@ -73,20 +73,21 @@ Mechanism facts:
 
 Before you read anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. After diagnosis, repeat both checks, prove byte identity, and clean up the snapshots. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
 
-Read the tiers off evidence you already have: the `scan` inventory and the
-generated program. Do not walk the vault again to build them, and do not reach
-for `doctor` here — `doctor` requires an initialized vault and reports nothing
-before `init`, which is the state every first-time setup is in.
+Read the tiers off the single `compile --json` payload you already have. Do not
+walk the vault again to build them, and do not reach for `doctor` here —
+`doctor` requires an initialized vault and reports nothing before `init`, which
+is the state every first-time setup is in.
 
 The useful frame is a diff: **what the program reads, what it does not, and
-why.** `scan` states what Enzyme can see at all; the program states what Enzyme
-will read. Neither alone shows the gap, and the gap is what the user needs.
+why.** `evidence` states what Enzyme can see at all; the program states what
+Enzyme will read. Neither alone shows the gap, and the gap is what the user
+needs.
 
 1. **Already usable** — a reading in the program, backed by content `scan`
    inventoried. Name the reading and what it now answers.
-2. **Weakly indexable** — `scan` sees it and the program reads it, but the
+2. **Weakly indexable** — the evidence shows it and the program reads it, but the
    content is degraded: missing dates, malformed metadata, thin bodies.
-3. **Would improve retrieval** — `scan` sees it and the program does *not* read
+3. **Would improve retrieval** — the evidence shows it and the program does *not* read
    it, or reads it less well than a small deterministic change would allow.
    This tier is the whole reason to keep diagnosing after compile.
 4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports,
@@ -192,17 +193,20 @@ consent requirement still applies.
 Before the gate, diagnose and preview without writing settings:
 
 ```bash
-"$ENZYME_BIN" -p "<vault path>" scan
-# Inventory: what Enzyme can and cannot see. Writes nothing.
-"$ENZYME_BIN" -p "<vault path>" compile -v
-# Proposes a program and saves it to ~/.enzyme/configs/. Touches no note and
-# builds no index. Backing out is deleting that one file.
+"$ENZYME_BIN" -p "<vault path>" compile --json
+# One call. Saves the program to ~/.enzyme/configs/ and returns it alongside
+# `evidence`: the inventory it selected from. Touches no note and builds no
+# index. Backing out is deleting that one file.
 ```
+
+`evidence.candidate_entities` is everything the scan found; the program's
+readings are what was chosen from it. The difference between them is the tier
+diff, already computed — do not run `scan` separately to rebuild it.
 
 Run `compile` **once**. Selection is a model call, so a second run re-selects
 and can legitimately return different readings and profiles; `--dry-run` is a
 preview of a *different* selection, not of the one you will keep. Narrate the
-file that was actually written.
+program that was actually written.
 
 Narrate it at the gate by showing it and annotating it. It is written to be
 read; paraphrasing it into other vocabulary only creates drift between what you
@@ -234,8 +238,10 @@ generation path, back up every affected existing setting and run:
 # Compare effective mode and Network with what the user accepted. Stop if either
 # changed; auto can resolve differently if machine state changed after the gate.
 "$ENZYME_BIN" -p "<vault path>" init --quiet
-"$ENZYME_BIN" -p "<vault path>" petri
+# Returns a compact outcome summary. For entities and catalysts, ask petri.
 "$ENZYME_BIN" -p "<vault path>" petri --query "<one real setup proof prompt>"
+# Query-scoped on purpose. A bare `petri` returns every top entity with its
+# children and is far more than a setup proof needs.
 "$ENZYME_BIN" -p "<vault path>" catalyze "<query composed from the prompt and petri vocabulary>"
 ```
 

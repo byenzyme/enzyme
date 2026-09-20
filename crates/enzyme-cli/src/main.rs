@@ -43,6 +43,9 @@ enum Commands {
         /// Print generated configuration without saving it
         #[arg(long, conflicts_with = "output")]
         dry_run: bool,
+        /// Emit the program and the inventory it was selected from as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Compile, migrate, or preview readable .enzyme configuration
     Spec {
@@ -144,7 +147,7 @@ enum Commands {
 
     /// Show the current petri (top catalysts and entities)
     Petri {
-        /// Number of top entities to show (default: all, or 15 with --query)
+        /// Number of top entities to show (default: 15; use 0 for all)
         #[arg(short = 'n', long)]
         top: Option<usize>,
 
@@ -425,6 +428,7 @@ async fn main() -> Result<()> {
         color,
         output,
         dry_run,
+        json,
     } = &cli.command
     {
         anyhow::ensure!(
@@ -437,6 +441,7 @@ async fn main() -> Result<()> {
             output.as_deref(),
             cli.verbose > 0,
             *dry_run,
+            *json,
         )
         .await;
     }
@@ -542,10 +547,18 @@ async fn main() -> Result<()> {
             query,
             catalyst_budget,
         } => {
-            let default_top = if query.is_some() { 15 } else { usize::MAX };
+            // Bounded by default. The old default of "every entity" produced
+            // hundreds of KB for a large vault, which every agent caller paid
+            // for and none could use. `--top 0` still asks for all of them.
+            let default_top = 15;
+            let resolved_top = match top {
+                Some(0) => usize::MAX,
+                Some(n) => n,
+                None => default_top,
+            };
             commands::petri::run_petri(
                 &vault_path,
-                top.unwrap_or(default_top),
+                resolved_top,
                 query.as_deref(),
                 catalyst_budget,
             )

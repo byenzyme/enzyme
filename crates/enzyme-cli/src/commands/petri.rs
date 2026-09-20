@@ -32,7 +32,7 @@ pub fn build_petri_json(
     let mut entity_relevances: HashMap<String, f64> = HashMap::new();
     let mut catalyst_relevances: HashMap<String, f64> = HashMap::new();
 
-    let entities = if let Some(query_text) = query {
+    let mut entities = if let Some(query_text) = query {
         match build_query_aware(
             &paths,
             &db,
@@ -57,6 +57,16 @@ pub fn build_petri_json(
     } else {
         build_recency_based(&db, top)?
     };
+
+    // Cap catalysts per entity. The recency path previously emitted every
+    // catalyst an entity had, so a large vault returned hundreds of KB that no
+    // caller could use; `--catalyst-budget 0` still asks for all of them.
+    let per_entity = catalyst_budget.unwrap_or(if query.is_some() { 3 } else { 7 });
+    if per_entity > 0 {
+        for (_, catalysts) in entities.iter_mut() {
+            catalysts.truncate(per_entity);
+        }
+    }
 
     // Canonical structural facts for the selected entity set.
     let entity_list_only: Vec<Entity> = entities.iter().map(|(e, _)| e.clone()).collect();
@@ -124,6 +134,7 @@ pub fn build_petri_json(
                     &mut entry,
                     &entity_relevances,
                     &catalyst_relevances,
+                    per_entity,
                 )?;
             }
         }
@@ -150,6 +161,7 @@ pub fn build_petri_json(
             &mut entry,
             &entity_relevances,
             &catalyst_relevances,
+            per_entity,
         )?;
         entry
             .as_object_mut()
@@ -194,6 +206,7 @@ fn enrich_folder_entry(
     entry: &mut serde_json::Value,
     entity_relevances: &HashMap<String, f64>,
     catalyst_relevances: &HashMap<String, f64>,
+    per_entity: usize,
 ) -> Result<()> {
     if !folder_group.page_entities.is_empty() {
         let (children, total_count) =
@@ -240,9 +253,14 @@ fn enrich_folder_entry(
                 .as_str()]))?;
         let mut nested: Vec<serde_json::Value> = Vec::new();
         for link_entity in &all_page_links {
-            let catalysts = db.get_catalysts_for_entity(&link_entity.name)?;
+            let mut catalysts = db.get_catalysts_for_entity(&link_entity.name)?;
             if catalysts.is_empty() {
                 continue;
+            }
+            // Nested children read straight from the DB, so they need the same
+            // cap as the top level or they dominate the payload.
+            if per_entity > 0 {
+                catalysts.truncate(per_entity);
             }
             let mut child_json = build_entity_json(
                 link_entity,

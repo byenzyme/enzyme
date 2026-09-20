@@ -23,6 +23,7 @@ pub async fn run(
     output: Option<&Path>,
     verbose: bool,
     dry_run: bool,
+    json: bool,
 ) -> Result<()> {
     let start = std::time::Instant::now();
     let path = path.canonicalize().context("resolve vault directory")?;
@@ -55,6 +56,7 @@ pub async fn run(
             config.excluded_folders.push(folder.clone());
         }
     }
+    let evidence = if json { Some(generated.evidence()?) } else { None };
     config.catalyzed_entities = generated.proposal.entities;
     let program = structured_setup(&path, config)?;
     let source = render(&program);
@@ -88,6 +90,23 @@ pub async fn run(
                 && std::env::var("TERM").as_deref() != Ok("dumb")
         }
     };
+    // One machine-readable payload for setup agents: the program that was
+    // written plus the inventory it was chosen from, so "seen but not read" is
+    // answerable without a second scan.
+    if let Some(evidence) = evidence {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": "compile.v1",
+                "vault_path": path.to_string_lossy(),
+                "saved_to": saved.as_ref().map(|f| f.display().to_string()),
+                "program": source,
+                "evidence": evidence,
+                "total_ms": start.elapsed().as_millis(),
+            }))?
+        );
+        return Ok(());
+    }
     if verbose || dry_run {
         io::stdout()
             .lock()

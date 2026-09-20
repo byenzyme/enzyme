@@ -75,6 +75,24 @@ impl GeneratedSetup {
     pub fn excluded_folders(&self) -> &[String] {
         &self.suggestion.excluded_folders
     }
+
+    /// The deterministic inventory this selection was drawn from.
+    ///
+    /// `compile` already pays for this scan, so exposing it lets a setup agent
+    /// build the "seen but not read" diff from one command instead of running
+    /// `scan` again for evidence the compile pass just computed.
+    pub fn evidence(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "files": self.suggestion.files,
+            "summary": serde_json::to_value(&self.suggestion.summary)?,
+            "candidate_entities": self.suggestion.entities,
+            "excluded_folders": self.suggestion.excluded_folders,
+            "top_folders": serde_json::to_value(&self.suggestion.top_folders)?,
+            "top_tags": serde_json::to_value(&self.suggestion.top_tags)?,
+            "top_links": serde_json::to_value(&self.suggestion.top_links)?,
+            "scan_ms": self.scan_ms,
+        }))
+    }
 }
 pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSetup> {
     let start = std::time::Instant::now();
