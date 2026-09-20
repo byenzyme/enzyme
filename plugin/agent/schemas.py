@@ -93,29 +93,6 @@ ENZYME_REFRESH = {
     },
 }
 
-ENZYME_SCAN = {
-    "name": "enzyme_scan",
-    "description": (
-        "Scan vault structure before initialization. Returns suggested config entities "
-        "from folders, tags, and wikilinks without reading or creating the enzyme DB. "
-        "By default this is a preview only. Audit the vault independently and confirm "
-        "the final entity/exclusion list with the user before setting write_config. "
-        "write_config persists the suggestion only when the vault has no configured "
-        "entities yet."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "write_config": {
-                "type": "boolean",
-                "description": "Write suggested entities to config only if none exist for this vault. Default: false.",
-                "default": False,
-            },
-        },
-        "required": [],
-    },
-}
-
 ENZYME_STATUS = {
     "name": "enzyme_status",
     "description": "Show vault stats: doc count, entity count, catalyst count, embedding coverage.",

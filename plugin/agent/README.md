@@ -57,7 +57,7 @@ On your first session, enzyme will:
 2. **Refresh the index** to catch any vault changes since last session
 3. **Register tools** — five tools become available to the model
 
-If the workspace is not initialized yet, ask Hermes to set up Enzyme for the current workspace. The agent should inspect the markdown corpus, preserve existing Obsidian or markdown conventions, run `enzyme scan`, validate the generated `~/.enzyme/config.toml`, add any missing important folders, and run `enzyme init`. If you installed the CLI outside the Hermes plugin path, run `enzyme install hermes` from the workspace before starting Hermes so the runtime skill and workspace marker are in place. It should treat folders like inboxes, daily notes, projects, people/contacts, meetings, and decisions as existing retrieval structure rather than replacing them with a new memory schema.
+If the workspace is not initialized yet, ask Hermes to set up Enzyme for the current workspace. The agent should inspect the markdown corpus, preserve existing Obsidian or markdown conventions, run `enzyme compile -v`, review the saved `~/.enzyme/configs/*.enzyme`, add any missing important folders as readings, and run `enzyme init`. If you installed the CLI outside the Hermes plugin path, run `enzyme install hermes` from the workspace before starting Hermes so the runtime skill and workspace marker are in place. It should treat folders like inboxes, daily notes, projects, people/contacts, meetings, and decisions as existing retrieval structure rather than replacing them with a new memory schema.
 
 Hermes loads `.hermes.md`/`HERMES.md` by walking upward from the launch directory and loads `AGENTS.md` from the current working directory at startup. For the smoothest install, launch Hermes from the root of the markdown workspace you want Enzyme to index.
 
@@ -114,7 +114,7 @@ The `pre_llm_call` hook fires on the first turn to seed the model with vault con
 | `enzyme_catalyze` | Semantic search — returns note excerpts, file paths, and the catalysts that bridged the match. |
 | `enzyme_refresh` | Incremental re-index. Fast (~100ms) when nothing changed. |
 | `enzyme_status` | Document count, entity count, embedding coverage, API key status. |
-| `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. The agent should run scan and config validation before this. |
+| `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. The agent should run `enzyme compile` and review the generated program before this. |
 
 Tools are gated by `check_fn` — hidden from the model until the enzyme binary is installed and on PATH.
 
@@ -174,7 +174,7 @@ That writes a small workspace marker to `AGENTS.md` and installs the full Enzyme
 The SKILL.md loads with `always: true` — enzyme is available every session without explicit invocation. On first session, the agent:
 
 1. **Detects `anyBins: ["enzyme"]`** requirement and bootstraps the binary if missing
-2. **Walks you through vault setup** using `enzyme scan`, config validation, and `enzyme init --quiet`
+2. **Walks you through vault setup** using `enzyme compile`, program review, and `enzyme init --quiet`
 3. **Uses the installed enzyme instructions** in your `AGENTS.md` and `~/.openclaw/skills/enzyme/SKILL.md` for persistence across sessions
 
 ### First session

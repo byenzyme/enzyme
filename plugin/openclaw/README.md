@@ -26,7 +26,7 @@ enzyme install openclaw
 
 `enzyme install openclaw` writes the small workspace marker into `AGENTS.md` and installs the full runtime skill into `~/.openclaw/skills/enzyme/SKILL.md` or `$OPENCLAW_HOME/skills/enzyme/SKILL.md`. The plugin handles automatic recall and optional refresh; the skill tells OpenClaw how to interpret Enzyme's retrieval results and preserve the user's existing markdown structure.
 
-On first use, ask OpenClaw to set up Enzyme for the vault. It should inspect the markdown structure, run `enzyme scan`, confirm the setup stance, persist config with `enzyme scan --write-config`, validate `~/.enzyme/config.toml`, and run `enzyme init --quiet`. For terminal-only setup, run those commands manually before starting OpenClaw.
+On first use, ask OpenClaw to set up Enzyme for the vault. It should inspect the markdown structure, run `enzyme compile -v` to propose a readable program, confirm the setup stance, review the saved `~/.enzyme/configs/*.enzyme`, and run `enzyme init --quiet`. For terminal-only setup, run those commands manually before starting OpenClaw.
 
 For local development (`--link` mode), OpenClaw rejects symlinked deps that resolve outside the plugin root. Use a packed tarball of the sibling bridge package:
 

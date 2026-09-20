@@ -77,13 +77,6 @@ def handle_refresh(args: dict, **kwargs) -> str:
     return _run_enzyme(cmd, timeout=120)
 
 
-def handle_scan(args: dict, **kwargs) -> str:
-    cmd = ["scan"]
-    if args.get("write_config", False):
-        cmd.append("--write-config")
-    return _run_enzyme(cmd, timeout=120)
-
-
 def handle_status(args: dict, **kwargs) -> str:
     return _run_enzyme(["status"])
 

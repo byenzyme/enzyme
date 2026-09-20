@@ -549,7 +549,6 @@ fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Resul
             *link_counts.entry(link.clone()).or_default() += 1;
         }
     }
-
     let folder_memberships = discover_folder_memberships(docs, &folder_counts, &link_counts);
     let entities = suggested_entities(
         docs,

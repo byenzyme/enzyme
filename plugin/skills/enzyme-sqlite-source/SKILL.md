@@ -317,7 +317,7 @@ awk -v key="$WORKSPACE_NAME" '
 "$ENZYME_BIN" scan --collection "$WORKSPACE_NAME"
 ```
 
-`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. Never use `scan --write-config` for SQLite: it is a Markdown-structure heuristic, not a SQLite contract author.
+`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. `enzyme compile` does not author SQLite contracts: it is a Markdown-structure path and refuses structured sources.
 
 Write the config in exactly this shape:
 

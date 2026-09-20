@@ -197,12 +197,14 @@ enum Commands {
         command: ModelCommands,
     },
 
-    /// Report what Enzyme can see in a vault; writes nothing
-    Scan {
-        /// Experimental: send bounded excerpts to Jev through OpenRouter (requires OPENAI_API_KEY and an OpenRouter OPENAI_BASE_URL)
-        #[arg(long)]
-        jev: bool,
-    },
+    /// Internal: read-only inventory and SQLite source validation.
+    ///
+    /// Hidden rather than removed. `enzyme compile` is the setup path and
+    /// carries this inventory in its own output, but the SQLite source skill
+    /// still validates a configured source with `scan --collection <name>`,
+    /// which has no compile equivalent yet.
+    #[command(hide = true)]
+    Scan {},
 
     /// Install or update this workspace's agent integration
     Install {
@@ -570,12 +572,8 @@ async fn main() -> Result<()> {
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan { jev } => {
-            if jev {
-                commands::scan::run_scan_jev(&vault_path).await?;
-            } else {
-                commands::scan::run_scan(&vault_path)?;
-            }
+        Commands::Scan {} => {
+            commands::scan::run_scan(&vault_path)?;
         }
         Commands::Install { target, source } => {
             commands::agents::run_agents_install(&vault_path, target, source).await?;
