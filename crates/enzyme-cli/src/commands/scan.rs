@@ -100,8 +100,8 @@ impl GeneratedSetup {
     }
 }
 pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSetup> {
-    let start = std::time::Instant::now();
     let client = JevClient::resolve().await?;
+    let start = std::time::Instant::now();
     let docs = process_docs(vault_path)?;
     let suggestion = build_scan_suggestion(vault_path, &docs)?;
     let candidates = jev_candidates(&docs, &suggestion);

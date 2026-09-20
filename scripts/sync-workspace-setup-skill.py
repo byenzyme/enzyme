@@ -68,7 +68,7 @@ SKILL_ANCHORS = [
     "revert.sh",
     "No body edits",
     "No restructuring needed; your vault already compounds well",
-    "Two Gates, Not One",
+    "Two gates, in this order. Never merge them.",
     "Gate 1: setup (always)",
     "Gate 2: repairs, after `init` (only when notes would change)",
     "Bind Capture Help To Enzyme",

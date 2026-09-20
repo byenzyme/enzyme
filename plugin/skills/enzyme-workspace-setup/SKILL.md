@@ -17,7 +17,27 @@ The durable promise:
 
 > You can start now. Existing files will not be changed until you say yes. If a repair is worth doing, it is small, reversible, and proved against the user's real notes.
 
-Nothing but explicitly requested CLI installation and temporary diagnostic artifacts is written before the setup gate. A request to "install Enzyme" authorizes the additive CLI installation, but it does not authorize changing the vault, changing Enzyme settings, downloading a local model, or sending note excerpts to a service. A "no" at the gate ends cleanly, with the vault and Enzyme settings unchanged.
+## The shape of the work
+
+`enzyme compile` chooses what to read and why, and writes a readable program.
+That is the setup. Your job is what it cannot do: say what the program will and
+will not reach, get consent before anything runs, prove the result on real notes,
+and repair only what measured evidence justifies.
+
+Two gates, in this order. Never merge them.
+
+| | Gate 1 — setup | Gate 2 — repairs |
+|---|---|---|
+| When | after `compile`, before `init` | after `init` and `doctor` |
+| Covers | the program, the generation path | changes to the user's own files |
+| Evidence | `compile --json` | `doctor` |
+| Touches notes | no | yes |
+| Backup contract | none, and imply none | required |
+| How often | always | rarely |
+
+Nothing but explicitly requested CLI installation and temporary diagnostic artifacts is written before gate 1. A request to "install Enzyme" authorizes the additive CLI installation, but it does not authorize changing the vault, changing Enzyme settings, downloading a local model, or sending note excerpts to a service. A no at gate 1 ends cleanly with the vault and Enzyme settings unchanged. A no at gate 2 leaves a working setup from gate 1.
+
+## Speak in the user's terms
 
 The first job of everything you say is revelation, not reassurance: show the user **what Enzyme anchored on in their vault** — the high-signal folders, tags, links, and running logs where their thinking accumulates — and **what each anchor makes possible**. A little mechanism is welcome when it makes the value believable ("for each anchor it keeps standing questions drawn from your own words; those are what answer you later"). Name each anchor the proposed setup will actually use in the user's vocabulary, with its real folder name, count, or dates, and pair it with a question it newly makes answerable: "it reads `content-drafts` as a timeline now, so your June draft and this morning's entry are different moments — ask what changed between them." Group secondary evidence rather than making the consent gate unreadable. Verdicts like "healthy" or "needs repair" are the footnote to this reveal, never the headline.
 
@@ -34,112 +54,23 @@ flow. The prompt may provide:
 - Optional `ENZYME_BIN`; otherwise use `enzyme` from PATH.
 - Optional existing setup constraints, such as "do not edit before init" or "use my provider key."
 
-Treat the provided path or current workspace as the workspace root unless the evidence or user says the notes live elsewhere. Verify that Markdown notes actually live there before scanning.
+Treat the provided path or current workspace as the workspace root unless the evidence or user says the notes live elsewhere. Verify that Markdown notes actually live there first.
 
 If the source is a SQLite database rather than a Markdown folder, use the `enzyme-sqlite-source` skill. It explores the schema read-only, obtains confirmation on a universal role binding, and preserves the resulting contract and workspace state.
 
-Existing setup is not a skip condition. If `.enzyme/`, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/`, or `.claude/skills/` already exist and the user asked for setup, re-setup, diagnosis, or repair, inspect them as evidence of the current state, then continue through the diagnosis flow. Overwrite stale Enzyme runtime instruction sections only by rerunning `enzyme install <runtime>` when the user is trying to update installed instructions; otherwise repair setup state through the diagnosis, config, init, refresh, and proof workflow below.
+Existing setup is not a skip condition. If `.enzyme/`, `AGENTS.md`, `CLAUDE.md`, `.agents/skills/`, or `.claude/skills/` already exist and the user asked for setup, re-setup, diagnosis, or repair, inspect them as evidence of the current state, then continue through the flow below. They are evidence to inspect; they are not proof that the setup is healthy or current. Overwrite stale Enzyme runtime instruction sections only by rerunning `enzyme install <runtime>` when the user is trying to update installed instructions.
 
-## Two Questions Carry The Skill
-
-Everything below is derived from asking these two questions honestly. Prescribe yourself no procedure you cannot justify from them.
-
-### 1. Diagnosis: What Does Enzyme Actually See?
-
-Ground truth is Enzyme's view, not the folder's appearance. Do not tier a cluster from a file count or a folder name. A `meetings/` folder can be stale exports; a `notes/` folder can be source code.
-
-Before `init`, the `evidence` block from `compile --json` is the ground truth:
-it reports what Enzyme can see without requiring an index. `doctor` needs an initialized vault and will only tell a
-first-time setup that the vault is uninitialized; run it after `init` and account
-for every fact it reports then. When an already-initialized vault is being
-re-checked, `doctor` and `.enzyme/enzyme.db` are available from the start — compare
-representative files in each cluster against the indexed view, especially source
-path, date source, and parsed date.
-
-A claim you can show against that evidence, the doctor report, or the DB is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified.
-
-Every gap between how the vault looks and what Enzyme sees is a finding. The mechanism facts below explain why gaps appear. They are a lens, not a checklist. If nothing rises above "leave it alone," say **"No restructuring needed; your vault already compounds well"** and stop. Never manufacture a finding to fill a template or justify a restructure.
-
-**The normative model:** Enzyme compounds on a dated log. Notes with real dates, shared homes, and consistent entity handles stack on each other over time. A large folder of continuously dated notes is healthy infrastructure, not a mess to clean up. Content that is undated or carries metadata the parser cannot read is where compounding stalls. Duplicates waste the budget of what gets embedded. Spread across folders matters only when it splits a dated series or scatters an entity's handles apart, never as tidiness for its own sake.
-
-Mechanism facts:
-
-- Discovery reads Markdown. Anything saved only as PDF, transcript, export, image, JSON, or log is invisible to indexing unless there is meaningful Markdown wrapping it.
-- Frontmatter can carry retrieval handles, but the mechanism is exact: title and recognized dates shape the document; tags become tag entities; literal wikilinks in any field become link entities. Plain strings such as `people: [Alice Smith]` are inert unless that vault's program lists the field, for example `references in fields ["people"]`. Mapped values become generic link entities, not a typed person/project model. A leading `---` proves nothing.
-- Retrieval compounds when related notes share one home and dedupes by file; scattered notes cannot stack as strongly.
-- Undated notes fall out of time-aware ranking, and only the most-recent slice is embedded; old or undated content can go dark.
-- Frequency and recency rank entities, so a large recent generated/reference/template folder can outrank real notes. Treat authored reference material as real content unless evidence says otherwise.
-- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single file of dated entries** — a `journal.md` that grows by appending, or a generated transcript with day-by-day sections — is different: without recognition Enzyme would read it as one note on one date, collapsing its internal timeline. Enzyme auto-recognizes this shape structurally and broadly: date headers may be ISO (`2026-07-28`), numeric (`07/28/2026`), prose (`July 28, 2026`), or weekday-prefixed (`Monday, July 28, 2026`), in mostly one chronological direction, with at least three entries that have real content beneath their headers (a page that merely *lists* dates, a metrics table, or an essay citing dates does not qualify). Recognized files are read as internal timelines automatically. What recognition looks like to the user: `compile` records each recognized file as a `learn questions from log "<name>"` reading in their program, next to the folders and tags — a legible ledger of what Enzyme noticed. Removing a line withdraws the file from anchor treatment; adding one promotes a log the detector missed or judged too small. Enzyme never splits or edits the file itself, and never writes recognition into the note's own metadata.
-
-Before you read anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. After diagnosis, repeat both checks, prove byte identity, and clean up the snapshots. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
-
-Read the tiers off the single `compile --json` payload you already have. Do not
-walk the vault again to build them, and do not reach for `doctor` here —
-`doctor` requires an initialized vault and reports nothing before `init`, which
-is the state every first-time setup is in.
-
-The useful frame is a diff: **what the program reads, what it does not, and
-why.** `evidence` states what Enzyme can see at all; the program states what
-Enzyme will read. Neither alone shows the gap, and the gap is what the user
-needs.
-
-**Before `init`, only tiers 1 and 3 are knowable**, and both are set operations
-on the `compile --json` payload:
-
-1. **Already usable** — a reading in the program, drawn from
-   `evidence.candidate_entities`. Name the reading and what it now answers.
-3. **Would improve retrieval** — in `candidate_entities` but *not* read by the
-   program, or read under a profile worth arguing with. Every reading appears in
-   the candidate pool, so the leftovers are exactly this tier.
-
-**Tiers 2 and 4 need `doctor`, which needs an initialized vault.** Do not guess
-them at the setup gate:
-
-2. **Weakly indexable** — read but read poorly: `undated_docs`,
-   `frontmatter_anomalies`, thin bodies. Only doctor counts these, and it names
-   the files.
-4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports,
-   build outputs. The pre-init evidence covers Markdown only, so the
-   non-Markdown inventory does not exist until doctor reports it.
-
-This is why repairs follow `init`: the evidence justifying a repair does not
-exist until the index does. Saying "your notes are undated" at the setup gate
-would be a guess wearing the clothes of a finding.
-
-Raw transcripts and evidence bundles stay put. Never move, edit, or summarize raw JSON, logs, transcripts, or exports during setup. Never bulk-invent `people:` or `tags:` frontmatter from body inference.
-
-### 2. Mutation: Can Every Promise Be Proven Mechanically?
-
-State each invariant, then prove it:
-
-- **Read-only diagnosis**: prove zero filesystem residue with the before/after snapshot.
-- **No body edits to existing notes**: capture each note body's hash before and after any frontmatter stamp and abort if it would change.
-- **Full backup before first mutation**: create a self-sufficient backup of every affected file before moving it, stamping it, or changing a template. A temporary backup workspace is acceptable if it is retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
-- **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
-
-Only moves/renames, date-repair frontmatter stamps, settings edits (`log` readings, reference fields, exclusions, targets in Enzyme's program), and one small change to a template used for new notes are allowed. The user must explicitly accept every change. Each change must follow evidence already present in filenames, metadata, exact entity matches, or the user's established template conventions. Configure a frontmatter link field only when scan/file evidence shows it is an established identity/reference field with scalar or list string values; never map broad metadata such as `status`, `type`, `aliases`, IDs, or arbitrary objects. A template change may make a future date, link, or existing field easier to add; it never authorizes edits to existing note bodies. No invented aliases, bulk summaries, or inferred tags. Never write or print a secret.
-
-Log recognition is a **settings edit, never a note edit**. When a single file of dated entries is confirmed (see the two-shapes mechanism fact), the remedy is its `from log "<name>"` reading in Enzyme's program: keep the reading `compile` already recorded, or add one for a real recurring log the detector missed (too few entries, say). Narrate the readings at the setup gate in the user's terms — "Enzyme recognized these files as running logs and reads each as a timeline; here are their lines, remove any I misread" — and treat removal as a first-class correction, not a failure. Because a false recognition is one deletable line in one settings file, this is the lightest mutation in the skill; it still passes through consent because it changes what Enzyme anchors on. Do not stamp `type:` metadata into the user's files to mark logs — the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their settings, not buried in per-file metadata. Never split or rewrite the file to normalize it — instead, if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
-
-Never delete a user's file, not even an exact duplicate. If a duplicate must be retired, move it to a backup/retired location with a non-Markdown suffix and record the move so revert restores it.
-
-## Connect Without Conflating Three Different Setups
-
-Keep these operations separate:
+Keep three operations separate and never conflate them:
 
 1. **CLI installation** puts the `enzyme` binary on the machine.
-2. **Runtime installation** (`enzyme install codex`, `claude`, `hermes`, or
-   `openclaw`) installs agent instructions.
-3. **Workspace setup** scans, configures, and initializes this vault.
+2. **Runtime installation** (`enzyme install codex|claude|hermes|openclaw`) installs agent instructions.
+3. **Workspace setup** is this skill.
 
 If this skill is loaded, runtime installation has already succeeded. Never run
 `enzyme install <runtime>` during workspace setup unless the user specifically
 asked to install or update that runtime's instructions. A website quickstart may
-serve a standalone user and still be wrong for the current app; do not copy its
-runtime-install step blindly. In this context, the user's phrase "install Enzyme"
-means install the missing CLI, not `enzyme install codex` or another runtime.
-
-Resolve the Enzyme binary:
+serve a standalone user and still be wrong for the current app. In this context,
+"install Enzyme" means install the missing CLI.
 
 ```bash
 ENZYME_BIN="${ENZYME_BIN:-enzyme}"
@@ -158,9 +89,28 @@ working `ENZYME_BIN`. Do not hunt through the filesystem for unrelated binaries.
 If the configured path is empty, scratch, or not where the notes live, stop and
 ask for the correct folder before reading notes or creating state.
 
-## Choose The Generation Path Before Any Setup Write
+## Ground truth is Enzyme's view
 
-First inspect the actual effective behavior:
+Do not tier a cluster from a file count or a folder name. A `meetings/` folder can be stale exports; a `notes/` folder can be source code. For every claim about what Enzyme can leverage, back it with what Enzyme actually extracted. A claim you can show against the evidence below is a finding. A claim you can only reason toward is a hypothesis; verify it before stating it, or label it plainly as unverified. Every gap between how the vault looks and what Enzyme sees is a finding — but never manufacture one to fill a template or justify a restructure. If nothing rises above "leave it alone," say so and stop.
+
+**Re-setup is different.** When the vault is already initialized, `doctor` and `.enzyme/enzyme.db` are available from the start, so all four tiers are knowable before any gate. Compare representative files in each cluster against the indexed view, especially source path, date source, and parsed date. The staging below describes a first-time setup, where the index does not exist yet.
+
+**The normative model:** Enzyme compounds on a dated log. Notes with real dates, shared homes, and consistent entity handles stack on each other over time. A large folder of continuously dated notes is healthy infrastructure, not a mess to clean up. Content that is undated or carries metadata the parser cannot read is where compounding stalls. Duplicates waste the budget of what gets embedded. Spread across folders matters only when it splits a dated series or scatters an entity's handles apart, never as tidiness for its own sake.
+
+Mechanism facts. These are a lens, not a checklist:
+
+- Discovery reads Markdown. Anything saved only as PDF, transcript, export, image, JSON, or log is invisible to indexing unless there is meaningful Markdown wrapping it.
+- Frontmatter can carry retrieval handles, but the mechanism is exact: title and recognized dates shape the document; tags become tag entities; literal wikilinks in any field become link entities. Plain strings such as `people: [Alice Smith]` are inert unless that vault's program lists the field, for example `references in fields ["people"]`. Mapped values become generic link entities, not a typed person/project model. A leading `---` proves nothing.
+- Retrieval compounds when related notes share one home and dedupes by file; scattered notes cannot stack as strongly.
+- Undated notes fall out of time-aware ranking, and only the most-recent slice is embedded; old or undated content can go dark.
+- Frequency and recency rank entities, so a large recent generated/reference/template folder can outrank real notes. Treat authored reference material as real content unless evidence says otherwise.
+- Two shapes both look like "a log" but need opposite handling. **Many dated files** — one note per day in a folder — are the healthy shape: each carries its own date and stacks over time; leave them alone. **A single file of dated entries** — a `journal.md` that grows by appending, or a generated transcript with day-by-day sections — is different: without recognition Enzyme would read it as one note on one date, collapsing its internal timeline. Enzyme auto-recognizes this shape structurally and broadly: date headers may be ISO (`2026-07-28`), numeric (`07/28/2026`), prose (`July 28, 2026`), or weekday-prefixed (`Monday, July 28, 2026`), in mostly one chronological direction, with at least three entries that have real content beneath their headers (a page that merely *lists* dates, a metrics table, or an essay citing dates does not qualify). Recognized files become a `learn questions from log "<name>"` reading in the program — a legible ledger of what Enzyme noticed. Removing a reading withdraws the file from anchor treatment; adding one promotes a log the detector missed or judged too small — treat removal as a first-class correction, not a failure, since a false recognition is one deletable line. Enzyme never splits or edits the file itself. Do not stamp `type:` metadata into the user's files to mark logs: the engine honors such stamps as a legacy escape hatch, but recognition the user can see and curate belongs in their program, not buried in per-file metadata. Never split or rewrite the file to normalize it; if the user wants the healthier shape over time, offer "one file per day" as a future-capture habit at the close, not as a mutation now.
+
+Raw transcripts and evidence bundles stay put. Never move, edit, or summarize raw JSON, logs, transcripts, or exports during setup. Never bulk-invent `people:` or `tags:` frontmatter from body inference.
+
+## Choose the generation path
+
+Inspect actual effective behavior before the gate:
 
 ```bash
 "$ENZYME_BIN" -p "<vault path>" model status
@@ -173,13 +123,13 @@ when its selected model is installed and hosted otherwise.
 
 When the user expresses no provider or privacy preference, preserve the configured
 mode; do not silently turn `auto` into forced local or forced hosted. Explain the
-effective path at the setup gate:
+effective path at gate 1:
 
 - **Effective local:** generation stays on the machine and requires no network.
   Do not run `model use` merely to make an already-local `auto` mode explicit.
 - **Effective hosted:** selected excerpts from notes are sent to Enzyme's hosted
   generation service. The local index, embeddings, and search stay on the machine.
-  State this plainly and ask for it as part of the one setup decision before init.
+  State this plainly and ask for it as part of gate 1.
 - **Local alternative:** run `model list` so the user sees the current download
   size and model availability. Downloading a model or switching modes requires an
   explicit yes; never do either as an automatic response to a hosted-provider
@@ -197,90 +147,165 @@ it blocks hosted generation, return to the user with the hosted-transfer and loc
 download choices. If it allows hosted generation, the skill's own disclosure and
 consent requirement still applies.
 
-## Diagnose Read-Only, Then Initialize After Consent
+## Step 1: compile, once
 
-Before the gate, diagnose and preview without writing settings:
+Before reading anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. Afterwards repeat both checks, prove byte identity, and clean up the temporary directory. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
 
 ```bash
 "$ENZYME_BIN" -p "<vault path>" compile --json
-# One call. Saves the program to ~/.enzyme/configs/ and returns it alongside
-# `evidence`: the inventory it selected from. Touches no note and builds no
-# index. Backing out is deleting that one file.
 ```
 
+One call. It saves the program to `~/.enzyme/configs/<vault>-<hash>.enzyme` and
+returns it alongside `evidence`, the inventory it selected from. It touches no
+note and builds no index; backing out is deleting that one file.
+
+`compile` is a settings mutation, so run nothing else that writes — no `init`,
+no `refresh`, no generation — until gate 1 passes.
+
+Run it **once**. Selection is a model call, so a second run re-selects and can
+legitimately return different readings and profiles. Never re-run it to refresh
+the program, and never narrate one run while saving another.
+
+**Setup requires connectivity.** Selection is a hosted call. There is no offline
+path and no degraded fallback: if it is unavailable, stop, say setup needs a
+connection, and leave the vault and settings untouched.
+
+## Step 2: tier what the payload can answer
+
+The frame is a diff: **what the program reads, what it does not, and why.**
 `evidence.candidate_entities` is the full pool selection drew from, so every
 reading in the program appears in it and the leftovers are exactly what was
-considered and not read. That difference is the tier-3 diff, already computed —
-do not run `scan` separately to rebuild it. (`evidence.scan_shortlist` is the
-narrower deterministic list, useful for seeing what the scan would have picked
-on its own.)
+considered and not read. Compute it from this payload; do not walk the vault
+again. (`evidence.scan_shortlist` is the narrower deterministic list, useful for
+seeing what a plain scan would have picked on its own.)
 
-Run `compile` **once**. Selection is a model call, so a second run re-selects
-and can legitimately return different readings and profiles; `--dry-run` is a
-preview of a *different* selection, not of the one you will keep. Narrate the
-program that was actually written.
+**Before `init`, only two tiers are knowable:**
 
-Narrate it at the gate by showing it and annotating it. It is written to be
-read; paraphrasing it into other vocabulary only creates drift between what you
-say and what gets written.
+1. **Already usable** — a reading in the program, drawn from `candidate_entities`. Name the reading and what it now answers.
+3. **Would improve retrieval** — in `candidate_entities` but not read, or read under a profile worth arguing with.
 
-Propose changes as concrete edits to that saved program — this reading removed,
-this profile changed, this log added — and apply them only after the user
-accepts. Do not silently tune the program on their behalf, and do not re-run
-`compile` to "refresh" it.
+**The other two need `doctor`, which needs an index.** Do not guess them now:
 
-`compile` is a settings mutation. Do not run it, `init`, `refresh`, or
-generation before the gate.
+2. **Weakly indexable** — read but read poorly: `undated_docs`, `frontmatter_anomalies`, thin bodies. Doctor counts these and names the files.
+4. **Can wait** — invisible or out of scope: non-Markdown source, raw exports, build outputs. The pre-init evidence covers Markdown only.
 
-**Setup requires connectivity.** Selection is a hosted model call. There is no
-offline setup path and no degraded fallback: if the call is unavailable, stop,
-say setup needs a connection, and leave the vault and settings untouched. Do not
-substitute another configuration route. After the user accepts the narrated setup plan and
-generation path, back up every affected existing setting and run:
+This is why repairs follow `init`: the evidence justifying a repair does not exist
+until the index does. "Your notes are undated" at gate 1 would be a guess wearing
+the clothes of a finding.
 
-The program is already on disk from diagnosis. Do not run `compile` again —
-apply the edits the user accepted by editing that file directly:
+## Gate 1: setup (always)
+
+One narrated moment the user could read aloud in under a minute:
+
+1. **The program**, shown and annotated: each reading, what it anchors on, and a question it newly makes answerable. It is written to be read — show it rather than paraphrasing it into other vocabulary, which only creates drift between what you say and what was written.
+2. **What Enzyme will not reach yet**, from tier 3, in plain terms.
+3. **How generation will run**: the effective local/hosted/BYOK result; for hosted, say selected note excerpts leave the machine; for a proposed local install, its download size.
+
+Propose changes as concrete edits to the saved program — this reading removed,
+this profile changed, this log added — and apply them only after the user accepts.
+Do not silently tune it on their behalf.
+
+**If tier 3 is empty and doctor later finds nothing worth repairing, this is the
+whole interaction.** Say **"No restructuring needed; your vault already compounds well"**,
+init, prove it, and close. Do not open gate 2 to have something to offer. A healthy
+vault still deserves the full program reveal — the user should leave knowing which
+of their places Enzyme watches and what to ask it.
+
+## Step 3: initialize and prove
+
+The program is already on disk. Apply accepted edits by editing that file; do not
+run `compile` again.
 
 ```bash
-# ~/.enzyme/configs/<vault>-<hash>.enzyme is the vault's anchor ledger: each
-# `learn questions from ...` reading names what Enzyme anchors on and the
-# profile it reads that material for, alongside exclusions, reference fields,
-# and recognized running logs (`from log "<name>"`). Edit only what was accepted.
-
 "$ENZYME_BIN" -p "<vault path>" model status
-# Compare effective mode and Network with what the user accepted. Stop if either
+# Compare effective mode and network with what the user accepted. Stop if either
 # changed; auto can resolve differently if machine state changed after the gate.
 "$ENZYME_BIN" -p "<vault path>" init --quiet
 # Returns a compact outcome summary. For entities and catalysts, ask petri.
 "$ENZYME_BIN" -p "<vault path>" doctor
-# Only works now. This is where tiers 2 and 4 come from, and what the repairs
-# gate is argued from: undated_docs and frontmatter_anomalies name their files.
+# Only works now. Source of tiers 2 and 4 and of everything gate 2 argues from:
+# undated_docs and frontmatter_anomalies name their files.
 "$ENZYME_BIN" -p "<vault path>" petri --query "<one real setup proof prompt>"
-# Query-scoped on purpose. A bare `petri` returns every top entity with its
-# children and is far more than a setup proof needs.
+# Query-scoped on purpose. A bare petri returns every top entity with its children.
 "$ENZYME_BIN" -p "<vault path>" catalyze "<query composed from the prompt and petri vocabulary>"
 ```
 
-When the user accepted BYOK, append `--use-env-llm` to `init` and later
-`refresh`; never append it merely because provider variables exist.
-
-Do not skip diagnosis and program review just because `.enzyme/` already exists. Existing config and index state are evidence to inspect; they are not proof that the setup is healthy or current.
+When the user accepted BYOK, append `--use-env-llm` to `init` and later `refresh`;
+never append it merely because provider variables exist.
 
 If init or generation reports a deterministic error, do not repeat the same
-command unchanged or continue to another generation command. Stop the generation
-flow, preserve partial state, rerun only read-only status and doctor checks, and
-report exactly what remains incomplete. A second attempt requires a concrete
-corrective change; never silently change providers after a failure. For an
-explicitly transient or resumable condition, allow at most one bounded retry and
-state the reason.
+command unchanged or continue to another generation command. Stop, preserve
+partial state, rerun only read-only status and doctor checks, and report exactly
+what remains incomplete. A second attempt requires a concrete corrective change;
+never silently change providers after a failure. For an explicitly transient or
+resumable condition, allow at most one bounded retry and state the reason.
 
 Never delete `~/.enzyme/auth.json` or run `"$ENZYME_BIN" logout` without explicit confirmation.
 
-## Prove It On One Real Note After The Repairs Gate
+## Gate 2: repairs, after `init` (only when notes would change)
 
-At the repairs gate, you may offer exactly one additive proof note distilled from the user's own best existing content, if doing so would prove Enzyme's value. Name its exact path and create it only after the user accepts it as part of the setup plan. Lead with the user's own words and file attribution. Place two to four short real excerpts beside each other. End with one concrete next question.
+Open only when doctor produced a concrete finding worth acting on. Quote the
+counts. This is where the backup and revert contract lives, because this is the
+only place the user's own files move:
 
-This proof note edits and moves nothing. If there is not enough content for a rich proof note, produce the smallest honest starting point or skip it; never fabricate to fill it.
+1. **Exactly what I would move, exclude, record in your program, create as the one proof note, or change in an existing template**, with concrete paths, lines, and fields, each traced to the doctor fact that justifies it.
+2. **The backup promise**, including where the backup/revert package will live for this run.
+3. **The revert story**: "I will check that every affected file comes back exactly as it was."
+
+When the plan mixes work of clearly different weight, offer at most two separately
+acceptable pieces, such as "just the duplicate cleanup" and "the broader re-file."
+A partial yes runs only the accepted piece under the same backup contract.
+
+At this gate you may also offer exactly one additive proof note distilled from the user's own best existing content, if it would prove Enzyme's value. Name its exact path and create it only after acceptance. Lead with the user's own words and file attribution, place two to four short real excerpts beside each other, and end with one concrete next question. It edits and moves nothing. If there is not enough content, produce the smallest honest starting point or skip it; never fabricate to fill it.
+
+### What a repair is for
+
+Each closes a gap doctor measured, by a named mechanism:
+
+- **Date-repair frontmatter stamps** return `undated_docs` to time-aware ranking and embedding, which is where undated notes go dark.
+- **Moves/renames** put a split dated series back under one home so it stacks.
+- **Program edits** — a `log` reading for a running log the selection missed, `references in fields` for a real identity field, an exclusion for material that should not compete — change what Enzyme anchors on without touching a note. These are the cheapest repairs and usually the first to reach for.
+- **One template change** removes a step from the user's capture habit so the next note arrives legible. It affects only notes made with it and never authorizes edits to existing bodies.
+
+The hard bound is exactly those four. Existing note bodies are never touched, and
+field/log recognition never writes to note files at all. Each change must follow
+evidence already present in filenames, metadata, exact entity matches, or the
+user's established template conventions. Configure a reference field only when
+evidence shows an established identity/reference field with scalar or list string
+values; never map broad metadata such as `status`, `type`, `aliases`, IDs, or
+arbitrary objects. No invented aliases, bulk summaries, or inferred tags. Never
+write or print a secret.
+
+Never delete a user's file, not even an exact duplicate. If a duplicate must be
+retired, move it to a backup/retired location with a non-Markdown suffix and
+record the move so revert restores it.
+
+### Prove every promise mechanically
+
+- **Read-only diagnosis**: prove zero filesystem residue with the before/after snapshot.
+- **No body edits to existing notes**: capture each note body's hash before and after any frontmatter stamp and abort if it would change.
+- **Full backup before first mutation**: a self-sufficient backup of every affected file before moving it, stamping it, or changing a template. A temporary backup workspace is acceptable if retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
+- **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
+
+The backup package must contain:
+
+- `sidecar/`: byte-for-byte copies of every file the repair will touch, preserving relative paths.
+- `manifest.json`: every move, every frontmatter or template change, every sidecar path, and before/after body hashes for existing notes.
+- `pre.shasum`: snapshot of the notes before mutation.
+- `revert.sh`: restores from sidecar files and reverses moves.
+
+The revert script must print what it will do before doing it, replay moves in
+reverse, restore changed files by copying original bytes from `sidecar` rather
+than reconstructing diffs, keep the optional proof note unless the user asked to
+remove it, compare only the user's notes that the repair owns (excluding
+`.enzyme/`, `.git/`, product state, caches, and the backup package itself), and
+exit non-zero if any owned note failed to restore.
+
+After a successful repair, refresh so it reaches the index — a date stamp or a new
+reading changes nothing until it is re-read. If `enzyme refresh --quiet` returns
+`update.status == "action_required"`, perform or relay the `action` string. Then
+rerun `doctor` and show the same counts you quoted at the gate, so the user sees
+the repair land rather than taking it on trust.
 
 ## Bind Capture Help To Enzyme
 
@@ -289,107 +314,16 @@ contract; do not create a second habit script here. Offer it only when the
 diagnosis found a meaningful trail that is likely to fade.
 
 Make Enzyme do its share. If an existing field merely needs recognition, or a real
-running note needs recording in settings, include that change in the consented
-setup plan. If the user already uses an Obsidian template and one small change
-would remove a step from the accepted practice, show the exact change and ask
-before making it. Core Obsidian Templates are enough for simple date and time
-placeholders, and Daily Notes can apply a daily template; do not require a new
-plugin. A template affects only notes made with it and does not choose where a note
-goes.
+running note needs a reading, include that change in the consented plan. If the
+user already uses an Obsidian template and one small change would remove a step
+from the accepted practice, show the exact change and ask before making it. Core
+Obsidian Templates are enough for simple date and time placeholders, and Daily
+Notes can apply a daily template; do not require a new plugin. A template affects
+only notes made with it and does not choose where a note goes.
 
 On first setup, name the retrieval promise that the practice should make possible.
 On a later setup check or repair, test that promise against naturally accumulated
 notes and revise or drop the Enzyme binding when it does not hold.
-
-## Two Gates, Not One
-
-Setup asks for two different things, and fusing them taxes every user with
-ceremony most vaults do not need. Keep them separate and reach only for the
-second when there is something to reach for.
-
-### Gate 1: setup (always)
-
-Everything before this changed nothing except an explicitly requested CLI installation and temporary diagnostics that are removed after comparison. A no ends cleanly with the vault and Enzyme settings unchanged. Present it as one narrated moment the user could read aloud in under a minute:
-
-1. **The program**, shown and annotated: each reading, what it anchors on, and a
-   question it newly makes answerable. This is the reveal.
-2. **What Enzyme cannot leverage yet, and why**, in plain user-visible terms —
-   the tier 2 and 3 gap between the program and what doctor sees.
-3. **How the slow generation step will run**: quote the effective local/hosted/BYOK result; for hosted, say selected note excerpts leave the machine; for a proposed local install, include its current download size.
-
-A yes here initializes. The program file is already on disk and is the thing
-being reviewed; no note and no index has been touched, so backing out is
-deleting that file. No backup contract is required here and none should be
-implied.
-
-**If tier 3 is empty and doctor later reports nothing worth repairing, this is the whole interaction.**
-Say **"No restructuring needed; your vault already compounds well"**, init,
-prove it, and close. Do not open the second gate to have something to offer. A
-healthy vault still deserves the full program reveal — the user should leave
-knowing exactly which of their places Enzyme watches and what to ask it.
-
-### Gate 2: repairs, after `init` (only when notes would change)
-
-Run `doctor` first — it works now — and open this gate only when tier 2, 3, or 4
-produced a concrete, doctor-backed change. Quote the counts.
-This is where the backup and revert contract lives, because this is the only
-place the user's own files move:
-
-1. **Exactly what I would move, exclude, record in your program, create as the one proof note, or change in an existing template**, with concrete paths, lines, and fields, each traced to the doctor fact that justifies it.
-2. **The backup promise**, including where the backup/revert package will live for this run.
-3. **The revert story**: "I will check that every affected file comes back exactly as it was."
-
-When the plan mixes work of clearly different weight, offer at most two separately acceptable pieces, such as "just the duplicate cleanup" and "the broader re-file." A partial yes runs only the accepted piece under the same backup contract.
-
-A no to gate 2 leaves a working Enzyme setup from gate 1. They are independent
-decisions and must be presented that way.
-
-## Apply The Accepted Repairs
-
-Runs only after a yes at the repairs gate, which is after `init`. Setup is
-already working at this point; repairs exist to close the gap doctor measured
-between what the vault holds and what Enzyme can read of it. Each one is a
-retrieval fix with a named mechanism:
-
-- **Date-repair frontmatter stamps** pull `undated_docs` back into time-aware
-  ranking and embedding, which is where undated notes go dark.
-- **Moves/renames** put a split dated series back under one home so it stacks
-  instead of scattering.
-- **Program edits** — a `from log "<name>"` reading for a running log the
-  selection missed, `references in fields` for a real identity field, an
-  exclusion for material that should not compete — change what Enzyme anchors
-  on without touching a note.
-- **One template change** removes a step from the user's own capture habit so
-  the next note arrives already legible.
-
-The hard bound is exactly those: moves/renames within reason, batch date-repair frontmatter edits, Enzyme program edits, and one explicitly accepted change to a template used for new notes. Existing note bodies are never touched, and field/log recognition never writes to note files at all.
-
-If doctor reports nothing in tier 2, 3, or 4 worth acting on, there are no
-repairs and this section does not run. That is the expected outcome for a
-healthy vault, not a gap in the work.
-
-Before the first mutation, write a backup package either to a unique temporary directory or to a visible vault-local directory selected by the product surface. It must contain:
-
-- `sidecar/`: byte-for-byte copies of every file the repair will touch, preserving relative paths.
-- `manifest.json`: every move, every frontmatter or template change, every sidecar path, and before/after body hashes for existing notes.
-- `pre.shasum`: snapshot of the notes before mutation.
-- `revert.sh`: a script that restores from sidecar files and reverses moves.
-
-The revert script must:
-
-- Print what it will do before doing it.
-- Replay moves in reverse.
-- Restore changed files by copying original bytes from `sidecar`, not by reconstructing diffs.
-- Keep the optional proof note unless the user explicitly asked to remove it.
-- Compare only the user's notes that the repair owns; exclude app-owned state such as `.enzyme/`, `.git/`, product-specific state directories, caches, and the backup package itself.
-- Exit non-zero if any owned note failed to restore.
-
-After a successful repair, refresh Enzyme so the repair actually reaches the
-index — a date stamp or a new reading changes nothing until it is re-read. If
-`enzyme refresh --quiet` returns `update.status == "action_required"`, perform or
-relay the `action` string before continuing. Then rerun `doctor` and show the
-same counts you quoted at the gate, so the user sees the repair land rather than
-taking it on trust.
 
 ## Complete The Handoff
 
