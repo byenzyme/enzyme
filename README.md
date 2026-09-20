@@ -50,14 +50,47 @@ vault "~/notes" {
 
 ## Get started
 
+Open your Markdown notes folder in an agent that can run terminal commands, such
+as Claude Code or Codex, and paste this prompt. If your agent is open elsewhere,
+replace the first sentence with the path to your notes.
+
+```text
+Set up Enzyme for the Markdown notes folder I have open. If you cannot identify it, ask me for its path.
+
+Install Enzyme if needed using https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh, and install the instructions for this agent. Read and follow the installed enzyme-workspace-setup skill.
+
+You may use Enzyme's online service to suggest settings from my notes and prepare search. Show me what you propose to include or exclude, and let me correct it before building the local search index.
+
+Then answer one useful question using my notes, with links to the sources, and suggest a question I can ask next. Keep my existing notes in place and unchanged. Ask separately before any cleanup, model download, or recurring task.
 ```
+
+The agent installs Enzyme, reviews the settings with you, and demonstrates an
+answer from your own notes. You can keep writing and organizing your notes as you
+already do; cleanup is not a prerequisite.
+
+### Terminal setup
+
+If you prefer to install it yourself:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash
-cd <your markdown folder root>
-# Optional: enzyme login, or configure OpenRouter by setting OPENAI_API_KEY
-enzyme compile -v
-enzyme install claude # (or: codex, hermes)
-enzyme init
+cd /path/to/your/notes
+enzyme install claude # or: codex, hermes, openclaw
 ```
+
+Then use the prompt above. For setup without an agent:
+
+```bash
+enzyme compile -v
+# Review the .enzyme settings file at the path printed by compile.
+enzyme init --quiet
+enzyme doctor
+enzyme petri --query "a question about your notes"
+enzyme catalyze "a question about your notes"
+```
+
+`compile` uses online selection and saves proposed settings under
+`~/.enzyme/configs/`. Review that file before `init` builds the local index.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
