@@ -1528,7 +1528,8 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────
     let duration_ms = start.elapsed().as_millis() as u64;
-    let petri = super::petri::build_petri_json(vault_path, 10, None, None)?;
+    // No petri here either. Callers that want entities and catalysts run
+    // `enzyme petri`; inlining it made a quiet refresh emit ~93 KB.
     let output = json!({
         "status": "completed",
         "fresh": true,
@@ -1558,7 +1559,6 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
             "entity_config_changed": local.indexing.entity_config_changed,
         },
         "duration_ms": duration_ms,
-        "petri": petri,
     });
     println!("{}", serde_json::to_string(&output)?);
 

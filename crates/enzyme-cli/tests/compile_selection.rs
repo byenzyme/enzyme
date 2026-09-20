@@ -1,5 +1,6 @@
-//! Exercise the actual CLI with a local OpenRouter Decisions server; no real credentials or
-//! network access required. Config must be usable by the existing selection path.
+//! Exercise `enzyme compile` against a local OpenRouter Decisions server; no real
+//! credentials or network access required. The program it writes must be usable by
+//! the existing selection path, and nothing it does may touch the user's notes.
 use serde_json::{Value, json};
 use std::process::Command;
 use wiremock::{
@@ -10,7 +11,7 @@ use wiremock::{
 struct Decisions;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_scan_batches_all_candidates_and_merges_profiles() {
+async fn compile_batches_all_candidates_and_merges_profiles() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -25,7 +26,6 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
     }
     let output = command(&vault, &home, &server.uri())
         .env("ENZYME_JEV_MODEL", "typesafe/jev-test")
-        .arg("--jev")
         .output()
         .unwrap();
     assert!(
@@ -33,37 +33,13 @@ async fn jev_scan_batches_all_candidates_and_merges_profiles() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // The mock's `.expect(2)` proves the candidates were batched across two
+    // requests. What matters downstream is that every decision reached the
+    // program with its merged profile, so assert the program itself.
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        result["selection"]["decisions"].as_array().unwrap().len(),
-        18
-    );
-    assert_eq!(
-        result["selection"]["batch_request_ms"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert!(
-        result["selection"]["unevaluated_entities"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        result["selection"]["decisions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|d| d["profile"] == "decision_trace")
-    );
-    assert!(
-        !result["suggested_entities_toml"]
-            .as_str()
-            .unwrap()
-            .contains("expandable = false")
-    );
+    let program = result["program"].as_str().unwrap();
+    assert_eq!(program.matches("learn questions from folder").count(), 18);
+    assert_eq!(program.matches("about decision_trace").count(), 18);
     let requests = server.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         request.url.path() == "/api/alpha/decisions"
@@ -88,7 +64,7 @@ impl Respond for Decisions {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_scan_uses_hosted_free_config_without_an_environment_key() {
+async fn compile_uses_hosted_free_config_without_an_environment_key() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/llm/free-config"))
@@ -116,7 +92,6 @@ async fn jev_scan_uses_hosted_free_config_without_an_environment_key() {
             format!("{}/llm/free-config", server.uri()),
         )
         .env("ENZYME_API_CACHE_PATH", home.join("hosted-cache.json"))
-        .arg("--jev")
         .output()
         .unwrap();
     assert!(
@@ -136,7 +111,7 @@ async fn jev_scan_uses_hosted_free_config_without_an_environment_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
+async fn compile_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -157,7 +132,6 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
         std::fs::write(vault.join(format!("inbox/{i}.md")), format!("Met [[Alice]] and [[Bob]] with {} to discuss how our collaboration has changed and what each of us needs from the relationship.", extra_links.join(" "))).unwrap();
     }
     let output = command(&vault, &home, &server.uri())
-        .arg("--jev")
         .output()
         .unwrap();
     assert!(
@@ -182,7 +156,7 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
             .iter()
             .all(|c| !c["spec"].as_str().unwrap().starts_with("[["))
     );
-    let scan = command(&vault, &home, &server.uri()).output().unwrap();
+    let scan = scan_command(&vault, &home, &server.uri()).output().unwrap();
     assert!(scan.status.success());
     let scan: Value = serde_json::from_slice(&scan.stdout).unwrap();
     let group = scan["folder_page_entities"]
@@ -201,31 +175,14 @@ async fn jev_expandable_people_uses_backlinks_even_with_empty_identity_pages() {
     );
 
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let proposed_path = home.join("proposal.toml");
-    std::fs::write(
-        &proposed_path,
-        format!(
-            "[vaults.{}]\n{}",
-            serde_json::to_string(vault.to_str().unwrap()).unwrap(),
-            result["suggested_entities_toml"].as_str().unwrap()
-        ),
-    )
-    .unwrap();
-    let proposed =
-        enzyme_core::config::enzyme_config::EnzymeConfig::load_at(&vault, &proposed_path)
-            .unwrap()
-            .unwrap();
-    let people_options = proposed
-        .catalyzed_entities
-        .iter()
-        .find_map(|entity| match entity {
-            enzyme_core::config::enzyme_config::CatalyzedEntity::WithOptions(options) => {
-                options.get("folder:people")
-            }
-            _ => None,
-        })
-        .unwrap();
-    assert!(people_options.expandable);
+    // Expandability is stated directly in the program rather than round-tripped
+    // through a TOML proposal.
+    let program = result["program"].as_str().unwrap();
+    let people_reading = program
+        .split("learn questions from ")
+        .find(|block| block.starts_with("folder \"people\""))
+        .expect("people folder reading");
+    assert!(people_reading.contains("including linked pages"));
     assert!(
         people["page_entities"]
             .as_array()
@@ -255,6 +212,20 @@ fn command(vault: &std::path::Path, home: &std::path::Path, base: &str) -> Comma
     command
         .arg("-p")
         .arg(vault)
+        .arg("compile")
+        .arg("--json")
+        .env("ENZYME_HOME", home)
+        .env("OPENAI_API_KEY", "test-key")
+        .env("OPENAI_BASE_URL", base);
+    command
+}
+
+/// The hidden read-only inventory command, still used by SQLite source validation.
+fn scan_command(vault: &std::path::Path, home: &std::path::Path, base: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enzyme"));
+    command
+        .arg("-p")
+        .arg(vault)
         .arg("scan")
         .env("ENZYME_HOME", home)
         .env("OPENAI_API_KEY", "test-key")
@@ -274,7 +245,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_scan_preview_then_write_preserves_notes_and_existing_config() {
+async fn compile_writes_a_program_without_touching_notes_or_legacy_config() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -284,67 +255,57 @@ async fn jev_scan_preview_then_write_preserves_notes_and_existing_config() {
     let (_root, vault, home) = fixture();
     let original_config = std::fs::read(home.join("config.toml")).unwrap();
     let original_note = std::fs::read(vault.join("projects/decision.md")).unwrap();
-    let preview = command(&vault, &home, &server.uri())
-        .arg("--jev")
-        .output()
-        .unwrap();
+
+    let first = command(&vault, &home, &server.uri()).output().unwrap();
     assert!(
-        preview.status.success(),
+        first.status.success(),
         "{}",
-        String::from_utf8_lossy(&preview.stderr)
+        String::from_utf8_lossy(&first.stderr)
     );
-    let result: Value = serde_json::from_slice(&preview.stdout).unwrap();
-    assert_eq!(result["status"], "suggested");
-    assert_eq!(
-        result["selection"]["decisions"][0]["profile"],
-        "decision_trace"
-    );
+    let result: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let saved = result["saved_to"].as_str().unwrap();
+    assert!(std::path::Path::new(saved).exists());
+    assert!(result["program"].as_str().unwrap().contains("decision_trace"));
+
+    // Writing a program touches neither the notes nor the legacy config, and
+    // builds no index. Backing out is deleting the one file it wrote.
     assert_eq!(
         std::fs::read(home.join("config.toml")).unwrap(),
         original_config
     );
-    assert!(!vault.join(".enzyme").exists());
-
-    let written = command(&vault, &home, &server.uri())
-        .args(["--jev", "--write-config"])
-        .output()
-        .unwrap();
-    assert!(
-        written.status.success(),
-        "{}",
-        String::from_utf8_lossy(&written.stderr)
-    );
-    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
-    assert!(config.contains("decision_trace"));
-    assert!(config.contains("auto = false"));
-    let parsed = enzyme_core::config::enzyme_config::EnzymeConfig::load_at(
-        &vault,
-        &home.join("config.toml"),
-    )
-    .unwrap()
-    .unwrap()
-    .parse_preferences();
-    assert_eq!(parsed.entity_profiles["projects"], "decision_trace");
     assert_eq!(
         std::fs::read(vault.join("projects/decision.md")).unwrap(),
         original_note
     );
     assert!(!vault.join(".enzyme").exists());
 
-    let refused = command(&vault, &home, &server.uri())
-        .args(["--jev", "--write-config"])
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("already has entities"));
-    assert_eq!(
-        std::fs::read_to_string(home.join("config.toml")).unwrap(),
-        config
+    // The saved program is what init consumes.
+    let loaded = enzyme_core::config::enzyme_config::EnzymeConfig::load_at(
+        &vault,
+        &home.join("config.toml"),
+    )
+    .unwrap()
+    .unwrap()
+    .parse_preferences();
+    assert_eq!(loaded.entity_profiles["projects"], "decision_trace");
+
+    // A second compile re-selects and rewrites this vault's program while
+    // leaving the notes alone.
+    let second = command(&vault, &home, &server.uri()).output().unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
     );
+    assert_eq!(
+        std::fs::read(vault.join("projects/decision.md")).unwrap(),
+        original_note
+    );
+    assert!(!vault.join(".enzyme").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_scan_bad_response_leaves_no_config_mutation() {
+async fn compile_bad_response_leaves_no_config_mutation() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -356,16 +317,17 @@ async fn jev_scan_bad_response_leaves_no_config_mutation() {
     let (_root, vault, home) = fixture();
     let before = std::fs::read(home.join("config.toml")).unwrap();
     let output = command(&vault, &home, &server.uri())
-        .args(["--jev", "--write-config"])
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), before);
+    // A refused selection writes no program at all, so there is nothing to undo.
+    assert!(!home.join("configs").exists() || std::fs::read_dir(home.join("configs")).unwrap().next().is_none());
     assert!(!vault.join(".enzyme").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plain_scan_never_calls_jev_even_with_a_key() {
+async fn hidden_scan_never_calls_jev_even_with_a_key() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -375,7 +337,7 @@ async fn plain_scan_never_calls_jev_even_with_a_key() {
     let (_root, vault, home) = fixture();
     std::fs::create_dir(vault.join(".enzyme")).unwrap();
     std::fs::write(vault.join(".enzyme/enzyme.log"), "existing log").unwrap();
-    let output = command(&vault, &home, &server.uri())
+    let output = scan_command(&vault, &home, &server.uri())
         .arg("-v")
         .output()
         .unwrap();
@@ -391,7 +353,7 @@ async fn plain_scan_never_calls_jev_even_with_a_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
+async fn compile_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -414,7 +376,6 @@ async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
         std::fs::write(vault.join(format!("projects/{i}.md")), format!("---\ncreated: 2020-01-01\n---\n{tags} #relationships #relationships/dating\nWe are learning how to communicate our expectations and support each other through changes.")).unwrap();
     }
     let output = command(&vault, &home, &server.uri())
-        .arg("--jev")
         .output()
         .unwrap();
     assert!(
@@ -465,7 +426,7 @@ async fn jev_scan_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn jev_samples_use_two_library_dated_notes_with_titles_and_paths() {
+async fn compile_samples_use_two_library_dated_notes_with_titles_and_paths() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(Decisions)
@@ -500,7 +461,6 @@ async fn jev_samples_use_two_library_dated_notes_with_titles_and_paths() {
         .unwrap();
     std::fs::write(vault.join("projects/undated.md"), "# Undated\n#research #undated\nThis note has useful evidence but no explicit date and must not inherit import recency.").unwrap();
     let output = command(&vault, &home, &server.uri())
-        .arg("--jev")
         .output()
         .unwrap();
     assert!(

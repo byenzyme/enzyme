@@ -203,17 +203,13 @@ fn named_sqlite_scan_validates_without_authoring_config() {
     let config_path = fixture.enzyme_home.join("config.toml");
     let before = std::fs::read(&config_path).unwrap();
 
-    let scan = fixture.run(&["scan", "--write-config", "--collection", "imessage"]);
+    // The SQLite source skill gates initialization on these checks. `scan` is
+    // hidden but retained for exactly this, and it authors no configuration.
+    let scan = fixture.run(&["scan", "--collection", "imessage"]);
     assert_success(&scan);
     let json: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
     assert_eq!(json["source_checks"][0]["valid"], true);
     assert_eq!(json["source_checks"][0]["rows"], 1);
-    assert!(
-        json["message"]
-            .as_str()
-            .unwrap()
-            .contains("Markdown source")
-    );
     assert_eq!(std::fs::read(config_path).unwrap(), before);
     assert!(!fixture.store().exists());
 }

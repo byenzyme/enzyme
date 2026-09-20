@@ -16,7 +16,7 @@ HOME="$tmp_home" "$ENZYME_BIN" -p "$tmp_workspace" install claude --source local
 check "claude: SKILL.md installed" test -f "$tmp_workspace/.claude/skills/enzyme/SKILL.md"
 check "claude: workspace setup SKILL.md installed" test -f "$tmp_workspace/.claude/skills/enzyme-workspace-setup/SKILL.md"
 check "claude: shared practice review installed" test -f "$tmp_workspace/.claude/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
-check "claude: setup skill includes scan/compile/proof path" grep -q "compile -v" "$tmp_workspace/.claude/skills/enzyme-workspace-setup/SKILL.md"
+check "claude: setup skill includes scan/compile/proof path" grep -q "compile --json" "$tmp_workspace/.claude/skills/enzyme-workspace-setup/SKILL.md"
 check "claude: CLAUDE.md written" test -f "$tmp_workspace/CLAUDE.md"
 
 # Reinstall preserves surrounding CLAUDE.md content (marked-section contract)

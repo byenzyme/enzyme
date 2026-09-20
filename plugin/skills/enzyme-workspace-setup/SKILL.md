@@ -149,7 +149,7 @@ consent requirement still applies.
 
 ## Step 1: compile, once
 
-Before reading anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. Afterwards repeat both checks, prove byte identity, and clean up the temporary directory. Diagnosis that changes the vault, config, index, or model inventory was not read-only.
+Before reading anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. Afterwards repeat both checks and clean up the temporary directory. Everything must be byte-identical except the single program file `compile` wrote under `~/.enzyme/configs/`, which is the one expected delta — name it and its hash rather than reporting "unchanged." The vault, any legacy config, the vault's `.enzyme/` state, the model inventory, and auth metadata must all be untouched. Anything else that moved means diagnosis was not read-only.
 
 ```bash
 "$ENZYME_BIN" -p "<vault path>" compile --json
@@ -166,9 +166,20 @@ Run it **once**. Selection is a model call, so a second run re-selects and can
 legitimately return different readings and profiles. Never re-run it to refresh
 the program, and never narrate one run while saving another.
 
-**Setup requires connectivity.** Selection is a hosted call. There is no offline
-path and no degraded fallback: if it is unavailable, stop, say setup needs a
-connection, and leave the vault and settings untouched.
+**Setup requires connectivity, and `compile` is itself a hosted call.** Selected
+excerpts from the user's notes leave the machine during selection, before gate 1
+exists. So disclose that and get a yes *before running it*:
+
+> To propose a setup, Enzyme sends short excerpts from your notes to its hosted
+> selection service. Nothing is indexed and no file changes. May I run it?
+
+This is narrow consent for selection only. Generation is a separate disclosure at
+gate 1, because the user may accept one and refuse the other. Do not fold them
+together, and do not run `compile` on the assumption that a later gate will cover
+it retroactively.
+
+There is no offline path and no degraded fallback: if the call is unavailable,
+stop, say setup needs a connection, and leave the vault and settings untouched.
 
 ## Step 2: tier what the payload can answer
 
@@ -197,8 +208,8 @@ the clothes of a finding.
 
 One narrated moment the user could read aloud in under a minute:
 
-1. **The program**, shown and annotated: each reading, what it anchors on, and a question it newly makes answerable. It is written to be read — show it rather than paraphrasing it into other vocabulary, which only creates drift between what you say and what was written.
-2. **What Enzyme will not reach yet**, from tier 3, in plain terms.
+1. **The program**, shown and annotated. It is written to be read — show it rather than paraphrasing it into other vocabulary, which only creates drift between what you say and what was written. Annotate the handful of readings that carry the most for this user, and group the rest ("nine more folders read for what keeps returning"). A real vault produces dozens of readings and a list of over a hundred omissions; narrating each one defeats the minute.
+2. **What Enzyme will not reach yet**, from tier 3, in plain terms and summarized by kind rather than enumerated — "18 running logs it noticed but did not pick up" beats eighteen paths.
 3. **How generation will run**: the effective local/hosted/BYOK result; for hosted, say selected note excerpts leave the machine; for a proposed local install, its download size.
 
 Propose changes as concrete edits to the saved program — this reading removed,
@@ -285,27 +296,39 @@ record the move so revert restores it.
 - **Read-only diagnosis**: prove zero filesystem residue with the before/after snapshot.
 - **No body edits to existing notes**: capture each note body's hash before and after any frontmatter stamp and abort if it would change.
 - **Full backup before first mutation**: a self-sufficient backup of every affected file before moving it, stamping it, or changing a template. A temporary backup workspace is acceptable if retained through verification and the user is told where it lives; a vault-local backup is acceptable when the product surface needs a visible revert package. Do not rely solely on git.
-- **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical before claiming success.
+- **Revertible**: run the revert end to end yourself and prove the notes come back byte-identical *and with their original modification times* before claiming success.
+
+**Bytes alone are not a restore.** An undated note takes its date from the
+filesystem, so a file restored with a fresh mtime is byte-identical and still
+wrong: Enzyme now reads it as recent, and it keeps an embedding slot it had
+previously lost. Record mtimes in the manifest, restore them in `revert.sh`, and
+verify them alongside the hashes. A revert that reports success while `doctor`
+counts stay moved has not reverted.
 
 The backup package must contain:
 
 - `sidecar/`: byte-for-byte copies of every file the repair will touch, preserving relative paths.
-- `manifest.json`: every move, every frontmatter or template change, every sidecar path, and before/after body hashes for existing notes.
+- `manifest.json`: every move, every frontmatter or template change, every sidecar path, before/after body hashes for existing notes, **and each file's original modification time**.
 - `pre.shasum`: snapshot of the notes before mutation.
 - `revert.sh`: restores from sidecar files and reverses moves.
 
 The revert script must print what it will do before doing it, replay moves in
 reverse, restore changed files by copying original bytes from `sidecar` rather
-than reconstructing diffs, keep the optional proof note unless the user asked to
-remove it, compare only the user's notes that the repair owns (excluding
-`.enzyme/`, `.git/`, product state, caches, and the backup package itself), and
-exit non-zero if any owned note failed to restore.
+than reconstructing diffs, restore each file's recorded modification time, keep
+the optional proof note unless the user asked to remove it, compare only the
+user's notes that the repair owns (excluding `.enzyme/`, `.git/`, product state,
+caches, and the backup package itself), and exit non-zero if any owned note
+failed to restore in bytes or mtime.
 
 After a successful repair, refresh so it reaches the index — a date stamp or a new
 reading changes nothing until it is re-read. If `enzyme refresh --quiet` returns
 `update.status == "action_required"`, perform or relay the `action` string. Then
 rerun `doctor` and show the same counts you quoted at the gate, so the user sees
 the repair land rather than taking it on trust.
+
+After a revert, refresh and rerun `doctor` too. The counts must return to their
+pre-repair values. If they do not, the revert was incomplete no matter what the
+file comparison said — say so plainly and report what is still changed.
 
 ## Bind Capture Help To Enzyme
 
