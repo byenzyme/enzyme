@@ -1798,7 +1798,14 @@ fn refresh_changed_doc_embeddings(
 
     let pipeline = EmbeddingPipeline::new(db, service);
     let result = match embedding_refresh_plan(has_index_changes) {
-        EmbeddingRefreshPlan::Backlog => pipeline.run_with_limit(None, |_| {}),
+        // Chip at the backlog, do not drain it. Unbounded here meant a refresh
+        // that changed nothing could embed thousands of documents in one pass,
+        // which made the window doctor reports meaningless and the cost of a
+        // no-op refresh unpredictable.
+        EmbeddingRefreshPlan::Backlog => pipeline.run_with_limit(
+            Some(enzyme_core::pipeline::embedding::MAX_EMBEDDING_FILES),
+            |_| {},
+        ),
         EmbeddingRefreshPlan::SinceIndexStart => {
             // Continuous projection may not defer part of a changed batch.
             pipeline.run_since_with_limit(index_start_ms, None, |_| {})

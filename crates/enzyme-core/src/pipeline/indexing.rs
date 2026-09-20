@@ -217,7 +217,7 @@ impl<'a> IndexingPipeline<'a> {
             paths_to_process = all_files.clone();
             files_new = paths_to_process.len();
         } else {
-            // Incremental mode: check mtime first, then hash only if mtime changed.
+            // Incremental mode: check mtime first, then hash only if mtime moved.
             //
             // Phase 1: Partition into new files vs files needing mtime check.
             let mut new_paths = Vec::new();
@@ -240,7 +240,13 @@ impl<'a> IndexingPipeline<'a> {
                                     .unwrap_or_default()
                                     .as_millis()
                                     as i64;
-                                fs_mtime_ms > *stored_mtime_ms
+                                // Any movement, not just forward. Restoring a
+                                // backup, reverting a repair, or checking out an
+                                // older copy rewinds mtime, and a `>` comparison
+                                // leaves that file indexed as its replaced
+                                // version forever. Phase 2 confirms by hash, so
+                                // a backward move costs one hash and nothing else.
+                                fs_mtime_ms != *stored_mtime_ms
                             })
                             .unwrap_or(true); // if stat fails, assume changed
 
@@ -254,7 +260,7 @@ impl<'a> IndexingPipeline<'a> {
             files_new = new_paths.len();
             paths_to_process.extend(new_paths);
 
-            // Phase 2: For files with newer mtime, read+hash in parallel to confirm change.
+            // Phase 2: For files whose mtime moved, read+hash in parallel to confirm change.
             let changed: Vec<DiscoveredFile> = candidates_to_check
                 .par_iter()
                 .filter_map(|(file, old_hash)| {
@@ -1132,6 +1138,65 @@ mod tests {
         assert_ne!(
             hash_before, hash_after,
             "content hash should change after modification"
+        );
+    }
+
+    /// Reverting a repair restores older content *and* an older mtime. A
+    /// forward-only comparison treated that as unchanged, so the vault held the
+    /// original file while the index kept serving the repaired one.
+    #[test]
+    fn incremental_detects_content_restored_with_an_older_mtime() {
+        let db = test_db();
+        let vault = create_test_vault();
+        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
+        pipeline.run(true, |_| {}).unwrap();
+
+        let original = std::fs::read(vault.path().join("note-a.md")).unwrap();
+        let original_mtime = std::fs::metadata(vault.path().join("note-a.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let hash_before = db
+            .get_document_by_path("note-a.md")
+            .unwrap()
+            .unwrap()
+            .content_hash
+            .clone();
+
+        // Repair: change content, and let mtime move forward normally.
+        write_md(
+            vault.path(),
+            "note-a.md",
+            "---\ntitle: Note A Repaired\ncreated: 2020-01-01\n---\n# Note A\nRepaired body.\n",
+        );
+        pipeline.run(false, |_| {}).unwrap();
+        let repaired_hash = db
+            .get_document_by_path("note-a.md")
+            .unwrap()
+            .unwrap()
+            .content_hash
+            .clone();
+        assert_ne!(hash_before, repaired_hash);
+
+        // Revert: restore the original bytes and the original, older mtime.
+        std::fs::write(vault.path().join("note-a.md"), &original).unwrap();
+        std::fs::File::open(vault.path().join("note-a.md"))
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+
+        let stats = pipeline.run(false, |_| {}).unwrap();
+        assert_eq!(
+            stats.files_updated, 1,
+            "a restored file must be re-indexed even though its mtime moved backward"
+        );
+        assert_eq!(
+            db.get_document_by_path("note-a.md")
+                .unwrap()
+                .unwrap()
+                .content_hash,
+            hash_before,
+            "index must serve the restored content, not the repaired content"
         );
     }
 

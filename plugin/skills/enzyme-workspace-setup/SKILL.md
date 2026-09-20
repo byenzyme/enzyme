@@ -177,7 +177,8 @@ excerpts from the user's notes leave the machine during selection, before gate 1
 exists. So disclose that and get a yes *before running it*:
 
 > To propose a setup, Enzyme sends short excerpts from your notes to its hosted
-> selection service. Nothing is indexed and no file changes. May I run it?
+> selection service. It writes a setup file you can read and delete, changes
+> nothing in your notes, and indexes nothing. May I run it?
 
 This is narrow consent for selection only. Generation is a separate disclosure at
 gate 1, because the user may accept one and refuse the other. Do not fold them
