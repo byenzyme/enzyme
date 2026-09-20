@@ -331,9 +331,29 @@ When the plan mixes work of clearly different weight, offer at most two separate
 A no to gate 2 leaves a working Enzyme setup from gate 1. They are independent
 decisions and must be presented that way.
 
-## Apply The Accepted Setup And Repairs
+## Apply The Accepted Repairs
 
-Runs only after the single yes. The hard bound is moves/renames within reason, batch date-repair frontmatter edits, Enzyme settings edits (`log:` lines, `frontmatter_link_fields`, exclusions), and one explicitly accepted change to a template used for new notes. Existing note bodies are never touched, and field/log recognition never writes to note files at all.
+Runs only after a yes at the repairs gate, which is after `init`. Setup is
+already working at this point; repairs exist to close the gap doctor measured
+between what the vault holds and what Enzyme can read of it. Each one is a
+retrieval fix with a named mechanism:
+
+- **Date-repair frontmatter stamps** pull `undated_docs` back into time-aware
+  ranking and embedding, which is where undated notes go dark.
+- **Moves/renames** put a split dated series back under one home so it stacks
+  instead of scattering.
+- **Program edits** — a `from log "<name>"` reading for a running log the
+  selection missed, `references in fields` for a real identity field, an
+  exclusion for material that should not compete — change what Enzyme anchors
+  on without touching a note.
+- **One template change** removes a step from the user's own capture habit so
+  the next note arrives already legible.
+
+The hard bound is exactly those: moves/renames within reason, batch date-repair frontmatter edits, Enzyme program edits, and one explicitly accepted change to a template used for new notes. Existing note bodies are never touched, and field/log recognition never writes to note files at all.
+
+If doctor reports nothing in tier 2, 3, or 4 worth acting on, there are no
+repairs and this section does not run. That is the expected outcome for a
+healthy vault, not a gap in the work.
 
 Before the first mutation, write a backup package either to a unique temporary directory or to a visible vault-local directory selected by the product surface. It must contain:
 
@@ -351,7 +371,12 @@ The revert script must:
 - Compare only the user's notes that the repair owns; exclude app-owned state such as `.enzyme/`, `.git/`, product-specific state directories, caches, and the backup package itself.
 - Exit non-zero if any owned note failed to restore.
 
-After a successful repair, refresh Enzyme. If `enzyme refresh --quiet` returns `update.status == "action_required"`, perform or relay the `action` string before continuing.
+After a successful repair, refresh Enzyme so the repair actually reaches the
+index — a date stamp or a new reading changes nothing until it is re-read. If
+`enzyme refresh --quiet` returns `update.status == "action_required"`, perform or
+relay the `action` string before continuing. Then rerun `doctor` and show the
+same counts you quoted at the gate, so the user sees the repair land rather than
+taking it on trust.
 
 ## Complete The Handoff
 
