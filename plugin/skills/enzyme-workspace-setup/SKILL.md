@@ -149,7 +149,7 @@ consent requirement still applies.
 
 ## Step 1: compile, once
 
-Before reading anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. Afterwards repeat both checks and clean up the temporary directory. Everything must be byte-identical except the single program file `compile` wrote under `~/.enzyme/configs/`, which is the one expected delta — name it and its hash rather than reporting "unchanged." The vault, any legacy config, the vault's `.enzyme/` state, the model inventory, and auth metadata must all be untouched. Anything else that moved means diagnosis was not read-only.
+Before reading anything, snapshot the workspace to a unique temporary path with `mktemp`. Also record the existence and hashes of non-secret Enzyme state that preflight must not change: `~/.enzyme/configs/`, any legacy `~/.enzyme/config.toml`, the vault's `.enzyme/` state, and the installed-model inventory. For authentication state, record only file existence and metadata; never read or print its contents. Afterwards repeat both checks and clean up the temporary directory. Everything must be byte-identical except what `compile` is expected to write: the program file under `~/.enzyme/configs/`, and on a first hosted call `~/.enzyme/bootstrap.json`. Name those and their hashes rather than reporting "unchanged." The vault, any legacy config, the vault's `.enzyme/` state, the model inventory, and auth metadata must all be untouched. Anything else that moved means diagnosis was not read-only.
 
 ```bash
 "$ENZYME_BIN" -p "<vault path>" compile --json
@@ -157,7 +157,13 @@ Before reading anything, snapshot the workspace to a unique temporary path with 
 
 One call. It saves the program to `~/.enzyme/configs/<vault>-<hash>.enzyme` and
 returns it alongside `evidence`, the inventory it selected from. It touches no
-note and builds no index; backing out is deleting that one file.
+note and builds no index; backing out is deleting that one program file.
+
+On a machine that has never used hosted access, the same call also creates
+`~/.enzyme/bootstrap.json`, an anonymous per-machine identifier for the hosted
+service. It is machine state rather than vault configuration, it is reused by
+every later call, and it is not part of what a user backs out. Expect it, name
+it if the user asks what appeared, and leave it alone.
 
 `compile` is a settings mutation, so run nothing else that writes — no `init`,
 no `refresh`, no generation — until gate 1 passes.
