@@ -639,6 +639,33 @@ Second paragraph here.
     }
 
     #[test]
+    fn test_process_all_discovered_preserves_order_and_link_fields() {
+        let (_dir, vault) = create_test_vault();
+        fs::write(vault.join("a.md"), "---\npeople: [Ada]\n---\n# A").unwrap();
+        fs::write(vault.join("b.md"), "---\npeople: [Grace]\n---\n# B").unwrap();
+        let discovered = ["b.md", "a.md"].map(|name| DiscoveredFile {
+            root_name: "notes".to_string(),
+            root_path: vault.clone(),
+            relative_path: PathBuf::from(name),
+            source_ref: name.to_string(),
+            writable: true,
+        });
+
+        let results = DocumentProcessor::process_all_discovered_with_link_fields(
+            &discovered,
+            &["people".to_string()],
+        );
+        let docs: Vec<_> = results.into_iter().collect::<Result<_>>().unwrap();
+
+        assert_eq!(
+            docs.iter().map(|doc| doc.source_ref.as_str()).collect::<Vec<_>>(),
+            vec!["b.md", "a.md"]
+        );
+        assert_eq!(docs[0].links, vec!["grace"]);
+        assert_eq!(docs[1].links, vec!["ada"]);
+    }
+
+    #[test]
     fn test_process_all_with_errors() {
         let (_dir, vault) = create_test_vault();
         fs::write(vault.join("good.md"), "# Good").unwrap();
