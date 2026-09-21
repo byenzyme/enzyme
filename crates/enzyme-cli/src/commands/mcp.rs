@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -49,7 +48,6 @@ fn setup_instructions() -> String {
 #[derive(Clone)]
 struct EnzymeMcp {
     vault_path: Arc<RwLock<PathBuf>>,
-    refreshed: Arc<AtomicBool>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -58,7 +56,6 @@ impl EnzymeMcp {
     fn new(vault_path: PathBuf) -> Self {
         Self {
             vault_path: Arc::new(RwLock::new(vault_path)),
-            refreshed: Arc::new(AtomicBool::new(false)),
             tool_router: Self::tool_router(),
         }
     }
@@ -70,18 +67,29 @@ impl EnzymeMcp {
             .map_err(|e| McpError::internal_error(format!("lock poisoned: {e}"), None))
     }
 
-    /// Ensure vault freshness on first tool call.
+    /// Ensure vault freshness before every read tool call.
+    ///
+    /// MCP servers are commonly long-lived. A once-per-process gate leaves
+    /// edits made after the first query invisible until the client restarts.
     /// Uses spawn_blocking + Handle::block_on to bridge the non-Send
     /// future from ensure_fresh_vault into the Send context required by rmcp.
     async fn ensure_fresh(&self) -> Result<(), McpError> {
-        if !self.refreshed.swap(true, Ordering::SeqCst) {
-            let vault_path = self.vault_path()?;
-            let handle = tokio::runtime::Handle::current();
-            tokio::task::spawn_blocking(move || handle.block_on(ensure_fresh_vault(&vault_path)))
-                .await
-                .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?
-                .map_err(|e| McpError::internal_error(format!("refresh failed: {e}"), None))?;
-        }
+        self.ensure_fresh_with(|vault_path, handle| {
+            handle.block_on(ensure_fresh_vault(&vault_path))
+        })
+        .await
+    }
+
+    async fn ensure_fresh_with<F>(&self, refresh: F) -> Result<(), McpError>
+    where
+        F: FnOnce(PathBuf, tokio::runtime::Handle) -> Result<()> + Send + 'static,
+    {
+        let vault_path = self.vault_path()?;
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || refresh(vault_path, handle))
+            .await
+            .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?
+            .map_err(|e| McpError::internal_error(format!("refresh failed: {e}"), None))?;
         Ok(())
     }
 }
@@ -153,9 +161,6 @@ impl EnzymeMcp {
                 .map_err(|e| McpError::internal_error(format!("lock poisoned: {e}"), None))?;
             *vp = vault_path.clone();
         }
-        // Reset freshness so ensure_fresh re-checks
-        self.refreshed.store(false, Ordering::SeqCst);
-
         let handle = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
             handle.block_on(run_init(
@@ -322,7 +327,10 @@ pub async fn run_mcp(vault: Option<PathBuf>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::setup_instructions;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{EnzymeMcp, setup_instructions};
 
     #[test]
     fn setup_instructions_compose_the_operational_skill_and_shared_review() {
@@ -330,5 +338,25 @@ mod tests {
         assert!(instructions.contains("# Enzyme Workspace Setup"));
         assert!(instructions.contains("# Knowledge Practice Review Contract"));
         assert!(instructions.contains("grants no authority to write"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn living_knowledge_base_persistent_server_refreshes_before_each_read() {
+        let vault = tempfile::tempdir().unwrap();
+        let server = EnzymeMcp::new(vault.path().to_path_buf());
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let attempts = Arc::clone(&attempts);
+            server
+                .ensure_fresh_with(move |_vault, _handle| {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

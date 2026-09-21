@@ -217,9 +217,11 @@ impl<'a> IndexingPipeline<'a> {
             paths_to_process = all_files.clone();
             files_new = paths_to_process.len();
         } else {
-            // Incremental mode: check mtime first, then hash only if mtime moved.
-            //
-            // Phase 1: Partition into new files vs files needing mtime check.
+            // Incremental mode: hash every previously indexed file. Filesystems,
+            // sync tools, and backup restores can preserve mtimes while replacing
+            // bytes; using mtime as a gate makes those edits permanently stale.
+            // Hashing is parallel and unchanged files still avoid the expensive
+            // parse/chunk/entity/upsert stages below.
             let mut new_paths = Vec::new();
             let mut candidates_to_check: Vec<(DiscoveredFile, &str)> = Vec::new();
 
@@ -228,31 +230,8 @@ impl<'a> IndexingPipeline<'a> {
                     None => {
                         new_paths.push(file.clone());
                     }
-                    Some((old_hash, stored_mtime_ms)) => {
-                        // Quick mtime check: stat() is ~1000x cheaper than read+hash
-                        let abs_path = file.root_path.join(&file.relative_path);
-                        let mtime_changed = std::fs::metadata(&abs_path)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .map(|mtime| {
-                                let fs_mtime_ms = mtime
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                                    as i64;
-                                // Any movement, not just forward. Restoring a
-                                // backup, reverting a repair, or checking out an
-                                // older copy rewinds mtime, and a `>` comparison
-                                // leaves that file indexed as its replaced
-                                // version forever. Phase 2 confirms by hash, so
-                                // a backward move costs one hash and nothing else.
-                                fs_mtime_ms != *stored_mtime_ms
-                            })
-                            .unwrap_or(true); // if stat fails, assume changed
-
-                        if mtime_changed {
-                            candidates_to_check.push((file.clone(), old_hash.as_str()));
-                        }
+                    Some((old_hash, _)) => {
+                        candidates_to_check.push((file.clone(), old_hash.as_str()));
                     }
                 }
             }
@@ -260,7 +239,7 @@ impl<'a> IndexingPipeline<'a> {
             files_new = new_paths.len();
             paths_to_process.extend(new_paths);
 
-            // Phase 2: For files whose mtime moved, read+hash in parallel to confirm change.
+            // Read and hash in parallel to confirm byte-level changes.
             let changed: Vec<DiscoveredFile> = candidates_to_check
                 .par_iter()
                 .filter_map(|(file, old_hash)| {
@@ -1058,6 +1037,115 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|entity| entity.name == "jay vidyarthi")
+        );
+    }
+
+    #[test]
+    fn living_knowledge_base_reconciles_edit_delete_and_schema_change() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+        write_md(
+            vault.path(),
+            "living.md",
+            "---\ntitle: Living\npeople: [Ada Lovelace]\n---\nThe obsolete answer. #living\n",
+        );
+        write_md(
+            vault.path(),
+            "deleted.md",
+            "# Temporary\nThis source must disappear. #temporary\n",
+        );
+
+        let initial = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_frontmatter_link_fields(Vec::<String>::new());
+        initial.run(true, |_| {}).unwrap();
+        let living = db.get_document_by_path("living.md").unwrap().unwrap();
+        let deleted = db.get_document_by_path("deleted.md").unwrap().unwrap();
+        let original_mtime = std::fs::metadata(vault.path().join("living.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        db.mark_document_embedded(
+            living.id.unwrap(),
+            &living.content_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+        db.mark_document_embedded(
+            deleted.id.unwrap(),
+            &deleted.content_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+        db.upsert_chunk_embeddings(&[
+            ("living.md".into(), 0, vec![1.0, 0.0]),
+            ("deleted.md".into(), 0, vec![0.0, 1.0]),
+        ])
+        .unwrap();
+
+        // A sync/restore tool may replace bytes without moving mtime. The
+        // incremental pass must still compare content, not trust metadata.
+        write_md(
+            vault.path(),
+            "living.md",
+            "---\ntitle: Living\npeople: [Ada Lovelace]\n---\nThe current answer. #living\n",
+        );
+        std::fs::File::open(vault.path().join("living.md"))
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        let edited = initial.run(false, |_| {}).unwrap();
+        assert_eq!(edited.files_updated, 1);
+        let living = db.get_document_by_path("living.md").unwrap().unwrap();
+        let living_content = living.content.as_deref().unwrap();
+        assert!(living_content.contains("current answer"));
+        assert!(!living_content.contains("obsolete answer"));
+        assert_eq!(living.embedded_content_hash, None);
+
+        // Model the synchronous embedding stage that follows indexing.
+        db.delete_chunk_embeddings_for_file("living.md").unwrap();
+        db.upsert_chunk_embeddings(&[("living.md".into(), 0, vec![0.5, 0.5])])
+            .unwrap();
+        db.mark_document_embedded(
+            living.id.unwrap(),
+            &living.content_hash,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .unwrap();
+
+        std::fs::remove_file(vault.path().join("deleted.md")).unwrap();
+        let pruned = initial.run(false, |_| {}).unwrap();
+        assert_eq!(pruned.files_deleted, 1);
+        assert!(db.get_document_by_path("deleted.md").unwrap().is_none());
+        assert_eq!(db.prune_stale_chunk_embeddings().unwrap(), 1);
+        assert!(
+            db.get_all_chunk_embeddings()
+                .unwrap()
+                .iter()
+                .all(|(path, _, _)| path != "deleted.md")
+        );
+        let deleted_occurrences = db
+            .query_read(
+                "SELECT COUNT(*) FROM entity_occurrences WHERE file_path = 'deleted.md'",
+                Vec::<libsql::Value>::new(),
+                |row| row.get::<i64>(0),
+            )
+            .unwrap();
+        assert_eq!(deleted_occurrences, vec![0]);
+
+        // Changing the generated program's frontmatter interpretation should
+        // reconcile unchanged notes without invalidating their embeddings.
+        let schema_changed = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_frontmatter_link_fields(["people".to_string()]);
+        let schema = schema_changed.run(false, |_| {}).unwrap();
+        assert_eq!(schema.files_new + schema.files_updated, 0);
+        assert!(schema.entity_config_changed);
+        assert!(db.get_all_entities().unwrap().iter().any(|entity| {
+            entity.name == "ada lovelace" && entity.entity_type == EntityType::Link
+        }));
+        let living_after_schema = db.get_document_by_path("living.md").unwrap().unwrap();
+        assert_eq!(
+            living_after_schema.embedded_content_hash.as_deref(),
+            Some(living_after_schema.content_hash.as_str())
         );
     }
 
