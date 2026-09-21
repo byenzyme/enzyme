@@ -83,8 +83,7 @@ Then use the prompt above. For setup without an agent:
 ```bash
 enzyme compile -v
 # Review the .enzyme settings file at the path printed by compile.
-enzyme init --quiet
-enzyme doctor
+enzyme init
 enzyme petri --query "a question about your notes"
 enzyme catalyze "a question about your notes"
 ```
