@@ -410,6 +410,7 @@ fn selection_rejects_ambiguous_or_invalid_policies() {
         "select 0 by frequency",
         "select 0% by frequency",
         "select 101% by frequency",
+        "select 100.000000000000000001% by frequency",
         "select -1 by frequency",
         "select -1% by frequency",
         "select 0.5 by frequency",

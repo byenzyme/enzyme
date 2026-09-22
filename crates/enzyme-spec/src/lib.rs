@@ -341,6 +341,14 @@ impl Parser {
                         ),
                     "expected a percentage"
                 );
+                // Check the decimal boundary before f64 conversion: a value
+                // just above 100 must not round down into the accepted range.
+                let (whole, fraction) = raw.split_once('.').unwrap_or((&raw, ""));
+                ensure!(
+                    whole.parse::<u16>().ok().is_some_and(|n| n < 100
+                        || (n == 100 && fraction.chars().all(|c| c == '0'))),
+                    "selection percentage must be at most 100"
+                );
                 let percent: f64 = raw.parse().context("expected a percentage")?;
                 ensure!(
                     percent.is_finite() && percent > 0.0 && percent <= 100.0,
