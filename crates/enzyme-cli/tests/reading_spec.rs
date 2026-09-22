@@ -314,3 +314,90 @@ async fn compile_dry_run_leaves_new_workspace_unconfigured_then_default_saves() 
     inspect.assert_success();
     assert!(inspect.stdout.contains("decision_trace"));
 }
+
+#[test]
+fn selection_is_honored_by_init_inspect_and_prompt_dump() {
+    let f = VaultFixture::empty();
+    let llm = MockLlm::start();
+    llm.set_ok_content(r#"{"catalysts":["Which migration tradeoff preserves evidence?","What alternative changes the audit decision?","Which constraint made the migration reversible?"],"topicNames":["migration evidence","audit alternatives","reversible migration"]}"#);
+    for name in ["frequent", "recent"] {
+        f.write_note(
+            &format!("efforts/{name}.md"),
+            &format!("# {name}\nAn ongoing migration effort."),
+        );
+    }
+    let now = chrono::Utc::now();
+    for (name, count, age) in [("frequent", 6, 180), ("recent", 3, 0)] {
+        let date = (now - chrono::Duration::days(age)).format("%Y-%m-%d");
+        for i in 0..count {
+            f.write_note(&format!("notes/{name}-{i}.md"), &format!("---\ncreated: {date}\n---\n# Migration decision\n[[{name}]]\n{}", "The team chose a reversible migration with auditable source evidence. Rejected alternatives traded traceability for speed. The decision depends on keeping old records available for comparison. ".repeat(20)));
+        }
+    }
+    let directory = f.enzyme_home().join("configs");
+    fs::create_dir_all(&directory).unwrap();
+    let file = directory.join("vault.enzyme");
+    let source = format!(
+        r#"
+settings {{ generation hosted updates disabled }}
+profile custom {{ seek "SELECTION_PROFILE: continuity" notice ["evidence"] }}
+learning {{ question budget 3 }}
+vault {:?} {{ learn questions from folder "efforts" including linked pages about custom
+ select 1 by frequency }}
+"#,
+        f.vault_path().to_string_lossy()
+    );
+    fs::write(&file, &source).unwrap();
+    let init = f
+        .cli()
+        .args(["init", "--quiet", "--use-env-llm"])
+        .env_llm(&llm)
+        .run();
+    init.assert_success();
+    let db = enzyme_core::db::Database::open(&f.vault_enzyme_dir().join("enzyme.db")).unwrap();
+    assert!(
+        !db.get_catalysts_for_entity("frequent").unwrap().is_empty(),
+        "{}",
+        init.combined()
+    );
+    assert!(db.get_catalysts_for_entity("recent").unwrap().is_empty());
+    assert!(
+        llm.requests()
+            .iter()
+            .any(|r| r.contains("SELECTION_PROFILE"))
+    );
+    let inspect = f
+        .cli()
+        .args(["spec", "inspect"])
+        .arg(f.vault_path().to_string_lossy())
+        .run();
+    inspect.assert_success();
+    let value: serde_json::Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert_eq!(
+        value["readingSpec"]["readings"][0]["learning"]["selection"]["amount"]["count"],
+        1
+    );
+    fs::write(
+        &file,
+        source.replace("select 1 by frequency", "select 50% by recency up to 1"),
+    )
+    .unwrap();
+    let dump_file = f.root().join("prompts.jsonl");
+    let dump = f
+        .cli()
+        .args(["dump-prompts", "--output"])
+        .arg(dump_file.to_string_lossy())
+        .run();
+    dump.assert_success();
+    let rows: Vec<serde_json::Value> = fs::read_to_string(&dump_file)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(rows.iter().any(|r| r["entity"] == "recent"), "{rows:?}");
+    assert!(!rows.iter().any(|r| r["entity"] == "frequent"));
+    assert!(rows.iter().any(|r| {
+        r["user_prompt"]
+            .as_str()
+            .is_some_and(|s| s.contains("SELECTION_PROFILE"))
+    }));
+}

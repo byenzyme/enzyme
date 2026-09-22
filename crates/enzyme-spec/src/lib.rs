@@ -17,8 +17,51 @@ pub struct Profile {
     #[serde(default)]
     pub recognize: Vec<String>,
 }
+/// A limit on linked child entities, never on source evidence or query results.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SelectionAmount {
+    Count { count: usize },
+    Percent { percent: f64, up_to: Option<usize> },
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionMode {
+    Frequency,
+    Recency,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Selection {
+    pub amount: SelectionAmount,
+    pub by: SelectionMode,
+}
+impl Selection {
+    pub fn limit(&self, eligible: usize) -> usize {
+        match self.amount {
+            SelectionAmount::Count { count } => count.min(eligible),
+            SelectionAmount::Percent { percent, up_to } => {
+                // Use the canonical decimal ratio so e.g. 0.07% of 10,000 is
+                // exactly seven, rather than rounding an f64 product up to eight.
+                let decimal = percent.to_string();
+                let (whole, fraction) = decimal.split_once('.').unwrap_or((&decimal, ""));
+                let numerator: u128 = format!("{whole}{fraction}")
+                    .parse()
+                    .expect("valid percentage");
+                let product = eligible as u128 * numerator;
+                let count = 10u128
+                    .checked_pow(fraction.len() as u32 + 2)
+                    .map_or(usize::from(product > 0), |denominator| {
+                        product.div_ceil(denominator) as usize
+                    });
+                count.min(eligible).min(up_to.unwrap_or(usize::MAX))
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Learning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
     pub budget: Option<usize>,
     pub sample: Option<String>,
     pub favor: Option<String>,
@@ -26,6 +69,7 @@ pub struct Learning {
 impl Learning {
     pub fn over(&self, base: &Self) -> Self {
         Self {
+            selection: self.selection.clone().or_else(|| base.selection.clone()),
             budget: self.budget.or(base.budget),
             sample: self.sample.clone().or_else(|| base.sample.clone()),
             favor: self.favor.clone().or_else(|| base.favor.clone()),
@@ -153,7 +197,7 @@ fn lex(input: &str) -> Result<Vec<Token>> {
                 line: start.0,
                 col: start.1,
             });
-        } else if "{}[]=,".contains(c) {
+        } else if "{}[]=,%".contains(c) {
             out.push(Token {
                 value: c.to_string(),
                 string: false,
@@ -164,7 +208,10 @@ fn lex(input: &str) -> Result<Vec<Token>> {
             col += 1;
         } else if c.is_ascii_alphanumeric() || c == '_' {
             let mut value = String::new();
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || "_-".contains(chars[i])) {
+            let punctuation = if c.is_ascii_digit() { "_-." } else { "_-" };
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || punctuation.contains(chars[i]))
+            {
                 value.push(chars[i]);
                 i += 1;
                 col += 1;
@@ -279,7 +326,61 @@ impl Parser {
         Ok(())
     }
     fn learn_setting(&mut self, l: &mut Learning) -> Result<()> {
-        if self.eat("sample") {
+        if self.eat("select") {
+            let raw = self.t().value.clone();
+            ensure!(
+                !self.t().string && raw.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "selection must be numeric"
+            );
+            self.pos += 1;
+            let amount = if self.eat("%") {
+                ensure!(
+                    raw.split('.').count() <= 2
+                        && raw.split('.').all(
+                            |part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
+                        ),
+                    "expected a percentage"
+                );
+                let percent: f64 = raw.parse().context("expected a percentage")?;
+                ensure!(
+                    percent.is_finite() && percent > 0.0 && percent <= 100.0,
+                    "selection percentage must be greater than 0 and at most 100"
+                );
+                SelectionAmount::Percent {
+                    percent,
+                    up_to: None,
+                }
+            } else {
+                ensure!(
+                    raw.chars().all(|c| c.is_ascii_digit()),
+                    "selection count must be a positive integer; fractions require %"
+                );
+                let count: usize = raw.parse().context("expected a positive selection count")?;
+                ensure!(count > 0, "selection count must be positive");
+                SelectionAmount::Count { count }
+            };
+            self.need("by")?;
+            let by = if self.eat("frequency") {
+                SelectionMode::Frequency
+            } else {
+                self.need("recency")?;
+                SelectionMode::Recency
+            };
+            let amount = if self.eat("up") {
+                self.need("to")?;
+                let cap = self.number(1, usize::MAX)?;
+                match amount {
+                    SelectionAmount::Percent { percent, .. } => SelectionAmount::Percent {
+                        percent,
+                        up_to: Some(cap),
+                    },
+                    _ => return self.err("up to is only allowed after a percentage selection"),
+                }
+            } else {
+                amount
+            };
+            self.set(&mut l.selection, Selection { amount, by })
+        } else if self.eat("sample") {
             self.need("across")?;
             self.need("time")?;
             self.set(&mut l.sample, "across_time".into())
@@ -371,7 +472,7 @@ impl Parser {
         } else {
             Learning::default()
         };
-        while ["sample", "favor", "question", "including"]
+        while ["sample", "favor", "question", "including", "select"]
             .iter()
             .any(|s| self.at(s))
         {
@@ -387,6 +488,10 @@ impl Parser {
         ensure!(
             !include || kind == "folder",
             "only folders can include linked pages"
+        );
+        ensure!(
+            learning.selection.is_none() || kind == "folder",
+            "select applies only to linked children of folders"
         );
         Ok(names
             .into_iter()
@@ -531,7 +636,10 @@ impl Parser {
                     "use a single learning block per scope"
                 );
                 v.learning = l;
-            } else if ["sample", "favor", "question"].iter().any(|s| self.at(s)) {
+            } else if ["sample", "favor", "question", "select"]
+                .iter()
+                .any(|s| self.at(s))
+            {
                 self.learn_setting(&mut v.learning)?;
             } else if self.eat("leave") {
                 self.need("out")?;
@@ -771,6 +879,7 @@ fn merge_learning(a: &mut Learning, b: &Learning) -> Result<()> {
             }
         };
     }
+    m!(selection);
     m!(budget);
     m!(sample);
     m!(favor);
@@ -1028,6 +1137,11 @@ pub fn render_vault(v: &Vault) -> String {
             s.push_str(&format!("\n    about {}", r.profile));
         }
         let local = Learning {
+            selection: r
+                .learning
+                .selection
+                .clone()
+                .filter(|x| Some(x) != v.learning.selection.as_ref()),
             budget: r.learning.budget.filter(|n| Some(*n) != v.learning.budget),
             sample: r
                 .learning
@@ -1101,6 +1215,21 @@ pub fn render_vault(v: &Vault) -> String {
 }
 fn render_learning(l: &Learning, indent: &str) -> String {
     let mut s = String::new();
+    if let Some(selection) = &l.selection {
+        let (amount, cap) = match selection.amount {
+            SelectionAmount::Count { count } => (count.to_string(), None),
+            SelectionAmount::Percent { percent, up_to } => (format!("{percent}%"), up_to),
+        };
+        let mode = match selection.by {
+            SelectionMode::Frequency => "frequency",
+            SelectionMode::Recency => "recency",
+        };
+        s.push_str(&format!("{indent}select {amount} by {mode}"));
+        if let Some(cap) = cap {
+            s.push_str(&format!(" up to {cap}"));
+        }
+        s.push('\n');
+    }
     if let Some(n) = l.budget {
         s.push_str(&format!("{indent}question budget {n}\n"));
     }
@@ -1249,8 +1378,8 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut trace = vec![];
             let mut vaults = vec![];
             for v in &p.vaults {
-                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor},"includeLinkedPages":r.include_linked_pages})}).collect();
-                vaults.push(json!({"path":v.path,"learning":{"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
+                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
+                vaults.push(json!({"path":v.path,"learning":{"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})
         }

@@ -811,8 +811,7 @@ impl<'a> ContextSearch<'a> {
             let recency_boost = if anchored {
                 1.0
             } else if let Some(&modified_at) = modified_at_map.get(&file_path) {
-                let age_days = ((now - modified_at) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
-                1.0 + (-0.693147 / 30.0 * age_days).exp()
+                1.0 + crate::models::activity_decay(now, modified_at)
             } else {
                 1.0
             };

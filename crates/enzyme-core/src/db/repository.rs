@@ -14,6 +14,15 @@ use super::connection::{Database, block_in_place_sync};
 // Context query types
 // ---------------------------------------------------------------------------
 
+/// Live statistics for linked-child selection. One source document counts once.
+#[derive(Debug, Default)]
+pub struct EntitySelectionStats {
+    pub documents: usize,
+    pub recency: f64,
+    /// Repair legacy cached rankings only when a future timestamp affected them.
+    pub corrected_legacy_recency: Option<f64>,
+}
+
 /// A child document within an expandable folder, ranked by external references.
 #[derive(Debug, Clone)]
 pub struct FolderChild {
@@ -904,6 +913,61 @@ impl Database {
                 .context("failed to commit update_entity_trends_batch")?;
             Ok(())
         })
+    }
+
+    /// Compute selection scores from distinct source documents, independent of
+    /// occurrence repetitions and cached trends from older indexers.
+    pub fn get_entity_selection_stats(
+        &self,
+        entity_ids: &[i64],
+    ) -> Result<HashMap<i64, EntitySelectionStats>> {
+        let now = Utc::now().timestamp_millis();
+        let ids: Vec<_> = entity_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut rows = Vec::new();
+        for batch in ids.chunks(500) {
+            let placeholders = vec!["?"; batch.len()].join(",");
+            rows.extend(self.query_read(
+                &format!("SELECT entity_id, file_path, COALESCE(effective_date, created_at, 0), SUM(weight)
+                 FROM entity_occurrences WHERE entity_id IN ({placeholders})
+                 GROUP BY entity_id, file_path, COALESCE(effective_date, created_at, 0)
+                 ORDER BY entity_id, file_path, COALESCE(effective_date, created_at, 0)"),
+                batch.iter().copied().map(Value::Integer).collect(),
+                |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?, row.get::<f64>(3)?)),
+            )?);
+        }
+        let mut docs = HashMap::<i64, std::collections::BTreeMap<String, i64>>::new();
+        let mut legacy = HashMap::<i64, (f64, f64, bool)>::new();
+        for (id, path, date, weight) in rows {
+            docs.entry(id)
+                .or_default()
+                .entry(path)
+                .and_modify(|d| *d = (*d).max(date))
+                .or_insert(date);
+            let acc = legacy.entry(id).or_default();
+            acc.0 += activity_decay(now, date) * weight;
+            acc.1 += weight;
+            acc.2 |= date > now;
+        }
+        Ok(docs
+            .into_iter()
+            .map(|(id, dates)| {
+                let (sum, weight, future) = legacy[&id];
+                (
+                    id,
+                    EntitySelectionStats {
+                        documents: dates.len(),
+                        recency: dates.values().map(|date| activity_decay(now, *date)).sum(),
+                        corrected_legacy_recency: future
+                            .then(|| sum * (1.0 + (1.0 + weight.max(0.0)).ln())),
+                    },
+                )
+            })
+            .collect())
     }
 
     /// Fetch all occurrence timestamps in one query, grouped by entity_id.

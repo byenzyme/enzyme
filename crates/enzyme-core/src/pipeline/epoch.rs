@@ -689,6 +689,34 @@ mod tests {
     }
 
     #[test]
+    fn selection_policy_change_invalidates_generation_contract() {
+        let db = Database::open_in_memory().unwrap();
+        let mut c = contract();
+        let mut config = crate::config::EnzymeConfig::default();
+        let parsed = enzyme_spec::parse(r#"vault "/notes" { learn questions from folder "people" including linked pages select 1 by frequency }"#).unwrap();
+        config.reading_spec = Some(
+            enzyme_spec::resolve(vec![parsed], std::path::Path::new("/home/test"))
+                .unwrap()
+                .vaults
+                .remove(0),
+        );
+        c.selection_config_json = serde_json::to_string(&config).unwrap();
+        activate_for_test(&db, 1_000, 2, &c);
+        let before = c.fingerprint().unwrap();
+        config.reading_spec.as_mut().unwrap().readings[0]
+            .learning
+            .selection
+            .as_mut()
+            .unwrap()
+            .by = enzyme_spec::SelectionMode::Recency;
+        c.selection_config_json = serde_json::to_string(&config).unwrap();
+        assert_ne!(before, c.fingerprint().unwrap());
+        let schedule = db.schedule_catalyst_epoch(1_001, &c, false).unwrap();
+        assert!(schedule.due);
+        assert_eq!(schedule.reason, Some(EpochDueReason::ContractChanged));
+    }
+
+    #[test]
     fn cadence_boundary_requires_changed_corpus() {
         let db = Database::open_in_memory().unwrap();
         let c = contract();

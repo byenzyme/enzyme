@@ -19,6 +19,7 @@ vault "~/notes" {
   learn questions from folder "people"
     including linked pages
     about relationships
+    select 50% by frequency up to 100
 
   learn questions from folder "inbox" about profile {
     seek "what is emerging across scattered thoughts"

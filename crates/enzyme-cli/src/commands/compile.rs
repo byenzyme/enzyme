@@ -372,6 +372,7 @@ fn highlight(source: &str, enabled: bool) -> String {
                     | "prepare"
                     | "references"
                     | "produce"
+                    | "select"
                     | "sample"
                     | "favor"
                     | "append"

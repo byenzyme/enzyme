@@ -93,7 +93,15 @@ pub fn build_readable_selection(
     overrides: &HashMap<String, String>,
     spec: &enzyme_spec::Vault,
 ) -> Result<MaterializedSelection> {
-    let mut folders = auto_expandable_folders(db, &base)?;
+    let policies: HashMap<String, enzyme_spec::Selection> = base
+        .iter()
+        .filter(|e| e.entity_type == EntityType::Folder)
+        .filter_map(|e| {
+            spec.reading(&e.name, "folder")
+                .and_then(|r| r.learning.selection.clone())
+                .map(|p| (e.name.clone(), p))
+        })
+        .collect();
     let explicit: HashMap<String, i64> = base
         .iter()
         .filter(|e| {
@@ -102,7 +110,9 @@ pub fn build_readable_selection(
         })
         .map(|e| (e.name.clone(), e.frequency))
         .collect();
-    folders.extend(load_expandable_folder_children(db, &explicit, false)?);
+    let density_exempt = explicit.keys().map(String::as_str).collect();
+    let folders =
+        load_expandable_folder_children(db, &folder_scope(&base), &density_exempt, &policies)?;
     let entities = expand_with_folder_children(db, &base, &folders)?;
     let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
     let mut inherited = HashMap::<String, String>::new();
@@ -217,7 +227,7 @@ fn auto_expandable_folders(
     entities: &[Entity],
 ) -> Result<HashMap<String, Vec<String>>> {
     let folders = folder_scope(entities);
-    load_expandable_folder_children(db, &folders, true)
+    load_expandable_folder_children(db, &folders, &HashSet::new(), &HashMap::new())
 }
 
 fn folder_scope(entities: &[Entity]) -> HashMap<String, i64> {
@@ -231,7 +241,8 @@ fn folder_scope(entities: &[Entity]) -> HashMap<String, i64> {
 fn load_expandable_folder_children(
     db: &Database,
     folders: &HashMap<String, i64>,
-    enforce_density: bool,
+    density_exempt: &HashSet<&str>,
+    policies: &HashMap<String, enzyme_spec::Selection>,
 ) -> Result<HashMap<String, Vec<String>>> {
     if folders.is_empty() {
         return Ok(HashMap::new());
@@ -240,23 +251,46 @@ fn load_expandable_folder_children(
     let folder_names: HashSet<&str> = folders.keys().map(|name| name.as_str()).collect();
     let links_by_folder = db.get_folder_page_entity_links_grouped(&folder_names)?;
 
+    let ids: Vec<_> = links_by_folder
+        .values()
+        .flatten()
+        .filter_map(|e| e.id)
+        .collect();
+    let stats = db.get_entity_selection_stats(&ids)?;
     let mut result = HashMap::new();
     for (folder, mut links) in links_by_folder {
         let file_count = folders.get(&folder).copied().unwrap_or(1) as f64;
         let density = links.len() as f64 / file_count;
-        if enforce_density && density < EXPANDABLE_DENSITY_THRESHOLD {
+        if !density_exempt.contains(folder.as_str()) && density < EXPANDABLE_DENSITY_THRESHOLD {
             continue;
         }
 
+        let policy = policies.get(&folder);
+        let score = |entity: &Entity| {
+            let live = entity.id.and_then(|id| stats.get(&id));
+            match policy.map(|p| p.by) {
+                Some(enzyme_spec::SelectionMode::Frequency) => {
+                    live.map_or(0.0, |s| s.documents as f64)
+                }
+                Some(enzyme_spec::SelectionMode::Recency) => live.map_or(0.0, |s| s.recency),
+                None => live
+                    .and_then(|s| s.corrected_legacy_recency)
+                    .unwrap_or(entity.trends.recency_score),
+            }
+        };
         links.sort_by(|a, b| {
-            b.trends
-                .recency_score
-                .partial_cmp(&a.trends.recency_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.frequency.cmp(&a.frequency))
+            score(b)
+                .total_cmp(&score(a))
+                .then_with(|| {
+                    if policy.is_none() {
+                        b.frequency.cmp(&a.frequency)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| a.name.cmp(&b.name))
         });
-        links.truncate(MAX_FOLDER_CHILDREN);
+        links.truncate(policy.map_or(MAX_FOLDER_CHILDREN, |p| p.limit(links.len())));
 
         let names: Vec<String> = links.into_iter().map(|entity| entity.name).collect();
         if !names.is_empty() {
@@ -380,6 +414,168 @@ mod tests {
             },
             metadata: serde_json::Value::Null,
         }
+    }
+
+    fn insert_occurrence(db: &Database, name: &str, file: &str, date: i64) {
+        use libsql::Value as V;
+        db.execute_write(
+            "INSERT INTO entity_occurrences (entity_id, file_path, created_at, effective_date)
+             SELECT id, ?2, ?3, ?3 FROM entities WHERE name = ?1 AND type = 'link'",
+            vec![V::Text(name.into()), V::Text(file.into()), V::Integer(date)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn explicit_selection_flows_from_config_to_runtime_with_distinct_documents() {
+        use crate::config::EnzymeConfig;
+        use crate::pipeline::selection::SelectionPipeline;
+        let db = test_db();
+        let home = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("configs")).unwrap();
+        insert_entity(&db, "efforts", "folder", 1000, 10); // below auto density
+        let now = chrono::Utc::now().timestamp_millis();
+        for (name, docs, repeats, age) in [
+            ("frequent", 6, 1, 300),
+            ("recent", 3, 30, 0),
+            ("tie-a", 3, 1, 10),
+            ("tie-b", 3, 10, 10),
+        ] {
+            insert_entity(&db, name, "link", docs * repeats, 1);
+            insert_doc(&db, &format!("efforts/{name}.md"));
+            for d in 0..docs {
+                for _ in 0..repeats {
+                    insert_occurrence(&db, name, &format!("source-{d}.md"), now - age * 86_400_000);
+                }
+            }
+        }
+        let load = |clause: &str| {
+            std::fs::write(
+                home.path().join("configs/vault.enzyme"),
+                format!(
+                    r#"
+profile custom {{ seek "continuity" notice ["evidence"] }}
+vault {:?} {{ learn questions from folder "efforts" including linked pages about custom {clause} }}
+"#,
+                    vault.path().to_string_lossy()
+                ),
+            )
+            .unwrap();
+            EnzymeConfig::load_at(vault.path(), &home.path().join("config.toml"))
+                .unwrap()
+                .unwrap()
+        };
+        for (clause, expected) in [
+            ("select 1 by frequency", vec!["frequent"]),
+            ("select 1 by recency", vec!["recent"]),
+            ("select 50% by frequency", vec!["frequent", "recent"]),
+            ("select 26% by frequency up to 1", vec!["frequent"]),
+            (
+                "select 100 by frequency",
+                vec!["frequent", "recent", "tie-a", "tie-b"],
+            ),
+        ] {
+            let config = load(clause);
+            let json = serde_json::to_string(&config).unwrap();
+            let restored: EnzymeConfig = serde_json::from_str(&json).unwrap();
+            let result = SelectionPipeline::new(&db, vault.path())
+                .run_with_config(Some(&restored))
+                .unwrap();
+            assert_eq!(result.expandable_folders["efforts"], expected, "{clause}");
+            assert_eq!(result.entities.len(), expected.len() + 1);
+            for child in expected {
+                assert_eq!(result.entity_profiles[child], "custom");
+            }
+        }
+        let before = serde_json::to_string(&load("select 1 by frequency")).unwrap();
+        let after = serde_json::to_string(&load("select 1 by recency")).unwrap();
+        assert_ne!(
+            before, after,
+            "selection must affect the serialized generation contract"
+        );
+    }
+
+    #[test]
+    fn selection_count_percent_cap_empty_and_legacy_default() {
+        let db = test_db();
+        insert_entity(&db, "people", "folder", 15, 15);
+        insert_entity(&db, "empty", "folder", 1, 1);
+        for i in (0..15).rev() {
+            let name = format!("person-{i:02}");
+            insert_entity(&db, &name, "link", 3, 1);
+            insert_doc(&db, &format!("people/{name}.md"));
+            insert_occurrence(&db, &name, "source.md", 1);
+        }
+        for (clause, count) in [
+            ("", 10),
+            ("select 12 by frequency", 12),
+            ("select 50% by frequency", 8),
+            ("select 100% by frequency", 15),
+            ("select 10% by frequency up to 1", 1),
+            ("select 100 by recency", 15),
+        ] {
+            let source = format!(
+                r#"vault "/notes" {{ learn questions from folders ["people", "empty"] including linked pages {clause} }}"#
+            );
+            let p = enzyme_spec::resolve(
+                vec![enzyme_spec::parse(&source).unwrap()],
+                std::path::Path::new("/home/test"),
+            )
+            .unwrap();
+            let base = db
+                .get_entities_by_names(&[
+                    ("people", EntityType::Folder),
+                    ("empty", EntityType::Folder),
+                ])
+                .unwrap();
+            let result =
+                build_readable_selection(&db, base, &HashMap::new(), &p.vaults[0]).unwrap();
+            assert_eq!(result.expandable_folders["people"].len(), count, "{clause}");
+            assert!(!result.expandable_folders.contains_key("empty"));
+            assert_eq!(
+                result.expandable_folders["people"][0], "person-00",
+                "ties use names"
+            );
+        }
+    }
+
+    #[test]
+    fn future_timestamps_cannot_dominate_live_or_cached_child_rankings() {
+        let db = test_db();
+        let now = chrono::Utc::now().timestamp_millis();
+        insert_entity(&db, "people", "folder", 2, 2);
+        for (name, date) in [("future", i64::MAX), ("today", now)] {
+            insert_entity(&db, name, "link", 3, 3);
+            insert_doc(&db, &format!("people/{name}.md"));
+            for d in 0..3 {
+                insert_occurrence(&db, name, &format!("source-{d}.md"), date);
+            }
+        }
+        db.execute_write("UPDATE entities SET trends = '{\"frequency_recent\":3,\"recency_score\":2.7e271,\"timeline_buckets\":{}}' WHERE name='future'", vec![]).unwrap();
+        let future = db
+            .get_entities_by_names(&[("future", EntityType::Link)])
+            .unwrap()
+            .remove(0);
+        let stats = db
+            .get_entity_selection_stats(&[future.id.unwrap()])
+            .unwrap();
+        let score = &stats[&future.id.unwrap()];
+        assert_eq!(score.documents, 3);
+        assert_eq!(score.recency, 3.0);
+        assert!(score.corrected_legacy_recency.unwrap() < 10.0);
+        // A cached score of 20 beats a repaired future score, proving the legacy path uses the repair.
+        db.execute_write("UPDATE entities SET trends = '{\"frequency_recent\":3,\"recency_score\":20,\"timeline_buckets\":{}}' WHERE name='today'", vec![]).unwrap();
+        let result = build_curated_selection(
+            &db,
+            vec![make_entity("people", EntityType::Folder, 2)],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(result.expandable_folders["people"][0], "today");
+        assert_eq!(crate::models::activity_decay(now, i64::MAX), 1.0);
+        assert_eq!(crate::models::activity_decay(now, i64::MIN), 0.0);
+        assert!(crate::models::activity_decay(now, now - 30 * 86_400_000) < 0.501);
     }
 
     #[test]

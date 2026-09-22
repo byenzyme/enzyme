@@ -126,3 +126,9 @@ pub struct EntityOccurrence {
 fn default_occurrence_weight() -> f64 {
     1.0
 }
+
+/// Thirty-day activity decay. Future timestamps have today's weight, never a boost.
+pub fn activity_decay(now: i64, date: i64) -> f64 {
+    let age_days = now.saturating_sub(date).max(0) as f64 / 86_400_000.0;
+    (-0.693_147 / 30.0 * age_days).exp()
+}

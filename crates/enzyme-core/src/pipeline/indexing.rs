@@ -761,7 +761,8 @@ impl<'a> IndexingPipeline<'a> {
 
         for (entity_id, effective_date_opt, created_at, occurrence_weight) in &all_occ_dates {
             let effective_date = effective_date_opt.unwrap_or(*created_at);
-            let age_days = ((now_millis - effective_date) as f64) / (1000.0 * 60.0 * 60.0 * 24.0);
+            let age_days = (now_millis.saturating_sub(effective_date).max(0) as f64)
+                / (1000.0 * 60.0 * 60.0 * 24.0);
 
             let acc = accums.entry(*entity_id).or_insert_with(|| Accum {
                 weighted_sum: 0.0,
@@ -771,7 +772,7 @@ impl<'a> IndexingPipeline<'a> {
             });
 
             // Exponential decay with a half-life of 30 days
-            let weight = (-0.693_147 / 30.0 * age_days).exp();
+            let weight = crate::models::activity_decay(now_millis, effective_date);
             acc.weighted_sum += weight * occurrence_weight;
 
             if age_days <= 365.0 {

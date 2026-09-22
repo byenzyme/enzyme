@@ -325,3 +325,115 @@ fn implicit_exclusions_are_omitted_but_real_choices_survive() {
     assert!(rendered.contains("leave out folders [\"node_modules\", \"archive\"]"));
     assert_eq!(parse(&rendered).unwrap(), parsed);
 }
+
+#[test]
+fn selection_grammar_inheritance_roundtrip_and_limits() {
+    let source = r#"
+learning { select 50 by frequency }
+vault "/notes" {
+ learning { select 50% by recency }
+ learn questions from folder "people" including linked pages
+ learn questions from folders ["projects", "efforts"] including linked pages
+   select 10% by frequency up to 100 sample across time question budget 4
+ learn questions from folder "small" including linked pages select 0.5% by frequency
+}"#;
+    let p = compile(source);
+    let readings = &p.vaults[0].readings;
+    assert_eq!(
+        readings[0].learning.selection.as_ref().unwrap().by,
+        SelectionMode::Recency
+    );
+    assert_eq!(
+        readings[0].learning.selection.as_ref().unwrap().limit(15),
+        8
+    );
+    let policy = readings[1].learning.selection.as_ref().unwrap();
+    for (eligible, expected) in [(0, 0), (1, 1), (11, 2), (1000, 100), (2000, 100)] {
+        assert_eq!(policy.limit(eligible), expected);
+    }
+    assert_eq!(
+        readings[2].learning.selection,
+        readings[1].learning.selection
+    );
+    assert_eq!(
+        readings[3].learning.selection.as_ref().unwrap().limit(201),
+        2
+    );
+    for s in [
+        "select 50 by frequency",
+        "select 50 by recency",
+        "select 100% by frequency",
+        "select 7% by frequency",
+        "select 0.07% by frequency",
+    ] {
+        let p = compile(&format!(
+            r#"vault "/notes" {{ learn questions from folder "efforts" including linked pages {s} }}"#
+        ));
+        let selection = p.vaults[0].readings[0].learning.selection.as_ref().unwrap();
+        assert_eq!(selection.limit(0), 0);
+        assert_eq!(selection.limit(1), 1);
+        if s.starts_with("select 0.07%") {
+            assert_eq!(selection.limit(10000), 7);
+        }
+        if s.starts_with("select 7%") {
+            assert_eq!(selection.limit(100), 7);
+        }
+    }
+    let count = p.learning.selection.as_ref().unwrap();
+    assert_eq!(count.limit(100), 50);
+    assert_eq!(count.limit(3), 3);
+    let normalized = render_program(&parse(source).unwrap());
+    assert_eq!(compile(&normalized), p);
+    assert_eq!(compile(&render_program(&p)), p);
+    assert_eq!(
+        serde_json::from_str::<Program>(&serde_json::to_string(&p).unwrap()).unwrap(),
+        p
+    );
+    let plan = playground(source);
+    assert_eq!(
+        plan["plan"]["vaults"][0]["readings"][1]["learning"]["selection"]["by"],
+        "frequency"
+    );
+    assert!(
+        compile(r#"vault "/notes" { learn questions from folder "people" }"#).vaults[0].readings[0]
+            .learning
+            .selection
+            .is_none()
+    );
+}
+
+#[test]
+fn selection_rejects_ambiguous_or_invalid_policies() {
+    for clause in [
+        "select",
+        "select 50.% by frequency",
+        "select 0 by frequency",
+        "select 0% by frequency",
+        "select 101% by frequency",
+        "select -1 by frequency",
+        "select -1% by frequency",
+        "select 0.5 by frequency",
+        "select half by frequency",
+        "select 2 by coverage",
+        "select 50% frequency",
+        "select 1 by frequency up to 3",
+        "select 10% by frequency up to 0",
+        "select 10% up to 3 by frequency",
+        "select 10% by frequency up to 1.5",
+        "select 2 by frequency select 3 by recency",
+        "select 1e2% by frequency",
+        "select 10%% by frequency",
+        "select NaN% by frequency",
+        "select 1..2% by recency",
+    ] {
+        let source = format!(
+            r#"vault "/notes" {{ learn questions from folder "people" including linked pages {clause} }}"#
+        );
+        assert!(parse(&source).is_err(), "accepted {clause}");
+    }
+    assert!(parse("learning { select").is_err());
+    assert!(
+        parse(r#"vault "/notes" { learn questions from tag "people" select 3 by frequency }"#)
+            .is_err()
+    );
+}
