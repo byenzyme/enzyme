@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::catalyst_profiles::{
@@ -265,14 +265,13 @@ fn build_profiles_section() -> String {
 ///
 /// Surfaces temporal engagement patterns so the LLM can use
 /// the shape of practice — not just content — to aim its probes.
-fn build_practice_shape(entity: &Entity) -> String {
+fn build_practice_shape(entity: &Entity, now: DateTime<Utc>) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     let freq_recent = entity.trends.frequency_recent;
     let freq_all = entity.frequency;
 
     // Engagement trajectory from timeline buckets
-    let now = Utc::now();
     let cutoff = (now - chrono::Duration::days(90)).date_naive();
 
     let freq_3m: i64 = entity
@@ -323,7 +322,9 @@ fn build_practice_shape(entity: &Entity) -> String {
     // Recency from last_seen (millis since epoch)
     if let Some(last_seen_ms) = entity.last_seen {
         if let Some(last_seen_dt) = chrono::DateTime::from_timestamp_millis(last_seen_ms) {
-            let days_since = (now - last_seen_dt).num_days();
+            // A last_seen after the reference time (a future-dated note) is
+            // active at that time, never a negative age.
+            let days_since = (now - last_seen_dt).num_days().max(0);
             if days_since == 0 {
                 parts.push("Last active today.".into());
             } else if days_since <= 7 {
@@ -429,7 +430,7 @@ cluster.\n</entity>"
 
     // Practice shape from entity trends
     if let Some(e) = entity {
-        let practice = build_practice_shape(e);
+        let practice = build_practice_shape(e, Utc::now());
         if !practice.is_empty() {
             prompt.push_str(&format!("\n\n{practice}"));
         }
@@ -1004,6 +1005,36 @@ fn generate_fallback_topic(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::llm::catalyst_profiles::{PROFILE_OPERATIONAL, PROFILE_TENSION_TRACE};
+
+    fn dated_entity(last_seen: &str) -> Entity {
+        Entity {
+            id: Some(1),
+            name: "topic".into(),
+            entity_type: crate::models::EntityType::Link,
+            frequency: 4,
+            ranking_weight: 4.0,
+            first_seen: None,
+            last_seen: Some(
+                chrono::DateTime::parse_from_rfc3339(last_seen)
+                    .unwrap()
+                    .timestamp_millis(),
+            ),
+            trends: Default::default(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn practice_shape_treats_future_last_seen_as_active_today() {
+        let now = DateTime::parse_from_rfc3339("2026-09-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let future = build_practice_shape(&dated_entity("2100-06-01T00:00:00Z"), now);
+        assert!(future.contains("Last active today."), "{future}");
+        assert!(!future.contains('-'), "{future}");
+        let past = build_practice_shape(&dated_entity("2026-09-20T12:00:00Z"), now);
+        assert!(past.contains("Last active 3 days ago."), "{past}");
+    }
 
     #[test]
     fn test_parse_object_format() {
