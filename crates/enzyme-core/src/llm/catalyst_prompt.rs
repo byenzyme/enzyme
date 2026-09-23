@@ -524,6 +524,10 @@ pub fn build_local_user_prompt(
     prompt
 }
 
+/// Default semantic instruction for question-form catalysts. Custom readable
+/// profiles replace this clause while retaining the question output contract.
+pub const QUESTION_PERIPHERY_INSTRUCTION: &str = "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.";
+
 /// Return (periphery_instruction, format_instruction, placeholder_label) for a format.
 fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'static str) {
     match fmt.key {
@@ -539,7 +543,7 @@ fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'s
         ),
         // "question" and any fallback
         _ => (
-            "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.",
+            QUESTION_PERIPHERY_INSTRUCTION,
             "Each catalyst must be a single sentence question. Keep every catalyst to one sentence and avoid second-person framing. IMPORTANT: Vary your sentence openings — do NOT start multiple catalysts with the same word (e.g., don't start 3 catalysts with \"What\").",
             "Retrieval question",
         ),

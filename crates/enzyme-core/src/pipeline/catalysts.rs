@@ -19,10 +19,10 @@ use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
-    GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst, build_local_user_prompt,
-    build_system_prompt, build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema,
-    get_profile, hardware, parse_catalyst_response, parse_partial_catalyst_entries,
-    streaming_entries_instruction,
+    GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst,
+    QUESTION_PERIPHERY_INSTRUCTION, build_local_user_prompt, build_system_prompt,
+    build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema, get_profile, hardware,
+    parse_catalyst_response, parse_partial_catalyst_entries, streaming_entries_instruction,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -818,6 +818,7 @@ pub struct CatalystStats {
 
 /// Replace the preset-specific preamble while preserving sampled evidence and output rules.
 fn apply_reading_profile(prompt: &str, name: &str, profile: &enzyme_spec::Profile) -> String {
+    const CUSTOM_READING_QUESTION_INSTRUCTION: &str = "Then formulate the retrieval question requested by the selected reading profile. Preserve the concrete identity, scope, time, and source vocabulary needed to route back to this evidence; leave the profile's requested relation open.";
     let boundary = prompt
         .find("<vault_context")
         .or_else(|| prompt.find("<entity>"))
@@ -843,8 +844,12 @@ fn apply_reading_profile(prompt: &str, name: &str, profile: &enzyme_spec::Profil
             profile.recognize.join("; ")
         ));
     }
-    guidance.push_str("Use this reading profile instead of a built-in profile. Preserve the core grounding and output-format rules.\n\n");
-    guidance.push_str(&prompt[boundary..]);
+    guidance.push_str("Use this reading profile instead of a built-in profile. Its seek, notice, ask, and note fields determine the semantic aim; preserve the core grounding and output-format rules.\n\n");
+    let body = prompt[boundary..].replace(
+        QUESTION_PERIPHERY_INSTRUCTION,
+        CUSTOM_READING_QUESTION_INSTRUCTION,
+    );
+    guidance.push_str(&body);
     guidance
 }
 
@@ -2933,7 +2938,7 @@ mod readable_profile_tests {
         };
         for original in [
             "SELECTED PROFILE: old\n\n<vault_context>actual evidence</vault_context>\n<entity>x</entity>\nReturn JSON",
-            "SELECTED PROFILE: old\nOld local guidance\n<vault_context era=\"2026\">actual evidence</vault_context>\nGenerate 3 questions",
+            "SELECTED PROFILE: old\nOld local guidance\n<vault_context era=\"2026\">actual evidence</vault_context>\nThen probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.\nGenerate 3 questions",
         ] {
             let applied = apply_reading_profile(original, "mine", &profile);
             assert!(!applied.contains("SELECTED PROFILE: old"));
@@ -2946,6 +2951,10 @@ mod readable_profile_tests {
                 "actual evidence",
             ] {
                 assert!(applied.contains(text));
+            }
+            if original.contains(QUESTION_PERIPHERY_INSTRUCTION) {
+                assert!(!applied.contains(QUESTION_PERIPHERY_INSTRUCTION));
+                assert!(applied.contains("leave the profile's requested relation open"));
             }
         }
     }
