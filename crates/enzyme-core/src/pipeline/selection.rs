@@ -29,6 +29,8 @@ pub struct SelectionResult {
     pub expandable_folders: HashMap<String, Vec<String>>,
     /// How the entities were selected.
     pub source: SelectionSource,
+    /// Why readable readings resolved as they did (empty for other paths).
+    pub diagnostics: selection_steps::SelectionDiagnostics,
 }
 
 /// Selects entities for catalyst generation, either from user config or coverage selection.
@@ -108,6 +110,10 @@ impl<'a> SelectionPipeline<'a> {
         // Drop entities the user explicitly excluded, and — via the unified
         // structural set — any folder that should never be surfaced even if the
         // user accidentally curated it (e.g. `templates`, `excalidraw`).
+        let indexed: std::collections::HashSet<(String, crate::models::EntityType)> = found
+            .iter()
+            .map(|e| (e.name.clone(), e.entity_type.clone()))
+            .collect();
         found.retain(|e| {
             !excluded.contains(&e.name)
                 && !(e.entity_type == crate::models::EntityType::Folder
@@ -117,16 +123,31 @@ impl<'a> SelectionPipeline<'a> {
         let found_names: std::collections::HashSet<String> =
             found.iter().map(|e| e.name.clone()).collect();
 
+        let mut missing = Vec::new();
+        let mut left_out = Vec::new();
         for parsed in &prefs.entities {
-            if !found_names.contains(&parsed.name) && !excluded.contains(&parsed.name) {
-                debug!(
-                    name = parsed.name.as_str(),
-                    "config entity not found in DB, skipping"
-                );
+            if found_names.contains(&parsed.name) {
+                continue;
+            }
+            let kind = match parsed.entity_type {
+                crate::models::EntityType::AppendLog => "log",
+                ref other => other.as_str(),
+            };
+            let selector = enzyme_spec::entity_selector(kind, &parsed.name);
+            if indexed.contains(&(parsed.name.clone(), parsed.entity_type.clone())) {
+                left_out.push(selector);
+            } else {
+                if !excluded.contains(&parsed.name) {
+                    debug!(
+                        name = parsed.name.as_str(),
+                        "config entity not found in DB, skipping"
+                    );
+                }
+                missing.push(selector);
             }
         }
 
-        let materialized = if let Some(spec) = &config.reading_spec {
+        let mut materialized = if let Some(spec) = &config.reading_spec {
             selection_steps::build_readable_selection(self.db, found, &prefs.entity_profiles, spec)?
         } else {
             selection_steps::build_curated_selection(self.db, found, &prefs.entity_profiles)?
@@ -139,11 +160,15 @@ impl<'a> SelectionPipeline<'a> {
             "selected entities from config"
         );
 
+        materialized.diagnostics.missing = missing;
+        materialized.diagnostics.left_out = left_out;
+
         Ok(SelectionResult {
             entities: materialized.final_entities,
             entity_profiles: materialized.entity_profiles,
             expandable_folders: materialized.expandable_folders,
             source: SelectionSource::Config,
+            diagnostics: materialized.diagnostics,
         })
     }
 
@@ -164,6 +189,7 @@ impl<'a> SelectionPipeline<'a> {
             entity_profiles: materialized.entity_profiles,
             expandable_folders: materialized.expandable_folders,
             source: SelectionSource::Coverage,
+            diagnostics: materialized.diagnostics,
         })
     }
 }

@@ -14,6 +14,18 @@ use super::connection::{Database, block_in_place_sync};
 // Context query types
 // ---------------------------------------------------------------------------
 
+/// Minimum link frequency for a folder page to count as an expandable child.
+pub const PAGE_LINK_MIN_FREQUENCY: i64 = 3;
+
+/// The folder-expansion eligibility gate: a page link mentioned at least
+/// [`PAGE_LINK_MIN_FREQUENCY`] times with cached activity in the year before the
+/// index-time reference instant (`trends.frequency_recent`).
+pub fn is_active_page_link(entity: &Entity) -> bool {
+    entity.entity_type == EntityType::Link
+        && entity.frequency >= PAGE_LINK_MIN_FREQUENCY
+        && entity.trends.frequency_recent > 0
+}
+
 /// Live statistics for linked-child selection. One source document counts once.
 #[derive(Debug, Default)]
 pub struct EntitySelectionStats {
@@ -1170,17 +1182,26 @@ impl Database {
         let all_entities = self.get_all_entities()?;
         Ok(all_entities
             .into_iter()
-            .filter(|e| {
-                e.entity_type == EntityType::Link
-                    && e.frequency >= 3
-                    && e.trends.frequency_recent > 0
-                    && stems.contains(&e.name.to_lowercase())
-            })
+            .filter(|e| is_active_page_link(e) && stems.contains(&e.name.to_lowercase()))
             .collect())
     }
 
     /// Like `get_folder_page_entity_links`, but returns results grouped by folder.
     pub fn get_folder_page_entity_links_grouped(
+        &self,
+        folders: &HashSet<&str>,
+    ) -> Result<HashMap<String, Vec<Entity>>> {
+        let mut grouped = self.get_folder_page_entity_candidates_grouped(folders)?;
+        for links in grouped.values_mut() {
+            links.retain(is_active_page_link);
+        }
+        grouped.retain(|_, links| !links.is_empty());
+        Ok(grouped)
+    }
+
+    /// Every link entity named like a direct child page of each folder, before
+    /// the [`is_active_page_link`] gate. Folders without such pages are absent.
+    pub fn get_folder_page_entity_candidates_grouped(
         &self,
         folders: &HashSet<&str>,
     ) -> Result<HashMap<String, Vec<Entity>>> {
@@ -1217,11 +1238,7 @@ impl Database {
         let all_entities = self.get_all_entities()?;
         let link_entities: Vec<&Entity> = all_entities
             .iter()
-            .filter(|e| {
-                e.entity_type == EntityType::Link
-                    && e.frequency >= 3
-                    && e.trends.frequency_recent > 0
-            })
+            .filter(|e| e.entity_type == EntityType::Link)
             .collect();
 
         let mut result: HashMap<String, Vec<Entity>> = HashMap::new();

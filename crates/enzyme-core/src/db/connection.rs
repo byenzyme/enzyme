@@ -92,6 +92,38 @@ impl Database {
         })
     }
 
+    /// Open an existing database strictly for reading: SQLite read-only flags,
+    /// `query_only`, and no pragmas or migrations that could change the file.
+    /// A schema older than this binary surfaces as a query error rather than
+    /// being upgraded in place.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        initialize_sqlite_runtime()?;
+        let path = path.as_ref().to_owned();
+        if !path.is_file() {
+            return Err(DbError::Migration(format!(
+                "database not found: {}",
+                path.display()
+            )));
+        }
+        info!(?path, "opening database read-only");
+        block_in_place_sync(async move {
+            let path_str = path
+                .to_str()
+                .ok_or_else(|| DbError::Migration("non-UTF8 database path".into()))?;
+            let db = Builder::new_local(path_str)
+                .flags(libsql::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .build()
+                .await
+                .map_err(DbError::Libsql)?;
+            let conn = db.connect().map_err(DbError::Libsql)?;
+            for sql in ["PRAGMA busy_timeout = 30000", "PRAGMA query_only = ON"] {
+                let mut rows = conn.query(sql, ()).await.map_err(DbError::Libsql)?;
+                while rows.next().await.map_err(DbError::Libsql)?.is_some() {}
+            }
+            Ok(Self { _db: db, conn })
+        })
+    }
+
     /// Open an **in-memory** database — useful for tests and ephemeral sessions.
     pub fn open_in_memory() -> Result<Self, DbError> {
         initialize_sqlite_runtime()?;
@@ -213,4 +245,39 @@ async fn apply_pragmas(conn: &Connection, wal: bool, busy_timeout_ms: u64) -> Re
         while rows.next().await.map_err(DbError::Libsql)?.is_some() {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_open_reads_but_never_writes_or_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enzyme.db");
+        assert!(Database::open_read_only(&path).is_err());
+        assert!(!path.exists(), "read-only open must not create a database");
+        {
+            let db = Database::open(&path).unwrap();
+            db.execute_write(
+                "INSERT INTO entities (name, type, frequency, trends) VALUES ('a', 'tag', 1, '{}')",
+                vec![],
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let db = Database::open_read_only(&path).unwrap();
+        let names = db
+            .query_read("SELECT name FROM entities", vec![], |row| {
+                row.get::<String>(0)
+            })
+            .unwrap();
+        assert_eq!(names, ["a"]);
+        assert!(
+            db.execute_write("DELETE FROM entities", vec![]).is_err(),
+            "writes must fail"
+        );
+        drop(db);
+        assert_eq!(before, std::fs::read(&path).unwrap());
+    }
 }

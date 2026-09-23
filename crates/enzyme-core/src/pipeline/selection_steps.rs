@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
+use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::db::Database;
-use crate::db::repository::EntitySelectionStats;
+use crate::db::repository::{EntitySelectionStats, PAGE_LINK_MIN_FREQUENCY, is_active_page_link};
 use crate::models::{Entity, EntityType};
 use crate::pipeline::entity_map::EntityMap;
 use crate::pipeline::exclusions::FolderExclusions;
@@ -31,6 +32,89 @@ pub struct MaterializedSelection {
     pub final_entities: Vec<Entity>,
     /// Final per-entity profile assignment map.
     pub entity_profiles: HashMap<String, String>,
+    /// Why readable folder expansions and name patterns resolved as they did.
+    /// Only the readable path fills this; other paths leave it empty.
+    pub diagnostics: SelectionDiagnostics,
+}
+
+/// Explanations collected while a readable selection runs, so previews can
+/// report what selection did without re-deriving it or parsing logs.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SelectionDiagnostics {
+    /// The resolved `as of` instant; `None` means the wall clock.
+    pub reference_ms: Option<i64>,
+    /// Per folder in scope (lowercase entity name).
+    pub folders: BTreeMap<String, FolderExpansion>,
+    /// One entry per name-pattern reading, in declaration order.
+    pub patterns: Vec<PatternDiagnostics>,
+    /// Explicit readings whose entity is not in the index.
+    pub missing: Vec<String>,
+    /// Explicit readings dropped by `leave out` or structural exclusions.
+    pub left_out: Vec<String>,
+}
+
+/// How one folder's linked pages were considered for expansion.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct FolderExpansion {
+    /// Direct child pages whose name is an indexed link.
+    pub linked_pages: usize,
+    /// Of those, linked fewer than [`PAGE_LINK_MIN_FREQUENCY`] times.
+    pub below_frequency: usize,
+    /// Frequent enough, but without cached activity in the year before the
+    /// index-time reference instant.
+    pub inactive: usize,
+    /// Passed both gates.
+    pub eligible: usize,
+    /// Eligible pages per folder document.
+    pub density: f64,
+    /// `including linked pages` bypasses the density gate.
+    pub density_exempt: bool,
+    /// Eligible pages exist, but the folder was below the density gate.
+    pub below_density: bool,
+    /// Selected children in rank order.
+    pub selected: Vec<ScoredEntity>,
+}
+
+/// How one `tags|links matching` reading resolved.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct PatternDiagnostics {
+    /// The reading's entity selector, e.g. `#auto-cluster-*`.
+    pub entity: String,
+    pub matched: usize,
+    /// Matches removed by `leave out tags|links`.
+    pub left_out: usize,
+    /// Matches that have their own explicit reading.
+    pub explicit: usize,
+    /// Matches with no occurrence at or before the reference instant.
+    pub undated: usize,
+    pub eligible: usize,
+    pub selected: Vec<ScoredEntity>,
+}
+
+/// A selected entity with the live selection scores used to rank it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ScoredEntity {
+    pub name: String,
+    pub entity_type: String,
+    /// Distinct linked source documents (the `by frequency` score).
+    pub documents: usize,
+    /// 30-day half-life activity (the `by recency` score).
+    pub recency: f64,
+}
+
+fn scored(entities: &[Entity], stats: &HashMap<i64, EntitySelectionStats>) -> Vec<ScoredEntity> {
+    entities
+        .iter()
+        .map(|e| {
+            let live = e.id.and_then(|id| stats.get(&id));
+            ScoredEntity {
+                name: e.name.clone(),
+                entity_type: e.entity_type.as_str().to_string(),
+                documents: live.map_or(0, |s| s.documents),
+                recency: live.map_or(0.0, |s| s.recency),
+            }
+        })
+        .collect()
 }
 
 /// Build the default deterministic selection pipeline:
@@ -57,6 +141,7 @@ pub fn build_catalyst_candidate_selection(
         expandable_folders,
         final_entities,
         entity_profiles,
+        diagnostics: SelectionDiagnostics::default(),
     })
 }
 
@@ -84,6 +169,7 @@ pub fn build_curated_selection(
         expandable_folders,
         final_entities,
         entity_profiles,
+        diagnostics: SelectionDiagnostics::default(),
     })
 }
 
@@ -94,6 +180,19 @@ pub(crate) fn readable_folder_children(
     spec: &enzyme_spec::Vault,
     as_of_ms: Option<i64>,
 ) -> Result<HashMap<String, Vec<String>>> {
+    Ok(readable_folder_children_explained(db, base, spec, as_of_ms)?.0)
+}
+
+/// [`readable_folder_children`] plus a per-folder account of the gates.
+fn readable_folder_children_explained(
+    db: &Database,
+    base: &[Entity],
+    spec: &enzyme_spec::Vault,
+    as_of_ms: Option<i64>,
+) -> Result<(
+    HashMap<String, Vec<String>>,
+    BTreeMap<String, FolderExpansion>,
+)> {
     let policies: HashMap<String, enzyme_spec::Selection> = base
         .iter()
         .filter(|e| e.entity_type == EntityType::Folder)
@@ -126,10 +225,32 @@ pub(crate) struct PatternExpansion<'a> {
     pub reading: &'a enzyme_spec::Reading,
     /// Indexed names matching the glob, before exclusions and eligibility.
     pub matched: usize,
+    /// Matches removed by `leave out tags|links`.
+    pub left_out: usize,
+    /// Matches that have their own explicit reading.
+    pub explicit: usize,
+    /// Remaining matches without an occurrence at or before the reference.
+    pub undated: usize,
     /// Matches that are not left out, not read explicitly, and occur at or
     /// before the reference instant.
     pub eligible: usize,
     pub selected: Vec<Entity>,
+    /// Live selection scores of `selected`, in rank order.
+    pub scores: Vec<ScoredEntity>,
+}
+
+impl PatternExpansion<'_> {
+    pub fn diagnostics(&self) -> PatternDiagnostics {
+        PatternDiagnostics {
+            entity: self.reading.entity.clone(),
+            matched: self.matched,
+            left_out: self.left_out,
+            explicit: self.explicit,
+            undated: self.undated,
+            eligible: self.eligible,
+            selected: self.scores.clone(),
+        }
+    }
 }
 
 /// Expand every name-pattern reading, in declaration order. Explicit readings
@@ -158,7 +279,7 @@ pub(crate) fn readable_pattern_children<'a>(
             .filter(|e| enzyme_spec::glob_matches(glob, &e.name))
             .collect();
         let matched = matches.len();
-        let candidates: Vec<Entity> = matches
+        let kept: Vec<&Entity> = matches
             .into_iter()
             .filter(|e| {
                 !excluded.iter().any(|x| {
@@ -166,24 +287,36 @@ pub(crate) fn readable_pattern_children<'a>(
                         .trim_start_matches("[[")
                         .trim_end_matches("]]")
                         .eq_ignore_ascii_case(&e.name)
-                }) && spec.reading(&e.name, kind).is_none()
+                })
             })
+            .collect();
+        let left_out = matched - kept.len();
+        let candidates: Vec<Entity> = kept
+            .into_iter()
+            .filter(|e| spec.reading(&e.name, kind).is_none())
             .cloned()
             .collect();
+        let explicit = matched - left_out - candidates.len();
         let ids: Vec<_> = candidates.iter().filter_map(|e| e.id).collect();
         // Stats only exist for entities with an occurrence at or before `as of`.
         let stats = db.get_entity_selection_stats(&ids, as_of_ms)?;
+        let unfiltered = candidates.len();
         let candidates: Vec<Entity> = candidates
             .into_iter()
             .filter(|e| e.id.is_some_and(|id| stats.contains_key(&id)))
             .collect();
         let eligible = candidates.len();
         let selected = rank_and_limit(candidates, &stats, reading.learning.selection.as_ref());
+        let scores = scored(&selected, &stats);
         expansions.push(PatternExpansion {
             reading,
             matched,
+            left_out,
+            explicit,
+            undated: unfiltered - eligible,
             eligible,
             selected,
+            scores,
         });
     }
     Ok(expansions)
@@ -207,7 +340,8 @@ pub fn build_readable_selection(
         .map(|e| (e.name.clone(), e.frequency))
         .collect();
     let as_of_ms = crate::pipeline::as_of::resolve(db, spec.learning.as_of.as_ref())?;
-    let folders = readable_folder_children(db, &base, spec, as_of_ms)?;
+    let (folders, folder_diagnostics) =
+        readable_folder_children_explained(db, &base, spec, as_of_ms)?;
     let mut entities = expand_with_folder_children(db, &base, &folders)?;
     let patterns = readable_pattern_children(db, spec, as_of_ms)?;
     let mut existing: HashSet<(String, EntityType)> = entities
@@ -273,12 +407,20 @@ pub fn build_readable_selection(
     profiles.extend(inherited);
     profiles.extend(overrides.clone());
     let entity_map = EntityMap::from_entities(db, &entities)?;
+    let diagnostics = SelectionDiagnostics {
+        reference_ms: as_of_ms,
+        folders: folder_diagnostics,
+        patterns: patterns.iter().map(PatternExpansion::diagnostics).collect(),
+        missing: Vec::new(),
+        left_out: Vec::new(),
+    };
     Ok(MaterializedSelection {
         base_entities: base,
         entity_map,
         expandable_folders: folders,
         final_entities: entities,
         entity_profiles: profiles,
+        diagnostics,
     })
 }
 
@@ -369,7 +511,7 @@ fn auto_expandable_folders(
     entities: &[Entity],
 ) -> Result<HashMap<String, Vec<String>>> {
     let folders = folder_scope(entities);
-    load_expandable_folder_children(db, &folders, &HashSet::new(), &HashMap::new(), None)
+    Ok(load_expandable_folder_children(db, &folders, &HashSet::new(), &HashMap::new(), None)?.0)
 }
 
 fn folder_scope(entities: &[Entity]) -> HashMap<String, i64> {
@@ -386,38 +528,66 @@ fn load_expandable_folder_children(
     density_exempt: &HashSet<&str>,
     policies: &HashMap<String, enzyme_spec::Selection>,
     as_of_ms: Option<i64>,
-) -> Result<HashMap<String, Vec<String>>> {
+) -> Result<(
+    HashMap<String, Vec<String>>,
+    BTreeMap<String, FolderExpansion>,
+)> {
     if folders.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(Default::default());
     }
 
     let folder_names: HashSet<&str> = folders.keys().map(|name| name.as_str()).collect();
-    let links_by_folder = db.get_folder_page_entity_links_grouped(&folder_names)?;
+    let candidates_by_folder = db.get_folder_page_entity_candidates_grouped(&folder_names)?;
 
-    let ids: Vec<_> = links_by_folder
+    let ids: Vec<_> = candidates_by_folder
         .values()
         .flatten()
+        .filter(|e| is_active_page_link(e))
         .filter_map(|e| e.id)
         .collect();
     let stats = db.get_entity_selection_stats(&ids, as_of_ms)?;
     let mut result = HashMap::new();
-    for (folder, links) in links_by_folder {
-        let file_count = folders.get(&folder).copied().unwrap_or(1) as f64;
-        let density = links.len() as f64 / file_count;
-        if !density_exempt.contains(folder.as_str()) && density < EXPANDABLE_DENSITY_THRESHOLD {
-            continue;
-        }
-
-        let names: Vec<String> = rank_and_limit(links, &stats, policies.get(&folder))
-            .into_iter()
-            .map(|entity| entity.name)
+    let mut explained = BTreeMap::new();
+    for (folder, file_count) in folders {
+        let candidates = candidates_by_folder
+            .get(folder)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let links: Vec<Entity> = candidates
+            .iter()
+            .filter(|e| is_active_page_link(e))
+            .cloned()
             .collect();
-        if !names.is_empty() {
-            result.insert(folder, names);
+        let below_frequency = candidates
+            .iter()
+            .filter(|e| e.frequency < PAGE_LINK_MIN_FREQUENCY)
+            .count();
+        let mut explanation = FolderExpansion {
+            linked_pages: candidates.len(),
+            below_frequency,
+            inactive: candidates.len() - below_frequency - links.len(),
+            eligible: links.len(),
+            density: links.len() as f64 / *file_count as f64,
+            density_exempt: density_exempt.contains(folder.as_str()),
+            ..Default::default()
+        };
+        explanation.below_density = !links.is_empty()
+            && !explanation.density_exempt
+            && explanation.density < EXPANDABLE_DENSITY_THRESHOLD;
+        if !links.is_empty() && !explanation.below_density {
+            let selected = rank_and_limit(links, &stats, policies.get(folder));
+            explanation.selected = scored(&selected, &stats);
+            if !selected.is_empty() {
+                result.insert(
+                    folder.clone(),
+                    selected.into_iter().map(|entity| entity.name).collect(),
+                );
+            }
         }
+        explained.insert(folder.clone(), explanation);
     }
 
-    Ok(result)
+    Ok((result, explained))
 }
 
 /// Order linked entities by an explicit selection policy (distinct documents or
@@ -647,6 +817,73 @@ vault {:?} {{ learn questions from folder "efforts" including linked pages about
             before, after,
             "selection must affect the serialized generation contract"
         );
+    }
+
+    #[test]
+    fn readable_selection_explains_folder_gates_and_pattern_filters() {
+        use libsql::Value as V;
+        let db = test_db();
+        insert_entity(&db, "people", "folder", 4, 4);
+        for (name, frequency, recent) in [("a", 5, 1), ("b", 2, 1), ("c", 5, 0)] {
+            insert_entity(&db, name, "link", frequency, recent);
+            insert_doc(&db, &format!("people/{name}.md"));
+            insert_occurrence(&db, name, "source.md", 1);
+        }
+        insert_doc(&db, "people/unlinked.md");
+        for tag in ["p-1", "p-2", "p-3", "p-4", "q"] {
+            insert_entity(&db, tag, "tag", 3, 1);
+        }
+        for tag in ["p-1", "p-2", "p-3"] {
+            db.execute_write(
+                "INSERT INTO entity_occurrences (entity_id, file_path, created_at, effective_date)
+                 SELECT id, 'tagged.md', 1, 1 FROM entities WHERE name = ?1 AND type = 'tag'",
+                vec![V::Text(tag.into())],
+            )
+            .unwrap();
+        }
+        let source = r#"vault "/notes" {
+  leave out tags ["p-2"]
+  learn questions from folder "people" including linked pages
+  learn questions from tag "p-3"
+  learn questions from tags matching "p-*"
+}"#;
+        let program = enzyme_spec::resolve(
+            vec![enzyme_spec::parse(source).unwrap()],
+            std::path::Path::new("/home/test"),
+        )
+        .unwrap();
+        let base = db
+            .get_entities_by_names(&[("people", EntityType::Folder), ("p-3", EntityType::Tag)])
+            .unwrap();
+        let result =
+            build_readable_selection(&db, base, &HashMap::new(), &program.vaults[0]).unwrap();
+        let d = &result.diagnostics;
+        assert_eq!(d.reference_ms, None);
+        let people = &d.folders["people"];
+        assert_eq!(
+            (
+                people.linked_pages,
+                people.below_frequency,
+                people.inactive,
+                people.eligible
+            ),
+            (3, 1, 1, 1)
+        );
+        assert!(people.density_exempt && !people.below_density);
+        assert_eq!(people.selected.len(), 1);
+        assert_eq!(people.selected[0].name, "a");
+        assert_eq!(people.selected[0].documents, 1);
+        assert_eq!(result.expandable_folders["people"], ["a"]);
+
+        assert_eq!(d.patterns.len(), 1);
+        let p = &d.patterns[0];
+        assert_eq!(p.entity, "#p-*");
+        assert_eq!(
+            (p.matched, p.left_out, p.explicit, p.undated, p.eligible),
+            (4, 1, 1, 1, 1)
+        );
+        let names: Vec<_> = p.selected.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["p-1"]);
     }
 
     #[test]

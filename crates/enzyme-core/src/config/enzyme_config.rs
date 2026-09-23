@@ -666,6 +666,14 @@ impl EnzymeConfig {
         }
     }
 
+    /// The runtime view of one vault as a standalone resolved program declares
+    /// it, with no legacy TOML or other config files. Read-only previews use
+    /// this to evaluate a program before it is installed.
+    pub fn from_readable_program(vault_path: &Path, program: enzyme_spec::Program) -> Result<Self> {
+        let global = overlay_program(serde_json::json!({}), Some(program))?;
+        Ok(Self::from_global_config(vault_path, &global))
+    }
+
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
         let key = canonical_vault_key(vault_path);
         let vault = global
@@ -1307,7 +1315,7 @@ impl EnzymeConfig {
 }
 
 fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
-    let mut value = if path.exists() {
+    let value = if path.exists() {
         let contents = fs::read_to_string(path)?;
         if contents.trim().is_empty() {
             serde_json::json!({})
@@ -1326,6 +1334,15 @@ fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
         .join("configs");
     let user_home = dirs::home_dir().context("cannot resolve home directory")?;
     let program = enzyme_spec::load_directory(&directory, &user_home)?;
+    overlay_program(value, program)
+}
+
+/// Overlay a resolved readable program on a legacy config value, exactly as
+/// the runtime does for `configs/*.enzyme`.
+fn overlay_program(
+    mut value: serde_json::Value,
+    program: Option<enzyme_spec::Program>,
+) -> Result<GlobalTomlConfig> {
     if let Some(program) = &program {
         let incoming = enzyme_spec::config_value(program);
         // Defaults/settings merge by field; a readable vault replaces its legacy section.

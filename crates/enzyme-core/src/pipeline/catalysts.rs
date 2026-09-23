@@ -980,12 +980,160 @@ struct EntityJob {
     context_hash: String,
     context_sources: Vec<GenerationContextSource>,
     era_labels: Vec<String>,
+    /// Evidence and question shape, for read-only previews.
+    shape: JobShape,
 }
 
 struct SkippedEntity {
     entity_name: String,
     entity_type: String,
     thin_context: bool,
+    reason: SkipReason,
+}
+
+/// The evidence and question shape of one generation job, exactly as
+/// [`CatalystPipeline::plan_jobs`] built it for the model.
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
+pub struct JobShape {
+    /// Questions requested from the model.
+    pub requested_questions: usize,
+    /// `time` or `recency` under explicit temporal sampling; `None` is the
+    /// legacy selector.
+    pub sampling: Option<String>,
+    /// Declared period granularity (`auto` when sampling without one).
+    pub period_granularity: Option<String>,
+    /// Represented periods in prompt order; empty for flat legacy context.
+    pub periods: Vec<PeriodShape>,
+    /// Evidence excerpts in the prompt.
+    pub excerpts: usize,
+    /// Excerpt cap for this job.
+    pub excerpt_limit: usize,
+    /// UTF-8 bytes of labelled evidence in the prompt.
+    pub bytes: usize,
+    /// Evidence byte budget; `0` means unlimited.
+    pub byte_budget: usize,
+    /// Distinct source documents behind the excerpts.
+    pub sources: usize,
+}
+
+/// One represented evidence period of a job.
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
+pub struct PeriodShape {
+    pub label: String,
+    pub excerpts: usize,
+    /// Requested question allocation (0 when questions are fewer than periods).
+    pub questions: usize,
+}
+
+/// Why a selected entity produces no generation job.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SkipReason {
+    /// The entity has no occurrences at all.
+    NoOccurrences,
+    /// Every occurrence is dated after the reference instant.
+    NoEvidenceBeforeReference { occurrences: usize },
+    /// Occurrences exist in scope but yielded no usable excerpt.
+    NoUsableEvidence { occurrences: usize },
+    /// Evidence was below the thin-context thresholds.
+    ThinContext {
+        documents: usize,
+        tokens: usize,
+        min_documents: usize,
+        min_tokens: usize,
+    },
+}
+
+/// A job as a read-only preview sees it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannedJob {
+    pub entity_name: String,
+    pub entity_type: String,
+    #[serde(flatten)]
+    pub shape: JobShape,
+    /// The rendered user prompt; the system prompt is shared by the plan.
+    #[serde(skip)]
+    pub user_prompt: String,
+}
+
+/// A selected entity that yields no job, with its reason.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannedSkip {
+    pub entity_name: String,
+    pub entity_type: String,
+    pub reason: SkipReason,
+}
+
+/// Everything job construction would hand the model, without calling it.
+#[derive(Debug, Clone)]
+pub struct JobsPlan {
+    pub system_prompt: String,
+    /// The generation clock: the vault's `as of` instant, else wall time.
+    pub reference_ms: i64,
+    pub jobs: Vec<PlannedJob>,
+    pub skipped: Vec<PlannedSkip>,
+}
+
+fn job_shape(
+    context: &SelectedContext,
+    requested_questions: usize,
+    temporal_policy: Option<temporal::Policy>,
+    excerpt_limit: usize,
+    byte_budget: usize,
+) -> JobShape {
+    let mut shape = JobShape {
+        requested_questions,
+        sampling: temporal_policy.map(|p| {
+            match p.preference {
+                temporal::Preference::Equal => "time",
+                temporal::Preference::Recent => "recency",
+            }
+            .to_string()
+        }),
+        period_granularity: temporal_policy.map(|p| p.periods.as_str().to_string()),
+        excerpts: context.flat_samples.len(),
+        excerpt_limit,
+        bytes: context.flat_samples.iter().map(String::len).sum(),
+        byte_budget,
+        sources: context
+            .context_sources
+            .iter()
+            .map(|s| s.source_ref.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        ..Default::default()
+    };
+    if let Some(era_context) = &context.era_context {
+        shape.periods = era_context
+            .eras
+            .iter()
+            .enumerate()
+            .map(|(i, era)| PeriodShape {
+                label: era.label.clone(),
+                excerpts: era_context.samples.iter().filter(|(e, _)| *e == i).count(),
+                questions: era_context.era_allocations.get(i).copied().unwrap_or(0),
+            })
+            .collect();
+        let undated = era_context
+            .samples
+            .iter()
+            .filter(|(e, _)| *e >= era_context.eras.len())
+            .count();
+        if undated > 0 {
+            shape.periods.push(PeriodShape {
+                label: "undated".into(),
+                excerpts: undated,
+                questions: 0,
+            });
+        }
+        shape.excerpts += era_context.samples.len();
+        shape.bytes += era_context
+            .samples
+            .iter()
+            .map(|(_, s)| s.len())
+            .sum::<usize>();
+    }
+    shape
 }
 
 /// Result of a single entity's catalyst generation.
@@ -1467,6 +1615,11 @@ impl<'a> CatalystPipeline<'a> {
             let entity_name = &entity.name;
 
             let mut occurrences = self.db.get_entity_occurrences(entity_id)?;
+            let all_occurrences = occurrences.len();
+            let in_scope_occurrences = occurrences
+                .iter()
+                .filter(|occ| occurrence_timestamp(occ) <= reference_ms)
+                .count();
             // Evidence after a declared `as of` is invisible to every sampler.
             if as_of_ms.is_some() {
                 occurrences.retain(|occ| occurrence_timestamp(occ) <= reference_ms);
@@ -1571,6 +1724,17 @@ impl<'a> CatalystPipeline<'a> {
                     entity_name: entity_name.clone(),
                     entity_type: entity.entity_type.as_str().to_string(),
                     thin_context: false,
+                    reason: if all_occurrences == 0 {
+                        SkipReason::NoOccurrences
+                    } else if in_scope_occurrences == 0 {
+                        SkipReason::NoEvidenceBeforeReference {
+                            occurrences: all_occurrences,
+                        }
+                    } else {
+                        SkipReason::NoUsableEvidence {
+                            occurrences: in_scope_occurrences,
+                        }
+                    },
                 });
                 continue;
             }
@@ -1584,10 +1748,24 @@ impl<'a> CatalystPipeline<'a> {
                     entity_name = entity_name.as_str(),
                     "thin generation context, skipping"
                 );
+                let sources = &selected_context.context_sources;
                 skipped.push(SkippedEntity {
                     entity_name: entity_name.clone(),
                     entity_type: entity.entity_type.as_str().to_string(),
                     thin_context: true,
+                    reason: SkipReason::ThinContext {
+                        documents: sources
+                            .iter()
+                            .map(|s| s.source_ref.as_str())
+                            .collect::<HashSet<_>>()
+                            .len(),
+                        tokens: sources
+                            .iter()
+                            .map(|s| substantive_token_count(&s.excerpt))
+                            .sum(),
+                        min_documents: config.min_context_documents,
+                        min_tokens: config.min_context_tokens,
+                    },
                 });
                 continue;
             }
@@ -1658,6 +1836,13 @@ impl<'a> CatalystPipeline<'a> {
                 periods_key,
             );
 
+            let shape = job_shape(
+                &selected_context,
+                num_catalysts,
+                temporal_policy,
+                max_samples,
+                max_context_chars,
+            );
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
                 entity_type,
@@ -1665,10 +1850,44 @@ impl<'a> CatalystPipeline<'a> {
                 context_hash,
                 context_sources: selected_context.context_sources,
                 era_labels: eras.into_iter().map(|era| era.label).collect(),
+                shape,
             });
         }
 
         Ok((system_prompt, jobs, skipped))
+    }
+
+    /// Build every job exactly as generation would and return what it would
+    /// send, without calling the model or writing anything. The reference
+    /// instant is resolved independently here; with a date or no `as of` it
+    /// matches the one job construction used (wall clock to the millisecond
+    /// aside).
+    pub fn plan_jobs(&self, entities: &[Entity], config: &CatalystConfig<'_>) -> Result<JobsPlan> {
+        let (system_prompt, jobs, skipped) = self.build_jobs(entities, config)?;
+        let as_of = config.reading_spec.and_then(|v| v.learning.as_of.as_ref());
+        let reference_ms = crate::pipeline::as_of::resolve(self.db, as_of)?
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        Ok(JobsPlan {
+            system_prompt,
+            reference_ms,
+            jobs: jobs
+                .into_iter()
+                .map(|job| PlannedJob {
+                    entity_name: job.entity_name,
+                    entity_type: job.entity_type,
+                    shape: job.shape,
+                    user_prompt: job.user_prompt,
+                })
+                .collect(),
+            skipped: skipped
+                .into_iter()
+                .map(|skip| PlannedSkip {
+                    entity_name: skip.entity_name,
+                    entity_type: skip.entity_type,
+                    reason: skip.reason,
+                })
+                .collect(),
+        })
     }
 
     /// Dump prompts to a JSONL file for training data generation.
@@ -2351,6 +2570,64 @@ mod tests {
     use crate::pipeline::eras::Era;
 
     #[test]
+    fn job_shape_counts_period_excerpts_questions_bytes_and_sources() {
+        let era = |label: &str| Era {
+            label: label.into(),
+            start: String::new(),
+            end: String::new(),
+            count: 1,
+            weight: 1.0,
+        };
+        let source = |r: &str| GenerationContextSource {
+            source_ref: r.into(),
+            timestamp_ms: 0,
+            excerpt: String::new(),
+        };
+        let context = SelectedContext {
+            era_context: Some(EraContext {
+                eras: vec![era("Jan 2026"), era("Feb 2026")],
+                era_allocations: vec![2, 3],
+                samples: vec![
+                    (0, "abc".into()),
+                    (1, "de".into()),
+                    (1, "f".into()),
+                    (2, "undated".into()),
+                ],
+            }),
+            flat_samples: Vec::new(),
+            context_sources: vec![source("a.md"), source("b.md"), source("a.md")],
+        };
+        let policy = temporal::Policy {
+            preference: temporal::Preference::Recent,
+            periods: enzyme_spec::Periods::Monthly,
+        };
+        let shape = job_shape(&context, 5, Some(policy), 10, 1000);
+        assert_eq!(shape.sampling.as_deref(), Some("recency"));
+        assert_eq!(shape.period_granularity.as_deref(), Some("monthly"));
+        let periods: Vec<_> = shape
+            .periods
+            .iter()
+            .map(|p| (p.label.as_str(), p.excerpts, p.questions))
+            .collect();
+        assert_eq!(
+            periods,
+            [("Jan 2026", 1, 2), ("Feb 2026", 2, 3), ("undated", 1, 0)]
+        );
+        assert_eq!((shape.excerpts, shape.bytes, shape.sources), (4, 13, 2));
+        assert_eq!((shape.excerpt_limit, shape.byte_budget), (10, 1000));
+
+        let flat = SelectedContext {
+            era_context: None,
+            flat_samples: vec!["xy".into()],
+            context_sources: vec![source("a.md")],
+        };
+        let shape = job_shape(&flat, 3, None, 10, 0);
+        assert_eq!(shape.sampling, None);
+        assert!(shape.periods.is_empty());
+        assert_eq!((shape.excerpts, shape.bytes), (1, 2));
+    }
+
+    #[test]
     fn name_pattern_children_inherit_learning_like_explicit_readings() {
         use crate::pipeline::indexing::IndexingPipeline;
         let vault = crate::pipeline::selection_steps::tests::tagged_vault(&[
@@ -2982,6 +3259,7 @@ mod tests {
             context_hash: hash.to_string(),
             context_sources: Vec::new(),
             era_labels: Vec::new(),
+            shape: JobShape::default(),
         }
     }
 
