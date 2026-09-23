@@ -1,7 +1,6 @@
 // A proposed policy: defaults inherit; local choices override.
 learning {
-  sample across time
-  favor recent periods
+  sample by recency
   question budget 40
 }
 
@@ -9,7 +8,7 @@ vault "/workspace/notes" {
   learn questions from log "observations" about preferences
 
   learn questions from folder "archive" about decisions {
-    favor all periods equally
+    sample by time
     question budget 20
   }
 }

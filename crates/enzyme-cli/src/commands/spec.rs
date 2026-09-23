@@ -88,7 +88,11 @@ pub async fn run(command: &SpecCommand) -> Result<()> {
                     .context("vault uses legacy config; no compiled policy")?;
                 print!("{}", enzyme_spec::instructions(&spec));
             } else {
-                println!("{}", serde_json::to_string_pretty(&config)?);
+                let mut output = serde_json::to_value(&config)?;
+                if let Some(spec) = &config.reading_spec {
+                    output["reading_program"] = enzyme_spec::render_vault(spec).into();
+                }
+                println!("{}", serde_json::to_string_pretty(&output)?);
             }
         }
         SpecCommand::Serve { bind, port } => serve(bind, *port).await?,

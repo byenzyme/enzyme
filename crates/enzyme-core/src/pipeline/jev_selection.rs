@@ -118,16 +118,9 @@ pub struct JevSelectionProposal {
 
 fn temporal_learning(choice: &str) -> enzyme_spec::Learning {
     match choice {
-        "across_time_equal" | "across_time_recent" => enzyme_spec::Learning {
+        "time" | "recency" => enzyme_spec::Learning {
             sample: Some("across_time".into()),
-            favor: Some(
-                if choice == "across_time_equal" {
-                    "equal"
-                } else {
-                    "recent"
-                }
-                .into(),
-            ),
+            favor: Some(if choice == "time" { "equal" } else { "recent" }.into()),
             ..Default::default()
         },
         _ => Default::default(),
@@ -358,9 +351,9 @@ impl JevSelectionPipeline {
                 "candidates": [],
                 "learning_definitions": {
                     "select": "Select N by frequency or recency limits linked child ENTITIES per folder. An integer is top N eligible children; a percentage rounds up that fraction of eligible children in EACH folder, capped at eligible count; up to N optionally caps a percentage. Frequency counts distinct linked source documents, not mentions. Recency uses bounded recent activity; future dates never boost it. This is separate from evidence sampling within each selected entity. Jev does not invent a selection cap.",
-                    "sample_across_time": "Select source excerpts WITHIN an already-selected entity across nonempty historical periods, before generation. Monthly periods for a span up to six months, quarterly beyond; sparse periods remain. Reserve coverage before extras. Existing excerpt and byte caps remain authoritative, including complete source/date labels; caps can prevent full coverage. Dates after the generation clock or outside valid calendar years 1..9999 are ineligible for this explicit temporal policy; raw timestamps remain unchanged. Default preference is equal.",
-                    "favor_equal": "Balance excerpt slots and requested questions across represented periods; redistribute spare slots from sparse periods. When fewer slots than periods, spread coverage across oldest to newest (one slot chooses newest). Balance bytes per excerpt within existing limits, not unlimited evidence. This preference also enables temporal sampling on its own.",
-                    "favor_recent": "Reserve one excerpt per nonempty period when budgets permit, then distribute extra excerpt and question capacity with linearly increasing weights by chronological period rank. Under scarce slots choose newest valid periods. Sparse periods donate unused excerpt capacity. This preference also enables temporal sampling on its own.",
+                    "sampling": "Select source excerpts WITHIN an already-selected entity across nonempty historical periods, before generation. Monthly periods for a span up to six months, quarterly beyond; sparse periods remain. Reserve coverage before extras. Existing excerpt and byte caps remain authoritative, including complete source/date labels; caps can prevent full coverage. Dates after the generation clock or outside valid calendar years 1..9999 are ineligible for this explicit temporal policy; raw timestamps remain unchanged. Choose sample by time or sample by recency. These distribute evidence and do not increase requested catalyst count.",
+                    "sample_by_time": "Balance excerpt slots and requested questions across represented periods; redistribute spare slots from sparse periods. When fewer slots than periods, spread coverage across oldest to newest (one slot chooses newest). Balance bytes per excerpt within existing limits, not unlimited evidence. Question budget controls the requested count; this mode only guides its distribution.",
+                    "sample_by_recency": "Reserve one excerpt per nonempty period when budgets permit, then distribute extra excerpt and question capacity with linearly increasing weights by chronological period rank. Under scarce slots choose newest valid periods. Sparse periods donate unused excerpt capacity. Question budget controls the requested count; this mode only guides its distribution.",
                     "question_budget": "Requested generated questions, NOT an evidence, document or chunk limit. Existing hosted excerpt ceiling scales with question allocation (floor 10, configured cap); local remains capped at 10. Global/vault budgets retain volume allocation; a different reading budget overrides its entity and expanded children. Jev does not choose or increase these resource limits."
                 },
                 "profile_catalog": profile_catalog,
@@ -411,8 +404,8 @@ impl JevSelectionPipeline {
                 request.questions.insert(temporal_id.clone(), JevQuestion::Choice {
                     instructions: format!("Which within-entity evidence policy serves candidates[{i}]? Use dates, scope and excerpts as evidence. Apply state.learning_definitions; this does not choose entities or increase budgets. Existing user policies take precedence. Choose uncertain if the limited scan cannot establish a need."),
                     criteria: BTreeMap::from([
-                        ("across_time_equal".into(), "Historical phases deserve equal attention. Emit sample across time + favor all periods equally; balance evidence before generation and requested questions. See sample_across_time and favor_equal definitions.".into()),
-                        ("across_time_recent".into(), "Current activity deserves extra capacity but historical context remains useful. Emit sample across time + favor recent periods; retain coverage when budgets allow. See sample_across_time and favor_recent definitions.".into()),
+                        ("time".into(), "Historical phases deserve equal attention. Emit sample by time; balance evidence before generation and distribute requested questions across periods. See sampling and sample_by_time definitions; do not increase catalyst count.".into()),
+                        ("recency".into(), "Current activity deserves extra capacity but historical context remains useful. Emit sample by recency; retain historical coverage when budgets allow. See sampling and sample_by_recency definitions; do not increase catalyst count.".into()),
                         ("default".into(), "No explicit temporal need is supported; retain the existing evidence selector and allocation without emitting a sampling override.".into()),
                         ("uncertain".into(), "Insufficient or ambiguous temporal evidence; emit no sampling override.".into()),
                     ]),
@@ -553,8 +546,8 @@ mod tests {
             }],
         };
         for (choice, favor) in [
-            ("across_time_equal", Some("equal")),
-            ("across_time_recent", Some("recent")),
+            ("time", Some("equal")),
+            ("recency", Some("recent")),
             ("default", None),
             ("uncertain", None),
         ] {
@@ -563,6 +556,11 @@ mod tests {
                 JevSelectionPipeline::request_with_temporal(&candidates, DEFAULT_JEV_MODEL, true)
                     .unwrap();
             assert_eq!(request.questions.len(), 3);
+            let serialized = serde_json::to_string(&request).unwrap();
+            assert!(serialized.contains("sample by time"));
+            assert!(serialized.contains("sample by recency"));
+            assert!(!serialized.contains("sample across time") && !serialized.contains("favor "));
+            assert!(serialized.contains("do not increase catalyst count"));
             assert!(
                 request.state["learning_definitions"]["select"]
                     .as_str()

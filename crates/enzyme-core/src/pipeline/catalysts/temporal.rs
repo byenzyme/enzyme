@@ -532,6 +532,48 @@ mod tests {
                 );
             }
             assert_ne!(topic.context_hash, recent.context_hash);
+            for (source, expected) in [
+                (
+                    r#"learning { sample by recency } vault "/notes" { learn questions from folder "efforts" including linked pages sample by time question budget 9 }"#,
+                    &jobs,
+                ),
+                (
+                    r#"learning { sample by time } vault "/notes" { learn questions from folder "efforts" including linked pages question budget 9 learn questions from link "topic" sample by recency question budget 9 }"#,
+                    &recent_jobs,
+                ),
+            ] {
+                let concise = spec(source);
+                let concise_config = CatalystConfig {
+                    reading_spec: Some(&concise),
+                    max_samples: 9,
+                    max_context_chars: Some(6000),
+                    min_context_tokens: 1,
+                    ..Default::default()
+                };
+                let (_, actual, _) = pipeline.build_jobs(&entities, &concise_config).unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for (a, b) in actual.iter().zip(expected) {
+                    assert_eq!(a.entity_name, b.entity_name);
+                    assert_eq!(
+                        a.user_prompt, b.user_prompt,
+                        "same requested question count and period allocation"
+                    );
+                    assert_eq!(
+                        a.context_hash, b.context_hash,
+                        "equivalent modes must not invalidate generation"
+                    );
+                    assert_eq!(
+                        a.context_sources
+                            .iter()
+                            .map(|s| (&s.source_ref, s.timestamp_ms, &s.excerpt))
+                            .collect::<Vec<_>>(),
+                        b.context_sources
+                            .iter()
+                            .map(|s| (&s.source_ref, s.timestamp_ms, &s.excerpt))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
             let dump = tempfile::NamedTempFile::new().unwrap();
             pipeline
                 .dump_prompts(&entities, &config, dump.path())

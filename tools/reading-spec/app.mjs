@@ -54,8 +54,7 @@ function renderReading(container) {
         const cap = amount.up_to == null ? '' : ` up to ${amount.up_to}`;
         card.append(badge(`select ${amount.kind === 'percent' ? `${amount.percent}%` : amount.count} by ${selection.by}${cap}`));
       }
-      if (reading.learning.sample) card.append(badge('sample across time'));
-      if (reading.learning.favor) card.append(badge(reading.learning.favor === 'recent' ? 'favor recent periods' : 'all periods equally'));
+      if (reading.learning.sampling_mode) card.append(badge(`sample by ${reading.learning.sampling_mode}`));
       card.append(badge(`base budget ${reading.learning.budget}`)); container.append(card);
     }
     for (const memory of vault.memories) {

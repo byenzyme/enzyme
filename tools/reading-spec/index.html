@@ -38,8 +38,7 @@
   notice ["assumptions", "tradeoffs"]
 }</pre><p>Use a name after <code>about</code>, or embed <code>profile { … }</code> directly. <code>let decisions = profile { … }</code> is equivalent. Built-in names work without a declaration.</p></div>
       <div><h3>Defaults flow downward</h3><pre>learning {
-  sample across time
-  favor recent periods
+  sample by recency
   question budget 40
 }</pre><p>Global → vault → reading. The last scope wins. Sampling and recency settings feed generation. Changes become part of the refresh fingerprint.</p></div>
       <div><h3>Guidance stays guidance</h3><pre>when asked {

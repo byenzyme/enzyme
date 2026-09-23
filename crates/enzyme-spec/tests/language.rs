@@ -279,7 +279,7 @@ fn omitted_profiles_default_to_auto_and_roundtrip_with_reading_options() {
         learn questions from tag "spirit"
         learn questions from tags { "taste" "comms" } about auto
         learn questions from folder "people" including linked pages { question budget 12 }
-        learn questions from log "journal" { favor all periods equally }
+        learn questions from log "journal" { sample by time }
         learn questions from tag "bestill" about reflective
     }"#;
     let parsed = parse(source).unwrap();
@@ -437,4 +437,81 @@ fn selection_rejects_ambiguous_or_invalid_policies() {
         parse(r#"vault "/notes" { learn questions from tag "people" select 3 by frequency }"#)
             .is_err()
     );
+}
+
+#[test]
+fn concise_sampling_normalizes_legacy_and_preserves_inheritance() {
+    for (mode, legacy) in [
+        ("time", "sample across time favor all periods equally"),
+        ("time", "sample across time"),
+        ("time", "favor all periods equally"),
+        ("recency", "sample across time favor recent periods"),
+        ("recency", "favor recent periods"),
+    ] {
+        let source = format!(
+            r#"learning {{ question budget 4 {legacy} }} vault "/notes" {{ learn questions from folder "a" }}"#
+        );
+        let old = compile(&source);
+        let concise = source.replace(legacy, &format!("sample by {mode}"));
+        assert_eq!(old, compile(&concise));
+        for program in [parse(&source).unwrap(), old.clone()] {
+            let rendered = render_program(&program);
+            assert!(rendered.contains(&format!("sample by {mode}")));
+            assert!(!rendered.contains("sample across time") && !rendered.contains("favor "));
+            assert_eq!(compile(&rendered), old);
+        }
+        let plan = playground(&concise);
+        assert_eq!(
+            plan["plan"]["vaults"][0]["readings"][0]["learning"]["sampling_mode"],
+            mode
+        );
+    }
+    for source in [
+        r#"learning { sample by recency question budget 4 } vault "/notes" { learn questions from folder "a" sample by time learn questions from link "child" sample by recency learn questions from folder "b" }"#,
+        r#"learning { favor recent periods question budget 4 } vault "/notes" { sample across time learn questions from folder "a" favor all periods equally learn questions from link "child" sample by recency learn questions from folder "b" sample across time }"#,
+    ] {
+        let p = compile(source);
+        let v = &p.vaults[0];
+        assert_eq!(v.learning.sampling_mode(), Some("recency"));
+        assert_eq!(v.readings[0].learning.sampling_mode(), Some("time"));
+        assert_eq!(v.readings[1].learning.sampling_mode(), Some("recency"));
+        assert_eq!(v.readings[2].learning.sampling_mode(), Some("recency"));
+        assert!(v.readings.iter().all(|r| r.learning.budget == Some(4)));
+        assert_eq!(compile(&render_program(&parse(source).unwrap())), p);
+        assert_eq!(compile(&render_program(&p)), p);
+        assert_eq!(
+            serde_json::from_str::<Program>(&serde_json::to_string(&p).unwrap()).unwrap(),
+            p
+        );
+    }
+}
+
+#[test]
+fn concise_sampling_rejects_mixed_duplicate_and_unknown_modes() {
+    for clause in [
+        "sample by",
+        "sample by recent",
+        "sample by frequency",
+        "sample by half",
+        "sample time",
+        "sample by time by recency",
+        "sample by time sample by recency",
+        "sample by time sample by time",
+        "sample by recency sample across time",
+        "sample across time sample by time",
+        "sample by time favor recent periods",
+        "favor recent periods sample by time",
+        "sample by recency favor recent periods",
+        "favor all periods equally sample by time",
+    ] {
+        assert!(
+            parse(&format!("learning {{ {clause} }}")).is_err(),
+            "{clause}"
+        );
+    }
+    let a = parse("learning { sample by time }").unwrap();
+    let b = parse("learning { favor recent periods }").unwrap();
+    for files in [vec![a.clone(), b.clone()], vec![b, a]] {
+        assert!(resolve(files, Path::new("/home/demo")).is_err());
+    }
 }

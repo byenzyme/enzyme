@@ -8,7 +8,7 @@ fn write_spec(f: &VaultFixture, marker: &str) {
     fs::write(dir.join("vault.enzyme"),format!(r#"
 settings {{ generation hosted updates disabled }}
 profile decisions {{ seek "{marker}: recover why one approach won" notice ["tradeoffs", "rejected alternatives"] }}
-learning {{ question budget 3 sample across time favor recent periods }}
+learning {{ question budget 3 sample by recency }}
 vault {:?} {{
  leave out folders ["private"]
  learn questions from tag "focus" about decisions
@@ -112,7 +112,7 @@ impl wiremock::Respond for JevDecisions {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert!(body["model"].as_str().unwrap().starts_with("typesafe/jev"));
         let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, q)| {
-            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "across_time_equal" } else { "decision_trace" };
+            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "time" } else { "decision_trace" };
             let probabilities: serde_json::Map<String, Value> = q["criteria"].as_object().unwrap().keys().map(|k| (k.clone(), json!(if k == choice { 1.0 } else { 0.0 }))).collect();
             (id.clone(), json!({"type":"choice", "choice":choice,"probabilities":probabilities,"confidence":0.95}))
         }).collect();
@@ -202,9 +202,18 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
             .is_none(),
         "built-in profile references must not become frozen custom definitions"
     );
+    assert!(out.stdout.contains("sample by recency"));
+    assert!(!out.stdout.contains("sample across time"));
+    assert!(!out.stdout.contains("favor "));
     assert_eq!(vault.learning.budget, Some(3));
     assert_eq!(vault.learning.sample.as_deref(), Some("across_time"));
-    assert!(vault.readings.iter().all(|r| r.learning.favor.as_deref() == Some("recent")), "explicit recent policy must survive Jev's equal proposal");
+    assert!(
+        vault
+            .readings
+            .iter()
+            .all(|r| r.learning.favor.as_deref() == Some("recent")),
+        "explicit recent policy must survive Jev's equal proposal"
+    );
     assert!(vault.exclusions.contains(&"private".into()));
     assert!(
         vault
@@ -223,6 +232,13 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
         .run();
     inspect.assert_success();
     assert!(inspect.stdout.contains("decision_trace"));
+    let inspected: serde_json::Value = serde_json::from_str(&inspect.stdout).unwrap();
+    assert!(
+        inspected["reading_program"]
+            .as_str()
+            .unwrap()
+            .contains("sample by recency")
+    );
     let again = f
         .cli()
         .args(["compile", "--output"])

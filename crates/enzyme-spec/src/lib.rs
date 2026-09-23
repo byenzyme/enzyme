@@ -67,13 +67,30 @@ pub struct Learning {
     pub favor: Option<String>,
 }
 impl Learning {
+    /// Canonical surface mode; storage retains the legacy fields for compatibility.
+    pub fn sampling_mode(&self) -> Option<&'static str> {
+        (self.sample.is_some() || self.favor.is_some()).then_some(
+            if self.favor.as_deref() == Some("recent") {
+                "recency"
+            } else {
+                "time"
+            },
+        )
+    }
     pub fn over(&self, base: &Self) -> Self {
-        Self {
+        let mut merged = Self {
             selection: self.selection.clone().or_else(|| base.selection.clone()),
             budget: self.budget.or(base.budget),
             sample: self.sample.clone().or_else(|| base.sample.clone()),
             favor: self.favor.clone().or_else(|| base.favor.clone()),
+        };
+        // Resolve legacy partial policies only after inheritance. New syntax sets
+        // both fields atomically, so time overrides inherited recency completely.
+        if merged.sampling_mode().is_some() {
+            merged.sample = Some("across_time".into());
+            merged.favor.get_or_insert_with(|| "equal".into());
         }
+        merged
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -389,9 +406,25 @@ impl Parser {
             };
             self.set(&mut l.selection, Selection { amount, by })
         } else if self.eat("sample") {
-            self.need("across")?;
-            self.need("time")?;
-            self.set(&mut l.sample, "across_time".into())
+            if self.eat("by") {
+                ensure!(
+                    l.sample.is_none() && l.favor.is_none(),
+                    "duplicate or mixed sampling policy; use one sample by time or sample by recency"
+                );
+                let favor = if self.eat("time") {
+                    "equal"
+                } else {
+                    self.need("recency")?;
+                    "recent"
+                };
+                l.sample = Some("across_time".into());
+                l.favor = Some(favor.into());
+                Ok(())
+            } else {
+                self.need("across")?;
+                self.need("time")?;
+                self.set(&mut l.sample, "across_time".into())
+            }
         } else if self.eat("favor") {
             let value = if self.eat("recent") {
                 self.need("periods")?;
@@ -823,6 +856,7 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
             global_retrieval = Some(r.clone());
         }
     }
+    defaults = defaults.over(&Learning::default());
     let mut paths = std::collections::BTreeSet::new();
     for p in programs {
         for mut v in p.vaults {
@@ -1106,6 +1140,13 @@ pub fn render_profile(name: &str, p: &Profile) -> String {
     s
 }
 pub fn render_vault(v: &Vault) -> String {
+    // Rendering accepts both unresolved legacy input and effective specs.
+    let mut normalized = v.clone();
+    normalized.learning = v.learning.over(&Learning::default());
+    for r in &mut normalized.readings {
+        r.learning = r.learning.over(&normalized.learning);
+    }
+    let v = &normalized;
     let mut s = format!("vault {} {{\n", quote(&v.path));
     if let Some(n) = v.embedding_limit {
         s.push_str(&format!(
@@ -1151,16 +1192,13 @@ pub fn render_vault(v: &Vault) -> String {
                 .clone()
                 .filter(|x| Some(x) != v.learning.selection.as_ref()),
             budget: r.learning.budget.filter(|n| Some(*n) != v.learning.budget),
-            sample: r
-                .learning
-                .sample
-                .clone()
-                .filter(|x| Some(x) != v.learning.sample.as_ref()),
-            favor: r
-                .learning
-                .favor
-                .clone()
-                .filter(|x| Some(x) != v.learning.favor.as_ref()),
+            // Sample and preference are one surface policy, never field deltas.
+            sample: (r.learning.sampling_mode() != v.learning.sampling_mode())
+                .then(|| r.learning.sample.clone())
+                .flatten(),
+            favor: (r.learning.sampling_mode() != v.learning.sampling_mode())
+                .then(|| r.learning.favor.clone())
+                .flatten(),
         };
         if local != Learning::default() {
             s.push_str(" {\n");
@@ -1241,18 +1279,8 @@ fn render_learning(l: &Learning, indent: &str) -> String {
     if let Some(n) = l.budget {
         s.push_str(&format!("{indent}question budget {n}\n"));
     }
-    if l.sample.is_some() {
-        s.push_str(&format!("{indent}sample across time\n"));
-    }
-    if let Some(f) = &l.favor {
-        s.push_str(&format!(
-            "{indent}favor {}\n",
-            if f == "equal" {
-                "all periods equally"
-            } else {
-                "recent periods"
-            }
-        ));
+    if let Some(mode) = l.sampling_mode() {
+        s.push_str(&format!("{indent}sample by {mode}\n"));
     }
     s
 }
@@ -1299,7 +1327,9 @@ pub fn render_program(p: &Program) -> String {
         s.push_str("}\n\n");
     }
     for v in &p.vaults {
-        s.push_str(&render_vault(v));
+        let mut scoped = v.clone();
+        scoped.learning = v.learning.over(&p.learning);
+        s.push_str(&render_vault(&scoped));
         s.push('\n');
     }
     if let Some(r) = &p.retrieval {
@@ -1386,8 +1416,8 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut trace = vec![];
             let mut vaults = vec![];
             for v in &p.vaults {
-                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
-                vaults.push(json!({"path":v.path,"learning":{"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
+                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
+                vaults.push(json!({"path":v.path,"learning":{"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})
         }

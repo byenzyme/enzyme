@@ -10,8 +10,7 @@ profile decisions {
 }
 
 learning {
-  sample across time
-  favor recent periods
+  sample by recency
   question budget 40
 }
 

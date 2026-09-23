@@ -40,8 +40,17 @@ async fn compile_batches_all_candidates_and_merges_profiles() {
     let program = result["program"].as_str().unwrap();
     assert_eq!(program.matches("learn questions from folder").count(), 18);
     assert_eq!(program.matches("about decision_trace").count(), 18);
-    let compiled = enzyme_spec::resolve(vec![enzyme_spec::parse(program).unwrap()], &vault).unwrap();
-    assert!(compiled.vaults[0].readings.iter().all(|r| r.learning.sample.as_deref() == Some("across_time") && r.learning.favor.as_deref() == Some("equal")));
+    assert!(program.contains("sample by time"));
+    assert!(!program.contains("sample across time") && !program.contains("favor "));
+    let compiled =
+        enzyme_spec::resolve(vec![enzyme_spec::parse(program).unwrap()], &vault).unwrap();
+    assert!(
+        compiled.vaults[0]
+            .readings
+            .iter()
+            .all(|r| r.learning.sample.as_deref() == Some("across_time")
+                && r.learning.favor.as_deref() == Some("equal"))
+    );
     let requests = server.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         request.url.path() == "/api/alpha/decisions"
@@ -53,11 +62,27 @@ async fn compile_batches_all_candidates_and_merges_profiles() {
 impl Respond for Decisions {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
-        assert!(body["state"]["learning_definitions"]["select"].as_str().unwrap().contains("EACH folder"));
-        assert!(body["state"]["learning_definitions"]["sample_across_time"].as_str().unwrap().contains("before generation"));
-        assert!(body["questions"].as_object().unwrap().keys().any(|k| k.starts_with("temporal_")));
+        assert!(
+            body["state"]["learning_definitions"]["select"]
+                .as_str()
+                .unwrap()
+                .contains("EACH folder")
+        );
+        assert!(
+            body["state"]["learning_definitions"]["sampling"]
+                .as_str()
+                .unwrap()
+                .contains("before generation")
+        );
+        assert!(
+            body["questions"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|k| k.starts_with("temporal_"))
+        );
         let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, question)| {
-            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "across_time_equal" } else { "decision_trace" };
+            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "time" } else { "decision_trace" };
             let probabilities: serde_json::Map<String, Value> = question["criteria"].as_object().unwrap().keys()
                 .map(|k| (k.clone(), json!(if k == choice { 1.0 } else { 0.0 }))).collect();
             (id.clone(), json!({"type":"choice", "choice":choice, "probabilities":probabilities, "confidence":0.95}))
@@ -136,9 +161,7 @@ async fn compile_expandable_people_uses_backlinks_even_with_empty_identity_pages
     for i in 0..3 {
         std::fs::write(vault.join(format!("inbox/{i}.md")), format!("Met [[Alice]] and [[Bob]] with {} to discuss how our collaboration has changed and what each of us needs from the relationship.", extra_links.join(" "))).unwrap();
     }
-    let output = command(&vault, &home, &server.uri())
-        .output()
-        .unwrap();
+    let output = command(&vault, &home, &server.uri()).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -270,7 +293,12 @@ async fn compile_writes_a_program_without_touching_notes_or_legacy_config() {
     let result: Value = serde_json::from_slice(&first.stdout).unwrap();
     let saved = result["saved_to"].as_str().unwrap();
     assert!(std::path::Path::new(saved).exists());
-    assert!(result["program"].as_str().unwrap().contains("decision_trace"));
+    assert!(
+        result["program"]
+            .as_str()
+            .unwrap()
+            .contains("decision_trace")
+    );
 
     // Writing a program touches neither the notes nor the legacy config, and
     // builds no index. Backing out is deleting the one file it wrote.
@@ -321,13 +349,17 @@ async fn compile_bad_response_leaves_no_config_mutation() {
         .await;
     let (_root, vault, home) = fixture();
     let before = std::fs::read(home.join("config.toml")).unwrap();
-    let output = command(&vault, &home, &server.uri())
-        .output()
-        .unwrap();
+    let output = command(&vault, &home, &server.uri()).output().unwrap();
     assert!(!output.status.success());
     assert_eq!(std::fs::read(home.join("config.toml")).unwrap(), before);
     // A refused selection writes no program at all, so there is nothing to undo.
-    assert!(!home.join("configs").exists() || std::fs::read_dir(home.join("configs")).unwrap().next().is_none());
+    assert!(
+        !home.join("configs").exists()
+            || std::fs::read_dir(home.join("configs"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
     assert!(!vault.join(".enzyme").exists());
 }
 
@@ -380,9 +412,7 @@ async fn compile_includes_tags_beyond_display_limit_and_supplies_hierarchy() {
     for i in 0..3 {
         std::fs::write(vault.join(format!("projects/{i}.md")), format!("---\ncreated: 2020-01-01\n---\n{tags} #relationships #relationships/dating\nWe are learning how to communicate our expectations and support each other through changes.")).unwrap();
     }
-    let output = command(&vault, &home, &server.uri())
-        .output()
-        .unwrap();
+    let output = command(&vault, &home, &server.uri()).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -465,9 +495,7 @@ async fn compile_samples_use_two_library_dated_notes_with_titles_and_paths() {
         )
         .unwrap();
     std::fs::write(vault.join("projects/undated.md"), "# Undated\n#research #undated\nThis note has useful evidence but no explicit date and must not inherit import recency.").unwrap();
-    let output = command(&vault, &home, &server.uri())
-        .output()
-        .unwrap();
+    let output = command(&vault, &home, &server.uri()).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
