@@ -34,6 +34,9 @@ pub struct IndexingPipeline<'a> {
     /// resolves the active vault/workspace config at run time.
     frontmatter_link_fields: Option<std::collections::HashSet<String>>,
     notes_roots: Option<Vec<NotesRootConfig>>,
+    /// The vault's `as of` clause for trend computation. `None` resolves the
+    /// vault config at run time; `Some(None)` explicitly uses the wall clock.
+    as_of: Option<Option<enzyme_spec::AsOf>>,
 }
 
 /// Cap on entity occurrences emitted per config-declared log. Keeps a
@@ -71,6 +74,26 @@ impl<'a> IndexingPipeline<'a> {
             configured_logs: None,
             frontmatter_link_fields: None,
             notes_roots: None,
+            as_of: None,
+        }
+    }
+
+    /// Explicitly set the reading's `as of` clause, bypassing config resolution.
+    pub fn with_as_of(mut self, as_of: Option<enzyme_spec::AsOf>) -> Self {
+        self.as_of = Some(as_of);
+        self
+    }
+
+    /// Trend scores decay from this vault's reference time. Absent or unreadable
+    /// config keeps the wall clock, like the other config-derived settings.
+    fn resolve_as_of(&self) -> Option<enzyme_spec::AsOf> {
+        match &self.as_of {
+            Some(as_of) => as_of.clone(),
+            None => crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path)
+                .ok()
+                .flatten()
+                .and_then(|config| config.reading_spec)
+                .and_then(|spec| spec.learning.as_of),
         }
     }
 
@@ -743,7 +766,8 @@ impl<'a> IndexingPipeline<'a> {
     /// in memory, then batch-updates all trends in one transaction.
     fn compute_trending_scores(&self) -> Result<()> {
         let entities = self.db.get_all_entities()?;
-        let now_millis = chrono::Utc::now().timestamp_millis();
+        let as_of_ms = crate::pipeline::as_of::resolve(self.db, self.resolve_as_of().as_ref())?;
+        let now_millis = as_of_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
         // Single bulk fetch of all occurrence dates
         let all_occ_dates = self.db.get_all_occurrence_dates()?;
@@ -761,6 +785,11 @@ impl<'a> IndexingPipeline<'a> {
 
         for (entity_id, effective_date_opt, created_at, occurrence_weight) in &all_occ_dates {
             let effective_date = effective_date_opt.unwrap_or(*created_at);
+            // Occurrences after a declared reference time do not exist yet;
+            // without one, future dates keep today's weight.
+            if as_of_ms.is_some_and(|reference| effective_date > reference) {
+                continue;
+            }
             let age_days = (now_millis.saturating_sub(effective_date).max(0) as f64)
                 / (1000.0 * 60.0 * 60.0 * 24.0);
 

@@ -917,11 +917,15 @@ impl Database {
 
     /// Compute selection scores from distinct source documents, independent of
     /// occurrence repetitions and cached trends from older indexers.
+    ///
+    /// With an `as of` instant, documents dated after it are ignored and
+    /// activity decays from that instant rather than the wall clock.
     pub fn get_entity_selection_stats(
         &self,
         entity_ids: &[i64],
+        as_of_ms: Option<i64>,
     ) -> Result<HashMap<i64, EntitySelectionStats>> {
-        let now = Utc::now().timestamp_millis();
+        let now = as_of_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
         let ids: Vec<_> = entity_ids
             .iter()
             .copied()
@@ -943,6 +947,9 @@ impl Database {
         let mut docs = HashMap::<i64, std::collections::BTreeMap<String, i64>>::new();
         let mut legacy = HashMap::<i64, (f64, f64, bool)>::new();
         for (id, path, date, weight) in rows {
+            if as_of_ms.is_some_and(|reference| date > reference) {
+                continue;
+            }
             docs.entry(id)
                 .or_default()
                 .entry(path)
@@ -968,6 +975,17 @@ impl Database {
                 )
             })
             .collect())
+    }
+
+    /// Newest occurrence date (effective date, else creation time) not after `limit_ms`.
+    pub fn latest_evidence_ms(&self, limit_ms: i64) -> Result<Option<i64>> {
+        let rows = self.query_read(
+            "SELECT MAX(COALESCE(effective_date, created_at)) FROM entity_occurrences
+             WHERE COALESCE(effective_date, created_at) <= ?1",
+            vec![Value::Integer(limit_ms)],
+            |row| row.get::<Option<i64>>(0),
+        )?;
+        Ok(rows.into_iter().next().flatten())
     }
 
     /// Fetch all occurrence timestamps in one query, grouped by entity_id.

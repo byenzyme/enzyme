@@ -478,6 +478,53 @@ mod tests {
         .remove(0)
     }
     #[test]
+    fn as_of_hides_later_evidence_from_temporal_and_legacy_sampling() {
+        for chunks in [false, true] {
+            let db = Database::open_in_memory().unwrap();
+            let entities = populate(&db, chunks);
+            let llm = LlmClient::with_base_url("unused", "http://localhost:0");
+            let pipeline = CatalystPipeline::new(&db, &llm, None);
+            let periods = |source: &str| {
+                let spec = spec(source);
+                let config = CatalystConfig {
+                    reading_spec: Some(&spec),
+                    max_samples: 9,
+                    max_context_chars: Some(6000),
+                    min_context_tokens: 1,
+                    ..Default::default()
+                };
+                let (_, jobs, _) = pipeline.build_jobs(&entities, &config).unwrap();
+                let topic = jobs.into_iter().find(|j| j.entity_name == "topic").unwrap();
+                let mut periods: Vec<_> = topic
+                    .context_sources
+                    .iter()
+                    .map(|s| s.source_ref[..8].to_string())
+                    .collect();
+                periods.sort();
+                periods.dedup();
+                (periods, topic.context_hash)
+            };
+            let reading = r#"learn questions from folder "efforts" including linked pages"#;
+            let (now, now_hash) =
+                periods(&format!(r#"vault "/notes" {{ sample by time {reading} }}"#));
+            assert_eq!(now, ["period-0", "period-1", "period-2"]);
+            let (past, past_hash) = periods(&format!(
+                r#"vault "/notes" {{ as of "2025-06-30" sample by time {reading} }}"#
+            ));
+            assert_eq!(past, ["period-0", "period-1"]);
+            assert_ne!(now_hash, past_hash);
+            // The day's end is inclusive: 2025-01-01T00:00 is visible as of that date.
+            let (day, _) = periods(&format!(
+                r#"vault "/notes" {{ learning {{ as of "2025-01-01" sample by recency }} {reading} }}"#
+            ));
+            assert_eq!(day, ["period-0", "period-1"]);
+            let (legacy, _) = periods(&format!(
+                r#"learning {{ as of "2024-06-30" }} vault "/notes" {{ {reading} }}"#
+            ));
+            assert_eq!(legacy, ["period-0"]);
+        }
+    }
+    #[test]
     fn real_jobs_and_prompt_dump_honor_inheritance_overrides_and_chunkless_fallback() {
         for chunks in [false, true] {
             let db = Database::open_in_memory().unwrap();
@@ -607,6 +654,7 @@ mod tests {
                 DEFAULT_FORMAT_KEY,
                 None,
                 selected.era_context.as_ref(),
+                ts("2026-02-01"),
             );
             for c in &selected.context_sources {
                 assert!(local.contains(&c.source_ref));

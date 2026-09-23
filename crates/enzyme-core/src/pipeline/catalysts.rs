@@ -782,6 +782,7 @@ fn context_hash(
     num_catalysts: usize,
     system_prompt: &str,
     user_prompt: &str,
+    as_of: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, "version", CONTEXT_HASH_VERSION.as_bytes());
@@ -792,6 +793,10 @@ fn context_hash(
     hash_field(&mut hasher, "num_catalysts", &num_catalysts.to_le_bytes());
     hash_field(&mut hasher, "system_prompt", system_prompt.as_bytes());
     hash_field(&mut hasher, "user_prompt", user_prompt.as_bytes());
+    // Only a declared `as of` participates, so existing hashes stay valid.
+    if let Some(as_of) = as_of {
+        hash_field(&mut hasher, "as_of", as_of.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -1264,6 +1269,7 @@ impl<'a> CatalystPipeline<'a> {
         entity_idx: usize,
         temporal: Option<temporal::Preference>,
         reference_ms: i64,
+        exclude_after_reference: bool,
     ) -> Result<Option<SelectedContext>> {
         let file_paths = occurrences
             .iter()
@@ -1295,6 +1301,9 @@ impl<'a> CatalystPipeline<'a> {
                 .collect();
             let hydrated = self.hydrate_occurrence_contexts(&missing)?;
             candidates.extend(temporal::occurrence_candidates(&hydrated));
+        }
+        if exclude_after_reference {
+            candidates.retain(|c| c.timestamp <= reference_ms);
         }
         if candidates.is_empty() {
             return Ok(None);
@@ -1355,7 +1364,10 @@ impl<'a> CatalystPipeline<'a> {
         config: &CatalystConfig<'_>,
     ) -> Result<(String, Vec<EntityJob>, Vec<SkippedEntity>)> {
         let is_local = self.llm.is_local();
-        let reference_ms = Utc::now().timestamp_millis();
+        let as_of = config.reading_spec.and_then(|v| v.learning.as_of.as_ref());
+        let as_of_ms = crate::pipeline::as_of::resolve(self.db, as_of)?;
+        let reference_ms = as_of_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
+        let as_of_key = as_of.map(|a| serde_json::to_string(a)).transpose()?;
 
         let custom_reading_mode = config.reading_spec.is_some_and(|spec| {
             !config.entity_profiles.is_empty()
@@ -1401,7 +1413,7 @@ impl<'a> CatalystPipeline<'a> {
                 .collect();
             if spec.readings.iter().any(|r| r.include_linked_pages) {
                 let folders = crate::pipeline::selection_steps::readable_folder_children(
-                    self.db, &base, spec,
+                    self.db, &base, spec, as_of_ms,
                 )?;
                 for reading in spec.readings.iter().filter(|r| r.include_linked_pages) {
                     let (_, folder) = enzyme_spec::split_entity(&reading.entity);
@@ -1430,7 +1442,11 @@ impl<'a> CatalystPipeline<'a> {
             let entity_id = entity.id.unwrap_or(0);
             let entity_name = &entity.name;
 
-            let occurrences = self.db.get_entity_occurrences(entity_id)?;
+            let mut occurrences = self.db.get_entity_occurrences(entity_id)?;
+            // Evidence after a declared `as of` is invisible to every sampler.
+            if as_of_ms.is_some() {
+                occurrences.retain(|occ| occurrence_timestamp(occ) <= reference_ms);
+            }
 
             let reading = config
                 .reading_spec
@@ -1488,6 +1504,7 @@ impl<'a> CatalystPipeline<'a> {
                 entity_idx,
                 temporal_preference,
                 reference_ms,
+                as_of_ms.is_some(),
             )? {
                 Some(ctx) => ctx,
                 None => {
@@ -1568,6 +1585,7 @@ impl<'a> CatalystPipeline<'a> {
                     config.format_key,
                     Some(entity),
                     era_context,
+                    reference_ms,
                 )
             };
             if let Some(custom) = custom_profile {
@@ -1598,6 +1616,7 @@ impl<'a> CatalystPipeline<'a> {
                 num_catalysts,
                 &system_prompt,
                 &user_prompt,
+                as_of_key.as_deref(),
             );
 
             jobs.push(EntityJob {
@@ -2761,6 +2780,7 @@ mod tests {
             7,
             "system",
             user_prompt,
+            None,
         )
     }
 
@@ -2774,35 +2794,64 @@ mod tests {
 
     #[test]
     fn context_hash_changes_with_every_input() {
-        let base = context_hash("model-a", false, "projects", "folder", 7, "system", "ctx");
+        let base = context_hash(
+            "model-a", false, "projects", "folder", 7, "system", "ctx", None,
+        );
         let variants = [
             (
                 "context chunks",
-                context_hash("model-a", false, "projects", "folder", 7, "system", "ctx2"),
+                context_hash(
+                    "model-a", false, "projects", "folder", 7, "system", "ctx2", None,
+                ),
             ),
             (
                 "model identity",
-                context_hash("model-b", false, "projects", "folder", 7, "system", "ctx"),
+                context_hash(
+                    "model-b", false, "projects", "folder", 7, "system", "ctx", None,
+                ),
             ),
             (
                 "hosted vs local",
-                context_hash("model-a", true, "projects", "folder", 7, "system", "ctx"),
+                context_hash(
+                    "model-a", true, "projects", "folder", 7, "system", "ctx", None,
+                ),
             ),
             (
                 "entity name",
-                context_hash("model-a", false, "writing", "folder", 7, "system", "ctx"),
+                context_hash(
+                    "model-a", false, "writing", "folder", 7, "system", "ctx", None,
+                ),
             ),
             (
                 "entity type",
-                context_hash("model-a", false, "projects", "tag", 7, "system", "ctx"),
+                context_hash(
+                    "model-a", false, "projects", "tag", 7, "system", "ctx", None,
+                ),
             ),
             (
                 "catalyst count",
-                context_hash("model-a", false, "projects", "folder", 8, "system", "ctx"),
+                context_hash(
+                    "model-a", false, "projects", "folder", 8, "system", "ctx", None,
+                ),
+            ),
+            (
+                "as of",
+                context_hash(
+                    "model-a",
+                    false,
+                    "projects",
+                    "folder",
+                    7,
+                    "system",
+                    "ctx",
+                    Some(r#"{"kind":"latest_evidence"}"#),
+                ),
             ),
             (
                 "system prompt",
-                context_hash("model-a", false, "projects", "folder", 7, "system2", "ctx"),
+                context_hash(
+                    "model-a", false, "projects", "folder", 7, "system2", "ctx", None,
+                ),
             ),
         ];
         for (label, hash) in variants {
@@ -2817,8 +2866,8 @@ mod tests {
     /// boundary must not produce the same digest.
     #[test]
     fn context_hash_fields_are_unambiguous() {
-        let a = context_hash("model-a", false, "ab", "folder", 7, "system", "ctx");
-        let b = context_hash("model-a", false, "a", "bfolder", 7, "system", "ctx");
+        let a = context_hash("model-a", false, "ab", "folder", 7, "system", "ctx", None);
+        let b = context_hash("model-a", false, "a", "bfolder", 7, "system", "ctx", None);
         assert_ne!(a, b);
     }
 

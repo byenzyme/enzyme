@@ -379,6 +379,14 @@ fn ensure_searchable_owned(
     if !configured_notes_roots.is_empty() {
         indexing = indexing.with_notes_roots(configured_notes_roots);
     }
+    if let Some(config) = &selection_config {
+        indexing = indexing.with_as_of(
+            config
+                .reading_spec
+                .as_ref()
+                .and_then(|spec| spec.learning.as_of.clone()),
+        );
+    }
     indexing
         .run(full_reindex, |_| {})
         .context("indexing documents")?;

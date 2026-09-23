@@ -515,3 +515,96 @@ fn concise_sampling_rejects_mixed_duplicate_and_unknown_modes() {
         assert!(resolve(files, Path::new("/home/demo")).is_err());
     }
 }
+
+#[test]
+fn as_of_scopes_roundtrip_and_inherit_by_vault() {
+    let source = r#"
+learning { as of "2024-10-01" sample by recency }
+vault "/old" {
+  learn questions from folder "people" including linked pages
+}
+vault "/current" {
+  as of latest evidence
+  learn questions from folder "people" { question budget 5 }
+}
+vault "/block" {
+  learning { as of "2024-02-29" }
+}"#;
+    let p = compile(source);
+    let date = |d: &str| Some(AsOf::Date { date: d.into() });
+    assert_eq!(p.learning.as_of, date("2024-10-01"));
+    assert_eq!(p.vaults[0].learning.as_of, date("2024-10-01"));
+    assert_eq!(p.vaults[0].readings[0].learning.as_of, date("2024-10-01"));
+    assert_eq!(p.vaults[1].learning.as_of, Some(AsOf::LatestEvidence));
+    assert_eq!(
+        p.vaults[1].readings[0].learning.as_of,
+        Some(AsOf::LatestEvidence)
+    );
+    assert_eq!(p.vaults[2].learning.as_of, date("2024-02-29"));
+    assert!(
+        compile(r#"vault "/n" {}"#).vaults[0]
+            .learning
+            .as_of
+            .is_none()
+    );
+
+    let normalized = render_program(&parse(source).unwrap());
+    assert!(normalized.contains("learning {\n  as of \"2024-10-01\"\n"));
+    assert!(normalized.contains("  as of latest evidence\n"));
+    assert_eq!(normalized.matches("as of").count(), 4, "{normalized}");
+    assert_eq!(compile(&normalized), p);
+    let effective = render_vault(&p.vaults[1]);
+    assert_eq!(effective.matches("as of").count(), 1, "{effective}");
+    assert_eq!(compile(&render_program(&p)), p);
+    let json = serde_json::to_value(&p.vaults[1].learning).unwrap();
+    assert_eq!(json["as_of"]["kind"], "latest_evidence");
+    assert_eq!(
+        serde_json::to_value(&p.vaults[0].learning).unwrap()["as_of"],
+        serde_json::json!({"kind": "date", "date": "2024-10-01"})
+    );
+    assert!(
+        serde_json::to_value(&compile(r#"vault "/n" {}"#).vaults[0].learning)
+            .unwrap()
+            .get("as_of")
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::from_str::<Program>(&serde_json::to_string(&p).unwrap()).unwrap(),
+        p
+    );
+    let plan = playground(source);
+    assert_eq!(
+        plan["plan"]["vaults"][1]["learning"]["as_of"]["kind"],
+        "latest_evidence"
+    );
+}
+
+#[test]
+fn as_of_rejects_reading_scope_duplicates_and_bad_dates() {
+    for s in [
+        r#"vault "/n" { learn questions from folder "people" { as of "2024-10-01" } }"#,
+        r#"vault "/n" { learn questions from folder "people" as of latest evidence }"#,
+    ] {
+        let error = parse(s).unwrap_err().to_string();
+        assert!(error.contains("as of applies to a whole vault"), "{error}");
+    }
+    for s in [
+        r#"learning { as of "2024-10-01" as of latest evidence }"#,
+        r#"vault "/n" { as of "2024-10-01" learning { as of "2024-10-02" } }"#,
+        r#"vault "/n" { as of latest evidence as of latest evidence }"#,
+        r#"learning { as of "2024-02-30" }"#,
+        r#"learning { as of "2023-02-29" }"#,
+        r#"learning { as of "24-10-01" }"#,
+        r#"learning { as of "2024-10-1" }"#,
+        r#"learning { as of "0000-01-01" }"#,
+        r#"learning { as of "2024-10-01T00:00" }"#,
+        r#"learning { as of latest }"#,
+        r#"learning { as of now }"#,
+        r#"learning { as of 2024 }"#,
+    ] {
+        assert!(parse(s).is_err(), "{s}");
+    }
+    let a = parse(r#"learning { as of "2024-10-01" }"#).unwrap();
+    let b = parse(r#"learning { as of latest evidence }"#).unwrap();
+    assert!(resolve(vec![a, b], Path::new("/home/demo")).is_err());
+}

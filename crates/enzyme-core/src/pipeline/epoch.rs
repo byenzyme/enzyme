@@ -711,6 +711,12 @@ mod tests {
             .by = enzyme_spec::SelectionMode::Recency;
         c.selection_config_json = serde_json::to_string(&config).unwrap();
         assert_ne!(before, c.fingerprint().unwrap());
+        let selection_changed = c.fingerprint().unwrap();
+        config.reading_spec.as_mut().unwrap().learning.as_of = Some(enzyme_spec::AsOf::Date {
+            date: "2024-10-01".into(),
+        });
+        c.selection_config_json = serde_json::to_string(&config).unwrap();
+        assert_ne!(selection_changed, c.fingerprint().unwrap());
         let schedule = db.schedule_catalyst_epoch(1_001, &c, false).unwrap();
         assert!(schedule.due);
         assert_eq!(schedule.reason, Some(EpochDueReason::ContractChanged));

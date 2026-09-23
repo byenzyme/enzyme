@@ -58,8 +58,18 @@ impl Selection {
         }
     }
 }
+/// Reference time for every time-dependent reading behavior in a vault.
+/// A date is the end of that UTC day; absence keeps the wall clock.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AsOf {
+    Date { date: String },
+    LatestEvidence,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Learning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<AsOf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection: Option<Selection>,
     pub budget: Option<usize>,
@@ -79,6 +89,7 @@ impl Learning {
     }
     pub fn over(&self, base: &Self) -> Self {
         let mut merged = Self {
+            as_of: self.as_of.clone().or_else(|| base.as_of.clone()),
             selection: self.selection.clone().or_else(|| base.selection.clone()),
             budget: self.budget.or(base.budget),
             sample: self.sample.clone().or_else(|| base.sample.clone()),
@@ -254,6 +265,27 @@ fn lex(input: &str) -> Result<Vec<Token>> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    in_reading: bool,
+}
+/// Accept only real calendar dates written as `YYYY-MM-DD` in years 1–9999.
+fn valid_date(date: &str) -> bool {
+    let parts: Vec<&str> = date.split('-').collect();
+    let [y, m, d] = parts[..] else { return false };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return false;
+    }
+    let (Ok(y), Ok(m), Ok(d)) = (y.parse::<u32>(), m.parse::<u32>(), d.parse::<u32>()) else {
+        return false;
+    };
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => return false,
+    };
+    y >= 1 && (1..=days).contains(&d)
 }
 impl Parser {
     fn t(&self) -> &Token {
@@ -343,7 +375,28 @@ impl Parser {
         Ok(())
     }
     fn learn_setting(&mut self, l: &mut Learning) -> Result<()> {
-        if self.eat("select") {
+        if self.at("as") {
+            if self.in_reading {
+                return self.err(
+                    "as of applies to a whole vault; set it in the vault or global learning block",
+                );
+            }
+            self.pos += 1;
+            self.need("of")?;
+            let as_of = if self.eat("latest") {
+                self.need("evidence")?;
+                AsOf::LatestEvidence
+            } else {
+                let date = self.string()?;
+                if !valid_date(&date) {
+                    return self.err(&format!(
+                        "as of needs a calendar date \"YYYY-MM-DD\" or latest evidence, not {date:?}"
+                    ));
+                }
+                AsOf::Date { date }
+            };
+            self.set(&mut l.as_of, as_of)
+        } else if self.eat("select") {
             let raw = self.t().value.clone();
             ensure!(
                 !self.t().string && raw.chars().next().is_some_and(|c| c.is_ascii_digit()),
@@ -476,6 +529,12 @@ impl Parser {
         Ok(p)
     }
     fn reading(&mut self) -> Result<Vec<Reading>> {
+        self.in_reading = true;
+        let readings = self.reading_body();
+        self.in_reading = false;
+        readings
+    }
+    fn reading_body(&mut self) -> Result<Vec<Reading>> {
         self.need("learn")?;
         self.need("questions")?;
         self.need("from")?;
@@ -513,7 +572,7 @@ impl Parser {
         } else {
             Learning::default()
         };
-        while ["sample", "favor", "question", "including", "select"]
+        while ["sample", "favor", "question", "including", "select", "as"]
             .iter()
             .any(|s| self.at(s))
         {
@@ -677,7 +736,7 @@ impl Parser {
                     "use a single learning block per scope"
                 );
                 v.learning = l;
-            } else if ["sample", "favor", "question", "select"]
+            } else if ["sample", "favor", "question", "select", "as"]
                 .iter()
                 .any(|s| self.at(s))
             {
@@ -747,6 +806,7 @@ pub fn parse(source: &str) -> Result<Program> {
     let mut p = Parser {
         tokens: lex(source)?,
         pos: 0,
+        in_reading: false,
     };
     let mut out = Program::default();
     let mut settings = false;
@@ -921,6 +981,7 @@ fn merge_learning(a: &mut Learning, b: &Learning) -> Result<()> {
             }
         };
     }
+    m!(as_of);
     m!(selection);
     m!(budget);
     m!(sample);
@@ -1186,6 +1247,8 @@ pub fn render_vault(v: &Vault) -> String {
             s.push_str(&format!("\n    about {}", r.profile));
         }
         let local = Learning {
+            // A vault-wide reference time never renders on a reading.
+            as_of: None,
             selection: r
                 .learning
                 .selection
@@ -1261,6 +1324,11 @@ pub fn render_vault(v: &Vault) -> String {
 }
 fn render_learning(l: &Learning, indent: &str) -> String {
     let mut s = String::new();
+    match &l.as_of {
+        Some(AsOf::Date { date }) => s.push_str(&format!("{indent}as of {}\n", quote(date))),
+        Some(AsOf::LatestEvidence) => s.push_str(&format!("{indent}as of latest evidence\n")),
+        None => {}
+    }
     if let Some(selection) = &l.selection {
         let (amount, cap) = match selection.amount {
             SelectionAmount::Count { count } => (count.to_string(), None),
@@ -1417,7 +1485,7 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut vaults = vec![];
             for v in &p.vaults {
                 let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
-                vaults.push(json!({"path":v.path,"learning":{"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
+                vaults.push(json!({"path":v.path,"learning":{"as_of":v.learning.as_of,"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})
         }

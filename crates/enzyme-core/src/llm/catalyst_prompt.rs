@@ -369,7 +369,8 @@ pub struct EraContext {
 /// Build the user prompt for a specific entity.
 ///
 /// This references the profile selected in the system prompt and provides the
-/// entity-specific context and instructions.
+/// entity-specific context and instructions. `reference_ms` is the generation
+/// clock (a vault's `as of`, else wall time) that practice-shape recency uses.
 pub fn build_user_prompt(
     entity_name: &str,
     context_samples: &[String],
@@ -378,6 +379,7 @@ pub fn build_user_prompt(
     format_key: &str,
     entity: Option<&Entity>,
     era_context: Option<&EraContext>,
+    reference_ms: i64,
 ) -> String {
     let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
     let synthetic_body_cluster =
@@ -430,7 +432,8 @@ cluster.\n</entity>"
 
     // Practice shape from entity trends
     if let Some(e) = entity {
-        let practice = build_practice_shape(e, Utc::now());
+        let reference = DateTime::from_timestamp_millis(reference_ms).unwrap_or_else(Utc::now);
+        let practice = build_practice_shape(e, reference);
         if !practice.is_empty() {
             prompt.push_str(&format!("\n\n{practice}"));
         }
@@ -1157,6 +1160,7 @@ mod tests {
             "question",
             None,
             None,
+            Utc::now().timestamp_millis(),
         );
         assert!(prompt.contains("SELECTED PROFILE: Tension Trace"));
         assert!(prompt.contains("<vault_context>"));
@@ -1187,6 +1191,7 @@ mod tests {
             "thesis",
             None,
             None,
+            Utc::now().timestamp_millis(),
         );
         assert!(prompt.contains("SELECTED PROFILE: Operational"));
         assert!(prompt.contains("articulate what's at stake"));

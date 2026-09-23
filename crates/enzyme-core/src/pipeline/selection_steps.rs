@@ -85,10 +85,12 @@ pub fn build_curated_selection(
     })
 }
 
+/// `as_of_ms` is the vault's resolved `as of` instant (see [`crate::pipeline::as_of`]).
 pub(crate) fn readable_folder_children(
     db: &Database,
     base: &[Entity],
     spec: &enzyme_spec::Vault,
+    as_of_ms: Option<i64>,
 ) -> Result<HashMap<String, Vec<String>>> {
     let policies: HashMap<String, enzyme_spec::Selection> = base
         .iter()
@@ -108,7 +110,13 @@ pub(crate) fn readable_folder_children(
         .map(|e| (e.name.clone(), e.frequency))
         .collect();
     let density_exempt = explicit.keys().map(String::as_str).collect();
-    load_expandable_folder_children(db, &folder_scope(base), &density_exempt, &policies)
+    load_expandable_folder_children(
+        db,
+        &folder_scope(base),
+        &density_exempt,
+        &policies,
+        as_of_ms,
+    )
 }
 
 /// Explicit readable expansion keeps the folder and promotes its linked pages.
@@ -127,7 +135,8 @@ pub fn build_readable_selection(
         })
         .map(|e| (e.name.clone(), e.frequency))
         .collect();
-    let folders = readable_folder_children(db, &base, spec)?;
+    let as_of_ms = crate::pipeline::as_of::resolve(db, spec.learning.as_of.as_ref())?;
+    let folders = readable_folder_children(db, &base, spec, as_of_ms)?;
     let entities = expand_with_folder_children(db, &base, &folders)?;
     let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
     let mut inherited = HashMap::<String, String>::new();
@@ -242,7 +251,7 @@ fn auto_expandable_folders(
     entities: &[Entity],
 ) -> Result<HashMap<String, Vec<String>>> {
     let folders = folder_scope(entities);
-    load_expandable_folder_children(db, &folders, &HashSet::new(), &HashMap::new())
+    load_expandable_folder_children(db, &folders, &HashSet::new(), &HashMap::new(), None)
 }
 
 fn folder_scope(entities: &[Entity]) -> HashMap<String, i64> {
@@ -258,6 +267,7 @@ fn load_expandable_folder_children(
     folders: &HashMap<String, i64>,
     density_exempt: &HashSet<&str>,
     policies: &HashMap<String, enzyme_spec::Selection>,
+    as_of_ms: Option<i64>,
 ) -> Result<HashMap<String, Vec<String>>> {
     if folders.is_empty() {
         return Ok(HashMap::new());
@@ -271,7 +281,7 @@ fn load_expandable_folder_children(
         .flatten()
         .filter_map(|e| e.id)
         .collect();
-    let stats = db.get_entity_selection_stats(&ids)?;
+    let stats = db.get_entity_selection_stats(&ids, as_of_ms)?;
     let mut result = HashMap::new();
     for (folder, mut links) in links_by_folder {
         let file_count = folders.get(&folder).copied().unwrap_or(1) as f64;
@@ -573,7 +583,7 @@ vault {:?} {{ learn questions from folder "efforts" including linked pages about
             .unwrap()
             .remove(0);
         let stats = db
-            .get_entity_selection_stats(&[future.id.unwrap()])
+            .get_entity_selection_stats(&[future.id.unwrap()], None)
             .unwrap();
         let score = &stats[&future.id.unwrap()];
         assert_eq!(score.documents, 3);
@@ -812,5 +822,66 @@ vault {:?} {{ learn questions from folder "efforts" including linked pages about
             .count();
 
         assert_eq!(alice_count, 1);
+    }
+
+    #[test]
+    fn as_of_makes_historical_pages_eligible_and_hides_later_evidence() {
+        use crate::pipeline::indexing::IndexingPipeline;
+        let vault = tempfile::tempdir().unwrap();
+        let recent = (chrono::Utc::now() - chrono::Duration::days(10))
+            .format("%Y-%m-%d")
+            .to_string();
+        std::fs::create_dir_all(vault.path().join("people")).unwrap();
+        std::fs::create_dir_all(vault.path().join("journal")).unwrap();
+        for (page, date) in [
+            ("alice", "2024-03-01"),
+            ("bob", "2024-09-01"),
+            ("carol", &recent),
+        ] {
+            std::fs::write(vault.path().join(format!("people/{page}.md")), "# Page\n").unwrap();
+            for i in 0..3 {
+                std::fs::write(
+                    vault.path().join(format!("journal/{page}-{i}.md")),
+                    format!("---\ndate: {date}\n---\nMet [[{page}]] today.\n"),
+                )
+                .unwrap();
+            }
+        }
+        let children = |as_of: &str, select: &str| {
+            let db = test_db();
+            let source = format!(
+                r#"vault "/notes" {{ {as_of} learn questions from folder "people" including linked pages {select} }}"#
+            );
+            let spec = enzyme_spec::resolve(
+                vec![enzyme_spec::parse(&source).unwrap()],
+                std::path::Path::new("/home/test"),
+            )
+            .unwrap()
+            .vaults
+            .remove(0);
+            IndexingPipeline::new(&db, vault.path().to_path_buf())
+                .with_as_of(spec.learning.as_of.clone())
+                .run(true, |_| {})
+                .unwrap();
+            let base = db
+                .get_entities_by_names(&[("people", EntityType::Folder)])
+                .unwrap();
+            let mut names = build_readable_selection(&db, base, &HashMap::new(), &spec)
+                .unwrap()
+                .expandable_folders
+                .remove("people")
+                .unwrap_or_default();
+            names.sort();
+            names
+        };
+        // The wall clock sees only the recent page; the 2024 corpus has no recent-year activity.
+        assert_eq!(children("", ""), ["carol"]);
+        // As of 2024, later evidence does not exist yet and 2024 pages are active.
+        assert_eq!(children(r#"as of "2024-10-01""#, ""), ["alice", "bob"]);
+        assert_eq!(
+            children(r#"as of "2024-10-01""#, "select 1 by recency"),
+            ["bob"]
+        );
+        assert_eq!(children("as of latest evidence", ""), ["carol"]);
     }
 }

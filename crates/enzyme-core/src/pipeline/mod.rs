@@ -1,3 +1,4 @@
+pub mod as_of;
 pub mod catalysts;
 pub mod context;
 pub mod embedding;

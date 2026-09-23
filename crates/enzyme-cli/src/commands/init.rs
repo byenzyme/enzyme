@@ -260,7 +260,12 @@ fn configured_indexing_pipeline<'a>(
         .filter(|entity| entity.entity_type == enzyme_core::models::EntityType::AppendLog)
         .map(|entity| entity.name)
         .collect();
+    let as_of = config
+        .reading_spec
+        .as_ref()
+        .and_then(|spec| spec.learning.as_of.clone());
     let pipeline = IndexingPipeline::new(db, markdown_root)
+        .with_as_of(as_of)
         .with_excluded_folders(config.excluded_folders)
         .with_configured_logs(logs)
         .with_frontmatter_link_fields(config.frontmatter_link_fields);
