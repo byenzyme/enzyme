@@ -1,3 +1,5 @@
+mod temporal;
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -749,7 +751,7 @@ fn build_chunk_candidates(
 /// different canonicalization), so every entity is treated as dirty once after
 /// an upgrade rather than silently keeping catalysts the new inputs disagree
 /// with.
-const CONTEXT_HASH_VERSION: &str = "catalyst-context-v6-generation-sources";
+const CONTEXT_HASH_VERSION: &str = "catalyst-context-v7-temporal-evidence";
 
 /// Fold one labelled, length-prefixed field into the fingerprint. The label and
 /// explicit length keep concatenation unambiguous, so no combination of field
@@ -863,14 +865,15 @@ pub struct CatalystConfig<'a> {
     pub model: &'a str,
     /// Per-entity catalyst count overrides from volume-based allocation.
     pub per_entity_allocations: Option<&'a HashMap<String, usize>>,
-    /// Maximum total characters across all context samples per entity.
-    /// When a budget applies, samples are truncated (head+tail with lasso
-    /// compression) to fit within it. Three-valued, mirroring
+    /// Maximum total UTF-8 bytes across labelled context samples per entity.
+    /// Legacy sampling uses lasso truncation; explicit temporal sampling reserves
+    /// provenance labels and clips content prefixes without exceeding this cap.
+    /// Three-valued, mirroring
     /// `EnzymeConfig::effective_max_embedding_files`:
     /// - `None` → use the built-in default (`DEFAULT_MAX_CONTEXT_CHARS` for
     ///   cloud, `LOCAL_DEFAULT_MAX_CONTEXT_CHARS` for local models),
     /// - `Some(0)` → explicit unlimited (no truncation),
-    /// - `Some(n)` → exactly `n` chars.
+    /// - `Some(n)` → at most `n` bytes for explicit temporal selection.
     pub max_context_chars: Option<usize>,
     /// Maximum number of context samples per entity. Hosted generation adapts
     /// within this cap at roughly one sample per requested catalyst, with a
@@ -1253,6 +1256,8 @@ impl<'a> CatalystPipeline<'a> {
         max_context_chars: usize,
         preload: Option<&ChunkSelectionPreload>,
         entity_idx: usize,
+        temporal: Option<temporal::Preference>,
+        reference_ms: i64,
     ) -> Result<Option<SelectedContext>> {
         let file_paths = occurrences
             .iter()
@@ -1273,12 +1278,32 @@ impl<'a> CatalystPipeline<'a> {
         let query_vector = preload
             .and_then(|p| p.entity_vectors.get(entity_idx))
             .and_then(|v| v.as_deref());
-        let candidates =
+        let mut candidates =
             build_chunk_candidates(chunks, occurrences, eras, chunk_vectors, query_vector);
+        if temporal.is_some() {
+            let chunked: HashSet<_> = candidates.iter().map(|c| c.source_ref.as_str()).collect();
+            let missing: Vec<_> = occurrences
+                .iter()
+                .filter(|o| !chunked.contains(o.file_path.as_str()))
+                .cloned()
+                .collect();
+            let hydrated = self.hydrate_occurrence_contexts(&missing)?;
+            candidates.extend(temporal::occurrence_candidates(&hydrated));
+        }
         if candidates.is_empty() {
             return Ok(None);
         }
 
+        if let Some(preference) = temporal {
+            return Ok(Some(temporal::select(
+                &candidates,
+                num_catalysts,
+                max_samples,
+                max_context_chars,
+                preference,
+                reference_ms,
+            )));
+        }
         let selected = match entity.entity_type {
             // A log is a timeline: like a folder, select time-first with
             // guaranteed per-era representation (its chunks carry per-entry
@@ -1324,6 +1349,7 @@ impl<'a> CatalystPipeline<'a> {
         config: &CatalystConfig<'_>,
     ) -> Result<(String, Vec<EntityJob>, Vec<SkippedEntity>)> {
         let is_local = self.llm.is_local();
+        let reference_ms = Utc::now().timestamp_millis();
 
         let system_prompt = if is_local {
             // Simplified system prompt for local models (~400 tokens).
@@ -1351,6 +1377,37 @@ impl<'a> CatalystPipeline<'a> {
             .unwrap_or_else(|| get_profile(DEFAULT_PROFILE_KEY).unwrap());
         let chunk_preload = self.preload_chunk_selection(entities);
 
+        let mut inherited_learning = HashMap::<String, enzyme_spec::Learning>::new();
+        if let Some(spec) = config.reading_spec {
+            let base: Vec<_> = entities
+                .iter()
+                .filter(|e| spec.reading(&e.name, e.entity_type.as_str()).is_some())
+                .cloned()
+                .collect();
+            if spec.readings.iter().any(|r| r.include_linked_pages) {
+                let folders = crate::pipeline::selection_steps::readable_folder_children(
+                    self.db, &base, spec,
+                )?;
+                for reading in spec.readings.iter().filter(|r| r.include_linked_pages) {
+                    let (_, folder) = enzyme_spec::split_entity(&reading.entity);
+                    for child in folders.get(&folder.to_lowercase()).into_iter().flatten() {
+                        if spec.reading(child, "link").is_some() {
+                            continue;
+                        }
+                        let mut learning = reading.learning.clone();
+                        learning.selection = None; // parent entity selection never limits child evidence
+                        if let Some(previous) =
+                            inherited_learning.insert(child.clone(), learning.clone())
+                        {
+                            anyhow::ensure!(
+                                previous == learning,
+                                "linked page {child} inherits conflicting learning policies; declare an explicit reading for it"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<SkippedEntity> = Vec::new();
 
@@ -1389,18 +1446,23 @@ impl<'a> CatalystPipeline<'a> {
                 .per_entity_allocations
                 .and_then(|a| a.get(entity_name).copied())
                 .unwrap_or(config.catalysts_per_entity);
-            if let (Some(spec), Some(reading)) = (config.reading_spec, reading) {
-                if reading.learning.budget != spec.learning.budget {
-                    if let Some(budget) = reading.learning.budget {
+            let policy = reading
+                .map(|r| &r.learning)
+                .or_else(|| inherited_learning.get(entity_name))
+                .or_else(|| config.reading_spec.map(|v| &v.learning));
+            if let (Some(spec), Some(policy)) = (config.reading_spec, policy) {
+                if policy.budget != spec.learning.budget {
+                    if let Some(budget) = policy.budget {
                         num_catalysts = budget;
                     }
                 }
             }
+            let temporal_preference = temporal::Preference::from_learning(policy);
             let max_samples = resolve_sample_limit(config.max_samples, is_local, num_catalysts);
 
             let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
             apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
-            let mut selected_context = match self.build_chunk_context(
+            let selected_context = match self.build_chunk_context(
                 entity,
                 &occurrences,
                 &eras,
@@ -1409,6 +1471,8 @@ impl<'a> CatalystPipeline<'a> {
                 max_context_chars,
                 chunk_preload.as_ref(),
                 entity_idx,
+                temporal_preference,
+                reference_ms,
             )? {
                 Some(ctx) => ctx,
                 None => {
@@ -1418,26 +1482,27 @@ impl<'a> CatalystPipeline<'a> {
                     // before sampling — otherwise long-note entities would be
                     // skipped as having no context at all.
                     let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
-                    build_occurrence_context(
-                        &eras,
-                        &occurrences,
-                        num_catalysts,
-                        max_samples,
-                        max_context_chars,
-                    )
+                    if let Some(preference) = temporal_preference {
+                        let candidates = temporal::occurrence_candidates(&occurrences);
+                        temporal::select(
+                            &candidates,
+                            num_catalysts,
+                            max_samples,
+                            max_context_chars,
+                            preference,
+                            reference_ms,
+                        )
+                    } else {
+                        build_occurrence_context(
+                            &eras,
+                            &occurrences,
+                            num_catalysts,
+                            max_samples,
+                            max_context_chars,
+                        )
+                    }
                 }
             };
-            let policy = reading
-                .map(|r| &r.learning)
-                .or_else(|| config.reading_spec.map(|v| &v.learning));
-            if policy.and_then(|p| p.favor.as_deref()) == Some("equal") {
-                if let Some(context) = &mut selected_context.era_context {
-                    let n = context.eras.len();
-                    context.era_allocations = (0..n)
-                        .map(|i| num_catalysts / n + usize::from(i < num_catalysts % n))
-                        .collect();
-                }
-            }
             if selected_context.flat_samples.is_empty() && selected_context.era_context.is_none() {
                 debug!(
                     entity_name = entity_name.as_str(),
@@ -1493,11 +1558,11 @@ impl<'a> CatalystPipeline<'a> {
             if let Some(custom) = custom_profile {
                 user_prompt = apply_reading_profile(&user_prompt, selected_profile_key, custom);
             }
-            if policy.and_then(|p| p.favor.as_deref()) == Some("equal") {
+            if let Some(preference) = temporal_preference {
                 if let Some(context) = era_context {
-                    user_prompt.push_str(
-                        "\nRequested question allocation across periods (equal priority):\n",
-                    );
+                    user_prompt.push_str(&format!(
+                        "\nTemporal evidence: {} represented periods; excerpt and byte caps may omit other periods. Future/invalid dates are excluded relative to the generation clock; source timestamps are unchanged.\nRequested question allocation ({preference:?} priority; only represented periods):\n", context.eras.len()
+                    ));
                     for (era, count) in context.eras.iter().zip(&context.era_allocations) {
                         user_prompt.push_str(&format!("- {}: {} questions\n", era.label, count));
                     }

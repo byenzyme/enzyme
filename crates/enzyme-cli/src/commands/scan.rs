@@ -36,7 +36,7 @@ pub fn run_scan(vault_path: &Path) -> Result<()> {
 /// config. Existing curated settings are never overwritten by --write-config.
 pub async fn run_scan_jev(vault_path: &Path) -> Result<()> {
     let start = std::time::Instant::now();
-    let generated = generate_jev_setup(vault_path).await?;
+    let generated = generate_jev_setup(vault_path, false).await?;
     let suggestion = generated.suggestion;
     let proposal = generated.proposal;
     let scan_ms = generated.scan_ms;
@@ -99,7 +99,10 @@ impl GeneratedSetup {
         }))
     }
 }
-pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSetup> {
+pub(super) async fn generate_jev_setup(
+    vault_path: &Path,
+    temporal: bool,
+) -> Result<GeneratedSetup> {
     let start = std::time::Instant::now();
     let docs = process_docs(vault_path)?;
     let suggestion = build_scan_suggestion(vault_path, &docs)?;
@@ -110,7 +113,7 @@ pub(super) async fn generate_jev_setup(vault_path: &Path) -> Result<GeneratedSet
     // Finish deterministic preparation before requesting hosted access. This
     // keeps local preparation failures local and makes scan_ms purely local work.
     let client = JevClient::resolve().await?;
-    let proposal = JevSelectionPipeline::run(&client, &candidates).await?;
+    let proposal = JevSelectionPipeline::run_with_temporal(&client, &candidates, temporal).await?;
     Ok(GeneratedSetup {
         suggestion,
         proposal,

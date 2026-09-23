@@ -44,7 +44,7 @@ pub async fn run(
         config.sources.is_empty() && config.notes_path.is_none() && config.notes_roots.is_empty(),
         "compile supports a single Markdown vault; structured sources must keep their existing configuration"
     );
-    let generated = super::scan::generate_jev_setup(&path).await?;
+    let generated = super::scan::generate_jev_setup(&path, true).await?;
     ensure!(
         !generated.proposal.entities.is_empty(),
         "Jev selected no entities; no configuration generated"
@@ -55,8 +55,12 @@ pub async fn run(
         }
     }
     let evidence = if json { Some(generated.evidence()?) } else { None };
+    let temporal_policies = generated.proposal.decisions.iter()
+        .filter(|d| d.selected)
+        .map(|d| (d.spec.clone(), d.learning.clone()))
+        .collect();
     config.catalyzed_entities = generated.proposal.entities;
-    let program = structured_setup(&path, config)?;
+    let program = structured_setup(&path, config, &temporal_policies)?;
     let source = render(&program);
     // Exercise the same parser/resolver as init before emitting any configuration.
     enzyme_spec::resolve(vec![enzyme_spec::parse(&source)?], &path)?;
@@ -249,9 +253,14 @@ fn save_setup(
     Ok(file.clone())
 }
 
-/// Preserve deterministic workspace policies; only entities and profile choices
-/// come from Jev. Profile prose comes from the runtime's canonical catalog.
-fn structured_setup(path: &Path, config: EnzymeConfig) -> Result<Program> {
+/// Preserve explicit workspace policies; fill unspecified temporal choices from
+/// Jev alongside entity and profile decisions. Profile prose comes from the
+/// runtime's canonical catalog.
+fn structured_setup(
+    path: &Path,
+    config: EnzymeConfig,
+    temporal_policies: &std::collections::HashMap<String, Learning>,
+) -> Result<Program> {
     let mut vault = config.reading_spec.clone().unwrap_or_default();
     let previous = std::mem::take(&mut vault.readings);
     vault.profiles.clear();
@@ -282,11 +291,20 @@ fn structured_setup(path: &Path, config: EnzymeConfig) -> Result<Program> {
                 enzyme_core::llm::get_profile(&profile)
                     .with_context(|| format!("unknown generated profile: {profile}"))?;
             }
-            let learning = previous
+            let mut learning = previous
                 .iter()
                 .find(|r| r.entity.eq_ignore_ascii_case(&entity))
                 .map(|r| r.learning.clone())
                 .unwrap_or_else(Learning::default);
+            let effective = learning.over(&vault.learning);
+            // Sample/favor form one policy. Never reinterpret an explicit user
+            // sample-only choice by filling its default preference from Jev.
+            if effective.sample.is_none() && effective.favor.is_none() {
+                if let Some(proposed) = temporal_policies.get(&entity) {
+                    learning.sample = proposed.sample.clone();
+                    learning.favor = proposed.favor.clone();
+                }
+            }
             vault.readings.push(Reading {
                 entity,
                 profile,

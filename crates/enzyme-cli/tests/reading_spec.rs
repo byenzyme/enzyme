@@ -112,7 +112,7 @@ impl wiremock::Respond for JevDecisions {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert!(body["model"].as_str().unwrap().starts_with("typesafe/jev"));
         let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, q)| {
-            let choice = if id.starts_with("select_") { "include" } else { "decision_trace" };
+            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "across_time_equal" } else { "decision_trace" };
             let probabilities: serde_json::Map<String, Value> = q["criteria"].as_object().unwrap().keys().map(|k| (k.clone(), json!(if k == choice { 1.0 } else { 0.0 }))).collect();
             (id.clone(), json!({"type":"choice", "choice":choice,"probabilities":probabilities,"confidence":0.95}))
         }).collect();
@@ -204,6 +204,7 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
     );
     assert_eq!(vault.learning.budget, Some(3));
     assert_eq!(vault.learning.sample.as_deref(), Some("across_time"));
+    assert!(vault.readings.iter().all(|r| r.learning.favor.as_deref() == Some("recent")), "explicit recent policy must survive Jev's equal proposal");
     assert!(vault.exclusions.contains(&"private".into()));
     assert!(
         vault

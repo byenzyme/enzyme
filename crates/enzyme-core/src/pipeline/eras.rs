@@ -148,6 +148,28 @@ pub fn cluster_eras_periodic(
     eras
 }
 
+/// Explicit temporal sampling keeps sparse nonempty periods. Reuse the existing
+/// calendar buckets, without merging thin periods or letting question count
+/// determine the evidence timeline. Monthly through six months, quarterly beyond.
+pub(crate) fn sampling_eras(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
+    let mut months: Vec<_> = timeline_buckets
+        .iter()
+        .filter(|(_, n)| **n > 0)
+        .map(|(m, _)| m.as_str())
+        .collect();
+    months.sort();
+    let (Some(first), Some(last)) = (months.first(), months.last()) else {
+        return Vec::new();
+    };
+    let (fy, fm) = parse_month_key(first);
+    let (ly, lm) = parse_month_key(last);
+    if (ly - fy) * 12 + lm - fm + 1 <= 6 {
+        bucket_monthly(timeline_buckets)
+    } else {
+        bucket_quarterly(timeline_buckets)
+    }
+}
+
 /// Replace default mention-count weights with configured per-month weights.
 pub fn apply_timeline_weights(eras: &mut [Era], timeline_weights: &HashMap<String, f64>) {
     if timeline_weights.is_empty() {

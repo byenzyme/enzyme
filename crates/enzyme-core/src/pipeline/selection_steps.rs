@@ -85,14 +85,11 @@ pub fn build_curated_selection(
     })
 }
 
-/// Explicit readable expansion keeps the folder and promotes its linked pages.
-/// Child readings inherit the parent's profile unless explicitly configured themselves.
-pub fn build_readable_selection(
+pub(crate) fn readable_folder_children(
     db: &Database,
-    base: Vec<Entity>,
-    overrides: &HashMap<String, String>,
+    base: &[Entity],
     spec: &enzyme_spec::Vault,
-) -> Result<MaterializedSelection> {
+) -> Result<HashMap<String, Vec<String>>> {
     let policies: HashMap<String, enzyme_spec::Selection> = base
         .iter()
         .filter(|e| e.entity_type == EntityType::Folder)
@@ -111,8 +108,26 @@ pub fn build_readable_selection(
         .map(|e| (e.name.clone(), e.frequency))
         .collect();
     let density_exempt = explicit.keys().map(String::as_str).collect();
-    let folders =
-        load_expandable_folder_children(db, &folder_scope(&base), &density_exempt, &policies)?;
+    load_expandable_folder_children(db, &folder_scope(base), &density_exempt, &policies)
+}
+
+/// Explicit readable expansion keeps the folder and promotes its linked pages.
+/// Child readings inherit the parent's profile unless explicitly configured themselves.
+pub fn build_readable_selection(
+    db: &Database,
+    base: Vec<Entity>,
+    overrides: &HashMap<String, String>,
+    spec: &enzyme_spec::Vault,
+) -> Result<MaterializedSelection> {
+    let explicit: HashMap<String, i64> = base
+        .iter()
+        .filter(|e| {
+            spec.reading(&e.name, e.entity_type.as_str())
+                .is_some_and(|r| r.include_linked_pages)
+        })
+        .map(|e| (e.name.clone(), e.frequency))
+        .collect();
+    let folders = readable_folder_children(db, &base, spec)?;
     let entities = expand_with_folder_children(db, &base, &folders)?;
     let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
     let mut inherited = HashMap::<String, String>::new();

@@ -40,6 +40,8 @@ async fn compile_batches_all_candidates_and_merges_profiles() {
     let program = result["program"].as_str().unwrap();
     assert_eq!(program.matches("learn questions from folder").count(), 18);
     assert_eq!(program.matches("about decision_trace").count(), 18);
+    let compiled = enzyme_spec::resolve(vec![enzyme_spec::parse(program).unwrap()], &vault).unwrap();
+    assert!(compiled.vaults[0].readings.iter().all(|r| r.learning.sample.as_deref() == Some("across_time") && r.learning.favor.as_deref() == Some("equal")));
     let requests = server.received_requests().await.unwrap();
     assert!(requests.iter().all(|request| {
         request.url.path() == "/api/alpha/decisions"
@@ -51,8 +53,11 @@ async fn compile_batches_all_candidates_and_merges_profiles() {
 impl Respond for Decisions {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(body["state"]["learning_definitions"]["select"].as_str().unwrap().contains("EACH folder"));
+        assert!(body["state"]["learning_definitions"]["sample_across_time"].as_str().unwrap().contains("before generation"));
+        assert!(body["questions"].as_object().unwrap().keys().any(|k| k.starts_with("temporal_")));
         let answers: serde_json::Map<String, Value> = body["questions"].as_object().unwrap().iter().map(|(id, question)| {
-            let choice = if id.starts_with("select_") { "include" } else { "decision_trace" };
+            let choice = if id.starts_with("select_") { "include" } else if id.starts_with("temporal_") { "across_time_equal" } else { "decision_trace" };
             let probabilities: serde_json::Map<String, Value> = question["criteria"].as_object().unwrap().keys()
                 .map(|k| (k.clone(), json!(if k == choice { 1.0 } else { 0.0 }))).collect();
             (id.clone(), json!({"type":"choice", "choice":choice, "probabilities":probabilities, "confidence":0.95}))
