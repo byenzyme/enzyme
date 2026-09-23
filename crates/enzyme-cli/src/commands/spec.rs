@@ -28,6 +28,24 @@ pub enum SpecCommand {
         #[arg(long)]
         instructions: bool,
     },
+    /// Preview what a program would do on an indexed vault (read-only; no model calls)
+    ///
+    /// Shows, per reading, the resolved entities, generation jobs, evidence
+    /// periods with excerpt and question allocation, and why readings are empty.
+    /// Pass the vault with the global `-p/--vault`; without it every vault the
+    /// file declares is planned.
+    Plan {
+        file: PathBuf,
+        /// Emit the plan as structured JSON
+        #[arg(long)]
+        json: bool,
+        /// Also write each job's rendered system and user prompt into this directory
+        #[arg(long)]
+        prompts: Option<PathBuf>,
+        /// Build local-model prompts instead of hosted ones
+        #[arg(long)]
+        local: bool,
+    },
     /// Serve the syntax playground backed by the Rust runtime parser
     Serve {
         #[arg(long, default_value = "127.0.0.1")]
@@ -36,7 +54,7 @@ pub enum SpecCommand {
         port: u16,
     },
 }
-pub async fn run(command: &SpecCommand) -> Result<()> {
+pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Result<()> {
     match command {
         SpecCommand::Compile {
             file,
@@ -95,6 +113,18 @@ pub async fn run(command: &SpecCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
         }
+        SpecCommand::Plan {
+            file,
+            json,
+            prompts,
+            local,
+        } => super::spec_plan::run(super::spec_plan::PlanOptions {
+            file,
+            vault,
+            json: *json,
+            prompts: prompts.as_deref(),
+            local: *local,
+        })?,
         SpecCommand::Serve { bind, port } => serve(bind, *port).await?,
     }
     Ok(())

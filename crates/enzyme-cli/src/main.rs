@@ -380,7 +380,11 @@ async fn main() -> Result<()> {
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
         Commands::Spec { command } => {
-            return commands::spec::run(command).await;
+            anyhow::ensure!(
+                cli.collection.is_none(),
+                "spec commands take Markdown vault paths, not named collections"
+            );
+            return commands::spec::run(command, cli.vault.as_deref()).await;
         }
         Commands::Mcp => {
             init_tracing(cli.verbose, None);

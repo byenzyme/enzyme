@@ -1021,6 +1021,7 @@ pub async fn run_init(
         });
         let allocations = calculate_allocations(&sel_result.entities, effective_min_top);
 
+        let limits = EvidenceLimits::from_env();
         let cat_config = CatalystConfig {
             reading_spec: enzyme_config.reading_spec.as_ref(),
             entity_profiles: &sel_result.entity_profiles,
@@ -1033,29 +1034,15 @@ pub async fn run_init(
             prompt_context: vault_context.as_deref(),
             model: &resolved.model,
             per_entity_allocations: Some(&allocations),
-            // Three-valued: env unset → None (use built-in default guardrail);
-            // `ENZYME_MAX_CONTEXT_CHARS=0` → Some(0) (explicit unlimited);
-            // `=n` → Some(n).
-            max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
-                .ok()
-                .and_then(|v| v.parse().ok()),
-            max_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
+            max_context_chars: limits.max_context_chars,
+            max_samples: limits.max_samples,
             concurrency: std::env::var("ENZYME_LLM_CONCURRENCY")
                 .ok()
                 .and_then(|v| v.parse().ok()),
             stream_partial_catalysts,
             force_regenerate: force,
-            min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
-            min_context_tokens: std::env::var("ENZYME_MIN_CONTEXT_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
+            min_context_documents: limits.min_context_documents,
+            min_context_tokens: limits.min_context_tokens,
             epoch_id: None,
         };
 
@@ -1648,6 +1635,33 @@ fn has_document_changes(stats: &IndexingStats) -> bool {
     stats.files_new > 0 || stats.files_updated > 0 || stats.files_deleted > 0
 }
 
+/// Evidence limits from the environment. Init and `spec plan` share this so a
+/// plan's excerpt, byte and thin-context thresholds match generation.
+pub(crate) struct EvidenceLimits {
+    /// Three-valued: env unset → None (use built-in default guardrail);
+    /// `ENZYME_MAX_CONTEXT_CHARS=0` → Some(0) (explicit unlimited); `=n` → Some(n).
+    pub max_context_chars: Option<usize>,
+    pub max_samples: usize,
+    pub min_context_documents: usize,
+    pub min_context_tokens: usize,
+}
+
+impl EvidenceLimits {
+    pub(crate) fn from_env() -> Self {
+        fn var<T: std::str::FromStr>(name: &str) -> Option<T> {
+            std::env::var(name).ok().and_then(|v| v.parse().ok())
+        }
+        Self {
+            max_context_chars: var("ENZYME_MAX_CONTEXT_CHARS"),
+            max_samples: var("ENZYME_MAX_CONTEXT_SAMPLES").unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
+            min_context_documents: var("ENZYME_MIN_CONTEXT_DOCUMENTS")
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
+            min_context_tokens: var("ENZYME_MIN_CONTEXT_TOKENS")
+                .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
+        }
+    }
+}
+
 pub(super) async fn generation_contract(
     vault_path: &Path,
     paths: &EnzymePaths,
@@ -1692,6 +1706,7 @@ pub(super) async fn generation_contract(
     // contract fingerprint.
     catalyst_config.max_embedding_files = None;
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
+    let limits = EvidenceLimits::from_env();
     Ok(GenerationContract {
         schema_version: "catalyst-epoch.v2".to_string(),
         prompt_version: "catalyst-prompts.2026-09-custom-reading-user-contract".to_string(),
@@ -1711,23 +1726,10 @@ pub(super) async fn generation_contract(
         embedding_dimension: service.dimension(),
         targets,
         selection_config_json,
-        // Three-valued: env unset → None (use built-in default guardrail);
-        // `ENZYME_MAX_CONTEXT_CHARS=0` → Some(0) (explicit unlimited); `=n` → Some(n).
-        max_context_chars: std::env::var("ENZYME_MAX_CONTEXT_CHARS")
-            .ok()
-            .and_then(|v| v.parse().ok()),
-        max_context_samples: std::env::var("ENZYME_MAX_CONTEXT_SAMPLES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_MAX_CONTEXT_SAMPLES),
-        min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_DOCUMENTS),
-        min_context_tokens: std::env::var("ENZYME_MIN_CONTEXT_TOKENS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(enzyme_core::pipeline::catalysts::DEFAULT_MIN_CONTEXT_TOKENS),
+        max_context_chars: limits.max_context_chars,
+        max_context_samples: limits.max_samples,
+        min_context_documents: limits.min_context_documents,
+        min_context_tokens: limits.min_context_tokens,
     })
 }
 

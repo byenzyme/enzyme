@@ -21,3 +21,4 @@ pub mod update;
 pub mod vault_summary;
 
 pub mod spec;
+pub mod spec_plan;
