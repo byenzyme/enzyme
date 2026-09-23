@@ -907,6 +907,10 @@ impl EnzymeConfig {
 
     pub fn has_curated_entities(&self) -> bool {
         !self.catalyzed_entities.is_empty()
+            || self
+                .reading_spec
+                .as_ref()
+                .is_some_and(|v| v.readings.iter().any(|r| r.pattern))
     }
 
     pub fn persist_min_top_catalysts(&mut self, vault_path: &Path, value: usize) -> Result<()> {
@@ -1004,9 +1008,11 @@ impl EnzymeConfig {
                             definition: None,
                             learning: Default::default(),
                             include_linked_pages: options.expandable,
+                            pattern: false,
                         });
                     }
                 }
+                enzyme_spec::retain_patterns(&vault.readings, &mut readings);
                 vault.readings = readings;
                 enzyme_spec::atomic_write(&path, &enzyme_spec::render_program(&program))?;
                 return Ok(true);
@@ -1035,6 +1041,7 @@ impl EnzymeConfig {
                         definition: None,
                         learning: Default::default(),
                         include_linked_pages: false,
+                        pattern: false,
                     }),
                     CatalyzedEntity::WithOptions(map) => {
                         for (name, opt) in map {
@@ -1044,6 +1051,7 @@ impl EnzymeConfig {
                                 definition: None,
                                 learning: Default::default(),
                                 include_linked_pages: opt.expandable,
+                                pattern: false,
                             });
                         }
                     }
@@ -2162,6 +2170,7 @@ pub fn migrate_readable_configs(
                     definition: None,
                     learning: Default::default(),
                     include_linked_pages: options.expandable,
+                    pattern: false,
                 });
             }
             let mut program = enzyme_spec::Program {

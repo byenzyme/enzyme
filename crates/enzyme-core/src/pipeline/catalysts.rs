@@ -1438,6 +1438,26 @@ impl<'a> CatalystPipeline<'a> {
                     }
                 }
             }
+            // Name-pattern readings hand their policy to each selected entity
+            // exactly as a folder does to its expanded linked pages.
+            for expansion in crate::pipeline::selection_steps::readable_pattern_children(
+                self.db, spec, as_of_ms,
+            )? {
+                let mut learning = expansion.reading.learning.clone();
+                learning.selection = None;
+                for child in &expansion.selected {
+                    if let Some(previous) =
+                        inherited_learning.insert(child.name.clone(), learning.clone())
+                    {
+                        anyhow::ensure!(
+                            previous == learning,
+                            "{} {} inherits conflicting learning policies; declare an explicit reading for it",
+                            child.entity_type.as_str(),
+                            child.name
+                        );
+                    }
+                }
+            }
         }
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<SkippedEntity> = Vec::new();
@@ -2329,6 +2349,50 @@ mod tests {
     use super::*;
     use crate::models::{EntityTrends, EntityType};
     use crate::pipeline::eras::Era;
+
+    #[test]
+    fn name_pattern_children_inherit_learning_like_explicit_readings() {
+        use crate::pipeline::indexing::IndexingPipeline;
+        let vault = crate::pipeline::selection_steps::tests::tagged_vault(&[
+            ("auto-cluster-a", 4, "2024-03-01"),
+            ("auto-cluster-b", 3, "2024-05-01"),
+        ]);
+        let db = Database::open_in_memory().unwrap();
+        IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .run(true, |_| {})
+            .unwrap();
+        let entities = db.get_entities_by_type(&EntityType::Tag).unwrap();
+        let llm = LlmClient::with_base_url("unused", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+        let job = |body: &str| {
+            let spec = enzyme_spec::resolve(
+                vec![enzyme_spec::parse(&format!(r#"vault "/notes" {{ {body} }}"#)).unwrap()],
+                std::path::Path::new("/tmp"),
+            )
+            .unwrap()
+            .vaults
+            .remove(0);
+            let config = CatalystConfig {
+                reading_spec: Some(&spec),
+                min_context_tokens: 1,
+                ..Default::default()
+            };
+            let (_, jobs, _) = pipeline.build_jobs(&entities, &config).unwrap();
+            jobs.into_iter()
+                .find(|j| j.entity_name == "auto-cluster-a")
+                .unwrap()
+        };
+        let policy = "question budget 7 sample by time periods monthly";
+        let pattern =
+            r#"learn questions from tags matching "auto-cluster-*" select 1 by frequency"#;
+        let inherited = job(&format!("{pattern} {policy}"));
+        let explicit = job(&format!(
+            r#"learn questions from tag "auto-cluster-a" {policy}"#
+        ));
+        assert_eq!(inherited.user_prompt, explicit.user_prompt);
+        assert_eq!(inherited.context_hash, explicit.context_hash);
+        assert_ne!(inherited.context_hash, job(pattern).context_hash);
+    }
 
     /// Allocation now keys off document count (`Entity::frequency`); the
     /// timeline buckets are irrelevant to it.

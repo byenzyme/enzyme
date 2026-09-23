@@ -311,9 +311,11 @@ fn structured_setup(
                 definition: None,
                 learning,
                 include_linked_pages: expandable,
+                pattern: false,
             });
         }
     }
+    enzyme_spec::retain_patterns(&previous, &mut vault.readings);
     program.vaults.push(vault);
     Ok(program)
 }
@@ -391,6 +393,7 @@ fn highlight(source: &str, enabled: bool) -> String {
                     | "references"
                     | "produce"
                     | "select"
+                    | "matching"
                     | "sample"
                     | "favor"
                     | "append"

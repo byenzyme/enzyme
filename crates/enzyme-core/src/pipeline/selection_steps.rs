@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use tracing::{info, warn};
 
 use crate::db::Database;
+use crate::db::repository::EntitySelectionStats;
 use crate::models::{Entity, EntityType};
 use crate::pipeline::entity_map::EntityMap;
 use crate::pipeline::exclusions::FolderExclusions;
@@ -119,8 +121,77 @@ pub(crate) fn readable_folder_children(
     )
 }
 
+/// One `tags|links matching "…"` reading resolved against the index.
+pub(crate) struct PatternExpansion<'a> {
+    pub reading: &'a enzyme_spec::Reading,
+    /// Indexed names matching the glob, before exclusions and eligibility.
+    pub matched: usize,
+    /// Matches that are not left out, not read explicitly, and occur at or
+    /// before the reference instant.
+    pub eligible: usize,
+    pub selected: Vec<Entity>,
+}
+
+/// Expand every name-pattern reading, in declaration order. Explicit readings
+/// are not candidates: they keep their own policy and consume no pattern slot.
+/// There is no density, frequency or recent-year gate; naming the pattern is the
+/// opt-in. Without `select`, the folder default applies (legacy ranking, cap of
+/// [`MAX_FOLDER_CHILDREN`]).
+pub(crate) fn readable_pattern_children<'a>(
+    db: &Database,
+    spec: &'a enzyme_spec::Vault,
+    as_of_ms: Option<i64>,
+) -> Result<Vec<PatternExpansion<'a>>> {
+    let mut by_type = HashMap::<&str, Vec<Entity>>::new();
+    let mut expansions = Vec::new();
+    for reading in spec.readings.iter().filter(|r| r.pattern) {
+        let (kind, glob) = enzyme_spec::split_entity(&reading.entity);
+        let (entity_type, excluded) = match kind {
+            "tag" => (EntityType::Tag, &spec.excluded_tags),
+            _ => (EntityType::Link, &spec.excluded_links),
+        };
+        if !by_type.contains_key(kind) {
+            by_type.insert(kind, db.get_entities_by_type(&entity_type)?);
+        }
+        let matches: Vec<&Entity> = by_type[kind]
+            .iter()
+            .filter(|e| enzyme_spec::glob_matches(glob, &e.name))
+            .collect();
+        let matched = matches.len();
+        let candidates: Vec<Entity> = matches
+            .into_iter()
+            .filter(|e| {
+                !excluded.iter().any(|x| {
+                    x.trim_start_matches('#')
+                        .trim_start_matches("[[")
+                        .trim_end_matches("]]")
+                        .eq_ignore_ascii_case(&e.name)
+                }) && spec.reading(&e.name, kind).is_none()
+            })
+            .cloned()
+            .collect();
+        let ids: Vec<_> = candidates.iter().filter_map(|e| e.id).collect();
+        // Stats only exist for entities with an occurrence at or before `as of`.
+        let stats = db.get_entity_selection_stats(&ids, as_of_ms)?;
+        let candidates: Vec<Entity> = candidates
+            .into_iter()
+            .filter(|e| e.id.is_some_and(|id| stats.contains_key(&id)))
+            .collect();
+        let eligible = candidates.len();
+        let selected = rank_and_limit(candidates, &stats, reading.learning.selection.as_ref());
+        expansions.push(PatternExpansion {
+            reading,
+            matched,
+            eligible,
+            selected,
+        });
+    }
+    Ok(expansions)
+}
+
 /// Explicit readable expansion keeps the folder and promotes its linked pages.
 /// Child readings inherit the parent's profile unless explicitly configured themselves.
+/// Name-pattern readings add their selected entities under the same rules.
 pub fn build_readable_selection(
     db: &Database,
     base: Vec<Entity>,
@@ -137,9 +208,56 @@ pub fn build_readable_selection(
         .collect();
     let as_of_ms = crate::pipeline::as_of::resolve(db, spec.learning.as_of.as_ref())?;
     let folders = readable_folder_children(db, &base, spec, as_of_ms)?;
-    let entities = expand_with_folder_children(db, &base, &folders)?;
+    let mut entities = expand_with_folder_children(db, &base, &folders)?;
+    let patterns = readable_pattern_children(db, spec, as_of_ms)?;
+    let mut existing: HashSet<(String, EntityType)> = entities
+        .iter()
+        .map(|e| (e.name.clone(), e.entity_type.clone()))
+        .collect();
+    for expansion in &patterns {
+        let (kind, glob) = enzyme_spec::split_entity(&expansion.reading.entity);
+        if expansion.matched == 0 {
+            warn!(kind, pattern = glob, "reading pattern matched no {kind}s");
+        } else if expansion.selected.is_empty() {
+            warn!(
+                kind,
+                pattern = glob,
+                matched = expansion.matched,
+                "reading pattern matched {kind}s, but none are eligible"
+            );
+        }
+        info!(
+            kind,
+            pattern = glob,
+            matched = expansion.matched,
+            eligible = expansion.eligible,
+            selected = expansion.selected.len(),
+            "expanded reading pattern"
+        );
+        for entity in &expansion.selected {
+            if existing.insert((entity.name.clone(), entity.entity_type.clone())) {
+                entities.push(entity.clone());
+            }
+        }
+    }
     let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
     let mut inherited = HashMap::<String, String>::new();
+    for expansion in &patterns {
+        let profile = &expansion.reading.profile;
+        if profile == "auto" {
+            continue;
+        }
+        for child in &expansion.selected {
+            if let Some(previous) = inherited.insert(child.name.clone(), profile.clone()) {
+                anyhow::ensure!(
+                    previous == *profile || overrides.contains_key(&child.name),
+                    "{} {} inherits conflicting profiles from reading patterns; declare an explicit reading for it",
+                    child.entity_type.as_str(),
+                    child.name
+                );
+            }
+        }
+    }
     for parent in explicit.keys() {
         if let Some(profile) = overrides.get(parent) {
             for child in folders.get(parent).into_iter().flatten() {
@@ -283,47 +401,57 @@ fn load_expandable_folder_children(
         .collect();
     let stats = db.get_entity_selection_stats(&ids, as_of_ms)?;
     let mut result = HashMap::new();
-    for (folder, mut links) in links_by_folder {
+    for (folder, links) in links_by_folder {
         let file_count = folders.get(&folder).copied().unwrap_or(1) as f64;
         let density = links.len() as f64 / file_count;
         if !density_exempt.contains(folder.as_str()) && density < EXPANDABLE_DENSITY_THRESHOLD {
             continue;
         }
 
-        let policy = policies.get(&folder);
-        let score = |entity: &Entity| {
-            let live = entity.id.and_then(|id| stats.get(&id));
-            match policy.map(|p| p.by) {
-                Some(enzyme_spec::SelectionMode::Frequency) => {
-                    live.map_or(0.0, |s| s.documents as f64)
-                }
-                Some(enzyme_spec::SelectionMode::Recency) => live.map_or(0.0, |s| s.recency),
-                None => live
-                    .and_then(|s| s.corrected_legacy_recency)
-                    .unwrap_or(entity.trends.recency_score),
-            }
-        };
-        links.sort_by(|a, b| {
-            score(b)
-                .total_cmp(&score(a))
-                .then_with(|| {
-                    if policy.is_none() {
-                        b.frequency.cmp(&a.frequency)
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        links.truncate(policy.map_or(MAX_FOLDER_CHILDREN, |p| p.limit(links.len())));
-
-        let names: Vec<String> = links.into_iter().map(|entity| entity.name).collect();
+        let names: Vec<String> = rank_and_limit(links, &stats, policies.get(&folder))
+            .into_iter()
+            .map(|entity| entity.name)
+            .collect();
         if !names.is_empty() {
             result.insert(folder, names);
         }
     }
 
     Ok(result)
+}
+
+/// Order linked entities by an explicit selection policy (distinct documents or
+/// recency, then name) or, without one, by the legacy cached activity score,
+/// frequency and name; then keep the policy's amount or the legacy cap.
+fn rank_and_limit(
+    mut entities: Vec<Entity>,
+    stats: &HashMap<i64, EntitySelectionStats>,
+    policy: Option<&enzyme_spec::Selection>,
+) -> Vec<Entity> {
+    let score = |entity: &Entity| {
+        let live = entity.id.and_then(|id| stats.get(&id));
+        match policy.map(|p| p.by) {
+            Some(enzyme_spec::SelectionMode::Frequency) => live.map_or(0.0, |s| s.documents as f64),
+            Some(enzyme_spec::SelectionMode::Recency) => live.map_or(0.0, |s| s.recency),
+            None => live
+                .and_then(|s| s.corrected_legacy_recency)
+                .unwrap_or(entity.trends.recency_score),
+        }
+    };
+    entities.sort_by(|a, b| {
+        score(b)
+            .total_cmp(&score(a))
+            .then_with(|| {
+                if policy.is_none() {
+                    b.frequency.cmp(&a.frequency)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    entities.truncate(policy.map_or(MAX_FOLDER_CHILDREN, |p| p.limit(entities.len())));
+    entities
 }
 
 fn expand_with_folder_children(
@@ -376,7 +504,7 @@ fn expand_with_folder_children(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::db::Database;
     use crate::models::EntityTrends;
@@ -883,5 +1011,139 @@ vault {:?} {{ learn questions from folder "efforts" including linked pages about
             ["bob"]
         );
         assert_eq!(children("as of latest evidence", ""), ["carol"]);
+    }
+
+    /// Journal notes carrying `#tag` dated `date`, `docs` notes per tag.
+    pub(crate) fn tagged_vault(tags: &[(&str, usize, &str)]) -> tempfile::TempDir {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join("journal")).unwrap();
+        for (tag, docs, date) in tags {
+            for i in 0..*docs {
+                std::fs::write(
+                    vault.path().join(format!("journal/{tag}-{i}.md")),
+                    format!("---\ndate: {date}\n---\nNotes on #{tag} and what followed.\n"),
+                )
+                .unwrap();
+            }
+        }
+        vault
+    }
+
+    #[test]
+    fn name_patterns_select_eligible_matches_and_inherit_like_folder_children() {
+        use crate::config::EnzymeConfig;
+        use crate::pipeline::indexing::IndexingPipeline;
+        use crate::pipeline::selection::SelectionPipeline;
+        let vault = tagged_vault(&[
+            ("auto-cluster-a", 4, "2024-03-01"),
+            ("auto-cluster-b", 3, "2024-03-01"),
+            ("auto-cluster-c", 2, "2024-03-01"),
+            ("auto-cluster-late", 1, "2025-06-01"),
+            ("other", 6, "2024-03-01"),
+        ]);
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("configs")).unwrap();
+        let run = |body: &str| {
+            std::fs::write(
+                home.path().join("configs/vault.enzyme"),
+                format!("vault {:?} {{ {body} }}", vault.path().to_string_lossy()),
+            )
+            .unwrap();
+            let config =
+                EnzymeConfig::load_at(vault.path(), &home.path().join("config.toml"))?.unwrap();
+            let db = test_db();
+            IndexingPipeline::new(&db, vault.path().to_path_buf())
+                .with_as_of(config.reading_spec.as_ref().unwrap().learning.as_of.clone())
+                .run(true, |_| {})?;
+            let result =
+                SelectionPipeline::new(&db, vault.path()).run_with_config(Some(&config))?;
+            let mut tags: Vec<(String, String)> = result
+                .entities
+                .iter()
+                .filter(|e| e.entity_type == EntityType::Tag)
+                .map(|e| {
+                    let profile = result.entity_profiles.get(&e.name).cloned();
+                    (e.name.clone(), profile.unwrap_or_default())
+                })
+                .collect();
+            tags.sort();
+            anyhow::Ok(tags)
+        };
+        let names = |body: &str| -> Vec<String> {
+            run(body)
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let pattern = r#"learn questions from tags matching "AUTO-cluster-*" about decisions"#;
+        // The two clusters with the most distinct documents; `other` never matches.
+        let selected = run(&format!("{pattern} select 2 by frequency")).unwrap();
+        assert_eq!(
+            selected,
+            [
+                ("auto-cluster-a".into(), "decision_trace".into()),
+                ("auto-cluster-b".into(), "decision_trace".into())
+            ]
+        );
+        // Without select, the folder default cap (10) keeps every eligible match.
+        assert_eq!(
+            names(pattern),
+            [
+                "auto-cluster-a",
+                "auto-cluster-b",
+                "auto-cluster-c",
+                "auto-cluster-late"
+            ]
+        );
+        // As of 2024, a tag whose only occurrences are later is not a match.
+        assert_eq!(
+            names(&format!(r#"as of "2024-12-31" {pattern}"#)),
+            ["auto-cluster-a", "auto-cluster-b", "auto-cluster-c"]
+        );
+        // An explicit reading keeps its own profile and consumes no pattern slot.
+        let overridden = run(&format!(
+            r#"{pattern} select 2 by frequency learn questions from tag "auto-cluster-a" about relationships"#
+        ))
+        .unwrap();
+        assert_eq!(
+            overridden,
+            [
+                ("auto-cluster-a".into(), "relational".into()),
+                ("auto-cluster-b".into(), "decision_trace".into()),
+                ("auto-cluster-c".into(), "decision_trace".into())
+            ]
+        );
+        assert_eq!(
+            names(&format!(
+                r#"{pattern} select 2 by frequency leave out tags ["auto-cluster-b"]"#
+            )),
+            ["auto-cluster-a", "auto-cluster-c"]
+        );
+        // A pattern with no match selects nothing (and warns) rather than failing.
+        assert!(names(r#"learn questions from tags matching "nothing-*""#).is_empty());
+        // Overlapping patterns follow the folder rule: agreeing policies are fine,
+        // conflicting inherited profiles need an explicit reading.
+        assert_eq!(
+            names(&format!(
+                r#"{pattern} learn questions from tags matching "*-a" about decisions"#
+            ))
+            .len(),
+            4
+        );
+        let conflict = run(&format!(
+            r#"{pattern} learn questions from tags matching "*-a" about relationships"#
+        ))
+        .unwrap_err();
+        assert!(
+            format!("{conflict:#}").contains("auto-cluster-a"),
+            "{conflict:#}"
+        );
+        assert!(
+            run(&format!(
+                r#"{pattern} learn questions from tags matching "*-a" about relationships learn questions from tag "auto-cluster-a""#
+            ))
+            .is_ok()
+        );
     }
 }

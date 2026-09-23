@@ -133,6 +133,35 @@ pub struct Reading {
     pub definition: Option<Profile>,
     pub learning: Learning,
     pub include_linked_pages: bool,
+    /// `tags|links matching "…"`: `entity` holds a `*` glob that expands at job
+    /// build time into one reading per matching indexed entity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pattern: bool,
+}
+/// Case-insensitive name glob where `*` matches any run of characters, including
+/// none. Every other character is literal. Tag and link names are indexed in
+/// lower case, so this agrees with how explicit readings find their entity.
+pub fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let name: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut p, mut n) = (0, 0);
+    let mut backtrack: Option<(usize, usize)> = None;
+    while n < name.len() {
+        if p < pattern.len() && pattern[p] == '*' {
+            backtrack = Some((p, n));
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == name[n] {
+            p += 1;
+            n += 1;
+        } else if let Some((star, matched)) = backtrack {
+            p = star + 1;
+            n = matched + 1;
+            backtrack = Some((star, matched + 1));
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Memory {
@@ -158,8 +187,9 @@ pub struct Vault {
     pub retrieval: Option<Vec<String>>,
 }
 impl Vault {
+    /// The explicit reading for one entity; name patterns never match here.
     pub fn reading(&self, name: &str, kind: &str) -> Option<&Reading> {
-        self.readings.iter().find(|r| {
+        self.readings.iter().filter(|r| !r.pattern).find(|r| {
             let (k, n) = split_entity(&r.entity);
             k == (if kind == "append_log" { "log" } else { kind }) && n.eq_ignore_ascii_case(name)
         })
@@ -579,7 +609,22 @@ impl Parser {
             .contains(&kind.as_str()),
             "unknown reading kind {kind}"
         );
-        let names = if kind.ends_with('s') {
+        let pattern = self.at("matching");
+        let names = if pattern {
+            if kind != "tags" && kind != "links" {
+                return self.err("matching applies only to tags and links");
+            }
+            self.pos += 1;
+            let glob = self.string()?;
+            if !glob.contains('*') {
+                return self.err(&format!(
+                    "pattern {glob:?} has no *; use learn questions from {} {glob:?} for one {}",
+                    kind.trim_end_matches('s'),
+                    kind.trim_end_matches('s')
+                ));
+            }
+            vec![glob]
+        } else if kind.ends_with('s') {
             self.list()?
         } else {
             vec![self.string()?]
@@ -631,8 +676,8 @@ impl Parser {
             "only folders can include linked pages"
         );
         ensure!(
-            learning.selection.is_none() || kind == "folder",
-            "select applies only to linked children of folders"
+            learning.selection.is_none() || kind == "folder" || pattern,
+            "select applies only to linked children of folders and to tags/links matching a pattern"
         );
         Ok(names
             .into_iter()
@@ -642,6 +687,7 @@ impl Parser {
                 definition: definition.clone(),
                 learning: learning.clone(),
                 include_linked_pages: include,
+                pattern,
             })
             .collect())
     }
@@ -913,6 +959,13 @@ pub fn entity_selector(kind: &str, name: &str) -> String {
         _ => format!("{kind}:{name}"),
     }
 }
+/// Rebuilding readings from a concrete entity list must not drop name patterns;
+/// they return to their declared positions so precedence and rendering hold.
+pub fn retain_patterns(previous: &[Reading], rebuilt: &mut Vec<Reading>) {
+    for (index, reading) in previous.iter().enumerate().filter(|(_, r)| r.pattern) {
+        rebuilt.insert(index.min(rebuilt.len()), reading.clone());
+    }
+}
 pub fn split_entity(entity: &str) -> (&str, &str) {
     if let Some(s) = entity.strip_prefix('#') {
         ("tag", s)
@@ -979,11 +1032,12 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
                 if r.definition.is_some() && r.profile == "inline" {
                     r.profile = format!("inline:{}", r.entity);
                 }
-                ensure!(
-                    entities.insert(r.entity.to_lowercase()),
-                    "duplicate reading {}",
-                    r.entity
-                );
+                let key = if r.pattern {
+                    format!("matching {}", r.entity.to_lowercase())
+                } else {
+                    r.entity.to_lowercase()
+                };
+                ensure!(entities.insert(key), "duplicate reading {}", r.entity);
                 r.learning = r.learning.over(&v.learning);
                 if r.definition.is_none() {
                     if let Some(def) = all.profiles.get(&r.profile) {
@@ -1135,9 +1189,11 @@ pub fn config_value(p: &Program) -> serde_json::Value {
     }
     let mut vaults = Map::new();
     for v in &p.vaults {
+        // Name patterns have no single entity; they expand at selection time.
         let entities: Vec<Value> = v
             .readings
             .iter()
+            .filter(|r| !r.pattern)
             .map(|r| {
                 if r.profile == "auto" {
                     json!(r.entity)
@@ -1274,7 +1330,14 @@ pub fn render_vault(v: &Vault) -> String {
     }
     for r in &v.readings {
         let (k, n) = split_entity(&r.entity);
-        s.push_str(&format!("  learn questions from {k} {}", quote(n)));
+        if r.pattern {
+            s.push_str(&format!(
+                "  learn questions from {k}s matching {}",
+                quote(n)
+            ));
+        } else {
+            s.push_str(&format!("  learn questions from {k} {}", quote(n)));
+        }
         if r.include_linked_pages {
             s.push_str("\n    including linked pages")
         }
@@ -1533,7 +1596,7 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut trace = vec![];
             let mut vaults = vec![];
             for v in &p.vaults {
-                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"periods":r.learning.periods,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
+                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"periods":r.learning.periods,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages,"pattern":r.pattern})}).collect();
                 vaults.push(json!({"path":v.path,"learning":{"as_of":v.learning.as_of,"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"periods":v.learning.periods,"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})

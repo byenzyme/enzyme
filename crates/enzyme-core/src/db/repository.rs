@@ -1072,6 +1072,18 @@ impl Database {
         Ok(results)
     }
 
+    /// Every entity of one type, e.g. the candidates for a name-pattern reading.
+    pub fn get_entities_by_type(&self, entity_type: &EntityType) -> Result<Vec<Entity>> {
+        Ok(self.query_read(
+            "SELECT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e WHERE e.type = ?1",
+            vec![Value::Text(entity_type.as_str().to_string())],
+            map_entity_row,
+        )?)
+    }
+
     /// Retrieve every entity in the database.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.query_read(

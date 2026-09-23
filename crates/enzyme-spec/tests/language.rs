@@ -718,3 +718,109 @@ fn periods_rejects_duplicates_and_unknown_values() {
     let b = parse(r#"learning { periods quarterly }"#).unwrap();
     assert!(resolve(vec![a, b], Path::new("/home/demo")).is_err());
 }
+
+#[test]
+fn name_patterns_roundtrip_select_and_stay_out_of_entity_lists() {
+    let source = r#"
+vault "/notes" {
+ learn questions from tags matching "auto-cluster-*" about decisions
+   { question budget 5 sample by time } select 25% by recency up to 8
+ learn questions from links matching "*@example.com" select 3 by frequency
+ learn questions from tag "auto-cluster-x" about relationships
+ learn questions from links matching "*"
+}"#;
+    let p = compile(source);
+    let readings = &p.vaults[0].readings;
+    assert!(readings[0].pattern && readings[1].pattern && !readings[2].pattern);
+    assert_eq!(readings[0].entity, "#auto-cluster-*");
+    assert_eq!(readings[1].entity, "[[*@example.com]]");
+    assert_eq!(readings[0].profile, "decision_trace");
+    assert_eq!(readings[0].learning.budget, Some(5));
+    assert_eq!(
+        readings[0].learning.selection.as_ref().unwrap().limit(100),
+        8
+    );
+    assert_eq!(readings[3].learning.selection, None);
+    // A pattern never answers an explicit entity lookup.
+    assert!(p.vaults[0].reading("auto-cluster-*", "tag").is_none());
+    assert!(p.vaults[0].reading("auto-cluster-x", "tag").is_some());
+    let rendered = render_program(&p);
+    assert!(rendered.contains(r#"learn questions from tags matching "auto-cluster-*""#));
+    assert!(rendered.contains("select 25% by recency up to 8"));
+    assert!(rendered.contains(r#"learn questions from links matching "*@example.com""#));
+    assert_eq!(compile(&rendered), p);
+    assert_eq!(compile(&render_program(&parse(source).unwrap())), p);
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(serde_json::from_str::<Program>(&json).unwrap(), p);
+    // Concrete readings keep their serialized shape, so fingerprints are stable.
+    assert!(
+        !serde_json::to_string(&readings[2])
+            .unwrap()
+            .contains("pattern")
+    );
+    assert_eq!(
+        config_value(&p)["vaults"]["/notes"]["entities"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "patterns are not concrete entities"
+    );
+    assert_eq!(
+        playground(source)["plan"]["vaults"][0]["readings"][0]["pattern"],
+        true
+    );
+    // Rewriting readings from the concrete entity list keeps patterns in place.
+    let mut rebuilt = vec![readings[2].clone()];
+    retain_patterns(readings, &mut rebuilt);
+    assert_eq!(&rebuilt, readings);
+    // A pattern and a literal reading of the same text are distinct readings.
+    compile(r#"vault "/n" { learn questions from tag "a*" learn questions from tags matching "a*" }"#);
+    assert!(
+        resolve(
+            vec![parse(r#"vault "/n" { learn questions from tags matching "a*" learn questions from tags matching "A*" }"#).unwrap()],
+            Path::new("/home/demo")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn name_pattern_globs_and_errors() {
+    for (pattern, name, expected) in [
+        ("auto-cluster-*", "auto-cluster-a", true),
+        ("auto-cluster-*", "auto-cluster-", true),
+        ("AUTO-*", "auto-x", true),
+        ("*-a", "auto-cluster-a", true),
+        ("*cluster*", "auto-cluster-a", true),
+        ("a*b*c", "a-b-b-c", true),
+        ("a*b*c", "a-c-b", false),
+        ("auto-cluster-*", "other", false),
+        ("auto-*", "x-auto-a", false),
+        ("*", "", true),
+        ("a?*", "ab", false),
+    ] {
+        assert_eq!(glob_matches(pattern, name), expected, "{pattern} {name}");
+    }
+    let no_star = parse(r#"vault "/n" { learn questions from tags matching "auto-cluster-a" }"#)
+        .unwrap_err()
+        .to_string();
+    assert!(no_star.contains("has no *"), "{no_star}");
+    assert!(no_star.contains(r#"from tag "auto-cluster-a""#), "{no_star}");
+    for bad in [
+        r#"learn questions from tag "people" select 3 by frequency"#,
+        r#"learn questions from link "people" select 3 by frequency"#,
+        r#"learn questions from tags ["a", "b"] select 3 by frequency"#,
+        r#"learn questions from folders matching "p*""#,
+        r#"learn questions from logs matching "p*""#,
+        r#"learn questions from tag matching "p*""#,
+        r#"learn questions from tags matching ["a*", "b*"]"#,
+        r#"learn questions from tags matching "a*" including linked pages"#,
+        r#"learn questions from tags matching """#,
+    ] {
+        assert!(
+            parse(&format!(r#"vault "/n" {{ {bad} }}"#)).is_err(),
+            "accepted {bad}"
+        );
+    }
+}
