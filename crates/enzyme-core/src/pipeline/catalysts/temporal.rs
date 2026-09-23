@@ -663,6 +663,75 @@ mod tests {
         }
     }
     #[test]
+    fn custom_reading_jobs_and_dumps_omit_builtin_steering() {
+        let db = Database::open_in_memory().unwrap();
+        let entities = populate(&db, true);
+        // Hosted client: the custom system/user contract is the hosted path.
+        let llm = LlmClient::with_base_url("unused", "https://hosted.invalid/v1");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+        let custom = spec(
+            r#"profile mine { seek "CUSTOM SEEK" notice { "CUSTOM NOTICE" } } vault "/notes" { learn questions from link "topic" about mine }"#,
+        );
+        let profiles = HashMap::from([("topic".to_string(), "mine".to_string())]);
+        let base = CatalystConfig {
+            entity_profiles: &profiles,
+            max_samples: 9,
+            max_context_chars: Some(6000),
+            min_context_tokens: 1,
+            ..Default::default()
+        };
+        let config = CatalystConfig {
+            reading_spec: Some(&custom),
+            ..base
+        };
+        let (system, jobs, _) = pipeline.build_jobs(&entities, &config).unwrap();
+        assert!(system.contains("SELECTED READING PROFILE"));
+        let topic = jobs.iter().find(|j| j.entity_name == "topic").unwrap();
+        let prompt = &topic.user_prompt;
+        for banned in [
+            "<practice_shape>",
+            "Engagement shape",
+            "Register —",
+            "probe what would reopen",
+            "tensions, emergence",
+            "probe AROUND",
+            "what it costs",
+            "defined in the system prompt",
+        ] {
+            assert!(!prompt.contains(banned), "{banned:?} in {prompt}");
+        }
+        assert_eq!(prompt.matches("SELECTED READING PROFILE: mine").count(), 1);
+        assert_eq!(prompt.matches("SELECTED PROFILE").count(), 0);
+        for kept in [
+            "Seek: CUSTOM SEEK",
+            "CUSTOM NOTICE",
+            "<vault_context",
+            "PERIOD_",
+            "\"catalysts\"",
+        ] {
+            assert!(prompt.contains(kept), "{kept:?} missing from {prompt}");
+        }
+        // The prompt dump shares build_jobs, so it carries the same text.
+        let dump = tempfile::NamedTempFile::new().unwrap();
+        pipeline
+            .dump_prompts(&entities, &config, dump.path())
+            .unwrap();
+        let dumped = std::fs::read_to_string(dump.path()).unwrap();
+        assert!(!dumped.contains("practice_shape"));
+
+        // Built-in profiles keep their engagement steering.
+        let builtin_profiles =
+            HashMap::from([("topic".to_string(), DEFAULT_PROFILE_KEY.to_string())]);
+        let builtin = CatalystConfig {
+            entity_profiles: &builtin_profiles,
+            ..base
+        };
+        let (_, jobs, _) = pipeline.build_jobs(&entities, &builtin).unwrap();
+        let topic = jobs.iter().find(|j| j.entity_name == "topic").unwrap();
+        assert!(topic.user_prompt.contains("<practice_shape>"));
+        assert!(topic.user_prompt.contains("Engagement shape"));
+    }
+    #[test]
     fn omitted_temporal_settings_keep_legacy_path() {
         assert_eq!(Preference::from_learning(None), None);
         assert_eq!(

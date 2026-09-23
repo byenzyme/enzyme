@@ -381,16 +381,71 @@ pub fn build_user_prompt(
     era_context: Option<&EraContext>,
     reference_ms: i64,
 ) -> String {
+    build_user_prompt_body(
+        entity_name,
+        context_samples,
+        num_catalysts,
+        Some(profile),
+        format_key,
+        entity,
+        era_context,
+        reference_ms,
+    )
+}
+
+/// Build the user prompt body for a custom readable profile.
+///
+/// Pairs with [`build_custom_reading_system_prompt`]: the caller prepends the
+/// SELECTED READING PROFILE guidance. The body carries only the dated evidence,
+/// the focus entity, and the grounding/format/count/JSON output contract — no
+/// built-in profile header, practice shape, register/engagement steering, or
+/// default periphery probe, all of which would compete with the profile.
+pub fn build_custom_reading_user_prompt(
+    entity_name: &str,
+    context_samples: &[String],
+    num_catalysts: usize,
+    format_key: &str,
+    era_context: Option<&EraContext>,
+) -> String {
+    build_user_prompt_body(
+        entity_name,
+        context_samples,
+        num_catalysts,
+        None,
+        format_key,
+        None,
+        era_context,
+        0,
+    )
+}
+
+/// Shared user prompt builder. `builtin_profile` is `None` for custom readings,
+/// which drops every built-in steering surface while keeping evidence and the
+/// output contract byte-identical.
+#[allow(clippy::too_many_arguments)]
+fn build_user_prompt_body(
+    entity_name: &str,
+    context_samples: &[String],
+    num_catalysts: usize,
+    builtin_profile: Option<&CatalystProfile>,
+    format_key: &str,
+    entity: Option<&Entity>,
+    era_context: Option<&EraContext>,
+    reference_ms: i64,
+) -> String {
     let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
     let synthetic_body_cluster =
         entity_name.starts_with("auto-cluster-") || entity_name.starts_with("auto/body/");
 
-    // Profile selection header
-    let mut prompt = format!(
-        "SELECTED PROFILE: {} (`{}`)\n\n\
+    // Profile selection header (custom readings get theirs from the caller)
+    let mut prompt = match builtin_profile {
+        Some(profile) => format!(
+            "SELECTED PROFILE: {} (`{}`)\n\n\
 Apply the guidance and approach from the {} profile defined in the system prompt.",
-        profile.display_name, profile.key, profile.display_name,
-    );
+            profile.display_name, profile.key, profile.display_name,
+        ),
+        None => String::new(),
+    };
 
     if let Some(ec) = era_context {
         for (era_idx, era) in ec.eras.iter().enumerate() {
@@ -430,8 +485,8 @@ cluster.\n</entity>"
         ));
     }
 
-    // Practice shape from entity trends
-    if let Some(e) = entity {
+    // Practice shape from entity trends (built-in profiles only)
+    if let Some(e) = entity.filter(|_| builtin_profile.is_some()) {
         let reference = DateTime::from_timestamp_millis(reference_ms).unwrap_or_else(Utc::now);
         let practice = build_practice_shape(e, reference);
         if !practice.is_empty() {
@@ -439,9 +494,16 @@ cluster.\n</entity>"
         }
     }
 
-    // Register detection + engagement shape preamble
-    prompt.push_str(
-        "\n\n\
+    // Register detection + engagement shape preamble (built-in profiles only)
+    if builtin_profile.is_none() {
+        prompt.push_str(
+            "\n\n\
+Catalysts must be retrieval-functional — each one should embed well against vault passages and \
+surface relevant content when used as a search query.",
+        );
+    } else {
+        prompt.push_str(
+            "\n\n\
 Before generating catalysts, read the excerpts for register and engagement shape:\n\
 \n\
 Register — adapt your probing depth to what the content actually is:\n\
@@ -463,10 +525,15 @@ probe what would reopen them.\n\
 The register and engagement shape determine HOW you aim the probe. The selected profile \
 determines WHAT to probe for. Catalysts must still be retrieval-functional — each one should \
 embed well against vault passages and surface relevant content when used as a search query.",
-    );
+        );
+    }
 
     // Format-specific instructions
-    let (periphery_instruction, format_instruction, placeholder_label) = format_instructions(fmt);
+    let (mut periphery_instruction, format_instruction, placeholder_label) =
+        format_instructions(fmt);
+    if builtin_profile.is_none() && periphery_instruction == QUESTION_PERIPHERY_INSTRUCTION {
+        periphery_instruction = CUSTOM_READING_QUESTION_INSTRUCTION;
+    }
 
     // Catalyst / topic placeholders
     let catalyst_placeholders: String = (0..num_catalysts)
@@ -568,6 +635,10 @@ pub fn build_local_user_prompt(
 /// Default semantic instruction for question-form catalysts. Custom readable
 /// profiles replace this clause while retaining the question output contract.
 pub const QUESTION_PERIPHERY_INSTRUCTION: &str = "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.";
+
+/// Question-form replacement for [`QUESTION_PERIPHERY_INSTRUCTION`] when a
+/// custom readable profile owns the semantic aim.
+pub const CUSTOM_READING_QUESTION_INSTRUCTION: &str = "Then formulate the retrieval question requested by the selected reading profile. Preserve the concrete identity, scope, time, and source vocabulary needed to route back to this evidence; leave the profile's requested relation open.";
 
 /// Return (periphery_instruction, format_instruction, placeholder_label) for a format.
 fn format_instructions(fmt: &CatalystFormat) -> (&'static str, &'static str, &'static str) {
@@ -1167,6 +1238,62 @@ mod tests {
         assert!(prompt.contains("Focus entity: enzyme"));
         assert!(prompt.contains("probe AROUND the grounded meaning"));
         assert!(prompt.contains("\"catalysts\""));
+    }
+
+    const CUSTOM_READING_STEERING: [&str; 8] = [
+        "<practice_shape>",
+        "Engagement shape",
+        "Register —",
+        "probe what would reopen",
+        "tensions, emergence",
+        "probe AROUND",
+        "what it costs",
+        "defined in the system prompt",
+    ];
+
+    #[test]
+    fn custom_reading_user_prompt_keeps_evidence_and_contract_without_steering() {
+        let samples = vec!["EVIDENCE ONE [notes/a.md]".into(), "EVIDENCE TWO".into()];
+        let prompt = build_custom_reading_user_prompt("enzyme", &samples, 3, "question", None);
+        for banned in CUSTOM_READING_STEERING {
+            assert!(!prompt.contains(banned), "{banned:?} in {prompt}");
+        }
+        for kept in [
+            "<vault_context>",
+            "EVIDENCE ONE [notes/a.md]",
+            "EVIDENCE TWO",
+            "Focus entity: enzyme",
+            "Ground each catalyst in a specific phrase",
+            CUSTOM_READING_QUESTION_INSTRUCTION,
+            "single sentence question",
+            "[Retrieval question 3]",
+            "\"topicNames\"",
+            "\"eraLabels\"",
+            "retrieval-functional",
+        ] {
+            assert!(prompt.contains(kept), "{kept:?} missing from {prompt}");
+        }
+        assert!(!prompt.contains("SELECTED PROFILE"));
+    }
+
+    #[test]
+    fn builtin_user_prompt_keeps_practice_shape_and_engagement_block() {
+        let reference = DateTime::parse_from_rfc3339("2026-09-23T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let prompt = build_user_prompt(
+            "topic",
+            &["excerpt".into()],
+            3,
+            &PROFILE_TENSION_TRACE,
+            "question",
+            Some(&dated_entity("2026-01-01T00:00:00Z")),
+            None,
+            reference,
+        );
+        for kept in CUSTOM_READING_STEERING {
+            assert!(prompt.contains(kept), "{kept:?} missing from {prompt}");
+        }
     }
 
     #[test]

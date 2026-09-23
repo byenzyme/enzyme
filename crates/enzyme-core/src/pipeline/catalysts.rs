@@ -18,12 +18,12 @@ use uuid::Uuid;
 use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
-    CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
-    GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst,
-    QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt, build_local_user_prompt,
-    build_system_prompt, build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema,
-    get_profile, hardware, parse_catalyst_response, parse_partial_catalyst_entries,
-    streaming_entries_instruction,
+    CUSTOM_READING_QUESTION_INSTRUCTION, CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL,
+    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient, Message,
+    ParsedCatalyst, QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
+    build_custom_reading_user_prompt, build_local_user_prompt, build_system_prompt,
+    build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema, get_profile, hardware,
+    parse_catalyst_response, parse_partial_catalyst_entries, streaming_entries_instruction,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -824,7 +824,6 @@ pub struct CatalystStats {
 
 /// Replace the preset-specific preamble while preserving sampled evidence and output rules.
 fn apply_reading_profile(prompt: &str, name: &str, profile: &enzyme_spec::Profile) -> String {
-    const CUSTOM_READING_QUESTION_INSTRUCTION: &str = "Then formulate the retrieval question requested by the selected reading profile. Preserve the concrete identity, scope, time, and source vocabulary needed to route back to this evidence; leave the profile's requested relation open.";
     let boundary = prompt
         .find("<vault_context")
         .or_else(|| prompt.find("<entity>"))
@@ -1574,6 +1573,17 @@ impl<'a> CatalystPipeline<'a> {
                     context_samples,
                     num_catalysts,
                     Some(profile),
+                    era_context,
+                )
+            } else if custom_reading_mode && custom_profile.is_some() {
+                // Same set that receives the neutral custom system prompt:
+                // the profile owns the aim, so no practice shape or
+                // register/engagement steering competes with it.
+                build_custom_reading_user_prompt(
+                    entity_name,
+                    context_samples,
+                    num_catalysts,
+                    config.format_key,
                     era_context,
                 )
             } else {
