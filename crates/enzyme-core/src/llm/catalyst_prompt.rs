@@ -180,6 +180,43 @@ Use this to understand how the current entity relates to the broader landscape o
     prompt
 }
 
+/// Build the neutral system contract used when every selected entity has a
+/// custom readable profile. The per-entity profile owns semantic intent, so
+/// injecting the built-in reflective catalog and its examples would create a
+/// competing instruction surface.
+pub fn build_custom_reading_system_prompt(
+    format_key: Option<&str>,
+    prompt_context: Option<&str>,
+) -> String {
+    let fmt = format_key
+        .and_then(get_format)
+        .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
+    let mut prompt = format!(
+        "You generate source-grounded semantic retrieval handles for a knowledge base.\n\n\
+{}\n\n\
+The user prompt supplies a SELECTED READING PROFILE. Its seek, notice, ask, and note fields \n\
+determine what relationship each catalyst should expose. Follow that profile directly. Do not \n\
+substitute generic questions about cost, tension, assumptions, or what was left unsaid unless the \n\
+selected profile and supplied evidence call for them. Direct factual retrieval questions are valid.\n\n\
+Preserve concrete identity, scope, time, identifiers, and source vocabulary when they determine \n\
+which evidence is relevant. Leave the requested relation open rather than inserting an unsupported \n\
+answer. Treat interpretations as tentative, make no clinical, diagnostic, or personality claims, \n\
+and ground every catalyst in the supplied excerpts.\n\n\
+Always respond with valid JSON that includes catalysts, topic names, and era labels.",
+        fmt.format_prompt,
+    );
+    if let Some(context) = prompt_context {
+        prompt.push_str(&format!(
+            "\n\n<vault_context>\n\
+The following context summarizes tracked entities and the vault's current terrain. \n\
+Use it only to understand scope and relationships around the current entity.\n\n\
+{context}\n\
+</vault_context>"
+        ));
+    }
+    prompt
+}
+
 /// Build the `<catalyst_profiles>` section listing all enabled profiles.
 fn build_profiles_section() -> String {
     let mut lines: Vec<String> = vec!["<catalyst_profiles>".into(), String::new()];
@@ -1063,6 +1100,19 @@ mod tests {
         assert!(prompt.contains("<vault_context>"));
         assert!(prompt.contains("My vault context content"));
         assert!(prompt.contains("</vault_context>"));
+    }
+
+    #[test]
+    fn test_custom_reading_system_prompt_leaves_semantic_intent_to_profile() {
+        let prompt = build_custom_reading_system_prompt(
+            Some("question"),
+            Some("Organization and source context"),
+        );
+        assert!(prompt.contains("SELECTED READING PROFILE"));
+        assert!(prompt.contains("Direct factual retrieval questions are valid"));
+        assert!(prompt.contains("Organization and source context"));
+        assert!(!prompt.contains("<catalyst_profiles>"));
+        assert!(!prompt.contains("What does the commitment to craft cost"));
     }
 
     #[test]

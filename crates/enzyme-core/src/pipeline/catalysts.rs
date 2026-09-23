@@ -20,9 +20,10 @@ use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL, DEFAULT_PROFILE_KEY, EraContext,
     GenerationParams, LlmApiError, LlmClient, Message, ParsedCatalyst,
-    QUESTION_PERIPHERY_INSTRUCTION, build_local_user_prompt, build_system_prompt,
-    build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema, get_profile, hardware,
-    parse_catalyst_response, parse_partial_catalyst_entries, streaming_entries_instruction,
+    QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt, build_local_user_prompt,
+    build_system_prompt, build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema,
+    get_profile, hardware, parse_catalyst_response, parse_partial_catalyst_entries,
+    streaming_entries_instruction,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -1356,12 +1357,21 @@ impl<'a> CatalystPipeline<'a> {
         let is_local = self.llm.is_local();
         let reference_ms = Utc::now().timestamp_millis();
 
+        let custom_reading_mode = config.reading_spec.is_some_and(|spec| {
+            !config.entity_profiles.is_empty()
+                && config
+                    .entity_profiles
+                    .values()
+                    .all(|key| spec.profiles.contains_key(key))
+        });
         let system_prompt = if is_local {
             // Simplified system prompt for local models (~400 tokens).
             // Profiles, vault overview, and format template are baked into
             // the fine-tuned model via SFT. Only core instructions remain.
             info!("using simplified system prompt for local model");
             LOCAL_SYSTEM_PROMPT.to_string()
+        } else if custom_reading_mode {
+            build_custom_reading_system_prompt(Some(config.format_key), config.prompt_context)
         } else {
             build_system_prompt(Some(config.format_key), config.prompt_context)
         };
