@@ -150,8 +150,17 @@ pub fn cluster_eras_periodic(
 
 /// Explicit temporal sampling keeps sparse nonempty periods. Reuse the existing
 /// calendar buckets, without merging thin periods or letting question count
-/// determine the evidence timeline. Monthly through six months, quarterly beyond.
-pub(crate) fn sampling_eras(timeline_buckets: &HashMap<String, i64>) -> Vec<Era> {
+/// determine the evidence timeline. `Auto` is monthly through six months,
+/// quarterly beyond; an explicit granularity applies regardless of span.
+pub(crate) fn sampling_eras(
+    timeline_buckets: &HashMap<String, i64>,
+    periods: enzyme_spec::Periods,
+) -> Vec<Era> {
+    match periods {
+        enzyme_spec::Periods::Monthly => return bucket_monthly(timeline_buckets),
+        enzyme_spec::Periods::Quarterly => return bucket_quarterly(timeline_buckets),
+        enzyme_spec::Periods::Auto => {}
+    }
     let mut months: Vec<_> = timeline_buckets
         .iter()
         .filter(|(_, n)| **n > 0)

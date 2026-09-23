@@ -717,6 +717,12 @@ mod tests {
         });
         c.selection_config_json = serde_json::to_string(&config).unwrap();
         assert_ne!(selection_changed, c.fingerprint().unwrap());
+        let as_of_changed = c.fingerprint().unwrap();
+        config.reading_spec.as_mut().unwrap().readings[0]
+            .learning
+            .periods = Some(enzyme_spec::Periods::Monthly);
+        c.selection_config_json = serde_json::to_string(&config).unwrap();
+        assert_ne!(as_of_changed, c.fingerprint().unwrap());
         let schedule = db.schedule_catalyst_epoch(1_001, &c, false).unwrap();
         assert!(schedule.due);
         assert_eq!(schedule.reason, Some(EpochDueReason::ContractChanged));

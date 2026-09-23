@@ -8,7 +8,7 @@ let activeExample = 'vault';
 const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const el = (name, text, className) => { const node = document.createElement(name); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 function highlight() {
-  const pattern = /\/\/[^\n]*|"(?:\\.|[^"\\])*"|\b(?:profile|let|vault|learning|seek|notice|ask|learn|questions|from|folder|folders|tag|tags|log|link|about|including|linked|pages|select|by|frequency|recency|up|to|sample|across|time|favor|recent|periods|question|budget|when|asked|retrieve|passages|through|learned|answer|with|sources|remember|in|append|observation|project|into|prepare|newest|first|leave|out|auto)\b|\b\d+\b/g;
+  const pattern = /\/\/[^\n]*|"(?:\\.|[^"\\])*"|\b(?:profile|let|vault|learning|seek|notice|ask|learn|questions|from|folder|folders|tag|tags|log|link|about|including|linked|pages|select|by|frequency|recency|up|to|sample|across|time|favor|recent|periods|question|budget|when|asked|retrieve|passages|through|learned|answer|with|sources|remember|in|append|observation|project|into|prepare|newest|first|leave|out|auto|monthly|quarterly)\b|\b\d+\b/g;
   let html = '', last = 0;
   for (const match of editor.value.matchAll(pattern)) {
     html += escapeHtml(editor.value.slice(last, match.index));
@@ -55,6 +55,7 @@ function renderReading(container) {
         card.append(badge(`select ${amount.kind === 'percent' ? `${amount.percent}%` : amount.count} by ${selection.by}${cap}`));
       }
       if (reading.learning.sampling_mode) card.append(badge(`sample by ${reading.learning.sampling_mode}`));
+      if (reading.learning.sampling_mode && reading.learning.periods) card.append(badge(`periods ${reading.learning.periods}`));
       card.append(badge(`base budget ${reading.learning.budget}`)); container.append(card);
     }
     for (const memory of vault.memories) {

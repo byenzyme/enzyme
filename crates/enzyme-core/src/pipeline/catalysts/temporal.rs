@@ -22,6 +22,33 @@ impl Preference {
     }
 }
 
+/// The explicit temporal sampling policy: period preference plus the calendar
+/// granularity of the periods themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Policy {
+    pub(super) preference: Preference,
+    pub(super) periods: enzyme_spec::Periods,
+}
+impl Policy {
+    /// `None` keeps the legacy sampler; `periods` alone never opts in.
+    pub(super) fn from_learning(policy: Option<&enzyme_spec::Learning>) -> Option<Self> {
+        Some(Self {
+            preference: Preference::from_learning(policy)?,
+            periods: policy
+                .and_then(|p| p.periods)
+                .unwrap_or(enzyme_spec::Periods::Auto),
+        })
+    }
+}
+impl From<Preference> for Policy {
+    fn from(preference: Preference) -> Self {
+        Self {
+            preference,
+            periods: enzyme_spec::Periods::Auto,
+        }
+    }
+}
+
 /// Reserve coverage first, then distribute extra slots by weighted fair share.
 /// Equal scarcity spans the timeline (one slot chooses the newest period);
 /// recent scarcity chooses the newest periods. Saturated periods donate slots.
@@ -117,9 +144,13 @@ pub(super) fn select(
     num_questions: usize,
     max_samples: usize,
     max_bytes: usize,
-    preference: Preference,
+    policy: impl Into<Policy>,
     reference_ms: i64,
 ) -> SelectedContext {
+    let Policy {
+        preference,
+        periods,
+    } = policy.into();
     // Keep raw timestamps. Future and non-calendar dates are ineligible for
     // this historical sampler, not silently clamped into the newest period.
     let mut eligible: Vec<&ChunkCandidate> = candidates
@@ -152,7 +183,7 @@ pub(super) fn select(
         .into_iter()
         .map(|(month, paths)| (month, paths.len() as i64))
         .collect();
-    let eras = crate::pipeline::eras::sampling_eras(&buckets);
+    let eras = crate::pipeline::eras::sampling_eras(&buckets, periods);
     let mut grouped: Vec<Vec<&ChunkCandidate>> = vec![Vec::new(); eras.len()];
     for c in eligible {
         grouped[era_index_for_timestamp(&eras, c.timestamp)].push(c);
@@ -259,6 +290,7 @@ pub(super) fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enzyme_spec::Periods;
     fn ts(date: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(&format!("{date}T00:00:00Z"))
             .unwrap()
@@ -730,6 +762,153 @@ mod tests {
         let topic = jobs.iter().find(|j| j.entity_name == "topic").unwrap();
         assert!(topic.user_prompt.contains("<practice_shape>"));
         assert!(topic.user_prompt.contains("Engagement shape"));
+    }
+    /// Ten consecutive months (2025-01..2025-10), `per_month` documents each.
+    fn ten_months(per_month: usize) -> Vec<ChunkCandidate> {
+        (1..=10)
+            .flat_map(|m| {
+                (0..per_month).map(move |i| ChunkCandidate {
+                    source_ref: format!("2025-{m:02}/doc-{i}.md"),
+                    chunk_index: 0,
+                    content: format!(
+                        "MONTH_{m}_DOC_{i} {}",
+                        "Substantive source evidence for a decision. ".repeat(4)
+                    ),
+                    timestamp: ts(&format!("2025-{m:02}-15")),
+                    era_index: 0,
+                    relevance: 0.0,
+                    vector: None,
+                })
+            })
+            .collect()
+    }
+    fn labels(context: &SelectedContext) -> Vec<String> {
+        let ec = context.era_context.as_ref().unwrap();
+        ec.eras.iter().map(|e| e.label.clone()).collect()
+    }
+    #[test]
+    fn periods_choose_monthly_or_quarterly_granularity() {
+        let history = ten_months(3);
+        let reference = ts("2026-02-01");
+        let policy = |periods| Policy {
+            preference: Preference::Equal,
+            periods,
+        };
+        let auto = select(&history, 10, 30, 0, Preference::Equal, reference);
+        assert_eq!(labels(&auto), ["2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4"]);
+        let explicit_auto = select(&history, 10, 30, 0, policy(Periods::Auto), reference);
+        let quarterly = select(&history, 10, 30, 0, policy(Periods::Quarterly), reference);
+        for same in [&explicit_auto, &quarterly] {
+            assert_eq!(labels(same), labels(&auto));
+            assert_eq!(paths(same), paths(&auto));
+        }
+        let monthly = select(&history, 10, 30, 0, policy(Periods::Monthly), reference);
+        assert_eq!(labels(&monthly).len(), 10);
+        assert_eq!(labels(&monthly)[0], "Jan 2025");
+        assert_eq!(labels(&monthly)[9], "Oct 2025");
+        assert_eq!(counts(&monthly), vec![3; 10]);
+        let ec = monthly.era_context.as_ref().unwrap();
+        assert_eq!(ec.era_allocations, vec![1; 10]);
+        // Recency preference allocates across the same ten months, newer first.
+        let recent = select(
+            &history,
+            10,
+            30,
+            0,
+            Policy {
+                preference: Preference::Recent,
+                periods: Periods::Monthly,
+            },
+            reference,
+        );
+        let allocations = &recent.era_context.as_ref().unwrap().era_allocations;
+        assert_eq!(allocations.len(), 10);
+        assert_eq!(allocations.iter().sum::<usize>(), 10);
+        assert!(
+            allocations.windows(2).all(|w| w[0] <= w[1]),
+            "{allocations:?}"
+        );
+        // Short histories: auto is monthly, explicit quarterly still groups.
+        let short: Vec<_> = history
+            .iter()
+            .filter(|c| c.timestamp < ts("2025-04-01"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            labels(&select(&short, 3, 9, 0, Preference::Equal, reference)).len(),
+            3
+        );
+        assert_eq!(
+            labels(&select(
+                &short,
+                3,
+                9,
+                0,
+                policy(Periods::Quarterly),
+                reference
+            )),
+            ["2025-Q1"]
+        );
+    }
+    #[test]
+    fn periods_clause_drives_jobs_allocation_and_hash_only_when_present() {
+        use libsql::Value as V;
+        let db = Database::open_in_memory().unwrap();
+        db.execute_write("INSERT INTO entities (id,name,type,frequency,trends) VALUES (1,'topic','link',20,'{}')", vec![]).unwrap();
+        for c in ten_months(2) {
+            db.execute_write("INSERT INTO docs (source_ref,content,content_hash,created_at,modified_at,indexed_at) VALUES (?1,?2,'hash',?3,?3,?3)", vec![V::Text(c.source_ref.clone()),V::Text(c.content.clone()),V::Integer(c.timestamp)]).unwrap();
+            db.execute_write("INSERT INTO entity_occurrences (entity_id,file_path,context,created_at,effective_date) VALUES (1,?1,NULL,?2,?2)", vec![V::Text(c.source_ref),V::Integer(c.timestamp)]).unwrap();
+        }
+        let entities = db.get_all_entities().unwrap();
+        let llm = LlmClient::with_base_url("unused", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+        let job = |source: &str| {
+            let spec = spec(source);
+            let config = CatalystConfig {
+                reading_spec: Some(&spec),
+                max_samples: 20,
+                max_context_chars: Some(20000),
+                min_context_tokens: 1,
+                ..Default::default()
+            };
+            let (_, jobs, _) = pipeline.build_jobs(&entities, &config).unwrap();
+            jobs.into_iter().find(|j| j.entity_name == "topic").unwrap()
+        };
+        let reading = r#"learn questions from link "topic" question budget 10"#;
+        let monthly = job(&format!(
+            r#"vault "/notes" {{ sample by time periods monthly {reading} }}"#
+        ));
+        assert!(
+            monthly
+                .user_prompt
+                .contains("Temporal evidence: 10 represented periods"),
+            "{}",
+            monthly.user_prompt
+        );
+        assert_eq!(monthly.user_prompt.matches(": 1 questions\n").count(), 10);
+        // Reading-level clause overrides the vault; auto is today's rule.
+        let auto = job(&format!(r#"vault "/notes" {{ sample by time {reading} }}"#));
+        assert!(
+            auto.user_prompt
+                .contains("Temporal evidence: 4 represented periods")
+        );
+        for label in ["2025-Q1", "2025-Q2", "2025-Q3", "2025-Q4"] {
+            assert!(auto.user_prompt.contains(&format!("- {label}: ")));
+        }
+        let overridden = job(&format!(
+            r#"vault "/notes" {{ sample by time periods monthly {reading} periods auto }}"#
+        ));
+        assert_eq!(overridden.user_prompt, auto.user_prompt);
+        // A declared granularity changes the hash; absence keeps the old one.
+        assert_ne!(overridden.context_hash, auto.context_hash);
+        assert_ne!(monthly.context_hash, auto.context_hash);
+        // Without temporal sampling the clause is inert for the prompt.
+        let legacy = job(&format!(r#"vault "/notes" {{ {reading} }}"#));
+        let inert = job(&format!(
+            r#"vault "/notes" {{ periods monthly {reading} }}"#
+        ));
+        assert_eq!(inert.user_prompt, legacy.user_prompt);
+        assert!(!inert.user_prompt.contains("Temporal evidence"));
     }
     #[test]
     fn omitted_temporal_settings_keep_legacy_path() {

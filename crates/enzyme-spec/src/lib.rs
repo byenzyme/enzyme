@@ -66,6 +66,25 @@ pub enum AsOf {
     Date { date: String },
     LatestEvidence,
 }
+/// Calendar granularity for temporal evidence periods (UTC). `Auto` keeps the
+/// default rule: months when dated history spans at most six months, else
+/// quarters. Inert without a temporal sampling mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Periods {
+    Auto,
+    Monthly,
+    Quarterly,
+}
+impl Periods {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Monthly => "monthly",
+            Self::Quarterly => "quarterly",
+        }
+    }
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Learning {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +94,8 @@ pub struct Learning {
     pub budget: Option<usize>,
     pub sample: Option<String>,
     pub favor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub periods: Option<Periods>,
 }
 impl Learning {
     /// Canonical surface mode; storage retains the legacy fields for compatibility.
@@ -94,6 +115,7 @@ impl Learning {
             budget: self.budget.or(base.budget),
             sample: self.sample.clone().or_else(|| base.sample.clone()),
             favor: self.favor.clone().or_else(|| base.favor.clone()),
+            periods: self.periods.or(base.periods),
         };
         // Resolve legacy partial policies only after inheritance. New syntax sets
         // both fields atomically, so time overrides inherited recency completely.
@@ -489,6 +511,17 @@ impl Parser {
                 "equal"
             };
             self.set(&mut l.favor, value.into())
+        } else if self.eat("periods") {
+            let periods = if self.eat("auto") {
+                Periods::Auto
+            } else if self.eat("monthly") {
+                Periods::Monthly
+            } else if self.eat("quarterly") {
+                Periods::Quarterly
+            } else {
+                return self.err("periods must be auto, monthly or quarterly");
+            };
+            self.set(&mut l.periods, periods)
         } else {
             self.need("question")?;
             self.need("budget")?;
@@ -572,9 +605,17 @@ impl Parser {
         } else {
             Learning::default()
         };
-        while ["sample", "favor", "question", "including", "select", "as"]
-            .iter()
-            .any(|s| self.at(s))
+        while [
+            "sample",
+            "favor",
+            "question",
+            "including",
+            "select",
+            "as",
+            "periods",
+        ]
+        .iter()
+        .any(|s| self.at(s))
         {
             if self.eat("including") {
                 ensure!(!include, "duplicate including linked pages");
@@ -736,7 +777,7 @@ impl Parser {
                     "use a single learning block per scope"
                 );
                 v.learning = l;
-            } else if ["sample", "favor", "question", "select", "as"]
+            } else if ["sample", "favor", "question", "select", "as", "periods"]
                 .iter()
                 .any(|s| self.at(s))
             {
@@ -986,6 +1027,7 @@ fn merge_learning(a: &mut Learning, b: &Learning) -> Result<()> {
     m!(budget);
     m!(sample);
     m!(favor);
+    m!(periods);
     Ok(())
 }
 fn merge_settings(a: &mut Settings, b: &Settings) -> Result<()> {
@@ -1262,6 +1304,10 @@ pub fn render_vault(v: &Vault) -> String {
             favor: (r.learning.sampling_mode() != v.learning.sampling_mode())
                 .then(|| r.learning.favor.clone())
                 .flatten(),
+            periods: r
+                .learning
+                .periods
+                .filter(|p| Some(p) != v.learning.periods.as_ref()),
         };
         if local != Learning::default() {
             s.push_str(" {\n");
@@ -1349,6 +1395,9 @@ fn render_learning(l: &Learning, indent: &str) -> String {
     }
     if let Some(mode) = l.sampling_mode() {
         s.push_str(&format!("{indent}sample by {mode}\n"));
+    }
+    if let Some(periods) = l.periods {
+        s.push_str(&format!("{indent}periods {}\n", periods.as_str()));
     }
     s
 }
@@ -1484,8 +1533,8 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut trace = vec![];
             let mut vaults = vec![];
             for v in &p.vaults {
-                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
-                vaults.push(json!({"path":v.path,"learning":{"as_of":v.learning.as_of,"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
+                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"periods":r.learning.periods,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages})}).collect();
+                vaults.push(json!({"path":v.path,"learning":{"as_of":v.learning.as_of,"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"periods":v.learning.periods,"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})
         }

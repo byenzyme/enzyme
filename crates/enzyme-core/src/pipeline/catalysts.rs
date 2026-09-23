@@ -783,6 +783,7 @@ fn context_hash(
     system_prompt: &str,
     user_prompt: &str,
     as_of: Option<&str>,
+    periods: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, "version", CONTEXT_HASH_VERSION.as_bytes());
@@ -796,6 +797,10 @@ fn context_hash(
     // Only a declared `as of` participates, so existing hashes stay valid.
     if let Some(as_of) = as_of {
         hash_field(&mut hasher, "as_of", as_of.as_bytes());
+    }
+    // Likewise only a declared period granularity, even `auto`.
+    if let Some(periods) = periods {
+        hash_field(&mut hasher, "periods", periods.as_bytes());
     }
     format!("{:x}", hasher.finalize())
 }
@@ -1266,7 +1271,7 @@ impl<'a> CatalystPipeline<'a> {
         max_context_chars: usize,
         preload: Option<&ChunkSelectionPreload>,
         entity_idx: usize,
-        temporal: Option<temporal::Preference>,
+        temporal: Option<temporal::Policy>,
         reference_ms: i64,
         exclude_after_reference: bool,
     ) -> Result<Option<SelectedContext>> {
@@ -1308,13 +1313,13 @@ impl<'a> CatalystPipeline<'a> {
             return Ok(None);
         }
 
-        if let Some(preference) = temporal {
+        if let Some(policy) = temporal {
             return Ok(Some(temporal::select(
                 &candidates,
                 num_catalysts,
                 max_samples,
                 max_context_chars,
-                preference,
+                policy,
                 reference_ms,
             )));
         }
@@ -1487,7 +1492,10 @@ impl<'a> CatalystPipeline<'a> {
                     }
                 }
             }
-            let temporal_preference = temporal::Preference::from_learning(policy);
+            let temporal_policy = temporal::Policy::from_learning(policy);
+            let periods_key = policy
+                .and_then(|p| p.periods)
+                .map(enzyme_spec::Periods::as_str);
             let max_samples = resolve_sample_limit(config.max_samples, is_local, num_catalysts);
 
             let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
@@ -1501,7 +1509,7 @@ impl<'a> CatalystPipeline<'a> {
                 max_context_chars,
                 chunk_preload.as_ref(),
                 entity_idx,
-                temporal_preference,
+                temporal_policy,
                 reference_ms,
                 as_of_ms.is_some(),
             )? {
@@ -1513,14 +1521,14 @@ impl<'a> CatalystPipeline<'a> {
                     // before sampling — otherwise long-note entities would be
                     // skipped as having no context at all.
                     let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
-                    if let Some(preference) = temporal_preference {
+                    if let Some(policy) = temporal_policy {
                         let candidates = temporal::occurrence_candidates(&occurrences);
                         temporal::select(
                             &candidates,
                             num_catalysts,
                             max_samples,
                             max_context_chars,
-                            preference,
+                            policy,
                             reference_ms,
                         )
                     } else {
@@ -1601,7 +1609,7 @@ impl<'a> CatalystPipeline<'a> {
             if let Some(custom) = custom_profile {
                 user_prompt = apply_reading_profile(&user_prompt, selected_profile_key, custom);
             }
-            if let Some(preference) = temporal_preference {
+            if let Some(temporal::Policy { preference, .. }) = temporal_policy {
                 if let Some(context) = era_context {
                     user_prompt.push_str(&format!(
                         "\nTemporal evidence: {} represented periods; excerpt and byte caps may omit other periods. Future/invalid dates are excluded relative to the generation clock; source timestamps are unchanged.\nRequested question allocation ({preference:?} priority; only represented periods):\n", context.eras.len()
@@ -1627,6 +1635,7 @@ impl<'a> CatalystPipeline<'a> {
                 &system_prompt,
                 &user_prompt,
                 as_of_key.as_deref(),
+                periods_key,
             );
 
             jobs.push(EntityJob {
@@ -2791,6 +2800,7 @@ mod tests {
             "system",
             user_prompt,
             None,
+            None,
         )
     }
 
@@ -2805,43 +2815,43 @@ mod tests {
     #[test]
     fn context_hash_changes_with_every_input() {
         let base = context_hash(
-            "model-a", false, "projects", "folder", 7, "system", "ctx", None,
+            "model-a", false, "projects", "folder", 7, "system", "ctx", None, None,
         );
         let variants = [
             (
                 "context chunks",
                 context_hash(
-                    "model-a", false, "projects", "folder", 7, "system", "ctx2", None,
+                    "model-a", false, "projects", "folder", 7, "system", "ctx2", None, None,
                 ),
             ),
             (
                 "model identity",
                 context_hash(
-                    "model-b", false, "projects", "folder", 7, "system", "ctx", None,
+                    "model-b", false, "projects", "folder", 7, "system", "ctx", None, None,
                 ),
             ),
             (
                 "hosted vs local",
                 context_hash(
-                    "model-a", true, "projects", "folder", 7, "system", "ctx", None,
+                    "model-a", true, "projects", "folder", 7, "system", "ctx", None, None,
                 ),
             ),
             (
                 "entity name",
                 context_hash(
-                    "model-a", false, "writing", "folder", 7, "system", "ctx", None,
+                    "model-a", false, "writing", "folder", 7, "system", "ctx", None, None,
                 ),
             ),
             (
                 "entity type",
                 context_hash(
-                    "model-a", false, "projects", "tag", 7, "system", "ctx", None,
+                    "model-a", false, "projects", "tag", 7, "system", "ctx", None, None,
                 ),
             ),
             (
                 "catalyst count",
                 context_hash(
-                    "model-a", false, "projects", "folder", 8, "system", "ctx", None,
+                    "model-a", false, "projects", "folder", 8, "system", "ctx", None, None,
                 ),
             ),
             (
@@ -2855,12 +2865,27 @@ mod tests {
                     "system",
                     "ctx",
                     Some(r#"{"kind":"latest_evidence"}"#),
+                    None,
+                ),
+            ),
+            (
+                "periods",
+                context_hash(
+                    "model-a",
+                    false,
+                    "projects",
+                    "folder",
+                    7,
+                    "system",
+                    "ctx",
+                    None,
+                    Some("auto"),
                 ),
             ),
             (
                 "system prompt",
                 context_hash(
-                    "model-a", false, "projects", "folder", 7, "system2", "ctx", None,
+                    "model-a", false, "projects", "folder", 7, "system2", "ctx", None, None,
                 ),
             ),
         ];
@@ -2876,8 +2901,12 @@ mod tests {
     /// boundary must not produce the same digest.
     #[test]
     fn context_hash_fields_are_unambiguous() {
-        let a = context_hash("model-a", false, "ab", "folder", 7, "system", "ctx", None);
-        let b = context_hash("model-a", false, "a", "bfolder", 7, "system", "ctx", None);
+        let a = context_hash(
+            "model-a", false, "ab", "folder", 7, "system", "ctx", None, None,
+        );
+        let b = context_hash(
+            "model-a", false, "a", "bfolder", 7, "system", "ctx", None, None,
+        );
         assert_ne!(a, b);
     }
 

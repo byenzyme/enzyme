@@ -608,3 +608,113 @@ fn as_of_rejects_reading_scope_duplicates_and_bad_dates() {
     let b = parse(r#"learning { as of latest evidence }"#).unwrap();
     assert!(resolve(vec![a, b], Path::new("/home/demo")).is_err());
 }
+
+#[test]
+fn periods_scopes_roundtrip_and_inherit() {
+    let source = r#"
+learning { sample by time periods quarterly }
+vault "/global" {
+  learn questions from folder "people" including linked pages
+}
+vault "/vault" {
+  periods monthly
+  learn questions from folder "people" { question budget 5 }
+  learn questions from link "topic" periods auto
+  learn questions from tag "idea" sample by recency periods monthly
+}
+vault "/block" {
+  learning { periods auto }
+  learn questions from log "journal" { periods monthly }
+}"#;
+    let p = compile(source);
+    assert_eq!(p.learning.periods, Some(Periods::Quarterly));
+    assert_eq!(p.vaults[0].learning.periods, Some(Periods::Quarterly));
+    assert_eq!(
+        p.vaults[0].readings[0].learning.periods,
+        Some(Periods::Quarterly)
+    );
+    let v = &p.vaults[1];
+    assert_eq!(v.learning.periods, Some(Periods::Monthly));
+    assert_eq!(v.readings[0].learning.periods, Some(Periods::Monthly));
+    assert_eq!(v.readings[1].learning.periods, Some(Periods::Auto));
+    assert_eq!(v.readings[2].learning.periods, Some(Periods::Monthly));
+    assert_eq!(v.readings[2].learning.sampling_mode(), Some("recency"));
+    assert_eq!(p.vaults[2].learning.periods, Some(Periods::Auto));
+    assert_eq!(
+        p.vaults[2].readings[0].learning.periods,
+        Some(Periods::Monthly)
+    );
+    // Accepted without a sampling mode (inert at runtime), and absent by default.
+    let inert = compile(r#"vault "/n" { periods monthly learn questions from link "x" }"#);
+    assert_eq!(
+        inert.vaults[0].readings[0].learning.periods,
+        Some(Periods::Monthly)
+    );
+    assert_eq!(inert.vaults[0].readings[0].learning.sampling_mode(), None);
+    assert!(
+        compile(r#"vault "/n" {}"#).vaults[0]
+            .learning
+            .periods
+            .is_none()
+    );
+
+    let normalized = render_program(&parse(source).unwrap());
+    assert!(normalized.contains("learning {\n  sample by time\n  periods quarterly\n"));
+    assert_eq!(compile(&normalized), p);
+    assert_eq!(compile(&render_program(&p)), p);
+    let effective = render_vault(&p.vaults[1]);
+    // Vault monthly once; the reading override to auto once; inherited readings stay silent.
+    assert_eq!(
+        effective.matches("periods monthly").count(),
+        1,
+        "{effective}"
+    );
+    assert_eq!(effective.matches("periods auto").count(), 1, "{effective}");
+    let json = serde_json::to_value(&p.vaults[1].readings[1].learning).unwrap();
+    assert_eq!(json["periods"], "auto");
+    assert!(
+        serde_json::to_value(&compile(r#"vault "/n" {}"#).vaults[0].learning)
+            .unwrap()
+            .get("periods")
+            .is_none()
+    );
+    assert_eq!(
+        serde_json::from_str::<Program>(&serde_json::to_string(&p).unwrap()).unwrap(),
+        p
+    );
+    let plan = playground(source);
+    assert_eq!(plan["plan"]["vaults"][1]["learning"]["periods"], "monthly");
+    assert_eq!(
+        plan["plan"]["vaults"][1]["readings"][1]["learning"]["periods"],
+        "auto"
+    );
+}
+
+#[test]
+fn periods_rejects_duplicates_and_unknown_values() {
+    for s in [
+        r#"learning { periods weekly }"#,
+        r#"learning { periods yearly }"#,
+        r#"learning { periods "monthly" }"#,
+        r#"learning { periods }"#,
+        r#"vault "/n" { learn questions from link "x" periods daily }"#,
+    ] {
+        let error = parse(s).unwrap_err().to_string();
+        assert!(
+            error.contains("periods must be auto, monthly or quarterly"),
+            "{s}: {error}"
+        );
+    }
+    for s in [
+        r#"learning { periods monthly periods quarterly }"#,
+        r#"vault "/n" { periods monthly learning { periods auto } }"#,
+        r#"vault "/n" { periods auto periods auto }"#,
+        r#"vault "/n" { learn questions from link "x" { periods monthly } periods auto }"#,
+        r#"vault "/n" { learn questions from link "x" periods monthly periods monthly }"#,
+    ] {
+        assert!(parse(s).is_err(), "{s}");
+    }
+    let a = parse(r#"learning { periods monthly }"#).unwrap();
+    let b = parse(r#"learning { periods quarterly }"#).unwrap();
+    assert!(resolve(vec![a, b], Path::new("/home/demo")).is_err());
+}
