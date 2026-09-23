@@ -439,6 +439,11 @@ impl Parser {
                 self.need("evidence")?;
                 AsOf::LatestEvidence
             } else {
+                if !self.t().string {
+                    return self.err(
+                        "as of needs a quoted calendar date such as \"2024-10-01\", or latest evidence",
+                    );
+                }
                 let date = self.string()?;
                 if !valid_date(&date) {
                     return self.err(&format!(
@@ -518,27 +523,32 @@ impl Parser {
                 );
                 let favor = if self.eat("time") {
                     "equal"
-                } else {
-                    self.need("recency")?;
+                } else if self.eat("recency") {
                     "recent"
+                } else {
+                    return self.err("expected sample by time or sample by recency");
                 };
                 l.sample = Some("across_time".into());
                 l.favor = Some(favor.into());
                 Ok(())
-            } else {
-                self.need("across")?;
+            } else if self.eat("across") {
                 self.need("time")?;
                 self.set(&mut l.sample, "across_time".into())
+            } else {
+                self.err("expected sample by time, sample by recency, or legacy sample across time")
             }
         } else if self.eat("favor") {
             let value = if self.eat("recent") {
                 self.need("periods")?;
                 "recent"
-            } else {
-                self.need("all")?;
+            } else if self.eat("all") {
                 self.need("periods")?;
                 self.need("equally")?;
                 "equal"
+            } else {
+                return self.err(
+                    "expected legacy favor recent periods or favor all periods equally; prefer sample by recency or sample by time",
+                );
             };
             self.set(&mut l.favor, value.into())
         } else if self.eat("periods") {
@@ -553,7 +563,11 @@ impl Parser {
             };
             self.set(&mut l.periods, periods)
         } else {
-            self.need("question")?;
+            if !self.at("question") {
+                return self
+                    .err("expected as of, select, sample, favor, periods, or question budget");
+            }
+            self.pos += 1;
             self.need("budget")?;
             let n = self.number(3, 10000)?;
             self.set(&mut l.budget, n)
@@ -656,7 +670,6 @@ impl Parser {
             "question",
             "including",
             "select",
-            "as",
             "periods",
         ]
         .iter()

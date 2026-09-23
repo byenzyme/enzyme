@@ -581,14 +581,13 @@ vault "/block" {
 
 #[test]
 fn as_of_rejects_reading_scope_duplicates_and_bad_dates() {
+    let error =
+        parse(r#"vault "/n" { learn questions from folder "people" { as of "2024-10-01" } }"#)
+            .unwrap_err()
+            .to_string();
+    assert!(error.contains("as of applies to a whole vault"), "{error}");
     for s in [
-        r#"vault "/n" { learn questions from folder "people" { as of "2024-10-01" } }"#,
-        r#"vault "/n" { learn questions from folder "people" as of latest evidence }"#,
-    ] {
-        let error = parse(s).unwrap_err().to_string();
-        assert!(error.contains("as of applies to a whole vault"), "{error}");
-    }
-    for s in [
+        r#"vault "/n" { as of "2024-10-01" learn questions from folder "a" as of latest evidence }"#,
         r#"learning { as of "2024-10-01" as of latest evidence }"#,
         r#"vault "/n" { as of "2024-10-01" learning { as of "2024-10-02" } }"#,
         r#"vault "/n" { as of latest evidence as of latest evidence }"#,
@@ -607,6 +606,61 @@ fn as_of_rejects_reading_scope_duplicates_and_bad_dates() {
     let a = parse(r#"learning { as of "2024-10-01" }"#).unwrap();
     let b = parse(r#"learning { as of latest evidence }"#).unwrap();
     assert!(resolve(vec![a, b], Path::new("/home/demo")).is_err());
+}
+
+#[test]
+fn bare_as_of_after_readings_sets_the_vault() {
+    let p = parse(
+        r#"vault "/n" {
+  learn questions from folder "people" sample by time question budget 5
+  learn questions from tag "idea"
+  as of "2024-10-01"
+  leave out tags { "draft" }
+}"#,
+    )
+    .unwrap();
+    let v = &p.vaults[0];
+    assert_eq!(
+        v.learning.as_of,
+        Some(AsOf::Date {
+            date: "2024-10-01".into()
+        })
+    );
+    assert_eq!(v.readings.len(), 2);
+    assert!(v.readings.iter().all(|r| r.learning.as_of.is_none()));
+    assert_eq!(v.readings[0].learning.budget, Some(5));
+    let rendered = render_program(&p);
+    assert_eq!(parse(&rendered).unwrap(), p, "{rendered}");
+}
+
+#[test]
+fn learning_clause_errors_name_the_accepted_forms() {
+    for (source, expected) in [
+        (
+            "learning { sample time }",
+            "expected sample by time, sample by recency, or legacy sample across time",
+        ),
+        (
+            "learning { sample by recent }",
+            "expected sample by time or sample by recency",
+        ),
+        (
+            "learning { favor recency }",
+            "prefer sample by recency or sample by time",
+        ),
+        (
+            "learning { as of 2024-10-01 }",
+            "as of needs a quoted calendar date",
+        ),
+        (
+            "learning { period monthly }",
+            "expected as of, select, sample, favor, periods, or question budget",
+        ),
+    ] {
+        let error = parse(source).unwrap_err().to_string();
+        assert!(error.starts_with("1:"), "{error}");
+        assert!(error.contains(expected), "{source}: {error}");
+    }
 }
 
 #[test]
