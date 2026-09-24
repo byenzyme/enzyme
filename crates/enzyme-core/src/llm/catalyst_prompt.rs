@@ -422,6 +422,13 @@ pub fn build_custom_reading_user_prompt(
 /// Shared user prompt builder. `builtin_profile` is `None` for custom readings,
 /// which drops every built-in steering surface while keeping evidence and the
 /// output contract byte-identical.
+/// Whether a tag name is a synthetic body-cluster handle (`auto-cluster-*` or
+/// `auto/body/*`). Such names are functional handles only; nothing may infer
+/// the cluster's meaning from them.
+pub fn is_synthetic_body_cluster(entity_name: &str) -> bool {
+    entity_name.starts_with("auto-cluster-") || entity_name.starts_with("auto/body/")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_user_prompt_body(
     entity_name: &str,
@@ -434,8 +441,7 @@ fn build_user_prompt_body(
     reference_ms: i64,
 ) -> String {
     let fmt = get_format(format_key).unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
-    let synthetic_body_cluster =
-        entity_name.starts_with("auto-cluster-") || entity_name.starts_with("auto/body/");
+    let synthetic_body_cluster = is_synthetic_body_cluster(entity_name);
 
     // Profile selection header (custom readings get theirs from the caller)
     let mut prompt = match builtin_profile {

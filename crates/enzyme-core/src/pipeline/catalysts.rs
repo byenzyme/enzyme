@@ -23,7 +23,8 @@ use crate::llm::{
     ParsedCatalyst, QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
     build_custom_reading_user_prompt, build_local_user_prompt, build_system_prompt,
     build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema, get_profile, hardware,
-    parse_catalyst_response, parse_partial_catalyst_entries, streaming_entries_instruction,
+    is_synthetic_body_cluster, parse_catalyst_response, parse_partial_catalyst_entries,
+    streaming_entries_instruction,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -728,12 +729,7 @@ fn build_chunk_candidates(
                     .get(&(chunk.file_path.clone(), chunk.chunk_index))
                     .cloned()
             });
-            let relevance = match (query_vector, vector.as_ref()) {
-                (Some(query), Some(vector)) if query.len() == vector.len() => {
-                    Embedding::cosine_similarity(query, vector)
-                }
-                _ => 0.0,
-            };
+            let relevance = relevance_to(query_vector, vector.as_deref());
 
             Some(ChunkCandidate {
                 source_ref: chunk.file_path.clone(),
@@ -746,6 +742,51 @@ fn build_chunk_candidates(
             })
         })
         .collect()
+}
+
+fn relevance_to(query: Option<&[f32]>, vector: Option<&[f32]>) -> f32 {
+    match (query, vector) {
+        (Some(query), Some(vector)) if query.len() == vector.len() => {
+            Embedding::cosine_similarity(query, vector)
+        }
+        _ => 0.0,
+    }
+}
+
+/// Whether an entity's excerpt relevance is measured against its scope
+/// centroid rather than an embedding of its name. A folder name says little
+/// about what its documents discuss, and a synthetic body-cluster tag name is a
+/// functional handle only; for both, the documents themselves are the best
+/// statement of the topic. User tags keep their name as the query.
+fn ranks_by_scope_centroid(entity: &Entity) -> bool {
+    match entity.entity_type {
+        EntityType::Folder => true,
+        EntityType::Tag => is_synthetic_body_cluster(&entity.name),
+        _ => false,
+    }
+}
+
+/// L2-normalized mean of the stored chunk vectors in an entity's scope: every
+/// chunk candidate dated at or before the reference instant. Summation follows
+/// candidate order (source reference, then chunk index), so the result is
+/// deterministic; one pass over the chunks. `None` when no candidate has a
+/// vector, which leaves the caller's fallback query in charge.
+fn scope_centroid(candidates: &[ChunkCandidate], reference_ms: i64) -> Option<Vec<f32>> {
+    let mut vectors = candidates
+        .iter()
+        .filter(|c| c.timestamp <= reference_ms)
+        .filter_map(|c| c.vector.as_deref());
+    let first = vectors.next()?;
+    let dim = first.len();
+    let mut centroid = first.to_vec();
+    for vector in vectors.filter(|v| v.len() == dim) {
+        for (c, v) in centroid.iter_mut().zip(vector) {
+            *c += v;
+        }
+    }
+    // The mean's direction equals the sum's; normalizing is all cosine needs.
+    l2_normalize(&mut centroid);
+    centroid.iter().any(|c| *c != 0.0).then_some(centroid)
 }
 
 /// Bumped when the meaning of the fingerprint changes (new inputs folded in,
@@ -1244,7 +1285,9 @@ impl<'a> CatalystPipeline<'a> {
 
         let mut entity_vectors = vec![None; entities.len()];
 
-        // Tags and folders: embed the entity name directly.
+        // Tags: embed the entity name directly. Folders get no name query and
+        // synthetic body-cluster tags only a fallback one: both rank against
+        // their scope centroid in `build_chunk_context`.
         let name_positions: Vec<(usize, &str)> = entities
             .iter()
             .enumerate()
@@ -1444,6 +1487,16 @@ impl<'a> CatalystPipeline<'a> {
             .and_then(|v| v.as_deref());
         let mut candidates =
             build_chunk_candidates(chunks, occurrences, eras, chunk_vectors, query_vector);
+        if ranks_by_scope_centroid(entity) {
+            // Without a centroid (no stored vectors in scope) the name query,
+            // or no query at all, stands as before.
+            if let Some(centroid) = scope_centroid(&candidates, reference_ms) {
+                for candidate in &mut candidates {
+                    candidate.relevance =
+                        relevance_to(Some(&centroid), candidate.vector.as_deref());
+                }
+            }
+        }
         if temporal.is_some() {
             let chunked: HashSet<_> = candidates.iter().map(|c| c.source_ref.as_str()).collect();
             let missing: Vec<_> = occurrences
@@ -3397,5 +3450,200 @@ mod readable_profile_tests {
                 assert!(applied.contains("leave the profile's requested relation open"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_centroid_tests {
+    use super::*;
+    use crate::models::EMBEDDING_DIMENSION;
+    use crate::pipeline::indexing::IndexingPipeline;
+    use libsql::Value;
+
+    fn axis(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0; EMBEDDING_DIMENSION];
+        v[i] = 1.0;
+        v
+    }
+
+    const SMALL_TALK: usize = 1;
+    const ON_TOPIC: usize = 0;
+
+    /// Three chat sessions in `sessions/`, each tagged with a synthetic
+    /// body-cluster tag and a user tag. Every session opens with small talk
+    /// (chunk 0) and continues with two on-topic chunks. Returns the database
+    /// with stored chunk vectors: small talk on one axis, on-topic on another.
+    fn session_vault() -> (tempfile::TempDir, Database) {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join("sessions")).unwrap();
+        for (i, date) in ["2024-03-01", "2024-03-05", "2024-03-10"]
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(
+                vault.path().join(format!("sessions/s{i}.md")),
+                format!("---\ndate: {date}\n---\nSession {i} #auto-cluster-parser #project\n"),
+            )
+            .unwrap();
+        }
+        let db = Database::open_in_memory().unwrap();
+        IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .run(true, |_| {})
+            .unwrap();
+        let docs = db
+            .query_read(
+                "SELECT id, source_ref FROM docs ORDER BY source_ref",
+                vec![],
+                |r| Ok((r.get::<i64>(0)?, r.get::<String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(docs.len(), 3);
+        let mut vectors = Vec::new();
+        for (doc_id, source_ref) in docs {
+            db.execute_write(
+                "DELETE FROM chunks WHERE doc_id = ?1",
+                vec![Value::Integer(doc_id)],
+            )
+            .unwrap();
+            let session = source_ref.trim_end_matches(".md").to_string();
+            let chunks = [
+                (
+                    format!("{session} small talk: hi, how was your weekend?"),
+                    SMALL_TALK,
+                ),
+                (
+                    format!("{session} on topic: the parser rewrite plan"),
+                    ON_TOPIC,
+                ),
+                (
+                    format!("{session} on topic: parser error recovery"),
+                    ON_TOPIC,
+                ),
+            ];
+            for (index, (content, dim)) in chunks.into_iter().enumerate() {
+                db.execute_write(
+                    "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+                     VALUES (?1, ?2, ?3, 1, 0)",
+                    vec![
+                        Value::Integer(doc_id),
+                        Value::Integer(index as i64),
+                        Value::Text(content),
+                    ],
+                )
+                .unwrap();
+                vectors.push((source_ref.clone(), index as u32, axis(dim)));
+            }
+        }
+        db.upsert_chunk_embeddings(&vectors).unwrap();
+        (vault, db)
+    }
+
+    fn entity(db: &Database, entity_type: EntityType, name: &str) -> Entity {
+        db.get_entities_by_type(&entity_type)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no {name} entity"))
+    }
+
+    /// The single excerpt one temporal slot picks for `entity`, given the
+    /// query vector the preload would carry for it (`None` = no preload).
+    fn picked(
+        db: &Database,
+        entity: &Entity,
+        preload_query: Option<Option<Vec<f32>>>,
+        reference_ms: i64,
+    ) -> String {
+        let llm = LlmClient::with_base_url("unused", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(db, &llm, None);
+        let preload = preload_query.map(|query| ChunkSelectionPreload {
+            chunk_vectors: db
+                .get_all_chunk_embeddings()
+                .unwrap()
+                .into_iter()
+                .map(|(path, index, vector)| ((path, index), vector))
+                .collect(),
+            entity_vectors: vec![query],
+        });
+        let occurrences = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
+        let context = pipeline
+            .build_chunk_context(
+                entity,
+                &occurrences,
+                &[],
+                1,
+                1,
+                0,
+                preload.as_ref(),
+                0,
+                Some(temporal::Preference::Equal.into()),
+                reference_ms,
+                false,
+            )
+            .unwrap()
+            .expect("context");
+        assert_eq!(context.context_sources.len(), 1);
+        context.context_sources[0].excerpt.clone()
+    }
+
+    fn now() -> i64 {
+        Utc::now().timestamp_millis()
+    }
+
+    #[test]
+    fn folder_ranks_excerpts_by_scope_centroid_not_newest_opening() {
+        let (_vault, db) = session_vault();
+        let folder = entity(&db, EntityType::Folder, "sessions");
+        let excerpt = picked(&db, &folder, Some(None), now());
+        assert!(excerpt.contains("on topic"), "{excerpt}");
+        // Equal relevance falls back to the unchanged tie-break: newest first.
+        assert!(excerpt.contains("sessions/s2"), "{excerpt}");
+    }
+
+    #[test]
+    fn folder_without_chunk_vectors_keeps_newest_first_fallback() {
+        let (_vault, db) = session_vault();
+        let folder = entity(&db, EntityType::Folder, "sessions");
+        let excerpt = picked(&db, &folder, None, now());
+        assert!(
+            excerpt.contains("sessions/s2 small talk"),
+            "no vectors: newest source, chunk 0 — {excerpt}"
+        );
+    }
+
+    #[test]
+    fn synthetic_tag_uses_centroid_and_user_tag_keeps_its_name_query() {
+        let (_vault, db) = session_vault();
+        // A name embedding that happens to point at the small talk.
+        let name_query = Some(axis(SMALL_TALK));
+        let cluster = entity(&db, EntityType::Tag, "auto-cluster-parser");
+        let excerpt = picked(&db, &cluster, Some(name_query.clone()), now());
+        assert!(excerpt.contains("on topic"), "{excerpt}");
+
+        let user = entity(&db, EntityType::Tag, "project");
+        let excerpt = picked(&db, &user, Some(name_query), now());
+        assert!(excerpt.contains("small talk"), "{excerpt}");
+    }
+
+    #[test]
+    fn centroid_ignores_chunks_after_the_reference_instant() {
+        let candidate = |timestamp: i64, dim: usize| ChunkCandidate {
+            source_ref: format!("{timestamp}.md"),
+            chunk_index: 0,
+            content: String::new(),
+            timestamp,
+            era_index: 0,
+            relevance: 0.0,
+            vector: Some(axis(dim)),
+        };
+        let candidates = [
+            candidate(1, ON_TOPIC),
+            candidate(5, SMALL_TALK),
+            candidate(6, SMALL_TALK),
+        ];
+        assert_eq!(scope_centroid(&candidates, 1), Some(axis(ON_TOPIC)));
+        let all = scope_centroid(&candidates, 10).unwrap();
+        assert!(all[SMALL_TALK] > all[ON_TOPIC]);
+        assert_eq!(scope_centroid(&candidates, 0), None);
     }
 }
