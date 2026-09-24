@@ -1709,7 +1709,7 @@ pub(super) async fn generation_contract(
     let limits = EvidenceLimits::from_env();
     Ok(GenerationContract {
         schema_version: "catalyst-epoch.v2".to_string(),
-        prompt_version: "catalyst-prompts.2026-09-custom-reading-user-contract".to_string(),
+        prompt_version: "catalyst-prompts.2026-09-titled-excerpt-labels".to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()

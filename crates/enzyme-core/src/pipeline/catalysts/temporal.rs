@@ -134,9 +134,14 @@ pub(super) fn occurrence_candidates(occurrences: &[EntityOccurrence]) -> Vec<Chu
                 era_index: 0,
                 relevance: 0.0,
                 vector: None,
+                title: None,
             })
         })
         .collect()
+}
+
+fn label(c: &ChunkCandidate) -> String {
+    excerpt_label(&c.source_ref, c.title.as_deref(), c.timestamp)
 }
 
 pub(super) fn select(
@@ -207,14 +212,12 @@ pub(super) fn select(
             .enumerate()
             .flat_map(|(i, group)| group.iter().take(allocation[i]).map(move |c| (i, *c)))
             .collect();
-        // Count complete provenance labels inside the existing byte budget;
-        // reserve up to 64 content bytes per excerpt before sharing the rest.
+        // Count complete provenance labels (source, date, title) inside the
+        // existing byte budget; reserve up to 64 content bytes per excerpt
+        // before sharing the rest.
         let minimums: Vec<_> = chosen
             .iter()
-            .map(|(_, c)| {
-                let header = format!("source_ref={} timestamp_ms={}\n", c.source_ref, c.timestamp);
-                header.len() + c.content.len().min(64)
-            })
+            .map(|(_, c)| label(c).len() + c.content.len().min(64))
             .collect();
         let minimum: usize = minimums.iter().sum();
         if max_bytes == 0 || minimum <= max_bytes || sample_slots == 0 {
@@ -226,8 +229,7 @@ pub(super) fn select(
     let mut lengths = minimums;
     if max_bytes == 0 {
         for (length, (_, c)) in lengths.iter_mut().zip(&selected) {
-            *length = format!("source_ref={} timestamp_ms={}\n", c.source_ref, c.timestamp).len()
-                + c.content.len();
+            *length = label(c).len() + c.content.len();
         }
     } else {
         let mut remaining = max_bytes - lengths.iter().sum::<usize>();
@@ -236,9 +238,7 @@ pub(super) fn select(
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (_, c))| {
-                    let full =
-                        format!("source_ref={} timestamp_ms={}\n", c.source_ref, c.timestamp).len()
-                            + c.content.len();
+                    let full = label(c).len() + c.content.len();
                     (lengths[i] < full).then_some((i, full))
                 })
                 .collect();
@@ -259,11 +259,12 @@ pub(super) fn select(
     let mut sources = Vec::new();
     let mut samples = Vec::new();
     for ((era, c), length) in selected.iter().zip(lengths) {
-        let header = format!("source_ref={} timestamp_ms={}\n", c.source_ref, c.timestamp);
+        let header = label(c);
         let content = prefix(&c.content, length - header.len());
         sources.push(GenerationContextSource {
             source_ref: c.source_ref.clone(),
             timestamp_ms: c.timestamp,
+            title: c.title.clone(),
             excerpt: context_excerpt(content),
         });
         samples.push((
@@ -313,6 +314,7 @@ mod tests {
                     era_index: era,
                     relevance: 0.0,
                     vector: None,
+                    title: None,
                 })
             })
             .collect()
@@ -425,9 +427,10 @@ mod tests {
                 assert!(ec.samples.iter().map(|(_, s)| s.len()).sum::<usize>() <= budget);
                 assert_eq!(ec.samples.len(), result.context_sources.len());
                 for ((_, text), source) in ec.samples.iter().zip(&result.context_sources) {
-                    assert!(text.starts_with(&format!(
-                        "source_ref={} timestamp_ms={}\n",
-                        source.source_ref, source.timestamp_ms
+                    assert!(text.starts_with(&excerpt_label(
+                        &source.source_ref,
+                        source.title.as_deref(),
+                        source.timestamp_ms
                     )));
                 }
                 assert_eq!(ec.era_allocations.iter().sum::<usize>(), 9);
@@ -778,6 +781,7 @@ mod tests {
                     era_index: 0,
                     relevance: 0.0,
                     vector: None,
+                    title: None,
                 })
             })
             .collect()

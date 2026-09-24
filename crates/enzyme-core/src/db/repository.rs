@@ -319,6 +319,36 @@ impl Database {
         Ok(contents)
     }
 
+    /// Stored title and the first `head_chars` characters of content for each
+    /// path, keyed by `source_ref`. Missing documents are absent from the map.
+    pub fn get_doc_titles_for_paths(
+        &self,
+        paths: &[String],
+        head_chars: usize,
+    ) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
+        let mut titles = std::collections::HashMap::new();
+        for chunk in paths.chunks(500) {
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT source_ref, title, substr(content, 1, ?1) FROM docs
+                 WHERE source_ref IN ({placeholders})"
+            );
+            let mut params = vec![Value::Integer(head_chars as i64)];
+            params.extend(chunk.iter().map(|p| Value::Text(p.clone())));
+            let rows = self.query_read(&sql, params, |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    (row.get::<Option<String>>(1)?, row.get::<Option<String>>(2)?),
+                ))
+            })?;
+            titles.extend(rows);
+        }
+        Ok(titles)
+    }
+
     /// Retrieve a single document by its `source_ref` (relative vault path).
     pub fn get_document_by_path(&self, source_ref: &str) -> Result<Option<Document>> {
         let rows = self.query_read(

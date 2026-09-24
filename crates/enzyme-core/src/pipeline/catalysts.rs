@@ -214,6 +214,8 @@ struct ChunkCandidate {
     era_index: usize,
     relevance: f32,
     vector: Option<Vec<f32>>,
+    /// Display title for the excerpt label; see [`excerpt_title`].
+    title: Option<String>,
 }
 
 /// A selected excerpt while one model request is in flight.
@@ -224,6 +226,7 @@ struct ChunkCandidate {
 struct GenerationContextSource {
     source_ref: String,
     timestamp_ms: i64,
+    title: Option<String>,
     excerpt: String,
 }
 
@@ -265,21 +268,103 @@ fn context_excerpt(content: &str) -> String {
     lasso_truncate(&compact, CONTEXT_EXCERPT_MAX_CHARS)
 }
 
+/// Longest title an excerpt label carries. Labels count toward the evidence
+/// byte budget, so titles are clipped (UTF-8 safe) rather than quoted whole.
+const EXCERPT_TITLE_MAX_BYTES: usize = 80;
+/// How much of a document's stored content is scanned for a first heading.
+const EXCERPT_TITLE_HEAD_CHARS: usize = 4096;
+
+/// The provenance line that heads every excerpt:
+/// `source_ref=<path> date=<YYYY-MM-DD> title=<title>`.
+///
+/// Relevance ranking can pick a mid-document chunk, so the label, not the
+/// chunk text, carries the source's identity. The date is the UTC calendar day
+/// of the timestamp the sampler used (omitted if it is not representable). The
+/// title comes last so it needs no quoting, and is omitted when it would only
+/// repeat the file stem already in `source_ref`.
+fn excerpt_label(source_ref: &str, title: Option<&str>, timestamp_ms: i64) -> String {
+    let mut label = format!("source_ref={source_ref}");
+    if let Some(date) = chrono::DateTime::from_timestamp_millis(timestamp_ms) {
+        label.push_str(&format!(" date={}", date.format("%Y-%m-%d")));
+    }
+    if let Some(title) = title {
+        label.push_str(" title=");
+        label.push_str(title);
+    }
+    label.push('\n');
+    label
+}
+
+/// First ATX heading in a document's leading content, after frontmatter and
+/// before any code fence.
+fn first_heading(content: &str) -> Option<&str> {
+    crate::document::strip_frontmatter(content)
+        .lines()
+        .map(str::trim_start)
+        .take_while(|line| !line.starts_with("```") && !line.starts_with("~~~"))
+        .find_map(|line| {
+            let level = line.len() - line.trim_start_matches('#').len();
+            let rest = &line[level..];
+            if !(1..=6).contains(&level) || !rest.starts_with([' ', '\t']) {
+                return None;
+            }
+            let text = rest.trim().trim_end_matches('#').trim();
+            (!text.is_empty()).then_some(text)
+        })
+}
+
+/// The title an excerpt label shows for a source, from what the index stores:
+/// the document's stored title (frontmatter or structured-source title), else
+/// its first heading. `None` when the only title is the file stem, which the
+/// label's `source_ref` already shows.
+fn excerpt_title(source_ref: &str, stored: Option<&str>, head: Option<&str>) -> Option<String> {
+    let stem = std::path::Path::new(source_ref)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(source_ref);
+    let informative = |title: &str| {
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!title.is_empty() && title != stem).then_some(title)
+    };
+    let mut title = stored
+        .and_then(informative)
+        .or_else(|| head.and_then(first_heading).and_then(informative))?;
+    let mut end = title.len().min(EXCERPT_TITLE_MAX_BYTES);
+    while !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    title.truncate(end);
+    Some(title)
+}
+
 fn format_context_source(source: &GenerationContextSource, content: &str) -> String {
     format!(
-        "source_ref={} timestamp_ms={}\n{}",
-        source.source_ref, source.timestamp_ms, content
+        "{}{}",
+        excerpt_label(
+            &source.source_ref,
+            source.title.as_deref(),
+            source.timestamp_ms
+        ),
+        content
     )
 }
 
 fn occurrence_context_source(
     occurrence: &EntityOccurrence,
     content: &str,
+    titles: &HashMap<String, String>,
 ) -> GenerationContextSource {
     GenerationContextSource {
         source_ref: occurrence.file_path.clone(),
         timestamp_ms: occurrence_timestamp(occurrence),
+        title: titles.get(&occurrence.file_path).cloned(),
         excerpt: context_excerpt(content),
+    }
+}
+
+fn apply_excerpt_titles(candidates: &mut [ChunkCandidate], titles: &HashMap<String, String>) {
+    for candidate in candidates {
+        candidate.title = titles.get(&candidate.source_ref).cloned();
     }
 }
 
@@ -348,6 +433,7 @@ fn build_occurrence_context(
     num_catalysts: usize,
     max_samples: usize,
     max_context_chars: usize,
+    titles: &HashMap<String, String>,
 ) -> SelectedContext {
     let raw_era_context = if eras.len() > 1 {
         let bucketed = assign_occurrences_to_eras(eras, occurrences);
@@ -417,7 +503,7 @@ fn build_occurrence_context(
             return content.to_string();
         };
         used_occurrences.insert(occurrence_idx);
-        let source = occurrence_context_source(occurrence, content);
+        let source = occurrence_context_source(occurrence, content, titles);
         let formatted = format_context_source(&source, content);
         context_sources.push(source);
         formatted
@@ -557,6 +643,7 @@ fn finalize_chunk_context(
             GenerationContextSource {
                 source_ref: candidate.source_ref.clone(),
                 timestamp_ms: candidate.timestamp,
+                title: candidate.title.clone(),
                 excerpt: context_excerpt(&candidate.content),
             }
         })
@@ -739,6 +826,7 @@ fn build_chunk_candidates(
                 era_index,
                 relevance,
                 vector,
+                title: None,
             })
         })
         .collect()
@@ -1452,6 +1540,26 @@ impl<'a> CatalystPipeline<'a> {
             .collect())
     }
 
+    /// Excerpt label titles for an entity's occurrence documents, keyed by
+    /// source reference; sources whose only title is their file stem are absent.
+    fn excerpt_titles(&self, occurrences: &[EntityOccurrence]) -> Result<HashMap<String, String>> {
+        let paths = occurrences
+            .iter()
+            .map(|occ| occ.file_path.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(self
+            .db
+            .get_doc_titles_for_paths(&paths, EXCERPT_TITLE_HEAD_CHARS)?
+            .into_iter()
+            .filter_map(|(source_ref, (stored, head))| {
+                let title = excerpt_title(&source_ref, stored.as_deref(), head.as_deref())?;
+                Some((source_ref, title))
+            })
+            .collect())
+    }
+
     fn build_chunk_context(
         &self,
         entity: &Entity,
@@ -1465,6 +1573,7 @@ impl<'a> CatalystPipeline<'a> {
         temporal: Option<temporal::Policy>,
         reference_ms: i64,
         exclude_after_reference: bool,
+        titles: &HashMap<String, String>,
     ) -> Result<Option<SelectedContext>> {
         let file_paths = occurrences
             .iter()
@@ -1513,6 +1622,7 @@ impl<'a> CatalystPipeline<'a> {
         if candidates.is_empty() {
             return Ok(None);
         }
+        apply_excerpt_titles(&mut candidates, titles);
 
         if let Some(policy) = temporal {
             return Ok(Some(temporal::select(
@@ -1726,6 +1836,7 @@ impl<'a> CatalystPipeline<'a> {
 
             let mut eras = cluster_eras_periodic(&entity.trends.timeline_buckets, 3, num_catalysts);
             apply_timeline_weights(&mut eras, &entity.trends.timeline_weights);
+            let titles = self.excerpt_titles(&occurrences)?;
             let selected_context = match self.build_chunk_context(
                 entity,
                 &occurrences,
@@ -1738,6 +1849,7 @@ impl<'a> CatalystPipeline<'a> {
                 temporal_policy,
                 reference_ms,
                 as_of_ms.is_some(),
+                &titles,
             )? {
                 Some(ctx) => ctx,
                 None => {
@@ -1748,7 +1860,8 @@ impl<'a> CatalystPipeline<'a> {
                     // skipped as having no context at all.
                     let occurrences = self.hydrate_occurrence_contexts(&occurrences)?;
                     if let Some(policy) = temporal_policy {
-                        let candidates = temporal::occurrence_candidates(&occurrences);
+                        let mut candidates = temporal::occurrence_candidates(&occurrences);
+                        apply_excerpt_titles(&mut candidates, &titles);
                         temporal::select(
                             &candidates,
                             num_catalysts,
@@ -1764,6 +1877,7 @@ impl<'a> CatalystPipeline<'a> {
                             num_catalysts,
                             max_samples,
                             max_context_chars,
+                            &titles,
                         )
                     }
                 }
@@ -2634,6 +2748,7 @@ mod tests {
         let source = |r: &str| GenerationContextSource {
             source_ref: r.into(),
             timestamp_ms: 0,
+            title: None,
             excerpt: String::new(),
         };
         let context = SelectedContext {
@@ -2771,6 +2886,7 @@ mod tests {
             era_index,
             relevance,
             vector,
+            title: None,
         }
     }
 
@@ -3125,7 +3241,8 @@ mod tests {
         let budget = resolve_context_budget(None, false);
         assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
 
-        let selected = build_occurrence_context(&eras, &occurrences, 7, 20, budget);
+        let selected =
+            build_occurrence_context(&eras, &occurrences, 7, 20, budget, &HashMap::new());
 
         let total: usize = selected.flat_samples.iter().map(|s| s.len()).sum();
         // `lasso_truncate` emits head + marker + tail per sample, so the
@@ -3141,7 +3258,7 @@ mod tests {
 
         // Sanity: without the guardrail (explicit unlimited) the same input is
         // enormous, so the assertion above is actually meaningful.
-        let unbounded = build_occurrence_context(&eras, &occurrences, 7, 20, 0);
+        let unbounded = build_occurrence_context(&eras, &occurrences, 7, 20, 0, &HashMap::new());
         let unbounded_total: usize = unbounded.flat_samples.iter().map(|s| s.len()).sum();
         assert!(
             unbounded_total > budget * 10,
@@ -3579,6 +3696,7 @@ mod scope_centroid_tests {
                 Some(temporal::Preference::Equal.into()),
                 reference_ms,
                 false,
+                &pipeline.excerpt_titles(&occurrences).unwrap(),
             )
             .unwrap()
             .expect("context");
@@ -3625,6 +3743,147 @@ mod scope_centroid_tests {
         assert!(excerpt.contains("small talk"), "{excerpt}");
     }
 
+    /// Long documents whose on-topic chunk sits mid-document: the centroid
+    /// picks that chunk, and its label still names the document and its date.
+    #[test]
+    fn mid_document_excerpt_labels_carry_title_and_iso_date() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join("documents")).unwrap();
+        std::fs::write(
+            vault.path().join("documents/q1-review.md"),
+            "---\ntitle: Quarterly Hiring Review\ndate: 2024-03-05\n---\n# Q1\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vault.path().join("documents/vendor-memo.md"),
+            "---\ndate: 2024-01-31\n---\n# Vendor Migration Memo\nBody.\n",
+        )
+        .unwrap();
+        let db = Database::open_in_memory().unwrap();
+        IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .run(true, |_| {})
+            .unwrap();
+        let docs = db
+            .query_read("SELECT id, source_ref FROM docs", vec![], |r| {
+                Ok((r.get::<i64>(0)?, r.get::<String>(1)?))
+            })
+            .unwrap();
+        let mut vectors = Vec::new();
+        for (doc_id, source_ref) in docs {
+            db.execute_write(
+                "DELETE FROM chunks WHERE doc_id = ?1",
+                vec![Value::Integer(doc_id)],
+            )
+            .unwrap();
+            let chunks = [
+                (
+                    "Front matter: distribution list and table of contents".to_string(),
+                    SMALL_TALK,
+                ),
+                (
+                    format!("MID_DOCUMENT {source_ref}: decision on the parser rewrite"),
+                    ON_TOPIC,
+                ),
+                (
+                    format!("LATER {source_ref}: parser error recovery"),
+                    ON_TOPIC,
+                ),
+            ];
+            for (index, (content, dim)) in chunks.into_iter().enumerate() {
+                db.execute_write(
+                    "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at)
+                     VALUES (?1, ?2, ?3, 1, 0)",
+                    vec![
+                        Value::Integer(doc_id),
+                        Value::Integer(index as i64),
+                        Value::Text(content),
+                    ],
+                )
+                .unwrap();
+                vectors.push((source_ref.clone(), index as u32, axis(dim)));
+            }
+        }
+        db.upsert_chunk_embeddings(&vectors).unwrap();
+
+        let folder = entity(&db, EntityType::Folder, "documents");
+        let llm = LlmClient::with_base_url("unused", "http://localhost:0");
+        let pipeline = CatalystPipeline::new(&db, &llm, None);
+        let preload = ChunkSelectionPreload {
+            chunk_vectors: db
+                .get_all_chunk_embeddings()
+                .unwrap()
+                .into_iter()
+                .map(|(path, index, vector)| ((path, index), vector))
+                .collect(),
+            entity_vectors: vec![None],
+        };
+        let occurrences = db.get_entity_occurrences(folder.id.unwrap()).unwrap();
+        let titles = pipeline.excerpt_titles(&occurrences).unwrap();
+        let context = pipeline
+            .build_chunk_context(
+                &folder,
+                &occurrences,
+                &[],
+                2,
+                2,
+                0,
+                Some(&preload),
+                0,
+                Some(temporal::Preference::Equal.into()),
+                now(),
+                false,
+                &titles,
+            )
+            .unwrap()
+            .expect("context");
+        let mut samples = context
+            .era_context
+            .expect("temporal context")
+            .samples
+            .into_iter()
+            .map(|(_, sample)| sample)
+            .collect::<Vec<_>>();
+        samples.sort();
+        assert_eq!(
+            samples,
+            vec![
+                "source_ref=documents/q1-review.md date=2024-03-05 title=Quarterly Hiring Review\n\
+                 MID_DOCUMENT documents/q1-review.md: decision on the parser rewrite",
+                "source_ref=documents/vendor-memo.md date=2024-01-31 title=Vendor Migration Memo\n\
+                 MID_DOCUMENT documents/vendor-memo.md: decision on the parser rewrite",
+            ]
+        );
+    }
+
+    #[test]
+    fn excerpt_titles_skip_stems_clip_long_titles_and_ignore_fenced_hashes() {
+        assert_eq!(excerpt_title("notes/plan.md", Some("plan"), None), None);
+        assert_eq!(
+            excerpt_title(
+                "notes/plan.md",
+                Some("plan"),
+                Some("```sh\n# not a title\n```\n")
+            ),
+            None
+        );
+        assert_eq!(
+            excerpt_title(
+                "notes/plan.md",
+                None,
+                Some("---\ntitle: x\n---\n\n## Launch  Plan ##\n")
+            ),
+            Some("Launch Plan".into())
+        );
+        let long = "é".repeat(60);
+        let clipped = excerpt_title("a.md", Some(&long), None).unwrap();
+        assert_eq!(clipped.len(), EXCERPT_TITLE_MAX_BYTES);
+        assert_eq!(
+            excerpt_label("a.md", None, i64::MAX),
+            "source_ref=a.md\n",
+            "an unrepresentable timestamp drops the date, never the source"
+        );
+    }
+
     #[test]
     fn centroid_ignores_chunks_after_the_reference_instant() {
         let candidate = |timestamp: i64, dim: usize| ChunkCandidate {
@@ -3635,6 +3894,7 @@ mod scope_centroid_tests {
             era_index: 0,
             relevance: 0.0,
             vector: Some(axis(dim)),
+            title: None,
         };
         let candidates = [
             candidate(1, ON_TOPIC),

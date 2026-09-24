@@ -413,7 +413,7 @@ fn ensure_searchable_owned(
             )?;
             let contract = GenerationContract {
                 schema_version: "catalyst-epoch.v2".into(),
-                prompt_version: "catalyst-prompts.2026-09-temporal-evidence".into(),
+                prompt_version: "catalyst-prompts.2026-09-titled-excerpt-labels".into(),
                 catalyst_format: crate::llm::DEFAULT_FORMAT_KEY.into(),
                 catalyst_profile: crate::llm::DEFAULT_PROFILE_KEY.into(),
                 model: model.clone(),
