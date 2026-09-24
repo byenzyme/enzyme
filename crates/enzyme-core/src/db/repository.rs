@@ -14,6 +14,9 @@ use super::connection::{Database, block_in_place_sync};
 // Context query types
 // ---------------------------------------------------------------------------
 
+/// Paths bound per `IN (...)` when clearing occurrences (SQLite allows 32,766).
+const OCCURRENCE_PATH_BATCH: usize = 10_000;
+
 /// Minimum link frequency for a folder page to count as an expandable child.
 pub const PAGE_LINK_MIN_FREQUENCY: i64 = 3;
 
@@ -550,32 +553,40 @@ impl Database {
         tx: &libsql::Transaction,
         paths: &[String],
     ) -> Result<()> {
-        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{i}")).collect();
-        let list = placeholders.join(", ");
-        let params: Vec<Value> = paths.iter().map(|p| Value::Text(p.clone())).collect();
+        // SQLite caps bound parameters at 32,766; a first index of a large vault
+        // passes every path at once, so bind them in bounded batches.
+        let mut affected = std::collections::BTreeSet::<i64>::new();
+        for batch in paths.chunks(OCCURRENCE_PATH_BATCH) {
+            let placeholders: Vec<String> = (1..=batch.len()).map(|i| format!("?{i}")).collect();
+            let list = placeholders.join(", ");
+            let params: Vec<Value> = batch.iter().map(|p| Value::Text(p.clone())).collect();
 
-        let mut rows = tx
-            .query(
-                &format!(
-                    "SELECT DISTINCT entity_id FROM entity_occurrences WHERE file_path IN ({list})"
-                ),
-                params.clone(),
+            let mut rows = tx
+                .query(
+                    &format!(
+                        "SELECT DISTINCT entity_id FROM entity_occurrences WHERE file_path IN ({list})"
+                    ),
+                    params.clone(),
+                )
+                .await?;
+            let mut batch_affected = Vec::new();
+            while let Some(row) = rows.next().await? {
+                batch_affected.push(row.get::<i64>(0)?);
+            }
+            drop(rows);
+            if batch_affected.is_empty() {
+                continue;
+            }
+            affected.extend(batch_affected);
+            tx.execute(
+                &format!("DELETE FROM entity_occurrences WHERE file_path IN ({list})"),
+                params,
             )
             .await?;
-        let mut affected: Vec<i64> = Vec::new();
-        while let Some(row) = rows.next().await? {
-            affected.push(row.get::<i64>(0)?);
         }
-        drop(rows);
         if affected.is_empty() {
             return Ok(());
         }
-
-        tx.execute(
-            &format!("DELETE FROM entity_occurrences WHERE file_path IN ({list})"),
-            params,
-        )
-        .await?;
         // Recompute rather than decrement: it is self-correcting for rows that
         // an older accumulate-only pass already double-counted.
         for entity_id in affected {
