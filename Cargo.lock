@@ -1214,6 +1214,7 @@ dependencies = [
  "encoding_rs",
  "enzyme-spec",
  "ese",
+ "flate2",
  "futures",
  "ignore",
  "instant-distance",

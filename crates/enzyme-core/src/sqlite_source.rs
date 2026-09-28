@@ -22,6 +22,8 @@ use crate::document::{
 use crate::models::{EntityOccurrence, EntityType};
 use crate::pipeline::indexing::IndexingPipeline;
 
+mod apple_notes;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteSourceValidation {
     pub row_count: u64,
@@ -198,6 +200,7 @@ fn open_source_read_only(path: &Path) -> Result<Connection> {
     source_db
         .pragma_update(None, "query_only", true)
         .context("failed to enforce SQLite query_only mode")?;
+    apple_notes::register(&source_db)?;
     Ok(source_db)
 }
 
