@@ -145,6 +145,17 @@ CREATE TABLE IF NOT EXISTS source_refreshes (
     refreshed_at_ms INTEGER NOT NULL
 );
 
+-- Versioned decisions for decoded SQLite source rows. Text stays in the source
+-- and retained documents; this cache stores only its digest and the decision.
+CREATE TABLE IF NOT EXISTS source_filter_cache (
+    source_name   TEXT NOT NULL,
+    policy        TEXT NOT NULL,
+    row_key       TEXT NOT NULL,
+    text_hash     TEXT NOT NULL,
+    is_excluded   INTEGER NOT NULL,
+    PRIMARY KEY (source_name, policy, row_key)
+);
+
 -- Applied targets (external directories this vault's catalysts have been projected onto)
 CREATE TABLE IF NOT EXISTS applied_targets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,6 +264,7 @@ pub const EXPECTED_TABLES: &[&str] = &[
     "context_cache",
     "config",
     "source_refreshes",
+    "source_filter_cache",
     "applied_targets",
     "chunk_embeddings",
     "catalyst_embeddings_packed",

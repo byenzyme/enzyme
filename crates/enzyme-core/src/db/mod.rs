@@ -10,6 +10,7 @@ mod errors;
 pub mod migrations;
 pub mod repository;
 pub mod schema;
+pub mod sqlite_filter_cache;
 pub mod update_sentinel;
 
 pub use connection::{Database, initialize_sqlite_runtime};

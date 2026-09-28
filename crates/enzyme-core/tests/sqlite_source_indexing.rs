@@ -810,7 +810,8 @@ fn template_filter_excludes_mundane_rows_and_reconciles_changed_decisions() {
            (1, 'me', 1700000000000, 'Groceries\nMilk\nEggs\nBread\nCoffee\nBananas\nOlive oil', 'Notes'),
            (2, 'me', 1700000000000, 'I have been thinking about how conversations change when I listen longer. What surprised me was that the pause created space for a better question, and I want to try that again.', 'Notes');",
     ).unwrap();
-    let db = Database::open_in_memory().unwrap();
+    let index_path = temp.path().join("enzyme.db");
+    let db = Database::open(&index_path).unwrap();
     let mut config = source_config(source_path);
     config.roles.r#where.clear();
     config.filter = Some(SqliteSourceFilter::AppleNotesContentV1);
@@ -818,7 +819,14 @@ fn template_filter_excludes_mundane_rows_and_reconciles_changed_decisions() {
     let first = run_sqlite_source(&db, "notes", &config).unwrap();
     assert_eq!(first.rows_seen, 2);
     assert_eq!(first.rows_filtered, 1);
+    assert_eq!(first.rows_classified, 2);
     assert_eq!(db.get_all_source_refs().unwrap().len(), 1);
+
+    drop(db);
+    let db = Database::open(&index_path).unwrap();
+    let unchanged = run_sqlite_source(&db, "notes", &config).unwrap();
+    assert_eq!(unchanged.rows_classified, 0);
+    assert_eq!(unchanged.rows_filtered, 1);
 
     source
         .execute(
@@ -827,7 +835,30 @@ fn template_filter_excludes_mundane_rows_and_reconciles_changed_decisions() {
         )
         .unwrap();
     let second = run_sqlite_source(&db, "notes", &config).unwrap();
+    assert_eq!(second.rows_classified, 1);
     assert_eq!(second.rows_filtered, 2);
     assert_eq!(second.documents_pruned, 1);
     assert!(db.get_all_source_refs().unwrap().is_empty());
+
+    source
+        .execute("DELETE FROM entries WHERE id = 2", [])
+        .unwrap();
+    let removed = run_sqlite_source(&db, "notes", &config).unwrap();
+    assert_eq!(removed.rows_classified, 0);
+    let cached = db
+        .query_read(
+            "SELECT COUNT(*) FROM source_filter_cache WHERE source_name = 'notes'",
+            vec![],
+            |row| row.get::<i64>(0),
+        )
+        .unwrap();
+    assert_eq!(cached, vec![1]);
+
+    run_configured_sqlite_sources(&db, &HashMap::new()).unwrap();
+    let cached = db
+        .query_read("SELECT COUNT(*) FROM source_filter_cache", vec![], |row| {
+            row.get::<i64>(0)
+        })
+        .unwrap();
+    assert_eq!(cached, vec![0]);
 }

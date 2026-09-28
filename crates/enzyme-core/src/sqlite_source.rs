@@ -14,6 +14,7 @@ use crate::config::{
     SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceFilter, SqliteSourceRoles,
     SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
 };
+use crate::db::sqlite_filter_cache::FilterCacheUpdate;
 use crate::db::{Database, initialize_sqlite_runtime};
 use crate::document::{
     ProcessedDocument, StructuredDocumentInput, StructuredLogDocumentInput, StructuredLogEntry,
@@ -85,6 +86,8 @@ pub struct SqliteSourceIndexingStats {
     pub rows_skipped_empty: usize,
     /// Decoded rows excluded by an explicit source content filter.
     pub rows_filtered: usize,
+    /// Rows whose content changed or had no cached decision and were embedded.
+    pub rows_classified: usize,
 }
 
 impl SqliteSourceIndexingStats {
@@ -101,6 +104,7 @@ impl SqliteSourceIndexingStats {
         self.documents_pruned += other.documents_pruned;
         self.rows_skipped_empty += other.rows_skipped_empty;
         self.rows_filtered += other.rows_filtered;
+        self.rows_classified += other.rows_classified;
     }
 }
 
@@ -284,6 +288,19 @@ fn reconcile_removed_source_namespaces(
             )?;
         }
     }
+    let cached_sources = db.query_read(
+        "SELECT DISTINCT source_name FROM source_filter_cache",
+        Vec::<Value>::new(),
+        |row| row.get::<String>(0),
+    )?;
+    for source_name in cached_sources {
+        if sources
+            .get(&source_name)
+            .is_none_or(|source| source.filter.is_none())
+        {
+            db.delete_sqlite_filter_cache_for_source(&source_name)?;
+        }
+    }
     if documents_pruned > 0 {
         db.prune_entities_without_occurrences()?;
     }
@@ -371,19 +388,62 @@ pub fn run_sqlite_source(
 
     let rows_seen = source_rows.len();
     let mut rows_filtered = 0;
+    let mut rows_classified = 0;
     if matches!(source.filter, Some(SqliteSourceFilter::AppleNotesContentV1)) {
-        let texts: Vec<&str> = source_rows.iter().map(|row| row.what.as_str()).collect();
+        const POLICY: &str = "apple-notes-content-v1";
+        let cached = db.load_sqlite_filter_cache(source_name, POLICY)?;
+        let mut seen_keys = HashSet::with_capacity(source_rows.len());
+        let mut decisions = vec![false; source_rows.len()];
+        let mut misses = Vec::new();
+        for (index, row) in source_rows.iter().enumerate() {
+            let key = stable_source_ref(source_name, &row.id);
+            anyhow::ensure!(
+                seen_keys.insert(key.clone()),
+                "duplicate SQLite source id in {source_name:?}"
+            );
+            let text_hash = format!("{:x}", Sha256::digest(row.what.as_bytes()));
+            if let Some((old_hash, excluded)) = cached.get(&key) {
+                if old_hash == &text_hash {
+                    decisions[index] = *excluded;
+                    continue;
+                }
+            }
+            misses.push((index, key, text_hash));
+        }
+        rows_classified = misses.len();
+        let texts: Vec<&str> = misses
+            .iter()
+            .map(|(index, _, _)| source_rows[*index].what.as_str())
+            .collect();
         let classifications = content_filter::classify_apple_notes_v1(&texts)?;
-        source_rows = source_rows
+        let updates: Vec<FilterCacheUpdate> = misses
             .into_iter()
             .zip(classifications)
-            .filter_map(|(row, classification)| {
-                if classification.is_mundane {
-                    tracing::debug!(
-                        votes = classification.mundane_votes,
-                        nearest_template = %classification.nearest_kind,
-                        "SQLite source row excluded by content filter"
-                    );
+            .map(|((index, row_key, text_hash), classification)| {
+                decisions[index] = classification.is_mundane;
+                tracing::debug!(
+                    votes = classification.mundane_votes,
+                    nearest_template = %classification.nearest_kind,
+                    excluded = classification.is_mundane,
+                    "SQLite source row classified"
+                );
+                FilterCacheUpdate {
+                    row_key,
+                    text_hash,
+                    excluded: classification.is_mundane,
+                }
+            })
+            .collect();
+        let vanished_keys: Vec<String> = cached
+            .into_keys()
+            .filter(|key| !seen_keys.contains(key))
+            .collect();
+        db.update_sqlite_filter_cache(source_name, POLICY, &updates, &vanished_keys)?;
+        source_rows = source_rows
+            .into_iter()
+            .zip(decisions)
+            .filter_map(|(row, excluded)| {
+                if excluded {
                     rows_filtered += 1;
                     None
                 } else {
@@ -471,6 +531,7 @@ pub fn run_sqlite_source(
         documents_pruned,
         rows_skipped_empty,
         rows_filtered,
+        rows_classified,
     })
 }
 
