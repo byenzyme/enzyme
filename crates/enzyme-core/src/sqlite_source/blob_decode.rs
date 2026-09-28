@@ -13,7 +13,7 @@ const MAX_DECOMPRESSED_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) fn register(connection: &Connection) -> Result<()> {
     connection
         .create_scalar_function(
-            "enzyme_gzip_protobuf_text",
+            "gzip_pb_text",
             2,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
             |ctx| {
@@ -179,7 +179,7 @@ mod tests {
         register(&connection).unwrap();
         let null: Option<String> = connection
             .query_row(
-                "SELECT enzyme_gzip_protobuf_text(NULL, '2.3.2')",
+                "SELECT gzip_pb_text(NULL, '2.3.2')",
                 [],
                 |row| row.get(0),
             )
@@ -194,7 +194,7 @@ mod tests {
         let blob = encoder.finish().unwrap();
         let text: String = connection
             .query_row(
-                "SELECT enzyme_gzip_protobuf_text(?1, '2.3.2')",
+                "SELECT gzip_pb_text(?1, '2.3.2')",
                 rusqlite::params![blob],
                 |row| row.get(0),
             )
