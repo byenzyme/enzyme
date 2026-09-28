@@ -156,13 +156,23 @@ pub fn validate_sqlite_source(
     let source_db = open_source_read_only(&source.db)?;
     let query = source.query.trim().trim_end_matches(';').trim_end();
 
-    let statement = source_db
+    let mut statement = source_db
         .prepare(query)
         .with_context(|| format!("failed to prepare source query: {query}"))?;
     if !statement.readonly() {
         bail!("source query must be read-only");
     }
-    ResolvedColumns::new(&statement, &source.roles)?;
+    let columns = ResolvedColumns::new(&statement, &source.roles)?;
+    // COUNT(*) can discard projected expressions, including source decoding
+    // functions. Evaluate one real row so a malformed mapping fails during
+    // validation instead of the first indexing run.
+    let mut rows = statement
+        .query([])
+        .context("failed to sample source query")?;
+    if let Some(row) = rows.next().context("failed to sample source row")? {
+        let _ = concatenated_text(row, &columns.what, "\n\n", "what")?;
+    }
+    drop(rows);
     drop(statement);
 
     let count_sql = format!("SELECT COUNT(*) FROM ({query}) AS enzyme_source");

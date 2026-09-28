@@ -1,0 +1,26 @@
+// Apple Notes source preset. The database path and workspace name are filled at compile time.
+// The schema and protobuf field path are visible here and editable in the saved program.
+workspace __WORKSPACE__ {
+  source sqlite "notes" {
+    database __DATABASE__
+    query """
+SELECT n.ZIDENTIFIER AS note_id,
+       n.ZTITLE1 AS title,
+       n.ZMODIFICATIONDATE1 AS modified,
+       gzip_pb_text(d.ZDATA, '2.3.2') AS body
+FROM ZICCLOUDSYNCINGOBJECT AS n
+JOIN ZICNOTEDATA AS d ON d.ZNOTE = n.Z_PK
+JOIN ZICCLOUDSYNCINGOBJECT AS f ON f.Z_PK = n.ZFOLDER AND f.Z_ENT = 15
+WHERE n.Z_ENT = 12
+  AND n.ZISPASSWORDPROTECTED = 0
+  AND f.ZTITLE2 = 'Notes'
+  AND n.ZMODIFICATIONDATE1 IS NOT NULL
+  AND d.ZDATA IS NOT NULL
+"""
+    id "note_id"
+    when "modified" unit s epoch "2001-01-01"
+    what ["title", "body"]
+  }
+
+  learn questions from source "notes"
+}

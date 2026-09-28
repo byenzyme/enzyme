@@ -287,6 +287,7 @@ fn index_configured_sqlite_sources(
 struct LocalRefreshResult {
     indexing: IndexingStats,
     sources: SqliteSourceIndexingStats,
+    arena_changed: bool,
     embedding: EmbeddingStats,
     similarity: IncrementalSimilarityStats,
 }
@@ -295,6 +296,7 @@ impl LocalRefreshResult {
     fn collection_changed(&self) -> bool {
         has_index_changes(&self.indexing)
             || self.sources.changed()
+            || self.arena_changed
             || self.embedding.documents_embedded > 0
             || self.embedding.documents_pruned > 0
             || self.similarity.rows_upserted > 0
@@ -302,7 +304,7 @@ impl LocalRefreshResult {
 
     fn change_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
-        if has_document_changes(&self.indexing) || self.sources.changed() {
+        if has_document_changes(&self.indexing) || self.sources.changed() || self.arena_changed {
             reasons.push("documents_changed");
         }
         if self.indexing.entity_config_changed {
@@ -514,6 +516,7 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
     let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
+    super::arena::index_configured_source(vault_path).await?;
     debug!(
         sources = source_stats.sources_queried,
         rows = source_stats.rows_seen,
@@ -750,6 +753,7 @@ pub async fn run_init(
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
     let source_stats = index_configured_sqlite_sources(&db, vault_path)?;
+    super::arena::index_configured_source(vault_path).await?;
     debug!(
         sources = source_stats.sources_queried,
         rows = source_stats.rows_seen,
@@ -1440,7 +1444,7 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     }
 
     let db = Database::open(&paths.vault_db)?;
-    let local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let local = run_local_refresh_work(&db, vault_path, &paths).await?;
     db.reconcile_corpus_generation(now_ms())?;
     let contract = generation_contract(vault_path, &paths, false).await?;
     db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
@@ -1506,7 +1510,7 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
     let binary_update_outcome = super::update::load_outcome(&db);
     let _ = super::update::maybe_spawn_background(vault_path, &db);
     let _sync_guard = paths.sync_on_drop();
-    let local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let local = run_local_refresh_work(&db, vault_path, &paths).await?;
     let collection_changed = local.collection_changed();
     let collection_change_reasons = local.change_reasons();
     db.reconcile_corpus_generation(now_ms())?;
@@ -1557,11 +1561,14 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
     Ok(())
 }
 
-fn run_local_refresh_work(
+async fn run_local_refresh_work(
     db: &Database,
     vault_path: &Path,
     paths: &EnzymePaths,
 ) -> Result<LocalRefreshResult> {
+    let before_arena = db.get_epoch_state()?.corpus_generation;
+    super::arena::index_configured_source(vault_path).await?;
+    let arena_changed = db.get_epoch_state()?.corpus_generation != before_arena;
     let _projection_lock =
         acquire_projection_lock(paths.vault_db.parent().context("vault DB has no parent")?)?;
     let recovery_required = db.continuous_projection_fence()?.dirty;
@@ -1622,6 +1629,7 @@ fn run_local_refresh_work(
     Ok(LocalRefreshResult {
         indexing: idx_stats,
         sources: source_stats,
+        arena_changed,
         embedding,
         similarity,
     })
@@ -2567,7 +2575,7 @@ async fn run_refresh_interactive(
 
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
-    let local = run_local_refresh_work(&db, vault_path, &paths)?;
+    let local = run_local_refresh_work(&db, vault_path, &paths).await?;
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     if let Some(message) = embedding_backlog_message(
         local.embedding.documents_skipped,

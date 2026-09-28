@@ -89,8 +89,12 @@ enzyme petri --query "a question about your notes"
 enzyme catalyze "a question about your notes"
 ```
 
-`compile` uses online selection and saves proposed settings under
+For Markdown vaults, `compile` uses online selection and saves proposed settings under
 `~/.enzyme/configs/`. Review that file before `init` builds the local index.
+`compile --preset arena <channel>` and `compile --preset apple-notes <database>`
+generate named workspace programs from source metadata without that selection step.
+Use `enzyme --collection <name> init --stage index` to populate the workspace,
+then `enzyme --collection <name> refresh` for later updates.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
@@ -219,10 +223,10 @@ A source names columns by the role they play rather than by the app they came fr
 
 ## API keys
 
-Enzyme needs an API key only for catalyst generation and for `enzyme compile`'s selection step. By default `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not spend your personal key. Credential resolution is explicit key → configured local model → anonymous brokered free config, with no additional configuration.
+Enzyme needs an API key only for catalyst generation and for Markdown `enzyme compile`'s selection step. Source preset compilation does not call a model. By default `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not spend your personal key. Credential resolution is explicit key → configured local model → anonymous brokered free config, with no additional configuration.
 
 The first configured vault on a machine initializes without login. Refresh, publishing, account credits, and additional vaults require `enzyme login`.
 
 To bring your own OpenAI-compatible key, pass `--use-env-llm`, which reads `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. Without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
 
-`enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).
+Markdown `enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).

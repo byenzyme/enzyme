@@ -3,6 +3,7 @@ pub mod arena;
 pub mod benchmark;
 pub mod catalyze;
 pub mod compile;
+pub mod compile_preset;
 pub mod doctor;
 pub mod dump_prompts;
 pub mod embed_entries;

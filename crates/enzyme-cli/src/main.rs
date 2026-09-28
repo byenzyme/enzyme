@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +35,12 @@ struct Cli {
 enum Commands {
     /// Generate and save readable setup; -v prints the configuration
     Compile {
+        /// Generate a structured source program from a known source layout
+        #[arg(long, value_enum)]
+        preset: Option<commands::compile_preset::Preset>,
+        /// Source URL, channel selector, or database path for the preset
+        #[arg(value_name = "SOURCE")]
+        sources: Vec<String>,
         #[arg(long, value_enum, default_value = "auto")]
         color: commands::compile::ColorChoice,
         /// Save the proposal to a new file; existing files are never overwritten
@@ -46,6 +52,9 @@ enum Commands {
         /// Emit the program and the inventory it was selected from as JSON
         #[arg(long)]
         json: bool,
+        /// Alternate Are.na API root for integration tests
+        #[arg(long, hide = true, default_value = "https://api.are.na/v3/")]
+        arena_api_base: String,
     },
     /// Compile, migrate, or preview readable .enzyme configuration
     Spec {
@@ -229,40 +238,6 @@ enum Commands {
         /// Suppress human output, emit JSON
         #[arg(short, long)]
         quiet: bool,
-    },
-
-    /// Import bounded newest-first windows from explicit Are.na channels
-    Arena {
-        /// Are.na channel URLs, slugs, or numeric IDs; omit to use an existing program's scope
-        channels: Vec<String>,
-
-        /// Maximum connections fetched per channel (one page, max 100)
-        #[arg(long, default_value_t = 24)]
-        limit: usize,
-
-        /// Catalyst evidence distribution over the fetched/indexed material
-        #[arg(long, value_enum, default_value = "recency")]
-        sampling: commands::arena::SamplingMode,
-
-        /// Questions requested per channel catalyst reading
-        #[arg(long, default_value_t = 15)]
-        question_budget: usize,
-
-        /// Fetch and print the program/coverage without writing or indexing
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Index and embed now, but leave catalyst generation for a later refresh
-        #[arg(long)]
-        index_only: bool,
-
-        /// Emit structured JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Alternate API root for integration tests
-        #[arg(long, hide = true, default_value = "https://api.are.na/v3/")]
-        api_base: String,
     },
 
     /// Embed structured entries without creating an enzyme database
@@ -454,7 +429,7 @@ async fn main() -> Result<()> {
     let vault_path = if let Some(ref collection_id) = collection_name {
         enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)?
     } else {
-        resolve_vault_path(cli.vault)?
+        resolve_vault_path(cli.vault.clone())?
     };
     // Setup previews must not write to an existing vault's log or index.
     let log_vault = if matches!(
@@ -466,12 +441,39 @@ async fn main() -> Result<()> {
         Some(vault_path.as_path())
     };
     if let Commands::Compile {
+        preset,
+        sources,
         color,
         output,
         dry_run,
         json,
+        arena_api_base,
     } = &cli.command
     {
+        if let Some(preset) = preset {
+            anyhow::ensure!(
+                cli.vault.is_none(),
+                "preset compilation uses --collection, not --vault"
+            );
+            let workspace_name = cli
+                .collection
+                .as_deref()
+                .context("preset compilation requires --collection <name>")?;
+            return commands::compile_preset::run(
+                *preset,
+                sources,
+                workspace_name,
+                output.as_deref(),
+                *dry_run,
+                *json,
+                arena_api_base,
+            )
+            .await;
+        }
+        anyhow::ensure!(
+            sources.is_empty(),
+            "source arguments require --preset arena or --preset apple-notes"
+        );
         anyhow::ensure!(
             cli.collection.is_none(),
             "compile supports Markdown vaults, not named collections"
@@ -622,30 +624,6 @@ async fn main() -> Result<()> {
         }
         Commands::Ingest { quiet } => {
             commands::ingest::run_ingest(&vault_path, quiet).await?;
-        }
-        Commands::Arena {
-            channels,
-            limit,
-            sampling,
-            question_budget,
-            dry_run,
-            index_only,
-            json,
-            api_base,
-        } => {
-            commands::arena::run(
-                &vault_path,
-                collection_name.as_deref(),
-                &channels,
-                limit,
-                sampling,
-                question_budget,
-                dry_run,
-                index_only,
-                json,
-                &api_base,
-            )
-            .await?;
         }
         Commands::EmbedEntries { input } => {
             commands::embed_entries::run_embed_entries(input.as_deref())?;

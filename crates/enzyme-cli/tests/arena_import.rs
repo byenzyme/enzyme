@@ -1,203 +1,50 @@
 use std::process::Command;
 
 use enzyme_core::db::Database;
-use enzyme_core::document::{StructuredDocumentInput, structured_document_to_processed_document};
-use enzyme_core::models::{EntityOccurrence, EntityType};
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, query_param},
 };
 
-#[tokio::test(flavor = "multi_thread")]
-async fn arena_dry_run_fetches_one_bounded_page_and_explains_sampling() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/research"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 9,
-            "slug": "research",
-            "title": "Research",
-            "counts": {"contents": 8}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/9"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 9,
-            "slug": "research",
-            "title": "Research",
-            "counts": {"contents": 8}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/9/contents"))
-        .and(query_param("page", "1"))
-        .and(query_param("per", "2"))
-        .and(query_param("sort", "created_at_desc"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "meta": {"total_count": 8},
-            "data": [
-                block(42, "2025-02-03T04:05:06Z"),
-                block(41, "2025-01-02T03:04:05Z")
-            ]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(home.join("config.toml"), "[update]\nauto = false\n").unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .arg("--collection")
-        .arg("arena-test")
-        .arg("arena")
-        .arg("research")
-        .arg("9")
-        .arg("--limit")
-        .arg("2")
-        .arg("--dry-run")
-        .arg("--json")
-        .arg("--api-base")
-        .arg(format!("{}/v3/", server.uri()))
-        .env("ENZYME_HOME", &home)
-        .env_remove("ARENA_ACCESS_TOKEN")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let program = result["program"].as_str().unwrap();
-    assert!(program.contains("sample by recency"), "{program}");
-    assert!(program.contains("workspace \"arena-test\""), "{program}");
-    assert!(program.contains("source arena \"channels\""), "{program}");
-    assert!(program.contains("channel 9 as \"Research\""), "{program}");
-    assert!(program.contains("from channel 9"), "{program}");
-    let parsed = enzyme_spec::parse(program).unwrap();
-    let resolved = enzyme_spec::resolve(vec![parsed], root.path()).unwrap();
-    assert_eq!(
-        resolved.vaults[0].readings[0].entity,
-        "collection:arena:channels/channel/9"
-    );
-
-    let coverage = &result["coverage"];
-    assert_eq!(coverage["api_fetch"]["sort"], "created_at_desc");
-    assert_eq!(coverage["catalyst_evidence"]["policy"], "sample by recency");
-    let plan_argv = coverage["catalyst_evidence"]["plan_argv"]
-        .as_array()
-        .unwrap();
-    assert_eq!(plan_argv[0], "enzyme");
-    assert_eq!(plan_argv[1], "-p");
-    let workspace = home.join("workspaces/arena-test");
-    assert_eq!(plan_argv[2], workspace.to_string_lossy().as_ref());
-    assert_eq!(plan_argv[3], "spec");
-    assert_eq!(plan_argv[4], "plan");
-    assert_eq!(plan_argv[5], result["program_path"]);
-    assert_eq!(plan_argv[6], "--json");
-    assert!(
-        coverage["catalyst_evidence"]["planned_distribution"]
-            .as_str()
-            .unwrap()
-            .contains("planned excerpts")
-    );
-    assert!(
-        coverage["catalyst_evidence"]["completed_epoch_evidence"]
-            .as_str()
-            .unwrap()
-            .contains("not captured")
-    );
-    assert_eq!(coverage["channels"][0]["reported_connections"], 8);
-    assert_eq!(coverage["channels"][0]["slug"], "research");
-    assert_eq!(coverage["channels"][0]["title"], "Research");
-    assert_eq!(coverage["channels"][0]["fetched_connections"], 2);
-    assert_eq!(coverage["channels"][0]["partial"], true);
-    assert_eq!(
-        coverage["channels"][0]["oldest_connected_at"],
-        "2025-01-02T03:04:05Z"
-    );
-    assert_eq!(coverage["channels"][0]["connected_by_month"]["2025-01"], 1);
-    assert_eq!(coverage["channels"][0]["connected_by_month"]["2025-02"], 1);
-
-    let omitted_first_run = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .args(["--collection", "new-arena", "arena", "--dry-run"])
-        .arg("--api-base")
-        .arg(format!("{}/v3/", server.uri()))
-        .env("ENZYME_HOME", &home)
-        .env_remove("ARENA_ACCESS_TOKEN")
-        .output()
-        .unwrap();
-    assert!(!omitted_first_run.status.success());
-    assert!(String::from_utf8_lossy(&omitted_first_run.stderr).contains("first import"));
-
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request.headers.get("authorization").is_none())
-    );
-    assert!(!workspace.join(".enzyme").exists());
+fn block(id: i64) -> Value {
+    json!({
+        "id": id, "type": "Text", "base_type": "Block", "title": format!("Block {id}"),
+        "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-02T00:00:00Z",
+        "content": {"markdown": "Research context decisions alternatives relationships outcomes"},
+        "connection": {"id": id + 100, "connected_at": "2025-02-03T04:05:06Z", "pinned": false}
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn arena_index_program_drives_collection_plan_and_preserves_edits() {
+async fn compiled_arena_program_indexes_through_init_and_refresh() {
     let server = MockServer::start().await;
+    let channel =
+        json!({"id": 9, "slug": "research", "title": "Research", "counts": {"contents": 2}});
     Mock::given(method("GET"))
         .and(path("/v3/channels/research"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 9,
-            "slug": "research",
-            "title": "Research Display",
-            "counts": {"contents": 2}
-        })))
-        .expect(3)
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel.clone()))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/v3/channels/9"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 9,
-            "slug": "research",
-            "title": "Research Display",
-            "counts": {"contents": 2}
-        })))
-        .expect(1)
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel))
+        .expect(2)
         .mount(&server)
         .await;
+    let mut image = block(77);
+    image["type"] = json!("Image");
+    image["content"] = Value::Null;
     Mock::given(method("GET"))
         .and(path("/v3/channels/9/contents"))
         .and(query_param("page", "1"))
-        .and(query_param("per", "2"))
+        .and(query_param("per", "24"))
         .and(query_param("sort", "created_at_desc"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "meta": {"total_count": 2},
-            "data": [
-                block(42, "2025-02-03T04:05:06Z"),
-                block(41, "2024-01-02T03:04:05Z")
-            ]
+            "meta": {"total_count": 2}, "data": [image, block(42)]
         })))
-        .expect(4)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/outside"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 10,
-            "slug": "outside",
-            "title": "Outside",
-            "counts": {"contents": 1}
-        })))
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -205,291 +52,85 @@ async fn arena_index_program_drives_collection_plan_and_preserves_edits() {
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[update]\nauto = false\n").unwrap();
-    let run_import = || {
-        Command::new(env!("CARGO_BIN_EXE_enzyme"))
-            .args([
-                "--collection",
-                "arena-test",
-                "arena",
-                "research",
-                "--limit",
-                "2",
-                "--index-only",
-                "--json",
-                "--api-base",
-            ])
-            .arg(format!("{}/v3/", server.uri()))
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_enzyme"));
+        command
+            .args(["--collection", "arena-test"])
             .env("ENZYME_HOME", &home)
-            .env_remove("ARENA_ACCESS_TOKEN")
-            .output()
-            .unwrap()
+            .env("ENZYME_ARENA_API_BASE", format!("{}/v3/", server.uri()))
+            .env_remove("ARENA_ACCESS_TOKEN");
+        command
     };
-    let run_declared_scope = || {
-        Command::new(env!("CARGO_BIN_EXE_enzyme"))
-            .args([
-                "--collection",
-                "arena-test",
-                "arena",
-                "--limit",
-                "2",
-                "--index-only",
-                "--json",
-                "--api-base",
-            ])
-            .arg(format!("{}/v3/", server.uri()))
-            .env("ENZYME_HOME", &home)
-            .env_remove("ARENA_ACCESS_TOKEN")
-            .output()
-            .unwrap()
-    };
-
-    let first = run_import();
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let imported: Value = serde_json::from_slice(&first.stdout).unwrap();
-    let program_path = std::path::PathBuf::from(imported["program"].as_str().unwrap());
-    let generated_program = std::fs::read_to_string(&program_path).unwrap();
-    assert!(generated_program.contains("channel 9 as \"Research Display\""));
-    assert!(generated_program.contains("learn questions from channel 9"));
-    let workspace = home.join("workspaces/arena-test");
-    let plan = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .arg("-p")
-        .arg(&workspace)
-        .arg("spec")
-        .arg("plan")
-        .arg(&program_path)
-        .arg("--json")
-        .env("ENZYME_HOME", &home)
+    let compiled = command()
+        .args([
+            "compile",
+            "--preset",
+            "arena",
+            "research",
+            "--arena-api-base",
+        ])
+        .arg(format!("{}/v3/", server.uri()))
         .output()
         .unwrap();
     assert!(
-        plan.status.success(),
+        compiled.status.success(),
         "{}",
-        String::from_utf8_lossy(&plan.stderr)
+        String::from_utf8_lossy(&compiled.stderr)
     );
-    let plan_json: Value = serde_json::from_slice(&plan.stdout).unwrap();
-    let plan_text = plan_json.to_string();
+    let program_path = home.join("configs/arena-arena-test.enzyme");
+    assert!(program_path.exists());
+    assert!(!home.join("workspaces/arena-test/enzyme.db").exists());
+
+    let indexed = command()
+        .args(["init", "--stage", "index"])
+        .output()
+        .unwrap();
     assert!(
-        plan_text.contains("arena:channels/channel/9"),
-        "{plan_text}"
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
     );
-    assert!(plan_text.contains("collection"), "{plan_text}");
-    assert!(plan_text.contains("2024-Q1"), "{plan_text}");
-    assert!(plan_text.contains("2025-Q1"), "{plan_text}");
+    let db_path = home.join("workspaces/arena-test/enzyme.db");
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.get_all_source_refs().unwrap(), vec!["arena:block:42"]);
+    drop(db);
+    let receipt_path = home.join("workspaces/arena-test/arena-coverage.json");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["channels"][0]["excluded_images"], 1);
+    assert_eq!(receipt["channels"][0]["indexed_documents"], 1);
 
     let edited = std::fs::read_to_string(&program_path)
         .unwrap()
         .replace("sample by recency", "sample by time");
-    std::fs::write(&program_path, &edited).unwrap();
-    let dry_run = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .args([
-            "--collection",
-            "arena-test",
-            "arena",
-            "research",
-            "--limit",
-            "2",
-            "--dry-run",
-            "--json",
-            "--api-base",
-        ])
-        .arg(format!("{}/v3/", server.uri()))
-        .env("ENZYME_HOME", &home)
-        .env_remove("ARENA_ACCESS_TOKEN")
-        .output()
-        .unwrap();
+    std::fs::write(&program_path, edited).unwrap();
+    let refreshed = command().args(["refresh", "--quiet"]).output().unwrap();
     assert!(
-        dry_run.status.success(),
+        refreshed.status.success(),
         "{}",
-        String::from_utf8_lossy(&dry_run.stderr)
+        String::from_utf8_lossy(&refreshed.stderr)
     );
-    let preview: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
-    assert!(
-        preview["program"]
-            .as_str()
-            .unwrap()
-            .contains("sample by time")
-    );
-    assert_eq!(
-        preview["coverage"]["catalyst_evidence"]["policy"],
-        "sample by time"
-    );
-    let second = run_import();
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    let refreshed: Value = serde_json::from_slice(&second.stdout).unwrap();
-    assert_eq!(refreshed["program_preserved"], true);
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["catalyst_evidence"]["policy"], "sample by time");
     assert!(
         std::fs::read_to_string(&program_path)
             .unwrap()
             .contains("sample by time")
     );
-    let receipt: Value = serde_json::from_slice(
-        &std::fs::read(refreshed["coverage_receipt"].as_str().unwrap()).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(receipt["catalyst_evidence"]["policy"], "sample by time");
-
-    let source_only = std::fs::read_to_string(&program_path)
-        .unwrap()
-        .replace("  learn questions from channel 9\n", "");
-    std::fs::write(&program_path, source_only).unwrap();
-    let third = run_declared_scope();
-    assert!(
-        third.status.success(),
-        "{}",
-        String::from_utf8_lossy(&third.stderr)
-    );
-    let source_only_result: Value = serde_json::from_slice(&third.stdout).unwrap();
-    let source_only_receipt: Value = serde_json::from_slice(
-        &std::fs::read(source_only_result["coverage_receipt"].as_str().unwrap()).unwrap(),
-    )
-    .unwrap();
     assert_eq!(
-        source_only_receipt["catalyst_evidence"]["policy"],
-        "not sampled (no reading)"
+        Database::open(&db_path)
+            .unwrap()
+            .get_all_source_refs()
+            .unwrap(),
+        vec!["arena:block:42"]
     );
-
-    let rejected = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .args([
-            "--collection",
-            "arena-test",
-            "arena",
-            "outside",
-            "--dry-run",
-        ])
-        .arg("--api-base")
-        .arg(format!("{}/v3/", server.uri()))
-        .env("ENZYME_HOME", &home)
-        .output()
-        .unwrap();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("outside the source arena scope"));
 }
 
-fn block(id: i64, connected_at: &str) -> Value {
-    json!({
-        "id": id,
-        "type": "Text",
-        "base_type": "Block",
-        "title": format!("Block {id}"),
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-02T00:00:00Z",
-        "content": {"markdown": format!(
-            "Evidence {id}: {}",
-            "research context decisions alternatives relationships outcomes ".repeat(12)
-        )},
-        "connection": {
-            "id": id + 100,
-            "connected_at": connected_at,
-            "pinned": false
-        }
-    })
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn arena_excludes_images_and_removes_image_documents_from_earlier_imports() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/research"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 9, "slug": "research", "title": "Research", "counts": {"contents": 2}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let mut image = block(77, "2025-02-03T04:05:06Z");
-    image["type"] = json!("Image");
-    image["content"] = Value::Null;
-    Mock::given(method("GET"))
-        .and(path("/v3/channels/9/contents"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "meta": {"total_count": 2},
-            "data": [image, block(42, "2025-01-02T03:04:05Z")]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    let workspace = home.join("workspaces/arena-test");
-    std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(home.join("config.toml"), "[update]\nauto = false\n").unwrap();
-    let db_path = workspace.join("enzyme.db");
-    {
-        let db = Database::open(&db_path).unwrap();
-        let old_image = structured_document_to_processed_document(StructuredDocumentInput {
-            source_ref: "arena:block:77".into(),
-            title: "Old image".into(),
-            content: Some("Type: Image\n\nAre.na: https://www.are.na/block/77".into()),
-            notes: None,
-            source: Some("https://www.are.na/block/77".into()),
-            tags: Vec::new(),
-            links: Vec::new(),
-            folders: Vec::new(),
-            created_at: 1_700_000_000_000,
-        });
-        db.upsert_documents_batch(&[old_image]).unwrap();
-        let occurrence = EntityOccurrence {
-            id: None,
-            entity_id: 0,
-            file_path: "arena:block:77".into(),
-            context: Some("Type: Image".into()),
-            created_at: 1_700_000_000_000,
-            effective_date: Some(1_700_000_000_000),
-            date_source: "arena_connection".into(),
-            weight: 1.0,
-        };
-        db.upsert_entity_occurrences_partial(&[(
-            "arena:channels/channel/9",
-            &EntityType::Collection,
-            &occurrence,
-        )])
-        .unwrap();
-    }
-
+#[test]
+fn standalone_arena_command_is_removed() {
     let output = Command::new(env!("CARGO_BIN_EXE_enzyme"))
-        .args([
-            "--collection",
-            "arena-test",
-            "arena",
-            "research",
-            "--limit",
-            "2",
-            "--index-only",
-            "--json",
-            "--api-base",
-        ])
-        .arg(format!("{}/v3/", server.uri()))
-        .env("ENZYME_HOME", &home)
-        .env_remove("ARENA_ACCESS_TOKEN")
+        .args(["arena", "research"])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["channels"][0]["fetched_connections"], 2);
-    assert_eq!(result["channels"][0]["indexed_documents"], 1);
-    assert_eq!(result["channels"][0]["excluded_images"], 1);
-    assert_eq!(result["previous_image_documents_removed"], 1);
-    let db = Database::open(&db_path).unwrap();
-    assert_eq!(db.get_all_source_refs().unwrap(), vec!["arena:block:42"]);
-    let entity = db
-        .get_entities_by_names(&[("arena:channels/channel/9", EntityType::Collection)])
-        .unwrap()
-        .pop()
-        .unwrap();
-    let occurrences = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
-    assert_eq!(occurrences.len(), 1);
-    assert_eq!(occurrences[0].file_path, "arena:block:42");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"));
 }

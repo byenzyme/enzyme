@@ -144,6 +144,87 @@ struct DeclaredChannelScope {
     remote_ids: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ArenaChannelSummary {
+    pub id: i64,
+    pub title: String,
+    pub reported_connections: usize,
+}
+
+/// Resolve channel selectors into a stable, editable source declaration.
+/// Compilation fetches channel metadata only; init and refresh import content
+/// from the saved source declaration.
+pub(crate) async fn compile_preset_program(
+    workspace_name: &str,
+    inputs: &[String],
+    api_base: &str,
+) -> Result<(Program, Vec<ArenaChannelSummary>)> {
+    ensure!(
+        !inputs.is_empty(),
+        "the Are.na preset needs at least one channel URL, slug, or ID"
+    );
+    let base = normalized_api_base(api_base)?;
+    let client = Client::builder()
+        .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("build Are.na HTTP client")?;
+    let token = if base.scheme() == "https" && base.host_str() == Some("api.are.na") {
+        std::env::var("ARENA_ACCESS_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    let mut summaries = Vec::new();
+    for input in inputs {
+        let identifier = channel_identifier(input)?;
+        let channel: Channel = get_json(
+            &client,
+            &base,
+            &["channels", &identifier],
+            &[],
+            token.as_deref(),
+        )
+        .await
+        .with_context(|| format!("resolve Are.na channel {identifier}"))?;
+        if !seen.insert(channel.id) {
+            continue;
+        }
+        summaries.push(ArenaChannelSummary {
+            id: channel.id,
+            title: channel.title.clone(),
+            reported_connections: channel.counts.contents,
+        });
+        normalized.push(NormalizedChannel {
+            coverage: ChannelCoverage {
+                channel_id: channel.id,
+                slug: channel.slug,
+                title: channel.title,
+                entity: collection_key(ARENA_SOURCE_NAME, channel.id),
+                reported_connections: channel.counts.contents,
+                fetched_connections: 0,
+                indexed_documents: 0,
+                excluded_images: 0,
+                nested_channels: 0,
+                oldest_connected_at: None,
+                newest_connected_at: None,
+                connected_by_month: BTreeMap::new(),
+                partial: false,
+            },
+            documents: Vec::new(),
+            occurrences: Vec::new(),
+        });
+    }
+    Ok((
+        build_program(workspace_name, &normalized, SamplingMode::Recency, 15),
+        summaries,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     vault_path: &Path,
@@ -156,10 +237,10 @@ pub async fn run(
     index_only: bool,
     json: bool,
     api_base: &str,
+    selected_program_path: Option<&Path>,
+    quiet: bool,
 ) -> Result<()> {
-    let workspace_name = workspace_name.context(
-        "arena requires a named workspace; pass --collection <name> before the arena command",
-    )?;
+    let workspace_name = workspace_name.context("Are.na source requires a named workspace")?;
     ensure!(
         (1..=100).contains(&limit),
         "--limit must be between 1 and 100"
@@ -172,7 +253,9 @@ pub async fn run(
         .canonicalize()
         .with_context(|| format!("resolve vault directory {}", vault_path.display()))?;
     let paths = EnzymePaths::new(&vault_path)?;
-    let program_path = arena_program_path(&paths, workspace_name);
+    let program_path = selected_program_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| arena_program_path(&paths, workspace_name));
     let existing_program = program_path
         .exists()
         .then(|| {
@@ -451,7 +534,13 @@ pub async fn run(
         )
     };
 
-    if json {
+    if quiet {
+        tracing::info!(
+            documents = documents.len(),
+            channels = coverages.len(),
+            "Are.na source indexed"
+        );
+    } else if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -510,6 +599,66 @@ pub async fn run(
                 vault_path.display()
             );
         }
+    }
+    Ok(())
+}
+
+/// Refresh the Are.na source declared by a named workspace program, if present.
+pub async fn index_configured_source(vault_path: &Path) -> Result<()> {
+    let Some(workspace_name) = EnzymePaths::bound_workspace(vault_path)? else {
+        return Ok(());
+    };
+    let paths = EnzymePaths::new(vault_path)?;
+    let directory = paths.home.join("configs");
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut found = None;
+    for entry in
+        std::fs::read_dir(&directory).with_context(|| format!("read {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "enzyme") {
+            continue;
+        }
+        let source =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let program =
+            enzyme_spec::parse(&source).with_context(|| format!("parse {}", path.display()))?;
+        let matches = program.workspaces.iter().any(|workspace| {
+            workspace.name == workspace_name
+                && workspace
+                    .sources
+                    .iter()
+                    .any(|source| matches!(source, Source::Arena(_)))
+        });
+        if matches {
+            ensure!(
+                found.is_none(),
+                "multiple Are.na programs define workspace {workspace_name}"
+            );
+            found = Some(path);
+        }
+    }
+    if let Some(program_path) = found {
+        let api_base = std::env::var("ENZYME_ARENA_API_BASE")
+            .unwrap_or_else(|_| "https://api.are.na/v3/".into());
+        run(
+            vault_path,
+            Some(&workspace_name),
+            &[],
+            24,
+            SamplingMode::Recency,
+            15,
+            false,
+            true,
+            false,
+            &api_base,
+            Some(&program_path),
+            true,
+        )
+        .await?;
     }
     Ok(())
 }
