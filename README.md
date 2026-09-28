@@ -89,12 +89,21 @@ enzyme petri --query "a question about your notes"
 enzyme catalyze "a question about your notes"
 ```
 
-For Markdown vaults, `compile` uses online selection and saves proposed settings under
-`~/.enzyme/configs/`. Review that file before `init` builds the local index.
-`compile --preset arena <channel>` and `compile --preset apple-notes <database>`
-generate named workspace programs from source metadata without that selection step.
-Use `enzyme --collection <name> init --stage index` to populate the workspace,
-then `enzyme --collection <name> refresh` for later updates.
+For a Markdown vault, run `enzyme compile` and review the settings file it saves
+before `enzyme init` builds the local index.
+
+To index Apple Notes, point Enzyme at your Notes database. Review the saved
+`.enzyme` program before running `init`:
+
+```bash
+enzyme --collection apple-notes compile --preset apple-notes \
+  "$HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+enzyme --collection apple-notes init --stage index
+```
+
+For Are.na, use `enzyme --collection <name> compile --preset arena <channel-url>`
+and then `enzyme --collection <name> init --stage index`. Run `refresh` with the
+same `--collection` name to pick up later changes.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
