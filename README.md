@@ -98,11 +98,11 @@ To index Apple Notes, point Enzyme at your Notes database. Review the saved
 ```bash
 enzyme --collection apple-notes compile --preset apple-notes \
   "$HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
-enzyme --collection apple-notes init --stage index
+enzyme --collection apple-notes init
 ```
 
 For Are.na, use `enzyme --collection <name> compile --preset arena <channel-url>`
-and then `enzyme --collection <name> init --stage index`. Run `refresh` with the
+and then `enzyme --collection <name> init`. Run `refresh` with the
 same `--collection` name to pick up later changes.
 
 Enzyme was built for knowledge bases that grow rapidly:
