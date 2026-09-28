@@ -21,6 +21,17 @@ async fn arena_dry_run_fetches_one_bounded_page_and_explains_sampling() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/v3/channels/9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 9,
+            "slug": "research",
+            "title": "Research",
+            "counts": {"contents": 8}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/v3/channels/9/contents"))
         .and(query_param("page", "1"))
         .and(query_param("per", "2"))
@@ -45,6 +56,7 @@ async fn arena_dry_run_fetches_one_bounded_page_and_explains_sampling() {
         .arg("arena-test")
         .arg("arena")
         .arg("research")
+        .arg("9")
         .arg("--limit")
         .arg("2")
         .arg("--dry-run")
@@ -125,7 +137,7 @@ async fn arena_dry_run_fetches_one_bounded_page_and_explains_sampling() {
     assert!(String::from_utf8_lossy(&omitted_first_run.stderr).contains("first import"));
 
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert!(
         requests
             .iter()
@@ -145,7 +157,7 @@ async fn arena_index_program_drives_collection_plan_and_preserves_edits() {
             "title": "Research Display",
             "counts": {"contents": 2}
         })))
-        .expect(2)
+        .expect(3)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -171,7 +183,7 @@ async fn arena_index_program_drives_collection_plan_and_preserves_edits() {
                 block(41, "2024-01-02T03:04:05Z")
             ]
         })))
-        .expect(3)
+        .expect(4)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -269,6 +281,39 @@ async fn arena_index_program_drives_collection_plan_and_preserves_edits() {
         .unwrap()
         .replace("sample by recency", "sample by time");
     std::fs::write(&program_path, &edited).unwrap();
+    let dry_run = Command::new(env!("CARGO_BIN_EXE_enzyme"))
+        .args([
+            "--collection",
+            "arena-test",
+            "arena",
+            "research",
+            "--limit",
+            "2",
+            "--dry-run",
+            "--json",
+            "--api-base",
+        ])
+        .arg(format!("{}/v3/", server.uri()))
+        .env("ENZYME_HOME", &home)
+        .env_remove("ARENA_ACCESS_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        dry_run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stderr)
+    );
+    let preview: Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert!(
+        preview["program"]
+            .as_str()
+            .unwrap()
+            .contains("sample by time")
+    );
+    assert_eq!(
+        preview["coverage"]["catalyst_evidence"]["policy"],
+        "sample by time"
+    );
     let second = run_import();
     assert!(
         second.status.success(),

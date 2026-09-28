@@ -210,6 +210,7 @@ pub async fn run(
 
     let mut normalized = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut seen_remote_ids = BTreeSet::new();
     let mut linked_cache = BTreeMap::new();
     let mut link_fetches = 0;
     for input in &requested_channels {
@@ -240,6 +241,9 @@ pub async fn run(
                 channel.id,
                 program_path.display()
             );
+        }
+        if !seen_remote_ids.insert(channel.id) {
+            continue;
         }
         let page: ContentsPage = get_json(
             &client,
@@ -314,19 +318,26 @@ pub async fn run(
     };
 
     if dry_run {
+        let displayed_program = if let Some(existing) = existing_program.as_deref() {
+            receipt.catalyst_evidence.policy =
+                validate_existing_program(existing, workspace_name, &coverages, &program_path)?;
+            existing
+        } else {
+            &program_text
+        };
         if json {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "program": program_text,
+                    "program": displayed_program,
                     "program_path": program_path,
                     "coverage": receipt,
                     "dry_run": true,
                 }))?
             );
         } else {
-            print!("{program_text}");
-            print_coverage(&coverages, sampling.canonical(), &plan_command);
+            print!("{displayed_program}");
+            print_coverage(&coverages, &receipt.catalyst_evidence.policy, &plan_command);
         }
         return Ok(());
     }
@@ -862,6 +873,21 @@ fn build_program(
     budget: usize,
 ) -> Program {
     let learning = sampling.learning(budget);
+    let mut title_counts = BTreeMap::<String, usize>::new();
+    let mut reserved_selectors = BTreeMap::<String, i64>::new();
+    for item in channels {
+        reserved_selectors.insert(
+            item.coverage.channel_id.to_string(),
+            item.coverage.channel_id,
+        );
+        reserved_selectors.insert(
+            item.coverage.entity.to_lowercase(),
+            item.coverage.channel_id,
+        );
+        *title_counts
+            .entry(item.coverage.title.to_lowercase())
+            .or_default() += 1;
+    }
     let readings = channels
         .iter()
         .map(|item| Reading {
@@ -882,7 +908,11 @@ fn build_program(
                     .iter()
                     .map(|item| ArenaChannel {
                         remote_id: item.coverage.channel_id.to_string(),
-                        alias: Some(item.coverage.title.clone()),
+                        alias: (title_counts[&item.coverage.title.to_lowercase()] == 1
+                            && reserved_selectors
+                                .get(&item.coverage.title.to_lowercase())
+                                .is_none_or(|owner| *owner == item.coverage.channel_id))
+                        .then(|| item.coverage.title.clone()),
                         slug: None,
                         title: None,
                     })
@@ -1292,5 +1322,39 @@ mod tests {
             Some("9")
         );
         assert_eq!(scope.remote_ids, ["9"]);
+    }
+
+    #[test]
+    fn generated_program_omits_ambiguous_title_aliases() {
+        let make_channel = |id| NormalizedChannel {
+            coverage: ChannelCoverage {
+                channel_id: id,
+                slug: format!("research-{id}"),
+                title: "Research".into(),
+                entity: collection_key(ARENA_SOURCE_NAME, id),
+                reported_connections: 0,
+                fetched_connections: 0,
+                indexed_documents: 0,
+                nested_channels: 0,
+                oldest_connected_at: None,
+                newest_connected_at: None,
+                connected_by_month: BTreeMap::new(),
+                partial: false,
+            },
+            documents: Vec::new(),
+            occurrences: Vec::new(),
+        };
+        let program = build_program(
+            "arena-test",
+            &[make_channel(9), make_channel(10)],
+            SamplingMode::Recency,
+            15,
+        );
+        let rendered = enzyme_spec::render_program(&program);
+        assert!(rendered.contains("channel 9\n"), "{rendered}");
+        assert!(rendered.contains("channel 10\n"), "{rendered}");
+        assert!(!rendered.contains(" as \"Research\""), "{rendered}");
+        let parsed = enzyme_spec::parse(&rendered).unwrap();
+        enzyme_spec::resolve(vec![parsed], Path::new("/")).unwrap();
     }
 }
