@@ -94,6 +94,7 @@ pub struct ChannelCoverage {
     pub reported_connections: usize,
     pub fetched_connections: usize,
     pub indexed_documents: usize,
+    pub excluded_images: usize,
     pub nested_channels: usize,
     pub oldest_connected_at: Option<String>,
     pub newest_connected_at: Option<String>,
@@ -381,13 +382,29 @@ pub async fn run(
 
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
+    // Earlier imports indexed Image blocks. Remove their documents and
+    // occurrences so reimporting into an existing workspace applies the same
+    // text-first source policy as a fresh import.
+    let arena_refs = db
+        .get_all_source_refs()?
+        .into_iter()
+        .filter(|source_ref| source_ref.starts_with("arena:block:"))
+        .collect::<Vec<_>>();
+    let arena_contents = db.get_doc_contents_for_paths(&arena_refs)?;
+    let old_image_refs = arena_contents
+        .into_iter()
+        .filter_map(|(source_ref, content)| is_image_document(&content).then_some(source_ref))
+        .collect::<Vec<_>>();
+    for batch in old_image_refs.chunks(500) {
+        db.delete_documents_by_paths(batch)?;
+    }
     let imported_paths: Vec<_> = documents
         .iter()
         .map(|document| document.source_ref.clone())
         .collect();
     let preserved = db
         .get_collection_occurrences_for_paths_by_date_source(&imported_paths, "arena_connection")?;
-    let observed_connections = occurrence_entries.len();
+    let indexed_connections = occurrence_entries.len();
     let observed_keys: BTreeSet<_> = occurrence_entries
         .iter()
         .map(|(name, _, occurrence)| (name.clone(), occurrence.file_path.clone()))
@@ -443,7 +460,9 @@ pub async fn run(
                 "program_preserved": program_preserved,
                 "coverage_receipt": receipt_path,
                 "documents_indexed": documents.len(),
-                "connections_observed": observed_connections,
+                "connections_indexed": indexed_connections,
+                "images_excluded_from_window": coverages.iter().map(|channel| channel.excluded_images).sum::<usize>(),
+                "previous_image_documents_removed": old_image_refs.len(),
                 "memberships_retained": retained_memberships,
                 "occurrences_indexed": occurrence_entries.len(),
                 "chunks_embedded": embedding.chunks_embedded,
@@ -459,10 +478,18 @@ pub async fn run(
         }
         println!("Coverage receipt: {}", receipt_path.display());
         println!(
-            "Indexed {} documents and {} observed channel connections ({} chunks embedded).",
+            "Indexed {} documents and {} eligible channel connections ({} chunks embedded).",
             documents.len(),
-            observed_connections,
+            indexed_connections,
             embedding.chunks_embedded
+        );
+        println!(
+            "Excluded {} image connections; removed {} image documents from earlier imports.",
+            coverages
+                .iter()
+                .map(|channel| channel.excluded_images)
+                .sum::<usize>(),
+            old_image_refs.len()
         );
         if retained_memberships > 0 {
             println!(
@@ -557,6 +584,13 @@ fn channel_identifier(input: &str) -> Result<String> {
 
 fn collection_key(source_name: &str, channel_id: i64) -> String {
     format!("arena:{source_name}/channel/{channel_id}")
+}
+
+fn is_image_document(content: &str) -> bool {
+    content
+        .lines()
+        .find(|line| line.starts_with("Type: "))
+        .is_some_and(|line| line == "Type: Image")
 }
 
 fn linked_block_ids(text: &str) -> Vec<i64> {
@@ -674,6 +708,7 @@ fn normalize_channel(
     let mut connected_dates = Vec::new();
     let mut by_month = BTreeMap::new();
     let mut nested_channels = 0usize;
+    let mut excluded_images = 0usize;
 
     for item in &page.data {
         let Some(connection) = item.get("connection") else {
@@ -697,6 +732,10 @@ fn normalize_channel(
             .unwrap_or(base_type);
         let is_channel = base_type == "Channel" || kind == "Channel";
         nested_channels += usize::from(is_channel);
+        if kind == "Image" {
+            excluded_images += 1;
+            continue;
+        }
         let source_ref = if is_channel {
             format!("arena:channel:{id}")
         } else {
@@ -769,7 +808,7 @@ fn normalize_channel(
     }
 
     connected_dates.sort_by_key(|(ms, _)| *ms);
-    let fetched = occurrences.len();
+    let fetched = connected_dates.len();
     let reported = page.meta.total_count.max(channel.counts.contents);
     let coverage = ChannelCoverage {
         channel_id: channel.id,
@@ -779,6 +818,7 @@ fn normalize_channel(
         reported_connections: reported,
         fetched_connections: fetched,
         indexed_documents: documents.len(),
+        excluded_images,
         nested_channels,
         oldest_connected_at: connected_dates.first().map(|(_, value)| value.clone()),
         newest_connected_at: connected_dates.last().map(|(_, value)| value.clone()),
@@ -1121,7 +1161,7 @@ fn print_coverage(channels: &[ChannelCoverage], policy: &str, plan_command: &str
     println!("API fetch: created_at_desc; date buckets describe the fetched window only.");
     for channel in channels {
         println!(
-            "- {}: fetched {} of {} connections ({})",
+            "- {}: fetched {} of {} connections ({}); {} indexed, {} images excluded",
             channel.title,
             channel.fetched_connections,
             channel.reported_connections,
@@ -1129,7 +1169,9 @@ fn print_coverage(channels: &[ChannelCoverage], policy: &str, plan_command: &str
                 "partial"
             } else {
                 "complete"
-            }
+            },
+            channel.indexed_documents,
+            channel.excluded_images,
         );
         if let (Some(oldest), Some(newest)) = (
             channel.oldest_connected_at.as_deref(),
@@ -1265,6 +1307,7 @@ mod tests {
                 reported_connections: 0,
                 fetched_connections: 0,
                 indexed_documents: 0,
+                excluded_images: 0,
                 nested_channels: 0,
                 oldest_connected_at: None,
                 newest_connected_at: None,
@@ -1303,6 +1346,7 @@ mod tests {
                     reported_connections: 0,
                     fetched_connections: 0,
                     indexed_documents: 0,
+                    excluded_images: 0,
                     nested_channels: 0,
                     oldest_connected_at: None,
                     newest_connected_at: None,
@@ -1335,6 +1379,7 @@ mod tests {
                 reported_connections: 0,
                 fetched_connections: 0,
                 indexed_documents: 0,
+                excluded_images: 0,
                 nested_channels: 0,
                 oldest_connected_at: None,
                 newest_connected_at: None,

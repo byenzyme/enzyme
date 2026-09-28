@@ -1,5 +1,8 @@
 use std::process::Command;
 
+use enzyme_core::db::Database;
+use enzyme_core::document::{StructuredDocumentInput, structured_document_to_processed_document};
+use enzyme_core::models::{EntityOccurrence, EntityType};
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -388,4 +391,105 @@ fn block(id: i64, connected_at: &str) -> Value {
             "pinned": false
         }
     })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn arena_excludes_images_and_removes_image_documents_from_earlier_imports() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v3/channels/research"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 9, "slug": "research", "title": "Research", "counts": {"contents": 2}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut image = block(77, "2025-02-03T04:05:06Z");
+    image["type"] = json!("Image");
+    image["content"] = Value::Null;
+    Mock::given(method("GET"))
+        .and(path("/v3/channels/9/contents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": {"total_count": 2},
+            "data": [image, block(42, "2025-01-02T03:04:05Z")]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let workspace = home.join("workspaces/arena-test");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(home.join("config.toml"), "[update]\nauto = false\n").unwrap();
+    let db_path = workspace.join("enzyme.db");
+    {
+        let db = Database::open(&db_path).unwrap();
+        let old_image = structured_document_to_processed_document(StructuredDocumentInput {
+            source_ref: "arena:block:77".into(),
+            title: "Old image".into(),
+            content: Some("Type: Image\n\nAre.na: https://www.are.na/block/77".into()),
+            notes: None,
+            source: Some("https://www.are.na/block/77".into()),
+            tags: Vec::new(),
+            links: Vec::new(),
+            folders: Vec::new(),
+            created_at: 1_700_000_000_000,
+        });
+        db.upsert_documents_batch(&[old_image]).unwrap();
+        let occurrence = EntityOccurrence {
+            id: None,
+            entity_id: 0,
+            file_path: "arena:block:77".into(),
+            context: Some("Type: Image".into()),
+            created_at: 1_700_000_000_000,
+            effective_date: Some(1_700_000_000_000),
+            date_source: "arena_connection".into(),
+            weight: 1.0,
+        };
+        db.upsert_entity_occurrences_partial(&[(
+            "arena:channels/channel/9",
+            &EntityType::Collection,
+            &occurrence,
+        )])
+        .unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_enzyme"))
+        .args([
+            "--collection",
+            "arena-test",
+            "arena",
+            "research",
+            "--limit",
+            "2",
+            "--index-only",
+            "--json",
+            "--api-base",
+        ])
+        .arg(format!("{}/v3/", server.uri()))
+        .env("ENZYME_HOME", &home)
+        .env_remove("ARENA_ACCESS_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["channels"][0]["fetched_connections"], 2);
+    assert_eq!(result["channels"][0]["indexed_documents"], 1);
+    assert_eq!(result["channels"][0]["excluded_images"], 1);
+    assert_eq!(result["previous_image_documents_removed"], 1);
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.get_all_source_refs().unwrap(), vec!["arena:block:42"]);
+    let entity = db
+        .get_entities_by_names(&[("arena:channels/channel/9", EntityType::Collection)])
+        .unwrap()
+        .pop()
+        .unwrap();
+    let occurrences = db.get_entity_occurrences(entity.id.unwrap()).unwrap();
+    assert_eq!(occurrences.len(), 1);
+    assert_eq!(occurrences[0].file_path, "arena:block:42");
 }
