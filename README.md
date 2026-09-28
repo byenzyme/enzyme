@@ -9,7 +9,7 @@
 
 </div>
 
-Enzyme introduces a compile step for your Markdown wiki that:
+Enzyme compiles your notes and other knowledge sources into a local index that:
 
 1. Uses temporally grounded context sampling that captures the contextual use of tags and wikilinks, or natural accumulation in folders (i.e. pseudo-[Zettelkasten](https://zettelkasten.de/introduction/))
 2. With this context, generate questions (called **catalysts**) and embed them as semantic routes to the whole knowledge base
@@ -17,7 +17,10 @@ Enzyme introduces a compile step for your Markdown wiki that:
 
 When your agent passes queries through the catalysts, it gets a more personalized way to get caught up on the knowledge base.
 
-**New:** Enzyme relies on a program that [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev) generates through a deterministic scan:
+Enzyme saves an editable reading program. For a Markdown folder, the program
+currently uses a `vault` block; named `workspace` blocks describe Are.na and
+SQLite sources. [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+can generate the Markdown program through a deterministic scan:
 
 ```
 profile relationships {
@@ -89,11 +92,11 @@ enzyme petri --query "a question about your notes"
 enzyme catalyze "a question about your notes"
 ```
 
-For a Markdown vault, run `enzyme compile` and review the settings file it saves
+For Markdown notes, run `enzyme compile` and review the settings file it saves
 before `enzyme init` builds the local index.
 
-To index Apple Notes, point Enzyme at your Notes database. Review the saved
-`.enzyme` program before running `init`:
+For Apple Notes, a preset builds a named `workspace` program from your Notes
+database. Review the saved `.enzyme` program before running `init`:
 
 ```bash
 enzyme --collection apple-notes compile --preset apple-notes \
@@ -216,6 +219,10 @@ enzyme catalyze "why we keep rewriting the auth layer"
 ## message archives (_experimental_)
 
 Enzyme indexes SQLite tables alongside Markdown — iMessage, WhatsApp, Mail, or any table of dated rows.
+
+Declare a `source sqlite` inside a named `workspace` program, then run `init`
+and periodic `refresh`. The [SQLite source setup skill](https://github.com/byenzyme/enzyme/blob/main/skills/enzyme-sqlite-source/SKILL.md)
+shows the source declaration and source-scoped readings.
 
 None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both collapse to entity occurrences with effective dates, and nothing downstream knows which one it came from: the same profiles, budgets, and catalysts apply to a message thread and a folder of meeting notes.
 
