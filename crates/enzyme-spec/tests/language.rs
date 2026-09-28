@@ -219,8 +219,20 @@ vault "/notes" { learn questions from tag "a" about p }
 #[test]
 fn short_token_lists_fill_inline_below_the_readings() {
     let long: Vec<String> = [
-        ".agents", ".claude", ".codex", ".conversations", ".enzyme", ".git", ".obsidian", ".trash",
-        "__pycache__", "build", "dist", "node_modules", "target", "templates",
+        ".agents",
+        ".claude",
+        ".codex",
+        ".conversations",
+        ".enzyme",
+        ".git",
+        ".obsidian",
+        ".trash",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "templates",
     ]
     .iter()
     .map(|s| format!("\"{s}\""))
@@ -243,7 +255,10 @@ fn short_token_lists_fill_inline_below_the_readings() {
     assert!(rendered.contains("references in fields [\"people\", \"attendees\"]"));
     // A list too long for one line wraps instead of reverting to a block.
     assert!(!rendered.contains("leave out folders {"));
-    assert!(rendered.lines().all(|l| l.chars().count() <= 84), "{rendered}");
+    assert!(
+        rendered.lines().all(|l| l.chars().count() <= 84),
+        "{rendered}"
+    );
 
     // The file opens on the readings; bookkeeping follows them.
     let readings = rendered.find("learn questions").unwrap();
@@ -829,7 +844,9 @@ vault "/notes" {
     retain_patterns(readings, &mut rebuilt);
     assert_eq!(&rebuilt, readings);
     // A pattern and a literal reading of the same text are distinct readings.
-    compile(r#"vault "/n" { learn questions from tag "a*" learn questions from tags matching "a*" }"#);
+    compile(
+        r#"vault "/n" { learn questions from tag "a*" learn questions from tags matching "a*" }"#,
+    );
     assert!(
         resolve(
             vec![parse(r#"vault "/n" { learn questions from tags matching "a*" learn questions from tags matching "A*" }"#).unwrap()],
@@ -860,7 +877,10 @@ fn name_pattern_globs_and_errors() {
         .unwrap_err()
         .to_string();
     assert!(no_star.contains("has no *"), "{no_star}");
-    assert!(no_star.contains(r#"from tag "auto-cluster-a""#), "{no_star}");
+    assert!(
+        no_star.contains(r#"from tag "auto-cluster-a""#),
+        "{no_star}"
+    );
     for bad in [
         r#"learn questions from tag "people" select 3 by frequency"#,
         r#"learn questions from link "people" select 3 by frequency"#,
@@ -910,8 +930,7 @@ workspace "arena-research" {
         Some(&resolved.vaults[0].readings[0])
     );
     assert!(
-        parse(r#"vault "/notes" { learn questions from channel "arena-influences" }"#)
-            .is_err()
+        parse(r#"vault "/notes" { learn questions from channel "arena-influences" }"#).is_err()
     );
     assert!(parse(
         r#"workspace "source-only" { source arena "channels" { channels { channel 275 slug "arena-influences" title "Arena Influences" } } }"#
@@ -936,7 +955,10 @@ workspace "arena-research" {
     let parsed = parse(source).unwrap();
     let rendered = render_program(&parsed);
     assert!(rendered.contains("channel 275\n"), "{rendered}");
-    assert!(rendered.contains("channel 1234567 as \"Rowan Tate\""), "{rendered}");
+    assert!(
+        rendered.contains("channel 1234567 as \"Rowan Tate\""),
+        "{rendered}"
+    );
     assert!(rendered.contains("from channel 275"), "{rendered}");
     assert!(
         rendered.contains("project questions into \"/workspace/obsidian/Readwise\""),
@@ -956,5 +978,108 @@ workspace "arena-research" {
     assert_eq!(
         resolved.vaults[0].targets,
         vec!["/workspace/obsidian/Readwise"]
+    );
+}
+
+#[test]
+fn sqlite_workspace_roundtrips_and_lowers_source_reading() {
+    let source = r#"
+workspace "messages" {
+  source sqlite "chat" {
+    database "/archive/chat.db"
+    query """
+SELECT id, sender, sent_ns, body, thread FROM messages
+WHERE body IS NOT NULL
+"""
+    id "id"
+    who "sender"
+    when "sent_ns" unit ns epoch "2001-01-01"
+    what "body"
+    where "thread"
+  }
+  question budget 15
+  sample by time
+  learn questions from source "chat"
+  learn questions from link "Alice"
+  learn questions from folder "Design"
+  learn questions from thread "Design" in source "chat"
+}"#;
+    let parsed = parse(source).unwrap();
+    let rendered = render_program(&parsed);
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    assert_eq!(
+        resolved.vaults[0].readings[0].entity,
+        "collection:sqlite:chat"
+    );
+    assert_eq!(resolved.vaults[0].readings[1].entity, "[[Alice]]");
+    assert_eq!(resolved.vaults[0].readings[2].entity, "folder:Design");
+    assert_eq!(
+        resolved.vaults[0].readings[3].entity,
+        "collection:sqlite:chat/thread/Design"
+    );
+    let config = enzyme_spec::config_value(&resolved);
+    assert_eq!(
+        config["workspaces"]["messages"]["sources"]["chat"]["timestamp"]["unit"],
+        "ns"
+    );
+    assert_eq!(
+        config["workspaces"]["messages"]["sources"]["chat"]["roles"]["where"],
+        serde_json::json!(["thread"])
+    );
+    assert!(parse(r#"vault "/notes" { learn questions from source "chat" }"#).is_err());
+    assert!(parse(r#"workspace "x" { source sqlite "chat" { database "/a" query "SELECT 1" id "id" when "date" unit days what "body" } }"#).is_err());
+}
+
+#[test]
+fn sqlite_advanced_roles_lower_without_losing_shape() {
+    let source = r#"workspace "archive" {
+  source sqlite "events" {
+    database "/archive/events.db"
+    query "SELECT id, ref, people, moment, body, score FROM events"
+    id ["id", "ref"]
+    document ref "ref"
+    who json_array "people"
+    when "moment" unit ms
+    what "body"
+    weight "score"
+  }
+  learn questions from source "events"
+}"#;
+    let parsed = parse(source).unwrap();
+    assert_eq!(parse(&render_program(&parsed)).unwrap(), parsed);
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    let roles = &enzyme_spec::config_value(&resolved)["workspaces"]["archive"]["sources"]["events"]
+        ["roles"];
+    assert_eq!(
+        roles["who"],
+        serde_json::json!({"format":"json_array", "column":"people"})
+    );
+    assert_eq!(roles["document_ref"], "ref");
+    assert_eq!(roles["weight"], "score");
+}
+
+#[test]
+fn sqlite_reading_uses_the_runtime_escaped_source_identity() {
+    let parsed = parse(
+        r#"workspace "archive" {
+      source sqlite "café" {
+        database "/archive/db.sqlite"
+        query "SELECT id, timestamp, body, folder FROM rows"
+        id "id" when "timestamp" unit ms what "body" where "folder"
+      }
+      learn questions from source "CAFÉ"
+      learn questions from thread "Design" in source "café"
+    }"#,
+    )
+    .unwrap();
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    assert_eq!(
+        resolved.vaults[0].readings[0].entity,
+        "collection:sqlite:caf%C3%A9"
+    );
+    assert_eq!(
+        resolved.vaults[0].readings[1].entity,
+        "collection:sqlite:caf%C3%A9/thread/Design"
     );
 }

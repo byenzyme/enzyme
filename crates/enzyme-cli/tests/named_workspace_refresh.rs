@@ -215,6 +215,71 @@ fn named_sqlite_scan_validates_without_authoring_config() {
 }
 
 #[test]
+fn sqlite_language_program_drives_scan_init_and_refresh() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.enzyme_home.join("config.toml")).unwrap();
+    let configs = fixture.enzyme_home.join("configs");
+    std::fs::create_dir_all(&configs).unwrap();
+    let program = configs.join("imessage.enzyme");
+    std::fs::write(
+        &program,
+        format!(
+            r#"
+workspace "imessage" {{
+  source sqlite "messages" {{
+    database "{}"
+    query "SELECT id, sent_at, body, thread FROM messages ORDER BY id"
+    id "id"
+    when "sent_at" unit ms
+    what "body"
+    where "thread"
+  }}
+  learn questions from source "messages"
+}}
+"#,
+            fixture.source_db.display()
+        ),
+    )
+    .unwrap();
+
+    let compile = fixture.run(&["spec", "compile", program.to_str().unwrap()]);
+    assert_success(&compile);
+    let scan = fixture.run(&["scan", "--collection", "imessage"]);
+    assert_success(&scan);
+    let scan_json: serde_json::Value = serde_json::from_slice(&scan.stdout).unwrap();
+    assert_eq!(scan_json["source_checks"][0]["rows"], 1);
+    let init = fixture.run(&[
+        "init",
+        "--stage",
+        "index",
+        "--quiet",
+        "--collection",
+        "imessage",
+    ]);
+    assert_success(&init);
+    let source_entities: i64 = Connection::open(fixture.enzyme_db()).unwrap()
+        .query_row("SELECT COUNT(*) FROM entity_occurrences eo JOIN entities e ON e.id = eo.entity_id WHERE e.name = 'sqlite:messages' AND e.type = 'collection'", (), |row| row.get(0)).unwrap();
+    assert_eq!(source_entities, 1);
+    let plan = fixture.run(&[
+        "-p",
+        fixture.store().to_str().unwrap(),
+        "spec",
+        "plan",
+        program.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_success(&plan);
+    let plan_json: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan_json["vaults"][0]["readings"][0]["kind"], "collection");
+    fixture.insert_message(2, "new text", "Thread B");
+    let refresh = fixture.run(&["refresh", "--quiet", "--collection", "imessage"]);
+    assert_success(&refresh);
+    let output: serde_json::Value = serde_json::from_slice(&refresh.stdout).unwrap();
+    assert_eq!(output["sources"]["documents_rebuilt"], 1);
+    assert_eq!(output["sources"]["documents_skipped"], 1);
+}
+
+#[test]
 fn failed_catalyst_attempt_does_not_gate_source_reexecution() {
     let fixture = Fixture::new();
     let init = fixture.run(&[

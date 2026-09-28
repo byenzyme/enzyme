@@ -671,7 +671,11 @@ impl EnzymeConfig {
     /// this to evaluate a program before it is installed.
     pub fn from_readable_program(vault_path: &Path, program: enzyme_spec::Program) -> Result<Self> {
         let global = overlay_program(serde_json::json!({}), Some(program))?;
-        Ok(Self::from_global_config(vault_path, &global))
+        if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
+            Ok(Self::from_workspace_config(&name, &global))
+        } else {
+            Ok(Self::from_global_config(vault_path, &global))
+        }
     }
 
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
@@ -1708,6 +1712,47 @@ workspace "arena-test" {
             CatalyzedEntity::Simple(value)
                 if value == "collection:arena:channels/channel/9"
         )));
+    }
+
+    #[test]
+    fn sqlite_workspace_loads_source_and_reading_from_language() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let workspace = home.join("workspaces/mail");
+        let configs = home.join("configs");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&configs).unwrap();
+        let database = home.join("mail.db");
+        std::fs::write(&database, []).unwrap();
+        std::fs::write(
+            configs.join("mail.enzyme"),
+            format!(
+                r#"
+workspace "mail" {{
+  source sqlite "messages" {{
+    database "{}"
+    query "SELECT id, sender, sent_ms, body FROM messages"
+    id "id"
+    who "sender"
+    when "sent_ms" unit ms
+    what "body"
+  }}
+  learn questions from source "messages"
+}}
+"#,
+                database.display()
+            ),
+        )
+        .unwrap();
+        let config = EnzymeConfig::load_at(&workspace, &home.join("config.toml"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.sources["messages"].db, database);
+        assert_eq!(config.sources["messages"].roles.what, vec!["body"]);
+        assert_eq!(
+            config.reading_spec.unwrap().readings[0].entity,
+            "collection:sqlite:messages"
+        );
     }
 
     #[test]

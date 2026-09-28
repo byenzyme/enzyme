@@ -207,7 +207,9 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
     for (index, vault_path, declared) in targets {
         let mut program = resolved.clone();
         let mut vault = program.vaults.swap_remove(index);
-        vault.path = vault_path.to_string_lossy().to_string();
+        if !vault.path.starts_with("workspace:") {
+            vault.path = vault_path.to_string_lossy().to_string();
+        }
         program.vaults = vec![vault];
         let raw = &raw_scopes[index];
         plans.push(plan_vault(

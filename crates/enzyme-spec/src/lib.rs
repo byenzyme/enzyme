@@ -206,10 +206,37 @@ pub struct ArenaSource {
     pub channels: Vec<ArenaChannel>,
 }
 
+/// A read-only query over an existing SQLite database. Column names refer to
+/// unique aliases in the query result, not to columns in the source tables.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SqliteSource {
+    pub name: String,
+    pub db: String,
+    pub query: String,
+    pub id: Vec<String>,
+    pub document_ref: Option<String>,
+    pub who: SqliteWho,
+    pub when: String,
+    pub what: Vec<String>,
+    pub where_columns: Vec<String>,
+    pub weight: Option<String>,
+    pub timestamp_unit: String,
+    pub timestamp_epoch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum SqliteWho {
+    Columns { columns: Vec<String> },
+    JsonArray { column: String },
+    Delimited { column: String, delimiter: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Source {
     Arena(ArenaSource),
+    Sqlite(SqliteSource),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -297,7 +324,39 @@ fn lex(input: &str) -> Result<Vec<Token>> {
             continue;
         }
         let start = (line, col);
-        if c == '"' {
+        if c == '"' && chars.get(i + 1) == Some(&'"') && chars.get(i + 2) == Some(&'"') {
+            i += 3;
+            col += 3;
+            let mut value = String::new();
+            let mut closed = false;
+            while i < chars.len() {
+                if chars.get(i) == Some(&'"')
+                    && chars.get(i + 1) == Some(&'"')
+                    && chars.get(i + 2) == Some(&'"')
+                {
+                    i += 3;
+                    col += 3;
+                    closed = true;
+                    break;
+                }
+                let x = chars[i];
+                value.push(x);
+                i += 1;
+                if x == '\n' {
+                    line += 1;
+                    col = 1;
+                } else {
+                    col += 1;
+                }
+            }
+            ensure!(closed, "{}:{}: unclosed multiline string", start.0, start.1);
+            out.push(Token {
+                value,
+                string: true,
+                line: start.0,
+                col: start.1,
+            });
+        } else if c == '"' {
             let mut raw = String::from("\"");
             i += 1;
             col += 1;
@@ -470,6 +529,13 @@ impl Parser {
         ensure!(!v.is_empty(), "lists must not be empty");
         Ok(v)
     }
+    fn string_or_list(&mut self) -> Result<Vec<String>> {
+        if self.at("[") {
+            self.list()
+        } else {
+            Ok(vec![self.string()?])
+        }
+    }
     fn set<T>(&self, place: &mut Option<T>, value: T) -> Result<()> {
         if place.is_some() {
             return self.err("setting is repeated in this scope");
@@ -523,8 +589,9 @@ impl Parser {
                 // just above 100 must not round down into the accepted range.
                 let (whole, fraction) = raw.split_once('.').unwrap_or((&raw, ""));
                 ensure!(
-                    whole.parse::<u16>().ok().is_some_and(|n| n < 100
-                        || (n == 100 && fraction.chars().all(|c| c == '0'))),
+                    whole.parse::<u16>().ok().is_some_and(
+                        |n| n < 100 || (n == 100 && fraction.chars().all(|c| c == '0'))
+                    ),
                     "selection percentage must be at most 100"
                 );
                 let percent: f64 = raw.parse().context("expected a percentage")?;
@@ -680,13 +747,15 @@ impl Parser {
                 "channel",
                 "channels",
                 "collection",
-                "collections"
+                "collections",
+                "source",
+                "thread"
             ]
             .contains(&kind.as_str()),
             "unknown reading kind {kind}"
         );
         let pattern = self.at("matching");
-        let names = if pattern {
+        let mut names = if pattern {
             if kind != "tags" && kind != "links" {
                 return self.err("matching applies only to tags and links");
             }
@@ -717,6 +786,15 @@ impl Parser {
         } else {
             vec![self.string()?]
         };
+        if kind == "thread" {
+            self.need("in")?;
+            self.need("source")?;
+            let source = self.string()?;
+            names = names
+                .into_iter()
+                .map(|name| format!("{source}/{name}"))
+                .collect();
+        }
         let kind = kind.trim_end_matches('s');
         let mut include = false;
         if self.eat("including") {
@@ -903,10 +981,11 @@ impl Parser {
             if self.at("learn") {
                 let readings = self.reading()?;
                 ensure!(
-                    readings
-                        .iter()
-                        .all(|reading| split_entity(&reading.entity).0 != "channel"),
-                    "channel readings require a workspace source declaration"
+                    readings.iter().all(|reading| !matches!(
+                        split_entity(&reading.entity).0,
+                        "channel" | "source" | "thread"
+                    )),
+                    "channel, source, and thread readings require a workspace source declaration"
                 );
                 v.readings.extend(readings);
             } else if self.eat("learning") {
@@ -1046,6 +1125,99 @@ impl Parser {
         Ok(Source::Arena(ArenaSource { name, channels }))
     }
 
+    fn sqlite_source(&mut self) -> Result<Source> {
+        self.need("source")?;
+        self.need("sqlite")?;
+        let name = self.string()?;
+        self.need("{")?;
+        let (mut db, mut query, mut id, mut who, mut when, mut what, mut where_columns) =
+            (None, None, None, None, None, None, None);
+        let (mut document_ref, mut weight) = (None, None);
+        let (mut timestamp_unit, mut timestamp_epoch) = (None, None);
+        while !self.at("}") {
+            if self.eat("database") {
+                let value = self.string()?;
+                self.set(&mut db, value)?;
+            } else if self.eat("query") {
+                let value = self.string()?;
+                self.set(&mut query, value)?;
+            } else if self.eat("id") {
+                let value = self.string_or_list()?;
+                self.set(&mut id, value)?;
+            } else if self.eat("document") {
+                self.need("ref")?;
+                let value = self.string()?;
+                self.set(&mut document_ref, value)?;
+            } else if self.eat("who") {
+                let value = if self.eat("json_array") {
+                    SqliteWho::JsonArray {
+                        column: self.string()?,
+                    }
+                } else if self.eat("delimited") {
+                    let column = self.string()?;
+                    self.need("by")?;
+                    SqliteWho::Delimited {
+                        column,
+                        delimiter: self.string()?,
+                    }
+                } else {
+                    SqliteWho::Columns {
+                        columns: self.string_or_list()?,
+                    }
+                };
+                self.set(&mut who, value)?;
+            } else if self.eat("when") {
+                let value = self.string()?;
+                self.set(&mut when, value)?;
+                self.need("unit")?;
+                let unit = self.word()?;
+                ensure!(
+                    ["s", "ms", "us", "ns"].contains(&unit.as_str()),
+                    "SQLite timestamp unit must be s, ms, us, or ns"
+                );
+                timestamp_unit = Some(unit);
+                if self.eat("epoch") {
+                    timestamp_epoch = Some(self.string()?);
+                }
+            } else if self.eat("what") {
+                let value = self.string_or_list()?;
+                self.set(&mut what, value)?;
+            } else if self.eat("where") {
+                let value = self.string_or_list()?;
+                self.set(&mut where_columns, value)?;
+            } else if self.eat("weight") {
+                let value = self.string()?;
+                self.set(&mut weight, value)?;
+            } else {
+                return self.err(
+                    "expected database, query, id, document ref, who, when, what, where, or weight in SQLite source",
+                );
+            }
+        }
+        self.need("}")?;
+        let required = |value: Option<String>, field: &str| -> Result<String> {
+            value
+                .filter(|v| !v.trim().is_empty())
+                .with_context(|| format!("SQLite source {name:?} needs {field}"))
+        };
+        Ok(Source::Sqlite(SqliteSource {
+            name: name.clone(),
+            db: required(db, "database")?,
+            query: required(query, "query")?,
+            id: id.context("SQLite source needs id")?,
+            document_ref,
+            who: who.unwrap_or(SqliteWho::Columns {
+                columns: Vec::new(),
+            }),
+            when: required(when, "when")?,
+            what: what.context("SQLite source needs what")?,
+            where_columns: where_columns.unwrap_or_default(),
+            weight,
+            timestamp_unit: timestamp_unit.context("SQLite source needs when unit")?,
+            timestamp_epoch,
+        }))
+    }
+
     fn workspace(&mut self) -> Result<Workspace> {
         self.need("workspace")?;
         let name = self.string()?;
@@ -1057,12 +1229,21 @@ impl Parser {
         let mut source_names = std::collections::BTreeSet::new();
         while !self.at("}") {
             if self.at("source") {
-                let source = self.arena_source()?;
+                let source = match self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map(|token| token.value.as_str())
+                {
+                    Some("arena") => self.arena_source()?,
+                    Some("sqlite") => self.sqlite_source()?,
+                    _ => return self.err("expected source arena or source sqlite"),
+                };
                 let source_name = match &source {
                     Source::Arena(source) => &source.name,
+                    Source::Sqlite(source) => &source.name,
                 };
                 ensure!(
-                    source_names.insert(source_name.clone()),
+                    source_names.insert(source_name.to_lowercase()),
                     "duplicate workspace source {source_name}"
                 );
                 workspace.sources.push(source);
@@ -1087,7 +1268,7 @@ impl Parser {
                 self.need("into")?;
                 workspace.targets.push(self.string()?);
             } else {
-                return self.err("expected source arena, a channel reading, learning settings, or project questions into");
+                return self.err("expected source arena/sqlite, a reading, learning settings, or project questions into");
             }
         }
         self.need("}")?;
@@ -1168,6 +1349,18 @@ pub fn entity_selector(kind: &str, name: &str) -> String {
         _ => format!("{kind}:{name}"),
     }
 }
+
+fn sqlite_source_key(name: &str) -> String {
+    let mut escaped = String::new();
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            escaped.push(char::from(byte));
+        } else {
+            escaped.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    escaped
+}
 /// Rebuilding readings from a concrete entity list must not drop name patterns;
 /// they return to their declared positions so precedence and rendering hold.
 pub fn retain_patterns(previous: &[Reading], rebuilt: &mut Vec<Reading>) {
@@ -1196,6 +1389,7 @@ fn expand(path: &str, home: &Path) -> String {
 
 fn lower_workspace(workspace: Workspace) -> Result<Vault> {
     let mut channels = BTreeMap::<String, String>::new();
+    let mut sqlite_sources = BTreeMap::<String, String>::new();
     for source in &workspace.sources {
         match source {
             Source::Arena(source) => {
@@ -1228,22 +1422,60 @@ fn lower_workspace(workspace: Workspace) -> Result<Vault> {
                     }
                 }
             }
+            Source::Sqlite(source) => {
+                ensure!(
+                    !source.name.contains('/') && !source.name.contains(':'),
+                    "source name must not contain / or :"
+                );
+                sqlite_sources.insert(source.name.to_lowercase(), source.name.clone());
+            }
         }
     }
     let mut vault = workspace.unresolved_vault();
     for reading in &mut vault.readings {
         let (kind, selector) = split_entity(&reading.entity);
-        ensure!(
-            kind == "channel" || kind == "collection",
-            "workspace readings must use channel, found {kind}"
-        );
-        let stable = channels.get(&selector.to_lowercase()).with_context(|| {
-            format!(
-                "channel {selector:?} is not declared by workspace {}",
-                workspace.name
-            )
-        })?;
-        reading.entity = entity_selector("collection", stable);
+        match kind {
+            "channel" | "collection" => {
+                let stable = channels.get(&selector.to_lowercase()).with_context(|| {
+                    format!(
+                        "channel {selector:?} is not declared by workspace {}",
+                        workspace.name
+                    )
+                })?;
+                reading.entity = entity_selector("collection", stable);
+            }
+            "source" => {
+                let name = sqlite_sources
+                    .get(&selector.to_lowercase())
+                    .with_context(|| {
+                        format!(
+                            "SQLite source {selector:?} is not declared by workspace {}",
+                            workspace.name
+                        )
+                    })?;
+                reading.entity =
+                    entity_selector("collection", &format!("sqlite:{}", sqlite_source_key(name)));
+            }
+            "thread" => {
+                let (source, thread) = selector
+                    .split_once('/')
+                    .context("thread reading needs a source name and thread")?;
+                let name = sqlite_sources
+                    .get(&source.to_lowercase())
+                    .with_context(|| {
+                        format!(
+                            "SQLite source {source:?} is not declared by workspace {}",
+                            workspace.name
+                        )
+                    })?;
+                reading.entity = entity_selector(
+                    "collection",
+                    &format!("sqlite:{}/thread/{thread}", sqlite_source_key(name)),
+                );
+            }
+            "link" | "folder" if !sqlite_sources.is_empty() => {}
+            _ => bail!("workspace reading kind {kind} has no declared source"),
+        }
     }
     Ok(vault)
 }
@@ -1278,8 +1510,19 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
     let mut paths = std::collections::BTreeSet::new();
     for p in programs {
         let mut scopes = p.vaults;
-        for workspace in p.workspaces {
-            scopes.push(lower_workspace(workspace)?);
+        for mut workspace in p.workspaces {
+            for source in &mut workspace.sources {
+                if let Source::Sqlite(source) = source {
+                    source.db = expand(&source.db, user_home);
+                    ensure!(
+                        Path::new(&source.db).is_absolute(),
+                        "SQLite database path must be absolute: {}",
+                        source.db
+                    );
+                }
+            }
+            scopes.push(lower_workspace(workspace.clone())?);
+            all.workspaces.push(workspace);
         }
         for mut v in scopes {
             if !v.path.starts_with("workspace:") {
@@ -1487,6 +1730,70 @@ pub fn config_value(p: &Program) -> serde_json::Value {
         vaults.insert(v.path.clone(), item);
     }
     root.insert("vaults".into(), Value::Object(vaults));
+    let mut workspaces = Map::new();
+    for workspace in &p.workspaces {
+        let mut sources = Map::new();
+        for source in &workspace.sources {
+            if let Source::Sqlite(source) = source {
+                let who = match &source.who {
+                    SqliteWho::Columns { columns } => json!(columns),
+                    SqliteWho::JsonArray { column } => {
+                        json!({"format":"json_array", "column":column})
+                    }
+                    SqliteWho::Delimited { column, delimiter } => {
+                        json!({"format":"delimited", "column":column, "delimiter":delimiter})
+                    }
+                };
+                let mut roles = json!({
+                    "id": source.id,
+                    "who": who,
+                    "when": source.when,
+                    "what": source.what,
+                    "where": source.where_columns,
+                });
+                if let Some(column) = &source.document_ref {
+                    roles["document_ref"] = json!(column);
+                }
+                if let Some(column) = &source.weight {
+                    roles["weight"] = json!(column);
+                }
+                // These names match SqliteSourceConfig exactly.
+                let mut timestamp = json!({"unit": source.timestamp_unit});
+                if let Some(epoch) = &source.timestamp_epoch {
+                    timestamp["epoch"] = json!(epoch);
+                }
+                sources.insert(
+                    source.name.clone(),
+                    json!({
+                        "db": source.db,
+                        "query": source.query,
+                        "roles": roles,
+                        "timestamp": timestamp,
+                    }),
+                );
+            }
+        }
+        let resolved = p
+            .vaults
+            .iter()
+            .find(|vault| vault.path == format!("workspace:{}", workspace.name));
+        let entities: Vec<Value> = resolved.into_iter().flat_map(|vault| vault.readings.iter())
+            .filter(|r| !r.pattern)
+            .map(|r| {
+                if r.profile == "auto" { json!(r.entity) }
+                else { json!({r.entity.clone(): {"profile": r.profile, "expandable": r.include_linked_pages}}) }
+            }).collect();
+        let mut item =
+            json!({"sources": sources, "entities": entities, "targets": workspace.targets});
+        if let Some(budget) = workspace.learning.budget {
+            item["min_top_catalysts"] = json!(budget);
+        }
+        if let Some(format) = &workspace.format {
+            item["catalyst_format"] = json!(format);
+        }
+        workspaces.insert(workspace.name.clone(), item);
+    }
+    root.insert("workspaces".into(), Value::Object(workspaces));
     Value::Object(root)
 }
 fn quote(s: &str) -> String {
@@ -1508,7 +1815,10 @@ fn render_clause(label: &str, items: &[String], indent: &str) -> String {
         .iter()
         .all(|i| i.chars().count() <= SHORT_ELEMENT && !i.contains('\n'))
     {
-        return format!("{prefix}{}", render_filled_list(items, indent, prefix.len()));
+        return format!(
+            "{prefix}{}",
+            render_filled_list(items, indent, prefix.len())
+        );
     }
     let mut s = prefix;
     s.push_str("{\n");
@@ -1720,15 +2030,60 @@ pub fn render_workspace(workspace: &Workspace) -> String {
                     if let Some(alias) = &channel.alias {
                         output.push_str(&format!(" as {}", quote(alias)));
                     } else if let (Some(slug), Some(title)) = (&channel.slug, &channel.title) {
-                        output.push_str(&format!(
-                            " slug {} title {}",
-                            quote(slug),
-                            quote(title)
-                        ));
+                        output.push_str(&format!(" slug {} title {}", quote(slug), quote(title)));
                     }
                     output.push('\n');
                 }
                 output.push_str("    }\n  }\n\n");
+            }
+            Source::Sqlite(source) => {
+                output.push_str(&format!("  source sqlite {} {{\n", quote(&source.name)));
+                output.push_str(&format!("    database {}\n", quote(&source.db)));
+                if source.query.contains('\n') && !source.query.contains("\"\"\"") {
+                    output.push_str("    query \"\"\"");
+                    output.push_str(&source.query);
+                    output.push_str("\"\"\"\n");
+                } else {
+                    output.push_str(&format!("    query {}\n", quote(&source.query)));
+                }
+                output.push_str(&format!("    id {}\n", render_columns(&source.id)));
+                if let Some(column) = &source.document_ref {
+                    output.push_str(&format!("    document ref {}\n", quote(column)));
+                }
+                match &source.who {
+                    SqliteWho::Columns { columns } if !columns.is_empty() => {
+                        output.push_str(&format!("    who {}\n", render_columns(columns)))
+                    }
+                    SqliteWho::JsonArray { column } => {
+                        output.push_str(&format!("    who json_array {}\n", quote(column)))
+                    }
+                    SqliteWho::Delimited { column, delimiter } => output.push_str(&format!(
+                        "    who delimited {} by {}\n",
+                        quote(column),
+                        quote(delimiter)
+                    )),
+                    _ => {}
+                }
+                output.push_str(&format!(
+                    "    when {} unit {}",
+                    quote(&source.when),
+                    source.timestamp_unit
+                ));
+                if let Some(epoch) = &source.timestamp_epoch {
+                    output.push_str(&format!(" epoch {}", quote(epoch)));
+                }
+                output.push('\n');
+                output.push_str(&format!("    what {}\n", render_columns(&source.what)));
+                if !source.where_columns.is_empty() {
+                    output.push_str(&format!(
+                        "    where {}\n",
+                        render_columns(&source.where_columns)
+                    ));
+                }
+                if let Some(column) = &source.weight {
+                    output.push_str(&format!("    weight {}\n", quote(column)));
+                }
+                output.push_str("  }\n\n");
             }
         }
     }
@@ -1746,7 +2101,10 @@ pub fn render_workspace(workspace: &Workspace) -> String {
     }
     for reading in &workspace.readings {
         let (kind, name) = split_entity(&reading.entity);
-        let selector = if kind == "channel" && name.chars().all(|ch| ch.is_ascii_digit()) {
+        let selector = if kind == "thread" {
+            let (source, thread) = name.split_once('/').expect("parsed thread has source");
+            format!("{} in source {}", quote(thread), quote(source))
+        } else if kind == "channel" && name.chars().all(|ch| ch.is_ascii_digit()) {
             name.to_string()
         } else {
             quote(name)
@@ -1796,6 +2154,21 @@ pub fn render_workspace(workspace: &Workspace) -> String {
     }
     output.push_str("}\n");
     output
+}
+
+fn render_columns(columns: &[String]) -> String {
+    if columns.len() == 1 {
+        quote(&columns[0])
+    } else {
+        format!(
+            "[{}]",
+            columns
+                .iter()
+                .map(|column| quote(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 fn render_learning(l: &Learning, indent: &str) -> String {
     let mut s = String::new();
@@ -2008,5 +2381,7 @@ pub const IMPLICIT_EXCLUSIONS: &[&str] = &[
 /// Whether the index gate already excludes `name` without being told to.
 pub fn is_implicit_exclusion(name: &str) -> bool {
     let name = name.trim().trim_matches('/');
-    IMPLICIT_EXCLUSIONS.iter().any(|d| d.eq_ignore_ascii_case(name))
+    IMPLICIT_EXCLUSIONS
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(name))
 }

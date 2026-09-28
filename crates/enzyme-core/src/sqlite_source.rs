@@ -361,6 +361,16 @@ pub fn run_sqlite_source(
     };
 
     let existing = source_document_hashes(db, source_name)?;
+    let collection_name = format!("sqlite:{}", escape_source_name(source_name));
+    let collection_occurrences = db.query_read(
+        "SELECT COUNT(*) FROM entity_occurrences eo JOIN entities e ON e.id = eo.entity_id WHERE e.name = ?1 AND e.type = 'collection'",
+        vec![Value::Text(collection_name)],
+        |row| row.get::<i64>(0),
+    )?.into_iter().next().unwrap_or(0);
+    // Existing SQLite indexes predate source-wide collections. Rebuild their
+    // documents once so an explicit `learn from source` has complete evidence.
+    let collection_needs_backfill =
+        collection_occurrences == 0 && !existing.is_empty() && rows_seen > 0;
     let current_paths: HashSet<&str> = pending
         .iter()
         .map(|item| item.document.source_ref.as_str())
@@ -374,7 +384,11 @@ pub fn run_sqlite_source(
     let mut skipped = 0usize;
     for item in pending {
         match existing.get(&item.document.source_ref) {
-            Some((fingerprint, _)) if fingerprint == &item.document.content_hash => skipped += 1,
+            Some((fingerprint, _))
+                if !collection_needs_backfill && fingerprint == &item.document.content_hash =>
+            {
+                skipped += 1
+            }
             _ => rebuilt.push(item),
         }
     }
@@ -500,6 +514,30 @@ fn build_row_documents(source_name: &str, rows: Vec<SourceRow>) -> Vec<PendingDo
             for (_, _, occurrence) in &mut occurrences {
                 occurrence.weight = row.weight;
             }
+            occurrences.push((
+                format!("sqlite:{}", escape_source_name(source_name)),
+                EntityType::Collection,
+                source_occurrence(
+                    &document.source_ref,
+                    None,
+                    Utc::now().timestamp_millis(),
+                    created_at,
+                    row.weight,
+                ),
+            ));
+            for folder in &where_labels {
+                occurrences.push((
+                    format!("sqlite:{}/thread/{folder}", escape_source_name(source_name)),
+                    EntityType::Collection,
+                    source_occurrence(
+                        &document.source_ref,
+                        None,
+                        Utc::now().timestamp_millis(),
+                        created_at,
+                        row.weight,
+                    ),
+                ));
+            }
             PendingDocument {
                 document,
                 occurrences,
@@ -589,6 +627,17 @@ fn build_bucket_documents(source_name: &str, rows: Vec<SourceRow>) -> Result<Vec
         let mut occurrences = Vec::new();
         for (index, row) in rows.iter().enumerate() {
             let context = output.entry_contexts.get(index).cloned();
+            occurrences.push((
+                format!("sqlite:{}", escape_source_name(source_name)),
+                EntityType::Collection,
+                source_occurrence(
+                    &source_ref,
+                    context.clone(),
+                    now,
+                    row.created_at,
+                    row.weight,
+                ),
+            ));
             for who in &row.who {
                 occurrences.push((
                     who.clone(),
@@ -606,6 +655,17 @@ fn build_bucket_documents(source_name: &str, rows: Vec<SourceRow>) -> Result<Vec
                 occurrences.push((
                     folder.clone(),
                     EntityType::Folder,
+                    source_occurrence(
+                        &source_ref,
+                        context.clone(),
+                        now,
+                        row.created_at,
+                        row.weight,
+                    ),
+                ));
+                occurrences.push((
+                    format!("sqlite:{}/thread/{folder}", escape_source_name(source_name)),
+                    EntityType::Collection,
                     source_occurrence(
                         &source_ref,
                         context.clone(),

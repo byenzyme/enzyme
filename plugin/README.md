@@ -204,7 +204,11 @@ enzyme catalyze "why we keep rewriting the auth layer"
 
 Enzyme indexes SQLite tables alongside Markdown — iMessage, WhatsApp, Mail, or any table of dated rows.
 
-None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both collapse to entity occurrences with effective dates, and nothing downstream knows which one it came from: the same profiles, budgets, and catalysts apply to a message thread and a folder of meeting notes.
+Declare a `source sqlite` inside a named `workspace` program, then run `scan`,
+`init`, and periodic `refresh`. The [SQLite source setup skill](skills/enzyme-sqlite-source/SKILL.md)
+shows the source declaration and source-scoped readings.
+
+None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both become dated entity occurrences and use the same profiles, budgets, and catalysts. SQLite sources also retain source-scoped collection identities, so a reading can focus on one source or one of its threads.
 
 A source names columns by the role they play rather than by the app they came from:
 

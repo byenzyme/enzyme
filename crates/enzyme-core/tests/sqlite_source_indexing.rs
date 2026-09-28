@@ -334,6 +334,18 @@ fn log_bucket_fingerprints_rebuild_skip_and_prune_exactly() {
     assert_eq!(first.documents_rebuilt, 3);
     assert_eq!(first.documents_skipped, 0);
     assert_eq!(first.documents_pruned, 0);
+    let source_occurrences = enzyme_db.query_read(
+        "SELECT COUNT(*) FROM entity_occurrences eo JOIN entities e ON e.id = eo.entity_id WHERE e.name = 'sqlite:messages' AND e.type = 'collection'",
+        Vec::<Value>::new(),
+        |row| row.get::<i64>(0),
+    ).unwrap();
+    assert_eq!(source_occurrences, vec![3]);
+    let thread_occurrences = enzyme_db.query_read(
+        "SELECT COUNT(*) FROM entity_occurrences eo JOIN entities e ON e.id = eo.entity_id WHERE e.name = 'sqlite:messages/thread/Thread A' AND e.type = 'collection'",
+        Vec::<Value>::new(),
+        |row| row.get::<i64>(0),
+    ).unwrap();
+    assert_eq!(thread_occurrences, vec![2]);
 
     mark_all_embedded(&enzyme_db);
     let unchanged = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
@@ -465,7 +477,11 @@ fn log_bucket_documents_are_dated_logs_and_occurrences_keep_message_dates() {
     );
     assert!(source_docs.iter().all(|doc| !doc.1.contains(" — Alice")));
     assert!(source_docs.iter().any(|doc| doc.1.contains("Met Will")));
-    assert!(source_docs.iter().any(|doc| doc.1.contains("Saw Will again")));
+    assert!(
+        source_docs
+            .iter()
+            .any(|doc| doc.1.contains("Saw Will again"))
+    );
     assert!(source_docs.iter().all(|doc| doc.2.len() == 64));
 
     let chunk_dates = enzyme_db
@@ -574,7 +590,14 @@ fn empty_what_rows_are_skipped_not_fatal() {
     // counted, never abort the whole index.
     insert_entry(&source_db, 1, Some("Alice"), JAN_2024, "hello", Some("T"));
     insert_entry(&source_db, 2, Some("Bob"), JAN_2024 + 1_000, "", Some("T"));
-    insert_entry(&source_db, 3, Some("Alice"), JAN_2024 + 2_000, "world", Some("T"));
+    insert_entry(
+        &source_db,
+        3,
+        Some("Alice"),
+        JAN_2024 + 2_000,
+        "world",
+        Some("T"),
+    );
 
     let config = source_config(source_path);
     let stats = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
@@ -623,7 +646,14 @@ fn row_mode_detects_non_leading_who_edit() {
     let source_path = temp.path().join("source.db");
     let source_db = Connection::open(&source_path).unwrap();
     create_entries(&source_db);
-    insert_entry(&source_db, 1, Some("A"), JAN_2024, "one", Some("second-who"));
+    insert_entry(
+        &source_db,
+        1,
+        Some("A"),
+        JAN_2024,
+        "one",
+        Some("second-who"),
+    );
     insert_entry(&source_db, 2, Some("B"), JAN_2024 + 1_000, "two", Some("x"));
     let mut config = source_config(source_path);
     config.roles.r#where.clear();
@@ -643,10 +673,7 @@ fn row_mode_detects_non_leading_who_edit() {
 
     // Edit the non-leading who of row 1 only; title/body unchanged.
     source_db
-        .execute(
-            "UPDATE entries SET thread = 'renamed' WHERE id = 1",
-            [],
-        )
+        .execute("UPDATE entries SET thread = 'renamed' WHERE id = 1", [])
         .unwrap();
     let edited = run_sqlite_source(&enzyme_db, "messages", &config).unwrap();
     assert_eq!(edited.documents_rebuilt, 1);
