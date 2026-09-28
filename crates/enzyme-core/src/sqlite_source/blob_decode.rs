@@ -1,6 +1,4 @@
-//! Read the plain text in modern Apple Notes `ZICNOTEDATA.ZDATA` blobs.
-//! The payload is gzip-compressed protobuf. The note text is field 2 of
-//! field 3 of field 2; the other fields carry formatting and attachments.
+//! Decode a gzip-compressed protobuf text field selected by the source query.
 
 use std::io::Read;
 
@@ -15,40 +13,70 @@ const MAX_DECOMPRESSED_BYTES: u64 = 32 * 1024 * 1024;
 pub(super) fn register(connection: &Connection) -> Result<()> {
     connection
         .create_scalar_function(
-            "enzyme_apple_notes_text",
-            1,
+            "enzyme_gzip_protobuf_text",
+            2,
             FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-            |ctx| match ctx.get_raw(0) {
-                ValueRef::Null => Ok(None),
-                ValueRef::Blob(blob) => decode(blob).map(Some).map_err(function_error),
-                other => Err(Error::InvalidFunctionParameterType(0, other.data_type())),
+            |ctx| {
+                let path = match ctx.get_raw(1) {
+                    ValueRef::Text(bytes) => {
+                        std::str::from_utf8(bytes).map_err(|error| function_error(error.into()))?
+                    }
+                    other => return Err(Error::InvalidFunctionParameterType(1, other.data_type())),
+                };
+                match ctx.get_raw(0) {
+                    ValueRef::Null => Ok(None),
+                    ValueRef::Blob(blob) => decode(blob, path).map(Some).map_err(function_error),
+                    other => Err(Error::InvalidFunctionParameterType(0, other.data_type())),
+                }
             },
         )
-        .context("failed to register Apple Notes text decoder")
+        .context("failed to register gzip protobuf text decoder")
 }
 
 fn function_error(error: anyhow::Error) -> Error {
     Error::UserFunctionError(Box::new(std::io::Error::other(error.to_string())))
 }
 
-fn decode(blob: &[u8]) -> Result<String> {
+fn decode(blob: &[u8], path: &str) -> Result<String> {
+    let fields = parse_path(path)?;
     if !blob.starts_with(&[0x1f, 0x8b]) {
-        bail!("Apple Notes body is not gzip data (possibly encrypted)");
+        bail!("source value is not gzip data (possibly encrypted)");
     }
     let mut bytes = Vec::new();
     GzDecoder::new(blob)
         .take(MAX_DECOMPRESSED_BYTES + 1)
         .read_to_end(&mut bytes)
-        .context("failed to decompress Apple Notes body")?;
+        .context("failed to decompress source value")?;
     if bytes.len() as u64 > MAX_DECOMPRESSED_BYTES {
-        bail!("Apple Notes body exceeds the 32 MiB decompression limit");
+        bail!("source value exceeds the 32 MiB decompression limit");
     }
-    let document = field_bytes(&bytes, 2)?.ok_or_else(|| anyhow!("missing Notes document"))?;
-    let note = field_bytes(document, 3)?.ok_or_else(|| anyhow!("missing Notes note"))?;
-    let text = field_bytes(note, 2)?.ok_or_else(|| anyhow!("missing Notes text"))?;
-    Ok(std::str::from_utf8(text)
-        .context("Apple Notes text is not UTF-8")?
+    let mut value = bytes.as_slice();
+    for field in fields {
+        value = field_bytes(value, field)?
+            .ok_or_else(|| anyhow!("protobuf path {path:?} has no field {field}"))?;
+    }
+    Ok(std::str::from_utf8(value)
+        .context("selected protobuf field is not UTF-8")?
         .to_owned())
+}
+
+fn parse_path(path: &str) -> Result<Vec<u64>> {
+    let fields = path
+        .split('.')
+        .map(|part| {
+            let field: u64 = part
+                .parse()
+                .context("protobuf path must contain field numbers")?;
+            if field == 0 {
+                bail!("protobuf field numbers must be positive");
+            }
+            Ok(field)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if fields.is_empty() || fields.len() > 16 {
+        bail!("protobuf path must contain 1 to 16 fields");
+    }
+    Ok(fields)
 }
 
 fn field_bytes(input: &[u8], wanted: u64) -> Result<Option<&[u8]>> {
@@ -73,7 +101,7 @@ fn field_bytes(input: &[u8], wanted: u64) -> Result<Option<&[u8]>> {
                 skip(input, &mut offset, size)?;
                 if field == wanted {
                     if found.is_some() {
-                        bail!("duplicate Apple Notes text field {wanted}");
+                        bail!("duplicate protobuf field {wanted}");
                     }
                     found = Some(&input[start..offset]);
                 }
@@ -89,7 +117,7 @@ fn skip(input: &[u8], offset: &mut usize, size: usize) -> Result<()> {
     *offset = offset
         .checked_add(size)
         .filter(|end| *end <= input.len())
-        .ok_or_else(|| anyhow!("truncated Apple Notes protobuf"))?;
+        .ok_or_else(|| anyhow!("truncated protobuf"))?;
     Ok(())
 }
 
@@ -98,17 +126,17 @@ fn varint(input: &[u8], offset: &mut usize) -> Result<u64> {
     for shift in (0..70).step_by(7) {
         let byte = *input
             .get(*offset)
-            .ok_or_else(|| anyhow!("truncated Apple Notes protobuf varint"))?;
+            .ok_or_else(|| anyhow!("truncated protobuf varint"))?;
         *offset += 1;
         if shift == 63 && byte > 1 {
-            bail!("Apple Notes protobuf varint overflows u64");
+            bail!("protobuf varint overflows u64");
         }
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok(value);
         }
     }
-    bail!("Apple Notes protobuf varint is too long")
+    bail!("protobuf varint is too long")
 }
 
 #[cfg(test)]
@@ -128,19 +156,21 @@ mod tests {
 
     #[test]
     fn decodes_text_and_rejects_non_gzip_payloads() {
-        let note = field(2, "Whole note\nSecond line".as_bytes());
-        let document = field(3, &note);
-        let payload = field(2, &document);
+        let note = field(9, "Whole note\nSecond line".as_bytes());
+        let document = field(7, &note);
+        let payload = field(4, &document);
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&payload).unwrap();
         let blob = encoder.finish().unwrap();
-        assert_eq!(decode(&blob).unwrap(), "Whole note\nSecond line");
+        assert_eq!(decode(&blob, "4.7.9").unwrap(), "Whole note\nSecond line");
+        assert!(decode(&blob, "2.3.2").is_err());
         assert!(
-            decode(b"encrypted")
+            decode(b"encrypted", "4.7.9")
                 .unwrap_err()
                 .to_string()
                 .contains("not gzip")
         );
+        assert!(decode(&blob, "4..9").is_err());
     }
 
     #[test]
@@ -148,7 +178,11 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         register(&connection).unwrap();
         let null: Option<String> = connection
-            .query_row("SELECT enzyme_apple_notes_text(NULL)", [], |row| row.get(0))
+            .query_row(
+                "SELECT enzyme_gzip_protobuf_text(NULL, '2.3.2')",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(null, None);
 
@@ -160,7 +194,7 @@ mod tests {
         let blob = encoder.finish().unwrap();
         let text: String = connection
             .query_row(
-                "SELECT enzyme_apple_notes_text(?1)",
+                "SELECT enzyme_gzip_protobuf_text(?1, '2.3.2')",
                 rusqlite::params![blob],
                 |row| row.get(0),
             )
