@@ -235,6 +235,7 @@ pub fn entity_symbol(entity_type: &EntityType) -> &'static str {
         EntityType::Tag => "#",
         EntityType::Link => "~",
         EntityType::Folder => "/",
+        EntityType::Collection => "@",
         EntityType::AppendLog => "%",
     }
 }

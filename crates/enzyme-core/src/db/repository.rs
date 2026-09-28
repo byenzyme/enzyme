@@ -114,6 +114,7 @@ fn parse_entity_type(s: &str) -> EntityType {
         "tag" => EntityType::Tag,
         "link" => EntityType::Link,
         "folder" => EntityType::Folder,
+        "collection" => EntityType::Collection,
         "append_log" => EntityType::AppendLog,
         _ => EntityType::Tag,
     }
@@ -740,6 +741,115 @@ impl Database {
         })
     }
 
+    /// Upsert only the addressed `(entity, document)` occurrence pairs.
+    ///
+    /// Unlike [`Self::upsert_entities_batch`], this does not remove every
+    /// occurrence associated with a reprocessed document. Remote collection
+    /// adapters use it for bounded observations: seeing one block in one
+    /// collection must not erase an older observed membership in another
+    /// collection, and absence from a partial page is not a deletion signal.
+    pub fn upsert_entity_occurrences_partial(
+        &self,
+        entries: &[(&str, &EntityType, &EntityOccurrence)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let entries: Vec<(String, String, EntityOccurrence)> = entries
+            .iter()
+            .map(|&(name, entity_type, occurrence)| {
+                (
+                    name.to_string(),
+                    entity_type.as_str().to_string(),
+                    occurrence.clone(),
+                )
+            })
+            .collect();
+
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("failed to begin partial occurrence upsert")?;
+            let mut affected = std::collections::BTreeSet::new();
+
+            for (name, type_str, occurrence) in &entries {
+                tx.execute(
+                    "INSERT OR IGNORE INTO entities (name, type, frequency, first_seen, last_seen)
+                     VALUES (?1, ?2, 0, ?3, ?4)",
+                    vec![
+                        Value::Text(name.clone()),
+                        Value::Text(type_str.clone()),
+                        opt_val(occurrence.effective_date),
+                        opt_val(occurrence.effective_date),
+                    ],
+                )
+                .await?;
+
+                let mut rows = tx
+                    .query(
+                        "SELECT id FROM entities WHERE name = ?1 AND type = ?2",
+                        vec![Value::Text(name.clone()), Value::Text(type_str.clone())],
+                    )
+                    .await?;
+                let entity_id: i64 = rows
+                    .next()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("entity not found after insert"))?
+                    .get::<i64>(0)?;
+                drop(rows);
+                affected.insert(entity_id);
+
+                tx.execute(
+                    "DELETE FROM entity_occurrences
+                     WHERE entity_id = ?1 AND file_path = ?2",
+                    vec![
+                        Value::Integer(entity_id),
+                        Value::Text(occurrence.file_path.clone()),
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO entity_occurrences
+                     (entity_id, file_path, context, created_at, effective_date, date_source, weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    vec![
+                        Value::Integer(entity_id),
+                        Value::Text(occurrence.file_path.clone()),
+                        opt_val(occurrence.context.clone()),
+                        Value::Integer(occurrence.created_at),
+                        opt_val(occurrence.effective_date),
+                        Value::Text(occurrence.date_source.clone()),
+                        Value::Real(occurrence.weight),
+                    ],
+                )
+                .await?;
+            }
+
+            for entity_id in affected {
+                tx.execute(
+                    "UPDATE entities
+                     SET frequency = (SELECT COUNT(*) FROM entity_occurrences eo
+                                      WHERE eo.entity_id = entities.id),
+                         first_seen = (SELECT MIN(effective_date) FROM entity_occurrences eo
+                                       WHERE eo.entity_id = entities.id),
+                         last_seen = (SELECT MAX(effective_date) FROM entity_occurrences eo
+                                      WHERE eo.entity_id = entities.id)
+                     WHERE id = ?1",
+                    vec![Value::Integer(entity_id)],
+                )
+                .await?;
+            }
+
+            tx.commit()
+                .await
+                .context("failed to commit partial occurrence upsert")?;
+            Ok(())
+        })
+    }
+
     /// Replace a config-declared append-log entity's occurrences wholesale.
     ///
     /// Logs need replace semantics, not the accumulate semantics of
@@ -878,6 +988,54 @@ impl Database {
             },
         )?;
         Ok(rows)
+    }
+
+    /// Snapshot collection occurrences for selected documents before re-indexing.
+    ///
+    /// Bounded remote imports use this to retain previously observed collection
+    /// membership. A page that does not include an older connection is not
+    /// evidence that the connection was removed upstream.
+    pub fn get_collection_occurrences_for_paths_by_date_source(
+        &self,
+        file_paths: &[String],
+        date_source: &str,
+    ) -> Result<Vec<(String, EntityOccurrence)>> {
+        if file_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut result = Vec::new();
+        for batch in file_paths.chunks(500) {
+            let placeholders = (0..batch.len())
+                .map(|index| format!("?{}", index + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT e.name, eo.id, eo.entity_id, eo.file_path, eo.context,
+                        eo.created_at, eo.effective_date, eo.date_source, eo.weight
+                 FROM entity_occurrences eo
+                 JOIN entities e ON e.id = eo.entity_id
+                 WHERE e.type = 'collection' AND eo.date_source = ?1
+                   AND eo.file_path IN ({placeholders})"
+            );
+            let mut params = vec![Value::Text(date_source.to_string())];
+            params.extend(batch.iter().cloned().map(Value::Text));
+            result.extend(self.query_read(&sql, params, |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    EntityOccurrence {
+                        id: Some(row.get::<i64>(1)?),
+                        entity_id: row.get::<i64>(2)?,
+                        file_path: row.get::<String>(3)?,
+                        context: row.get::<Option<String>>(4)?,
+                        created_at: row.get::<Option<i64>>(5)?.unwrap_or(0),
+                        effective_date: row.get::<Option<i64>>(6)?,
+                        date_source: row.get::<Option<String>>(7)?.unwrap_or_default(),
+                        weight: row.get::<f64>(8)?,
+                    },
+                ))
+            })?);
+        }
+        Ok(result)
     }
 
     /// Load all chunks for the given file paths.

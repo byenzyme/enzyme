@@ -718,6 +718,30 @@ impl EnzymeConfig {
 
     fn from_workspace_config(name: &str, global: &GlobalTomlConfig) -> Self {
         let workspace = global.workspaces.get(name);
+        let reading_spec = global.readings.get(&format!("workspace:{name}")).cloned();
+        let readable_entities: Vec<CatalyzedEntity> = reading_spec
+            .as_ref()
+            .map(|spec| {
+                spec.readings
+                    .iter()
+                    .filter(|reading| !reading.pattern)
+                    .map(|reading| {
+                        if reading.profile == "auto" {
+                            CatalyzedEntity::Simple(reading.entity.clone())
+                        } else {
+                            CatalyzedEntity::WithOptions(HashMap::from([(
+                                reading.entity.clone(),
+                                EntityOptions {
+                                    profile: Some(reading.profile.clone()),
+                                    expandable: reading.include_linked_pages,
+                                    children: Vec::new(),
+                                },
+                            )]))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let trending = SelectionConfig {
             minimum_tags: global.defaults.minimum_tags,
             minimum_links: global.defaults.minimum_links,
@@ -764,8 +788,11 @@ impl EnzymeConfig {
             .unwrap_or_default();
 
         Self {
-            reading_spec: None,
-            catalyzed_entities: workspace.map(|w| w.entities.clone()).unwrap_or_default(),
+            reading_spec,
+            catalyzed_entities: workspace
+                .map(|workspace| workspace.entities.clone())
+                .filter(|entities| !entities.is_empty())
+                .unwrap_or(readable_entities),
             trending: Some(trending),
             catalyst_format: workspace
                 .and_then(|w| w.catalyst_format.clone())
@@ -1517,6 +1544,15 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
             name,
             entity_type: EntityType::Folder,
         })
+    } else if let Some(collection) = trimmed.strip_prefix("collection:") {
+        let name = collection.trim().to_string();
+        if name.is_empty() {
+            return None;
+        }
+        Some(ParsedEntity {
+            name,
+            entity_type: EntityType::Collection,
+        })
     } else {
         None
     }
@@ -1624,6 +1660,54 @@ timestamp = { unit = "ms" }
         let p = parse_entity_ref("folder:.").unwrap();
         assert_eq!(p.name, ROOT_FOLDER_ENTITY);
         assert_eq!(p.entity_type, EntityType::Folder);
+    }
+
+    #[test]
+    fn test_parse_entity_ref_collection() {
+        let parsed = parse_entity_ref("collection:arena:channels/channel/9").unwrap();
+        assert_eq!(parsed.name, "arena:channels/channel/9");
+        assert_eq!(parsed.entity_type, EntityType::Collection);
+    }
+
+    #[test]
+    fn arena_workspace_loads_typed_reading_into_runtime_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let workspace = home.join("workspaces/arena-test");
+        let configs = home.join("configs");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&configs).unwrap();
+        std::fs::write(
+            configs.join("arena-test.enzyme"),
+            r#"
+workspace "arena-test" {
+  source arena "channels" {
+    channels {
+      channel 9 slug "research" title "Research"
+    }
+  }
+  question budget 15
+  sample by recency
+  learn questions from channel "research"
+}
+"#,
+        )
+        .unwrap();
+
+        let config = EnzymeConfig::load_at(&workspace, &home.join("config.toml"))
+            .unwrap()
+            .unwrap();
+        let reading_spec = config.reading_spec.as_ref().unwrap();
+        assert_eq!(reading_spec.path, "workspace:arena-test");
+        assert_eq!(
+            reading_spec.readings[0].entity,
+            "collection:arena:channels/channel/9"
+        );
+        assert!(config.catalyzed_entities.iter().any(|entity| matches!(
+            entity,
+            CatalyzedEntity::Simple(value)
+                if value == "collection:arena:channels/channel/9"
+        )));
     }
 
     #[test]

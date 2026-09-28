@@ -2631,6 +2631,7 @@ fn parse_entity_type(s: &str) -> enzyme_core::models::EntityType {
         "link" => enzyme_core::models::EntityType::Link,
         "folder" => enzyme_core::models::EntityType::Folder,
         "append_log" => enzyme_core::models::EntityType::AppendLog,
+        "collection" => enzyme_core::models::EntityType::Collection,
         _ => enzyme_core::models::EntityType::Tag,
     }
 }
@@ -2646,6 +2647,7 @@ fn selected_entity_ref(entity: &Entity) -> String {
         }
         enzyme_core::models::EntityType::Folder => format!("folder:{}", entity.name),
         enzyme_core::models::EntityType::AppendLog => format!("log:{}", entity.name),
+        enzyme_core::models::EntityType::Collection => format!("collection:{}", entity.name),
     }
 }
 

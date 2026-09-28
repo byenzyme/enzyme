@@ -231,6 +231,40 @@ enum Commands {
         quiet: bool,
     },
 
+    /// Import bounded newest-first windows from explicit Are.na channels
+    Arena {
+        /// Are.na channel URLs, slugs, or numeric IDs; omit to use an existing program's scope
+        channels: Vec<String>,
+
+        /// Maximum connections fetched per channel (one page, max 100)
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+
+        /// Catalyst evidence distribution over the fetched/indexed material
+        #[arg(long, value_enum, default_value = "recency")]
+        sampling: commands::arena::SamplingMode,
+
+        /// Questions requested per channel catalyst reading
+        #[arg(long, default_value_t = 15)]
+        question_budget: usize,
+
+        /// Fetch and print the program/coverage without writing or indexing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Index and embed now, but leave catalyst generation for a later refresh
+        #[arg(long)]
+        index_only: bool,
+
+        /// Emit structured JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Alternate API root for integration tests
+        #[arg(long, hide = true, default_value = "https://api.are.na/v3/")]
+        api_base: String,
+    },
+
     /// Embed structured entries without creating an enzyme database
     EmbedEntries {
         /// JSON file containing an array, {"entries": [...]}, or {"entry": ...}; reads stdin if omitted
@@ -416,7 +450,8 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    let vault_path = if let Some(ref collection_id) = cli.collection {
+    let collection_name = cli.collection.clone();
+    let vault_path = if let Some(ref collection_id) = collection_name {
         enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)?
     } else {
         resolve_vault_path(cli.vault)?
@@ -587,6 +622,30 @@ async fn main() -> Result<()> {
         }
         Commands::Ingest { quiet } => {
             commands::ingest::run_ingest(&vault_path, quiet).await?;
+        }
+        Commands::Arena {
+            channels,
+            limit,
+            sampling,
+            question_budget,
+            dry_run,
+            index_only,
+            json,
+            api_base,
+        } => {
+            commands::arena::run(
+                &vault_path,
+                collection_name.as_deref(),
+                &channels,
+                limit,
+                sampling,
+                question_budget,
+                dry_run,
+                index_only,
+                json,
+                &api_base,
+            )
+            .await?;
         }
         Commands::EmbedEntries { input } => {
             commands::embed_entries::run_embed_entries(input.as_deref())?;

@@ -186,6 +186,55 @@ pub struct Vault {
     pub memories: Vec<Memory>,
     pub retrieval: Option<Vec<String>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArenaChannel {
+    pub remote_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// Read compatibility for the first typed-source prototype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Read compatibility for the first typed-source prototype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArenaSource {
+    pub name: String,
+    pub channels: Vec<ArenaChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Source {
+    Arena(ArenaSource),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub sources: Vec<Source>,
+    pub learning: Learning,
+    pub readings: Vec<Reading>,
+    pub format: Option<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+impl Workspace {
+    pub fn unresolved_vault(&self) -> Vault {
+        Vault {
+            path: format!("workspace:{}", self.name),
+            learning: self.learning.clone(),
+            readings: self.readings.clone(),
+            format: self.format.clone(),
+            targets: self.targets.clone(),
+            ..Default::default()
+        }
+    }
+}
 impl Vault {
     /// The explicit reading for one entity; name patterns never match here.
     pub fn reading(&self, name: &str, kind: &str) -> Option<&Reading> {
@@ -213,6 +262,8 @@ pub struct Program {
     pub learning: Learning,
     pub settings: Settings,
     pub vaults: Vec<Vault>,
+    #[serde(default)]
+    pub workspaces: Vec<Workspace>,
     pub retrieval: Option<Vec<String>>,
 }
 #[derive(Debug, Clone)]
@@ -618,7 +669,18 @@ impl Parser {
         let kind = self.word()?;
         ensure!(
             [
-                "folder", "folders", "tag", "tags", "link", "links", "log", "logs"
+                "folder",
+                "folders",
+                "tag",
+                "tags",
+                "link",
+                "links",
+                "log",
+                "logs",
+                "channel",
+                "channels",
+                "collection",
+                "collections"
             ]
             .contains(&kind.as_str()),
             "unknown reading kind {kind}"
@@ -640,6 +702,18 @@ impl Parser {
             vec![glob]
         } else if kind.ends_with('s') {
             self.list()?
+        } else if kind == "channel"
+            && !self.t().string
+            && !self.t().value.is_empty()
+            && self
+                .t()
+                .value
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            let id = self.t().value.clone();
+            self.pos += 1;
+            vec![id]
         } else {
             vec![self.string()?]
         };
@@ -827,7 +901,14 @@ impl Parser {
         let mut seen = std::collections::BTreeSet::new();
         while !self.at("}") {
             if self.at("learn") {
-                v.readings.extend(self.reading()?);
+                let readings = self.reading()?;
+                ensure!(
+                    readings
+                        .iter()
+                        .all(|reading| split_entity(&reading.entity).0 != "channel"),
+                    "channel readings require a workspace source declaration"
+                );
+                v.readings.extend(readings);
             } else if self.eat("learning") {
                 ensure!(seen.insert("learning"), "duplicate vault learning block");
                 let l = self.learning()?;
@@ -901,6 +982,118 @@ impl Parser {
         self.need("}")?;
         Ok(v)
     }
+
+    fn arena_source(&mut self) -> Result<Source> {
+        self.need("source")?;
+        self.need("arena")?;
+        let name = self.string()?;
+        self.need("{")?;
+        self.need("channels")?;
+        self.need("{")?;
+        let mut channels = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        let mut aliases = std::collections::BTreeSet::new();
+        let mut slugs = std::collections::BTreeSet::new();
+        while !self.at("}") {
+            self.need("channel")?;
+            let remote_id = self.t().value.clone();
+            ensure!(
+                !self.t().string
+                    && !remote_id.is_empty()
+                    && remote_id.chars().all(|ch| ch.is_ascii_digit()),
+                "Are.na channel ID must be numeric"
+            );
+            self.pos += 1;
+            let (alias, slug, title) = if self.eat("as") {
+                (Some(self.string()?), None, None)
+            } else if self.eat("slug") {
+                let slug = self.string()?;
+                self.need("title")?;
+                let title = self.string()?;
+                (None, Some(slug), Some(title))
+            } else {
+                (None, None, None)
+            };
+            ensure!(
+                ids.insert(remote_id.clone()),
+                "duplicate Are.na channel ID {remote_id}"
+            );
+            if let Some(alias) = &alias {
+                ensure!(
+                    aliases.insert(alias.to_lowercase()),
+                    "duplicate Are.na channel alias {alias}"
+                );
+            }
+            if let Some(slug) = &slug {
+                ensure!(
+                    slugs.insert(slug.to_lowercase()),
+                    "duplicate Are.na channel slug {slug}"
+                );
+            }
+            channels.push(ArenaChannel {
+                remote_id,
+                alias,
+                slug,
+                title,
+            });
+        }
+        self.need("}")?;
+        self.need("}")?;
+        ensure!(
+            !channels.is_empty(),
+            "Are.na source needs at least one channel"
+        );
+        Ok(Source::Arena(ArenaSource { name, channels }))
+    }
+
+    fn workspace(&mut self) -> Result<Workspace> {
+        self.need("workspace")?;
+        let name = self.string()?;
+        self.need("{")?;
+        let mut workspace = Workspace {
+            name,
+            ..Default::default()
+        };
+        let mut source_names = std::collections::BTreeSet::new();
+        while !self.at("}") {
+            if self.at("source") {
+                let source = self.arena_source()?;
+                let source_name = match &source {
+                    Source::Arena(source) => &source.name,
+                };
+                ensure!(
+                    source_names.insert(source_name.clone()),
+                    "duplicate workspace source {source_name}"
+                );
+                workspace.sources.push(source);
+            } else if self.at("learn") {
+                workspace.readings.extend(self.reading()?);
+            } else if ["sample", "favor", "question", "select", "as", "periods"]
+                .iter()
+                .any(|setting| self.at(setting))
+            {
+                self.learn_setting(&mut workspace.learning)?;
+            } else if self.eat("produce") {
+                let value = self.word()?;
+                let format = match value.as_str() {
+                    "questions" => "question",
+                    "theses" => "thesis",
+                    "claims" => "claim",
+                    _ => return self.err("produce questions, theses, or claims"),
+                };
+                self.set(&mut workspace.format, format.into())?;
+            } else if self.eat("project") {
+                self.need("questions")?;
+                self.need("into")?;
+                workspace.targets.push(self.string()?);
+            } else {
+                return self.err("expected source arena, a channel reading, learning settings, or project questions into");
+            }
+        }
+        self.need("}")?;
+        ensure!(!workspace.sources.is_empty(), "workspace needs a source");
+        Ok(workspace)
+    }
 }
 pub fn parse(source: &str) -> Result<Program> {
     let mut p = Parser {
@@ -940,11 +1133,14 @@ pub fn parse(source: &str) -> Result<Program> {
             out.settings = p.settings()?;
         } else if p.at("vault") {
             out.vaults.push(p.vault()?);
+        } else if p.at("workspace") {
+            out.workspaces.push(p.workspace()?);
         } else if p.at("when") {
             let x = p.retrieval()?;
             p.set(&mut out.retrieval, x)?;
         } else {
-            return p.err("expected profile, let, settings, learning, vault, or when asked");
+            return p
+                .err("expected profile, let, settings, learning, workspace, vault, or when asked");
         }
     }
     Ok(out)
@@ -997,6 +1193,61 @@ fn expand(path: &str, home: &Path) -> String {
         path.into()
     }
 }
+
+fn lower_workspace(workspace: Workspace) -> Result<Vault> {
+    let mut channels = BTreeMap::<String, String>::new();
+    for source in &workspace.sources {
+        match source {
+            Source::Arena(source) => {
+                ensure!(
+                    !source.name.contains('/') && !source.name.contains(':'),
+                    "source name must not contain / or :"
+                );
+                for channel in &source.channels {
+                    let stable = format!("arena:{}/channel/{}", source.name, channel.remote_id);
+                    let mut selectors = vec![channel.remote_id.as_str(), stable.as_str()];
+                    if let Some(alias) = channel.alias.as_deref() {
+                        selectors.push(alias);
+                    }
+                    if let Some(slug) = channel.slug.as_deref() {
+                        selectors.push(slug);
+                    }
+                    if let Some(title) = channel.title.as_deref() {
+                        selectors.push(title);
+                    }
+                    for selector in selectors {
+                        if let Some(existing) =
+                            channels.insert(selector.to_lowercase(), stable.clone())
+                        {
+                            ensure!(
+                                existing == stable,
+                                "ambiguous channel selector {selector:?} in workspace {}",
+                                workspace.name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut vault = workspace.unresolved_vault();
+    for reading in &mut vault.readings {
+        let (kind, selector) = split_entity(&reading.entity);
+        ensure!(
+            kind == "channel" || kind == "collection",
+            "workspace readings must use channel, found {kind}"
+        );
+        let stable = channels.get(&selector.to_lowercase()).with_context(|| {
+            format!(
+                "channel {selector:?} is not declared by workspace {}",
+                workspace.name
+            )
+        })?;
+        reading.entity = entity_selector("collection", stable);
+    }
+    Ok(vault)
+}
+
 /// Resolve files as one namespace. Identical reusable profiles may be shared; conflicting declarations are errors.
 pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
     let mut all = Program::default();
@@ -1026,16 +1277,22 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
     defaults = defaults.over(&Learning::default());
     let mut paths = std::collections::BTreeSet::new();
     for p in programs {
-        for mut v in p.vaults {
-            v.path = expand(&v.path, user_home);
-            ensure!(
-                Path::new(&v.path).is_absolute(),
-                "vault path must be absolute: {}",
-                v.path
-            );
-            let canonical =
-                std::fs::canonicalize(&v.path).unwrap_or_else(|_| PathBuf::from(&v.path));
-            v.path = canonical.to_string_lossy().into_owned();
+        let mut scopes = p.vaults;
+        for workspace in p.workspaces {
+            scopes.push(lower_workspace(workspace)?);
+        }
+        for mut v in scopes {
+            if !v.path.starts_with("workspace:") {
+                v.path = expand(&v.path, user_home);
+                ensure!(
+                    Path::new(&v.path).is_absolute(),
+                    "vault path must be absolute: {}",
+                    v.path
+                );
+                let canonical =
+                    std::fs::canonicalize(&v.path).unwrap_or_else(|_| PathBuf::from(&v.path));
+                v.path = canonical.to_string_lossy().into_owned();
+            }
             ensure!(paths.insert(v.path.clone()), "duplicate vault {}", v.path);
             v.profiles = all.profiles.clone();
             v.learning = v.learning.over(&defaults);
@@ -1444,6 +1701,102 @@ pub fn render_vault(v: &Vault) -> String {
     s.push_str("}\n");
     s
 }
+
+pub fn render_workspace(workspace: &Workspace) -> String {
+    let mut normalized = workspace.clone();
+    normalized.learning = workspace.learning.over(&Learning::default());
+    for reading in &mut normalized.readings {
+        reading.learning = reading.learning.over(&normalized.learning);
+    }
+    let workspace = &normalized;
+    let mut output = format!("workspace {} {{\n", quote(&workspace.name));
+    for source in &workspace.sources {
+        match source {
+            Source::Arena(source) => {
+                output.push_str(&format!("  source arena {} {{\n", quote(&source.name)));
+                output.push_str("    channels {\n");
+                for channel in &source.channels {
+                    output.push_str(&format!("      channel {}", channel.remote_id));
+                    if let Some(alias) = &channel.alias {
+                        output.push_str(&format!(" as {}", quote(alias)));
+                    } else if let (Some(slug), Some(title)) = (&channel.slug, &channel.title) {
+                        output.push_str(&format!(
+                            " slug {} title {}",
+                            quote(slug),
+                            quote(title)
+                        ));
+                    }
+                    output.push('\n');
+                }
+                output.push_str("    }\n  }\n\n");
+            }
+        }
+    }
+    output.push_str(&render_learning(&workspace.learning, "  "));
+    if let Some(format) = &workspace.format {
+        let plural = match format.as_str() {
+            "thesis" => "theses",
+            "claim" => "claims",
+            _ => "questions",
+        };
+        output.push_str(&format!("  produce {plural}\n"));
+    }
+    if workspace.learning != Learning::default() || workspace.format.is_some() {
+        output.push('\n');
+    }
+    for reading in &workspace.readings {
+        let (kind, name) = split_entity(&reading.entity);
+        let selector = if kind == "channel" && name.chars().all(|ch| ch.is_ascii_digit()) {
+            name.to_string()
+        } else {
+            quote(name)
+        };
+        output.push_str(&format!("  learn questions from {kind} {selector}"));
+        if let Some(profile) = &reading.definition {
+            output.push_str(&format!(
+                "\n    about {}",
+                render_profile("", profile)
+                    .replacen("profile  {", "profile {", 1)
+                    .trim_end()
+            ));
+        } else if reading.profile != "auto" {
+            output.push_str(&format!("\n    about {}", reading.profile));
+        }
+        let local = Learning {
+            as_of: None,
+            selection: reading
+                .learning
+                .selection
+                .clone()
+                .filter(|value| Some(value) != workspace.learning.selection.as_ref()),
+            budget: reading
+                .learning
+                .budget
+                .filter(|value| Some(*value) != workspace.learning.budget),
+            sample: (reading.learning.sampling_mode() != workspace.learning.sampling_mode())
+                .then(|| reading.learning.sample.clone())
+                .flatten(),
+            favor: (reading.learning.sampling_mode() != workspace.learning.sampling_mode())
+                .then(|| reading.learning.favor.clone())
+                .flatten(),
+            periods: reading
+                .learning
+                .periods
+                .filter(|value| Some(value) != workspace.learning.periods.as_ref()),
+        };
+        if local != Learning::default() {
+            output.push_str(" {\n");
+            output.push_str(&render_learning(&local, "      "));
+            output.push_str("    }");
+        }
+        output.push('\n');
+    }
+    for target in &workspace.targets {
+        output.push_str(&format!("\n  project questions into {}\n", quote(target)));
+    }
+    output.push_str("}\n");
+    output
+}
 fn render_learning(l: &Learning, indent: &str) -> String {
     let mut s = String::new();
     match &l.as_of {
@@ -1518,6 +1871,12 @@ pub fn render_program(p: &Program) -> String {
         s.push_str("learning {\n");
         s.push_str(&render_learning(&p.learning, "  "));
         s.push_str("}\n\n");
+    }
+    for workspace in &p.workspaces {
+        let mut scoped = workspace.clone();
+        scoped.learning = workspace.learning.over(&p.learning);
+        s.push_str(&render_workspace(&scoped));
+        s.push('\n');
     }
     for v in &p.vaults {
         let mut scoped = v.clone();

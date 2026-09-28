@@ -878,3 +878,83 @@ fn name_pattern_globs_and_errors() {
         );
     }
 }
+
+#[test]
+fn arena_workspace_roundtrips_and_lowers_channels_to_collections() {
+    let source = r#"
+workspace "arena-research" {
+  source arena "channels" {
+    channels {
+      channel 275 slug "arena-influences" title "Arena Influences"
+    }
+  }
+
+  question budget 15
+  sample by recency
+  learn questions from channel "arena-influences"
+}"#;
+    let parsed = parse(source).unwrap();
+    assert_eq!(parsed.workspaces[0].name, "arena-research");
+    let rendered = render_program(&parsed);
+    let reparsed = parse(&rendered).unwrap();
+    assert_eq!(reparsed, parsed);
+
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    assert_eq!(resolved.vaults[0].path, "workspace:arena-research");
+    assert_eq!(
+        resolved.vaults[0].readings[0].entity,
+        "collection:arena:channels/channel/275"
+    );
+    assert_eq!(
+        resolved.vaults[0].reading("arena:channels/channel/275", "collection"),
+        Some(&resolved.vaults[0].readings[0])
+    );
+    assert!(
+        parse(r#"vault "/notes" { learn questions from channel "arena-influences" }"#)
+            .is_err()
+    );
+    assert!(parse(
+        r#"workspace "source-only" { source arena "channels" { channels { channel 275 slug "arena-influences" title "Arena Influences" } } }"#
+    )
+    .is_ok());
+}
+
+#[test]
+fn concise_arena_channels_and_numeric_or_alias_readings_roundtrip() {
+    let source = r#"
+workspace "arena-research" {
+  source arena "channels" {
+    channels {
+      channel 275
+      channel 1234567 as "Rowan Tate"
+    }
+  }
+  learn questions from channel 275
+  learn questions from channel "Rowan Tate"
+  project questions into "/workspace/obsidian/Readwise"
+}"#;
+    let parsed = parse(source).unwrap();
+    let rendered = render_program(&parsed);
+    assert!(rendered.contains("channel 275\n"), "{rendered}");
+    assert!(rendered.contains("channel 1234567 as \"Rowan Tate\""), "{rendered}");
+    assert!(rendered.contains("from channel 275"), "{rendered}");
+    assert!(
+        rendered.contains("project questions into \"/workspace/obsidian/Readwise\""),
+        "{rendered}"
+    );
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    assert_eq!(
+        resolved.vaults[0].readings[0].entity,
+        "collection:arena:channels/channel/275"
+    );
+    assert_eq!(
+        resolved.vaults[0].readings[1].entity,
+        "collection:arena:channels/channel/1234567"
+    );
+    assert_eq!(
+        resolved.vaults[0].targets,
+        vec!["/workspace/obsidian/Readwise"]
+    );
+}

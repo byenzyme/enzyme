@@ -151,9 +151,19 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         }
     }
     let globals: Vec<Learning> = programs.iter().map(|p| p.learning.clone()).collect();
+    let raw_scopes: Vec<enzyme_spec::Vault> = ast
+        .vaults
+        .iter()
+        .cloned()
+        .chain(
+            ast.workspaces
+                .iter()
+                .map(|workspace| workspace.unresolved_vault()),
+        )
+        .collect();
     let mut resolved = enzyme_spec::resolve(programs, &user_home)?;
-    // `resolve` keeps program order, so this file's vaults come first.
-    resolved.vaults.truncate(ast.vaults.len());
+    // `resolve` keeps program order, so this file's vaults/workspaces come first.
+    resolved.vaults.truncate(raw_scopes.len());
     anyhow::ensure!(
         !resolved.vaults.is_empty(),
         "{} declares no vault",
@@ -199,7 +209,7 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         let mut vault = program.vaults.swap_remove(index);
         vault.path = vault_path.to_string_lossy().to_string();
         program.vaults = vec![vault];
-        let raw = &ast.vaults[index];
+        let raw = &raw_scopes[index];
         plans.push(plan_vault(
             &vault_path,
             declared,

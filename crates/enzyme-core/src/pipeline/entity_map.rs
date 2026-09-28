@@ -449,6 +449,7 @@ impl EntityMap {
                     }
                     EntityType::Link => !e.name.contains('/') && e.ranking_weight >= 3.0,
                     EntityType::AppendLog => true,
+                    EntityType::Collection => true,
                 }
             })
             .collect();
@@ -495,12 +496,18 @@ impl EntityMap {
                     EntityType::AppendLog => {
                         score += 1.1;
                     }
+                    EntityType::Collection => {
+                        score += 1.1;
+                    }
                     EntityType::Link => {}
                 }
 
                 // Marginal file coverage
                 let entity_files: HashSet<&String> = match entity.entity_type {
-                    EntityType::Tag | EntityType::Link | EntityType::AppendLog => entity
+                    EntityType::Tag
+                    | EntityType::Link
+                    | EntityType::AppendLog
+                    | EntityType::Collection => entity
                         .id
                         .and_then(|id| entity_file_sets.get(&id))
                         .map(|s| s.iter().collect())
@@ -532,7 +539,10 @@ impl EntityMap {
 
             // Update coverage
             match winner.entity_type {
-                EntityType::Tag | EntityType::Link | EntityType::AppendLog => {
+                EntityType::Tag
+                | EntityType::Link
+                | EntityType::AppendLog
+                | EntityType::Collection => {
                     if let Some(id) = winner.id {
                         if let Some(files) = entity_file_sets.get(&id) {
                             covered_files.extend(files.iter().cloned());

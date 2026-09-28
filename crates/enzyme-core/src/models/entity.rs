@@ -54,6 +54,8 @@ pub enum EntityType {
     Tag,
     Link,
     Folder,
+    /// A source-neutral remote collection, such as one explicit Are.na channel.
+    Collection,
     /// A single-file append-only log promoted to a first-class entity via a
     /// config `log:` entry (never auto-promoted).
     AppendLog,
@@ -65,6 +67,7 @@ impl EntityType {
             Self::Tag => "tag",
             Self::Link => "link",
             Self::Folder => "folder",
+            Self::Collection => "collection",
             Self::AppendLog => "append_log",
         }
     }

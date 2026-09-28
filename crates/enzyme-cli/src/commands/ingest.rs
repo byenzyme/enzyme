@@ -146,7 +146,7 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn project_ingest_batch(
+pub(crate) fn project_ingest_batch(
     db: &Database,
     paths: &EnzymePaths,
     processed: &[ProcessedDocument],

@@ -848,7 +848,7 @@ fn relevance_to(query: Option<&[f32]>, vector: Option<&[f32]>) -> f32 {
 /// statement of the topic. User tags keep their name as the query.
 fn ranks_by_scope_centroid(entity: &Entity) -> bool {
     match entity.entity_type {
-        EntityType::Folder => true,
+        EntityType::Folder | EntityType::Collection => true,
         EntityType::Tag => is_synthetic_body_cluster(&entity.name),
         _ => false,
     }
@@ -1638,13 +1638,15 @@ impl<'a> CatalystPipeline<'a> {
             // A log is a timeline: like a folder, select time-first with
             // guaranteed per-era representation (its chunks carry per-entry
             // dates), and don't require embeddings.
-            EntityType::Folder | EntityType::AppendLog => select_folder_chunks(
-                eras,
-                num_catalysts,
-                &candidates,
-                max_samples,
-                max_context_chars,
-            ),
+            EntityType::Folder | EntityType::Collection | EntityType::AppendLog => {
+                select_folder_chunks(
+                    eras,
+                    num_catalysts,
+                    &candidates,
+                    max_samples,
+                    max_context_chars,
+                )
+            }
             EntityType::Tag | EntityType::Link => {
                 let scorable = candidates
                     .iter()
