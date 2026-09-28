@@ -437,6 +437,7 @@ async fn shared_document_link_entities_each_see_full_conversation() {
             unit: SqliteTimestampUnit::Ms,
             epoch: None,
         },
+        filter: None,
     };
     run_sqlite_source(&db, "mail", &source_config).unwrap();
 

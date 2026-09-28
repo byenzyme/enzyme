@@ -222,6 +222,9 @@ pub struct SqliteSource {
     pub weight: Option<String>,
     pub timestamp_unit: String,
     pub timestamp_epoch: Option<String>,
+    /// Optional bundled content classifier applied after decoding query rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1132,7 +1135,7 @@ impl Parser {
         self.need("{")?;
         let (mut db, mut query, mut id, mut who, mut when, mut what, mut where_columns) =
             (None, None, None, None, None, None, None);
-        let (mut document_ref, mut weight) = (None, None);
+        let (mut document_ref, mut weight, mut filter) = (None, None, None);
         let (mut timestamp_unit, mut timestamp_epoch) = (None, None);
         while !self.at("}") {
             if self.eat("database") {
@@ -1188,9 +1191,16 @@ impl Parser {
             } else if self.eat("weight") {
                 let value = self.string()?;
                 self.set(&mut weight, value)?;
+            } else if self.eat("filter") {
+                let value = self.string()?;
+                ensure!(
+                    value == "apple-notes-content-v1",
+                    "unknown SQLite source filter {value:?}"
+                );
+                self.set(&mut filter, value)?;
             } else {
                 return self.err(
-                    "expected database, query, id, document ref, who, when, what, where, or weight in SQLite source",
+                    "expected database, query, id, document ref, who, when, what, where, weight, or filter in SQLite source",
                 );
             }
         }
@@ -1215,6 +1225,7 @@ impl Parser {
             weight,
             timestamp_unit: timestamp_unit.context("SQLite source needs when unit")?,
             timestamp_epoch,
+            filter,
         }))
     }
 
@@ -1762,15 +1773,16 @@ pub fn config_value(p: &Program) -> serde_json::Value {
                 if let Some(epoch) = &source.timestamp_epoch {
                     timestamp["epoch"] = json!(epoch);
                 }
-                sources.insert(
-                    source.name.clone(),
-                    json!({
-                        "db": source.db,
-                        "query": source.query,
-                        "roles": roles,
-                        "timestamp": timestamp,
-                    }),
-                );
+                let mut config = json!({
+                    "db": source.db,
+                    "query": source.query,
+                    "roles": roles,
+                    "timestamp": timestamp,
+                });
+                if let Some(filter) = &source.filter {
+                    config["filter"] = json!(filter);
+                }
+                sources.insert(source.name.clone(), config);
             }
         }
         let resolved = p
@@ -2082,6 +2094,9 @@ pub fn render_workspace(workspace: &Workspace) -> String {
                 }
                 if let Some(column) = &source.weight {
                     output.push_str(&format!("    weight {}\n", quote(column)));
+                }
+                if let Some(filter) = &source.filter {
+                    output.push_str(&format!("    filter {}\n", quote(filter)));
                 }
                 output.push_str("  }\n\n");
             }

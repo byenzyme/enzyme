@@ -11,8 +11,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-    SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceRoles, SqliteTimestampConfig,
-    SqliteTimestampUnit, SqliteWhoRole,
+    SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceFilter, SqliteSourceRoles,
+    SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
 };
 use crate::db::{Database, initialize_sqlite_runtime};
 use crate::document::{
@@ -23,6 +23,7 @@ use crate::models::{EntityOccurrence, EntityType};
 use crate::pipeline::indexing::IndexingPipeline;
 
 mod blob_decode;
+mod content_filter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteSourceValidation {
@@ -82,6 +83,8 @@ pub struct SqliteSourceIndexingStats {
     pub documents_pruned: usize,
     /// Source rows dropped because every mapped `what` column was NULL/empty.
     pub rows_skipped_empty: usize,
+    /// Decoded rows excluded by an explicit source content filter.
+    pub rows_filtered: usize,
 }
 
 impl SqliteSourceIndexingStats {
@@ -97,6 +100,7 @@ impl SqliteSourceIndexingStats {
         self.documents_skipped += other.documents_skipped;
         self.documents_pruned += other.documents_pruned;
         self.rows_skipped_empty += other.rows_skipped_empty;
+        self.rows_filtered += other.rows_filtered;
     }
 }
 
@@ -365,8 +369,30 @@ pub fn run_sqlite_source(
     drop(rows);
     drop(statement);
 
-    source_rows.sort_by(compare_source_rows);
     let rows_seen = source_rows.len();
+    let mut rows_filtered = 0;
+    if matches!(source.filter, Some(SqliteSourceFilter::AppleNotesContentV1)) {
+        let texts: Vec<String> = source_rows.iter().map(|row| row.what.clone()).collect();
+        let classifications = content_filter::classify_apple_notes_v1(&texts)?;
+        source_rows = source_rows
+            .into_iter()
+            .zip(classifications)
+            .filter_map(|(row, classification)| {
+                if classification.is_mundane {
+                    tracing::debug!(
+                        votes = classification.mundane_votes,
+                        nearest_template = %classification.nearest_kind,
+                        "SQLite source row excluded by content filter"
+                    );
+                    rows_filtered += 1;
+                    None
+                } else {
+                    Some(row)
+                }
+            })
+            .collect();
+    }
+    source_rows.sort_by(compare_source_rows);
     let pending = if source.roles.r#where.is_empty() {
         build_row_documents(source_name, source_rows)
     } else {
@@ -444,6 +470,7 @@ pub fn run_sqlite_source(
         documents_skipped: skipped,
         documents_pruned,
         rows_skipped_empty,
+        rows_filtered,
     })
 }
 

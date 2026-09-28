@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use enzyme_core::config::{
-    OneOrManyStrings, SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceRoles,
-    SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
+    OneOrManyStrings, SqliteMultiValueWhoRole, SqliteSourceConfig, SqliteSourceFilter,
+    SqliteSourceRoles, SqliteTimestampConfig, SqliteTimestampUnit, SqliteWhoRole,
 };
 use enzyme_core::db::Database;
 use enzyme_core::initialize_sqlite_runtime;
@@ -39,6 +39,7 @@ fn source_config(path: PathBuf) -> SqliteSourceConfig {
             unit: SqliteTimestampUnit::Ms,
             epoch: None,
         },
+        filter: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn supplied_document_ref_config(path: PathBuf) -> SqliteSourceConfig {
             unit: SqliteTimestampUnit::Ms,
             epoch: None,
         },
+        filter: None,
     }
 }
 
@@ -794,4 +796,38 @@ fn source_refresh_staleness_uses_engine_owned_success_watermark() {
     let unavailable = source_refresh_staleness(&enzyme_db, "messages", &source_path).unwrap();
     assert!(unavailable.stale);
     assert_eq!(unavailable.reason.as_deref(), Some("source_unavailable"));
+}
+
+#[test]
+fn template_filter_excludes_mundane_rows_and_reconciles_changed_decisions() {
+    initialize_sqlite_runtime().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("notes.db");
+    let source = Connection::open(&source_path).unwrap();
+    source.execute_batch(
+        "CREATE TABLE entries (id INTEGER PRIMARY KEY, sender TEXT, ts INTEGER, body TEXT, thread TEXT);
+         INSERT INTO entries VALUES
+           (1, 'me', 1700000000000, 'Groceries\nMilk\nEggs\nBread\nCoffee\nBananas\nOlive oil', 'Notes'),
+           (2, 'me', 1700000000000, 'I have been thinking about how conversations change when I listen longer. What surprised me was that the pause created space for a better question, and I want to try that again.', 'Notes');",
+    ).unwrap();
+    let db = Database::open_in_memory().unwrap();
+    let mut config = source_config(source_path);
+    config.roles.r#where.clear();
+    config.filter = Some(SqliteSourceFilter::AppleNotesContentV1);
+
+    let first = run_sqlite_source(&db, "notes", &config).unwrap();
+    assert_eq!(first.rows_seen, 2);
+    assert_eq!(first.rows_filtered, 1);
+    assert_eq!(db.get_all_source_refs().unwrap().len(), 1);
+
+    source
+        .execute(
+            "UPDATE entries SET body = ?1 WHERE id = 2",
+            ["To do today\nCall dentist\nBuy milk\nReturn package\nSchedule oil change"],
+        )
+        .unwrap();
+    let second = run_sqlite_source(&db, "notes", &config).unwrap();
+    assert_eq!(second.rows_filtered, 2);
+    assert_eq!(second.documents_pruned, 1);
+    assert!(db.get_all_source_refs().unwrap().is_empty());
 }

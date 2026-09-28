@@ -996,6 +996,7 @@ WHERE body IS NOT NULL
     when "sent_ns" unit ns epoch "2001-01-01"
     what "body"
     where "thread"
+    filter "apple-notes-content-v1"
   }
   question budget 15
   sample by time
@@ -1027,6 +1028,11 @@ WHERE body IS NOT NULL
         config["workspaces"]["messages"]["sources"]["chat"]["roles"]["where"],
         serde_json::json!(["thread"])
     );
+    assert_eq!(
+        config["workspaces"]["messages"]["sources"]["chat"]["filter"],
+        "apple-notes-content-v1"
+    );
+    assert!(parse(r#"workspace "x" { source sqlite "s" { database "/a" query "SELECT 1" id "id" when "date" what "body" filter "unknown" } }"#).is_err());
     assert!(parse(r#"vault "/notes" { learn questions from source "chat" }"#).is_err());
     assert!(parse(r#"workspace "x" { source sqlite "chat" { database "/a" query "SELECT 1" id "id" when "date" unit days what "body" } }"#).is_err());
 }

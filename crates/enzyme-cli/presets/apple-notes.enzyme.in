@@ -20,6 +20,7 @@ WHERE n.Z_ENT = 12
     id "note_id"
     when "modified" unit s epoch "2001-01-01"
     what ["title", "body"]
+    filter "apple-notes-content-v1"
   }
 
   learn questions from source "notes"

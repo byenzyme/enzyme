@@ -110,7 +110,8 @@ fn apple_notes_preset_compiles_full_body_query_without_indexing() {
     );
     let receipt: serde_json::Value = serde_json::from_slice(&saved.stdout).unwrap();
     assert_eq!(receipt["inspection"]["rows"], 1);
-    assert!(home.join("configs/apple-notes.enzyme").exists());
+    let program = std::fs::read_to_string(home.join("configs/apple-notes.enzyme")).unwrap();
+    assert!(program.contains("filter \"apple-notes-content-v1\""));
     assert!(!home.join("workspaces/apple-notes/enzyme.db").exists());
 
     let scan = cli(&home)

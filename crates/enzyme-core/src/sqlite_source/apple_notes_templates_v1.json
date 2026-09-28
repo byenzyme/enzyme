@@ -1,0 +1,905 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about product development. It connects to user feedback\n        in that both reveal unmet needs. What's interesting is how patterns emerge\n        across different conversations. This makes me wonder if we're asking the\n        right questions. Key insight: listen more, assume less. Need to explore\n        user research methods more deeply."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about learning systems. It connects to memory formation\n        in that repetition strengthens pathways. What's interesting is the role\n        of context in retrieval. This makes me wonder about spaced repetition\n        effectiveness. Key insight: context matters as much as content. Need to\n        explore retrieval practice techniques."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about note-taking and thinking. Writing forces structure.\n        Vague thoughts become concrete when written down. This is different from\n        just thinking - writing creates accountability to coherence. What's interesting\n        is how this relates to tools. The catalyst questions work because they force\n        synthesis. Key insight: tools that force articulation are more valuable than\n        tools that just store."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about decision-making and intuition. Sometimes the best\n        decisions come from gut feelings, but those feelings are actually pattern\n        recognition from experience. What's interesting is how we rationalize afterward.\n        This makes me wonder about the role of deliberate practice in improving\n        intuition. Key insight: intuition needs data to work with."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about creativity and constraints. Unlimited freedom can be\n        paralyzing. Constraints force problem-solving and innovation. What's interesting\n        is how the best creative work often comes from tight boundaries. This connects\n        to product design - the best products do one thing really well. Key insight:\n        embrace constraints as creative fuel."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about communication and shared understanding. We assume others\n        see what we see, but everyone has different mental models. What's interesting\n        is how much miscommunication comes from unexamined assumptions. This makes me\n        wonder about techniques for building shared context. Key insight: make the\n        invisible visible through explicit articulation."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about systems and emergence. Small changes can have unexpected\n        large effects. What's interesting is how second-order effects are often more\n        important than first-order ones. This connects to organizational change - you\n        can't just change one thing. Key insight: think in systems, not isolated\n        components."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about feedback loops and growth. The best learning happens\n        with tight, immediate feedback. What's interesting is how delayed feedback\n        loses effectiveness. This makes me wonder about how to design better feedback\n        mechanisms. Key insight: reduce the time between action and consequence."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about attention and focus. We underestimate how much context\n        switching costs. What's interesting is that it's not the time spent switching,\n        it's the cognitive load of rebuilding context. This connects to deep work -\n        long uninterrupted blocks are exponentially more valuable. Key insight:\n        protect long blocks of focused time."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about writing and clarity of thought. Writing reveals fuzzy\n        thinking. When you can't explain something clearly, you don't understand it\n        yet. What's interesting is how teaching forces this clarity. This makes me\n        wonder about using writing as a thinking tool, not just communication. Key\n        insight: write to think, not just to communicate."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about tools and behavior change. Tools encode assumptions\n        about how work should be done. What's interesting is how the right tool can\n        make good behavior automatic. This connects to habit formation - environment\n        shapes behavior more than willpower. Key insight: design environments that\n        make the right thing easy."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about knowledge and application. Knowing something intellectually\n        is different from embodying it. What's interesting is how repetition and practice\n        turn knowledge into skill. This makes me wonder about the gap between understanding\n        and doing. Key insight: practice closes the knowing-doing gap."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about complexity and simplicity. The goal isn't to eliminate\n        complexity, it's to manage it. What's interesting is how good abstraction hides\n        complexity without losing power. This connects to API design - the best interfaces\n        are simple on the surface. Key insight: simplicity on the outside requires\n        complexity inside."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about narrative and meaning-making. We're storytelling machines.\n        Raw data becomes meaningful when woven into narrative. What's interesting is how\n        the same events can tell different stories depending on framing. This makes me\n        wonder about the stories we tell ourselves. Key insight: change the narrative,\n        change the meaning."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about collaboration and trust. The best teams have high trust\n        and low ego. What's interesting is how psychological safety enables experimentation.\n        This connects to innovation - you need space to fail safely. Key insight: trust\n        is the foundation for everything else."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about time and energy management. Productivity isn't about\n        doing more, it's about doing the right things. What's interesting is how energy\n        levels vary throughout the day. This makes me wonder about matching task types\n        to energy states. Key insight: protect peak energy for hardest problems."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about questions and discovery. The quality of questions determines\n        the quality of answers. What's interesting is how better questions open new\n        territory. This connects to research - asking the right question is harder than\n        finding answers. Key insight: spend more time on the question."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about change and resistance. People don't resist change itself,\n        they resist loss. What's interesting is how framing change in terms of gains\n        reduces resistance. This makes me wonder about change management strategies.\n        Key insight: honor what's being left behind."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about patterns and recognition. Expertise is pattern recognition\n        across many examples. What's interesting is how patterns become invisible once\n        internalized. This connects to teaching - experts struggle to articulate what\n        they know. Key insight: make tacit knowledge explicit through deliberate\n        reflection."
+    },
+    {
+      "class": "meaningful",
+      "kind": "reflective_thinking",
+      "text": "Been thinking about balance and trade-offs. There's no such thing as a free\n        lunch. Every decision involves trade-offs. What's interesting is how we often\n        hide trade-offs by not making them explicit. This makes me wonder about decision\n        frameworks that surface trade-offs clearly. Key insight: explicit trade-offs\n        lead to better decisions."
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Talked with Sarah about enzyme development. Main points:\n        - The catalyst generation feels like it surfaces blind spots\n        - Need better visual design for the question interface\n        - Integration with Obsidian is critical for adoption\n        Takeaway: Focus on integration first, polish later. Questions to explore:\n        What makes a good catalyst? How do we measure catalyst quality?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Meeting with the product team about user onboarding. Key insights:\n        - Users don't understand the value prop in first session\n        - Demo vaults help but need to be more personal\n        - The aha moment comes when they see their own notes synthesized\n        Takeaway: Get users to their own content faster. Questions: How do we\n        bootstrap the first experience? What's the minimum viable vault?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Conversation with Alex about knowledge management systems. Interesting points:\n        - Most tools optimize for capture, not retrieval\n        - The problem isn't storage, it's surfacing the right thing at the right time\n        - Context-aware retrieval is the unsolved problem\n        Takeaway: Focus on intelligent retrieval, not just better organization. Questions:\n        How do we build context awareness? What signals indicate relevance?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Discussion with the design team about interface complexity. Key points:\n        - Power users want customization, new users need simplicity\n        - Progressive disclosure solves this tension\n        - The default experience should be opinionated\n        Takeaway: Start opinionated, allow escape hatches. Questions: What are the\n        right defaults? When do we expose advanced options?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Brainstorm session about catalyst types. Interesting observations:\n        - Synthesis questions work best for scattered notes\n        - Temporal questions help with long-running projects\n        - Tension questions surface contradictions\n        Takeaway: Different catalyst types for different content patterns. Questions:\n        How do we detect which type to use? Can we combine types?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Check-in with Jordan about embedding strategy. Key insights:\n        - Local embeddings are fast enough for most users\n        - Cloud makes sense for initial indexing only\n        - The index needs to be incrementally updatable\n        Takeaway: Hybrid approach - cloud for bulk, local for incremental. Questions:\n        How do we handle model updates? What's the migration path?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Workshop on user research findings. Main patterns:\n        - Users struggle with the blank page problem\n        - Catalysts help but need better triggering\n        - The value becomes clear after 2-3 weeks of use\n        Takeaway: Reduce time to value, improve triggering. Questions: What events\n        should trigger catalysts? How do we communicate long-term value?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Strategy session about Apple Notes integration. Key points:\n        - Apple Notes users capture everything - lots of noise\n        - Need intelligent filtering to find signal\n        - The value is in connecting Apple Notes to Obsidian\n        Takeaway: Build the bridge between capture and synthesis. Questions: How do\n        we classify content quality? What's the filtering strategy?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Debrief with beta users about catalyst experience. Insights:\n        - Catalysts feel like having a conversation with your past self\n        - The questions are better when they're specific\n        - Users want to respond inline and save responses\n        Takeaway: Make catalysts more conversational and actionable. Questions: How\n        do we capture responses? Should they feed back into the system?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Retrospective on last sprint. Key learnings:\n        - We shipped too much complexity at once\n        - Need better feature flagging for gradual rollout\n        - User feedback is more valuable than internal assumptions\n        Takeaway: Ship smaller, learn faster. Questions: What's the smallest testable\n        increment? How do we structure experiments?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Sync with marketing about messaging. Important points:\n        - \"Second brain\" is overused and unclear\n        - \"Thinking partner\" resonates better\n        - The focus should be on synthesis, not storage\n        Takeaway: Refine positioning around synthesis and insight. Questions: What\n        stories demonstrate the value? Who are the best early adopters?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Session with Emily about chunk strategy. Key insights:\n        - Sentence-level chunks are too granular\n        - Paragraph-level works for prose, but not lists\n        - Need adaptive chunking based on content structure\n        Takeaway: Content-aware chunking improves relevance. Questions: How do we\n        detect content structure? What heuristics work best?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Planning meeting about Q2 roadmap. Priorities:\n        - Finish Apple Notes integration\n        - Improve catalyst quality and triggering\n        - Build collaboration features for teams\n        Takeaway: Integration first, then collaboration. Questions: What does\n        collaboration look like? Is it shared vaults or shared catalysts?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "User interview with David about his workflow. Observations:\n        - He uses Apple Notes for quick capture during meetings\n        - Everything flows to Obsidian for synthesis later\n        - The gap is connecting capture to review\n        Takeaway: Reduce friction in capture-to-synthesis pipeline. Questions: How\n        do we automate the flow? What triggers the review step?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Conversation about technical architecture with the team. Key points:\n        - Python migration is paying off in speed and maintainability\n        - Need better separation between indexing and querying\n        - Local-first is the right architecture choice\n        Takeaway: Continue investing in Python stack and local-first. Questions:\n        How do we handle sync for teams? What's the cloud role?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Review of competitor landscape with the team. Interesting patterns:\n        - Everyone is building AI features, few focus on synthesis\n        - Most tools optimize for individuals, not thinking\n        - The best tools disappear into the workflow\n        Takeaway: Double down on synthesis and invisibility. Questions: What makes\n        synthesis feel magical? How do we reduce tool overhead?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Pair programming session with Taylor on classifier. Learnings:\n        - Template-based classification is simpler than ML\n        - KNN gives us explainability through nearest neighbors\n        - The template quality matters more than the algorithm\n        Takeaway: Focus on template quality, keep algorithm simple. Questions: How\n        many templates do we need? How do we validate accuracy?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Design critique about the catalyst UI. Feedback:\n        - Too much text overwhelms users\n        - Progressive disclosure would help\n        - Visual hierarchy needs work\n        Takeaway: Simplify, show less by default. Questions: What's the minimal\n        useful presentation? What details can be hidden?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Discussion about error handling and edge cases. Key points:\n        - Silent failures are worse than loud errors\n        - Need better logging and diagnostics\n        - Users should always know what's happening\n        Takeaway: Explicit error states, better transparency. Questions: What level\n        of detail is helpful? How do we surface errors without alarming users?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "meeting_insights",
+      "text": "Exploration of future features with early adopters. Ideas:\n        - Catalyst threads - follow-up questions based on responses\n        - Social features - share interesting catalysts\n        - Temporal view - see how thinking evolves over time\n        Takeaway: Lots of interesting directions, need to prioritize. Questions:\n        What has the highest impact? What aligns with core value prop?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Notes on effective learning strategies. Spaced repetition works because\n        it exploits the spacing effect - memory consolidation improves with time\n        between exposures. The key components are timing and active recall. This\n        is similar to how athletes train - distributed practice beats massed practice.\n        The distinction is that spaced repetition focuses on timing intervals, while\n        interleaving focuses on mixing content types. Applications: flashcard systems,\n        curriculum design. Limitations: requires discipline and long-term commitment."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring the concept of product-market fit. PMF happens when you've built\n        something people want badly enough to tell others. The key indicators are\n        organic growth, high retention, and word-of-mouth. This is similar to the\n        concept of resonance in physics - you're matching a natural frequency. The\n        distinction is PMF is about matching market need, not just solving a problem.\n        Common mistake: thinking you have PMF because some users love it, when the\n        market is too small. Key question: is the market pulling the product forward?"
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding attention mechanisms in transformers. Attention allows the\n        model to focus on relevant parts of the input when generating each output token.\n        The key innovation is the self-attention mechanism that computes relationships\n        between all positions. This works by creating query, key, and value matrices\n        through learned transformations. Unlike RNNs which process sequentially,\n        attention enables parallelization. Applications: language models, translation,\n        vision transformers. The limitation is quadratic complexity in sequence length."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about systems thinking and feedback loops. Systems have emergent\n        properties that can't be understood by analyzing parts in isolation. Feedback\n        loops are either reinforcing (amplifying) or balancing (stabilizing). The key\n        insight is that structure generates behavior - changing behavior requires\n        changing structure. This is similar to how ecosystems maintain equilibrium\n        through multiple feedback loops. Applications: organizational design, product\n        strategy, complex problem solving."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring how memory works and why we forget. Memory has three stages:\n        encoding, storage, retrieval. Forgetting mostly happens during retrieval -\n        the information is there but inaccessible. The key insight is that memory is\n        context-dependent - we remember better in similar contexts to encoding. This\n        explains why cramming doesn't work - you're encoding without strong retrieval\n        cues. Techniques that work: elaborative rehearsal, creating vivid associations,\n        testing yourself regularly."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding the difference between tactics and strategy. Strategy is\n        about choosing which battles to fight. Tactics are about how to fight them.\n        The key distinction is that strategy involves trade-offs - saying no to some\n        opportunities. Good strategy has a diagnosis, a guiding policy, and coherent\n        actions. This differs from goals or vision - strategy is about the how, not\n        just the what. Common mistake: confusing a goal (we want to grow) with strategy\n        (here's how we'll compete differently)."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about semantic search and embeddings. Embeddings are dense vector\n        representations that capture meaning. Similar concepts are close in vector\n        space. The key innovation is that you can search by semantic similarity, not\n        just keyword matching. This works by encoding text into vectors using neural\n        networks trained on massive text corpora. Applications: search, recommendation,\n        clustering. Limitation: embeddings collapse nuance and can encode biases from\n        training data."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring the concept of flow state. Flow happens when challenge matches\n        skill level and attention is fully absorbed. The key conditions are clear goals,\n        immediate feedback, and the right balance of difficulty. This is similar to\n        the concept of deep work - sustained focus on cognitively demanding tasks.\n        The distinction is flow is about the experience, deep work is about the practice.\n        Creating flow: eliminate distractions, work on challenging but achievable tasks,\n        build clear milestones."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding how habits form and change. Habits are behavioral loops with\n        a cue, routine, and reward. The key insight from neuroscience is that habits\n        are encoded in the basal ganglia and run automatically. To change a habit,\n        keep the cue and reward but change the routine. This differs from willpower-based\n        approaches - habits are about automaticity, not self-control. Applications:\n        building good habits, breaking bad ones, designing behavior change products."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about information architecture and mental models. Good IA matches\n        users' mental models of how information should be organized. The key principle\n        is that organization should support findability and understanding. This involves\n        creating clear hierarchies, meaningful labels, and appropriate groupings. Similar\n        to how libraries use classification systems, but digital IA needs to support\n        multiple access paths. Techniques: card sorting, tree testing, navigation\n        analysis."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring the idea of leverage in work and business. Leverage is about\n        maximizing output per unit of input. The key types are labor (people working\n        for you), capital (money working for you), and code/media (products with no\n        marginal cost). This connects to the concept of scalability - high leverage\n        means you can grow impact without proportional effort. The highest leverage\n        comes from creating systems and tools that others can use."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding the difference between complicated and complex systems.\n        Complicated systems have many parts but are predictable (like a car). Complex\n        systems have emergent behavior and are unpredictable (like weather). The key\n        distinction is that complex systems can't be fully understood through analysis.\n        This matters for management - complicated problems need expertise, complex\n        problems need experimentation. Applications: organizational design, product\n        development in uncertain domains."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about the psychology of decision-making. We think we're rational\n        but actually use heuristics and are prone to biases. The key insight is that\n        System 1 (fast, automatic) usually runs the show, not System 2 (slow, deliberate).\n        Common biases: confirmation bias, availability bias, anchoring, sunk cost\n        fallacy. This connects to behavioral economics - small changes in choice\n        architecture can have large effects. Applications: product design, persuasion,\n        improving your own decisions."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring writing as a thinking tool. Writing forces you to linearize and\n        structure vague thoughts. The key benefit is that fuzzy thinking becomes visible\n        when you try to write it. This is different from speaking - writing allows\n        revision and creates a permanent artifact. The best approach is to write first\n        drafts quickly (thinking mode) then revise carefully (editing mode). Applications:\n        clarifying your thinking, learning new concepts, developing arguments."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding how neural networks learn through backpropagation. The network\n        makes predictions, computes error, then adjusts weights to reduce error. The\n        key innovation is automatic differentiation - computing gradients efficiently\n        through the chain rule. This works by propagating error backwards from output\n        to input. The learning rate controls how big each weight update is. Applications:\n        training any neural network. Limitations: can get stuck in local minima,\n        requires lots of data and compute."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about the principle of least surprise in design. Interfaces should\n        behave the way users expect based on their prior experience. The key insight\n        is that familiarity reduces cognitive load. This doesn't mean copying others -\n        it means building on established patterns when possible. When you must break\n        conventions, the benefit should be worth the learning cost. Applications: UI\n        design, API design, any interface between systems and humans."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring the concept of technical debt. Taking shortcuts now that will\n        cost more to fix later. The key insight is that it's not always bad - sometimes\n        speed matters more than perfection. But debt compounds - it gets exponentially\n        harder to change things. This is similar to financial debt - small amounts\n        are manageable, too much becomes crushing. The solution is to pay down debt\n        incrementally and avoid accruing new debt. Applications: code quality,\n        architecture decisions, process debt."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Understanding the difference between correlation and causation. Two things\n        can move together without one causing the other. The key challenge is that\n        correlation is easy to observe, causation requires controlled experiments.\n        Confounding variables are the main reason correlation doesn't imply causation.\n        This matters for decision-making - acting on correlations without understanding\n        causation leads to wasted effort. Techniques for inferring causation: RCTs,\n        natural experiments, causal inference methods."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Learning about the power of defaults and choice architecture. Most people\n        stick with defaults, so defaults shape outcomes dramatically. The key insight\n        from behavioral economics is that small changes in how choices are presented\n        can have large effects. This is different from persuasion - you're not changing\n        preferences, just making the preferred option easier. Applications: product\n        design, policy, improving your own decisions through environmental design."
+    },
+    {
+      "class": "meaningful",
+      "kind": "learning_exploration",
+      "text": "Exploring the concept of information diet. Just as food affects physical\n        health, information affects mental health. The key insight is that we have\n        limited attention and the information we consume shapes our thinking. Low-quality\n        information (outrage, gossip, noise) crowds out high-quality information\n        (books, thoughtful analysis). This connects to the attention economy - platforms\n        optimize for engagement, not value. The solution is curating inputs deliberately."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "So I've been thinking about this problem with how we organize information\n        and it strikes me that most tools are optimized for capture but not for retrieval\n        and synthesis. Like we can save everything but then we never find it again when\n        we need it. And the problem isn't really about search because even when search\n        works you have to know what you're looking for. The deeper problem is about\n        surfacing things you didn't know you needed to remember in this moment. That's\n        what makes it interesting because it's not just about better search it's about\n        understanding context and relevance in a much deeper way. So the question becomes\n        how do you build a system that understands what you're working on right now and\n        can surface relevant things from your past even when you don't explicitly search\n        for them. That's the hard problem and I think it requires thinking about notes\n        not as isolated documents but as part of a larger connected knowledge graph where\n        relationships matter as much as content. Anyway that's where my head is at with\n        this."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Had an interesting realization today about product development and user needs.\n        So often we build what we think users want based on what they tell us in interviews\n        and surveys. But there's this huge gap between what people say they want and what\n        they actually need. Like they'll say they want more features but what they really\n        need is for the existing features to work better or be easier to use. And the\n        challenge is that users don't always know what they need because they're working\n        within their current mental model. So when you ask them what they want they give\n        you incremental improvements to what exists not breakthrough innovations. That's\n        why observing behavior is so much more valuable than asking questions. Watch what\n        people actually do see where they struggle see what workarounds they create. That's\n        where the real insights are. And then you have to synthesize across multiple users\n        to find the patterns that point to underlying needs not just surface wants. It's\n        hard work but that's what separates good products from mediocre ones."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Thinking out loud about this catalyst generation idea. The core insight is\n        that good questions are more valuable than good answers because questions open\n        up new territory while answers close it down. And when you're working with a large\n        collection of notes the problem isn't finding information it's knowing what\n        questions to ask of that information. So if you could generate good questions\n        automatically based on patterns in your notes that would be really valuable. Like\n        it could notice that you have scattered notes about a topic and ask you to synthesize\n        them. Or it could notice contradictions between different notes and ask you to\n        resolve them. Or it could see temporal patterns and ask about how your thinking\n        has evolved. The key is that these questions should feel like they're coming from\n        someone who really understands your work not generic prompts. And they should\n        surface blind spots things you didn't realize were there. That's what makes them\n        catalysts they catalyze new thinking rather than just organizing existing thoughts.\n        The challenge is generating questions that are specific enough to be useful but\n        general enough to allow for creative exploration."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Been reflecting on what makes a tool feel like a thinking partner versus just\n        a utility. I think it comes down to whether the tool participates in the thinking\n        process or just facilitates it. Like a calculator facilitates arithmetic but\n        doesn't participate in mathematical thinking. But a tool that can suggest connections\n        or generate questions based on your work that's participating. And the difference\n        is huge in terms of how it feels to use. Thinking partners reduce cognitive load\n        in a different way they don't just make tasks easier they expand your thinking\n        capacity by bringing in perspectives you wouldn't have had alone. That's why the\n        best tools don't feel like tools they feel like collaborators. The challenge is\n        building that feeling without making the tool feel intrusive or like it's trying\n        to think for you instead of with you. It's a delicate balance. The tool should\n        feel like it's on your team working toward your goals not like it has its own\n        agenda. And it should enhance your thinking not replace it."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Interesting conversation earlier about the difference between information and\n        knowledge. Information is just data with context but knowledge is information\n        that's been integrated into your understanding connected to other things you know\n        and available for use. And the gap between the two is where a lot of knowledge\n        management tools fall short. They're great at storing information but they don't\n        help with the integration step. That requires active processing making connections\n        synthesizing across sources applying to new situations. Which makes me think about\n        what it would mean to build a tool that supports that integration process. Not\n        just storing notes but helping you connect them question them apply them. The\n        catalyst idea fits here because catalysts prompt that active processing. But there's\n        probably more to it than just questions. Maybe it's about making the integration\n        process more visible and easier to engage with. Like showing you potential connections\n        and letting you strengthen or dismiss them. Or prompting you to apply ideas from\n        one domain to another. The goal is turning information into knowledge through\n        supported reflection."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "So I've been thinking about chunking strategies for embeddings and why it matters.\n        The problem is that notes aren't uniform in structure. Some are prose some are lists\n        some are a mix. And if you chunk everything the same way you lose important semantic\n        boundaries. Like if you chunk mid-paragraph you break up ideas that belong together.\n        If you chunk mid-list you separate items that should be grouped. So you need\n        content-aware chunking that respects the structure of the note. For prose that\n        probably means paragraph-level chunks. For lists maybe chunk every 5-10 items\n        depending on how related they are. For mixed content you need to detect the\n        boundaries and chunk accordingly. The challenge is doing this automatically without\n        requiring manual markup. Maybe you can use whitespace and formatting as signals.\n        Or look at semantic similarity between adjacent chunks and merge if they're very\n        similar. Anyway the point is that chunking strategy affects retrieval quality so\n        it's worth getting right even if it adds complexity."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Had a realization about the relationship between tools and behavior change.\n        Tools encode assumptions about how work should be done. And when you adopt a tool\n        you're also adopting those assumptions often without realizing it. Like email\n        assumes that communication should be asynchronous and documented. Slack assumes\n        it should be synchronous and ephemeral. And those assumptions shape how teams\n        communicate in subtle but important ways. So when you're designing tools you're\n        not just solving functional problems you're shaping behavior and culture. Which\n        means you have a responsibility to think carefully about what assumptions you're\n        encoding. Are you making good behavior easy and bad behavior hard? Are you creating\n        affordances for the outcomes you want? Or are you accidentally making dysfunctional\n        patterns more convenient? This matters because tools have second-order effects\n        that are often more important than the first-order problem they solve. The best\n        tools make good practices feel natural and easy not like extra work."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Thinking about the problem of context switching and how expensive it is cognitively.\n        When you switch between tasks you don't just lose the time spent switching you\n        lose the mental context you built up in the previous task. And rebuilding that\n        context takes way longer than people think. That's why deep work is so valuable\n        because you can build up really rich context and hold it in working memory for\n        hours. Every interruption destroys that context and forces you to rebuild from\n        scratch. Which makes me think about how tools can help reduce context switching\n        costs. One way is batching similar tasks so you're not constantly switching modes.\n        Another is making it easier to capture context when you do have to switch so\n        rebuilding is faster. Or designing workflows that minimize the need for switching\n        in the first place. The key insight is that context is expensive to build and\n        fragile once built so protect it carefully. Structure your day to maximize long\n        uninterrupted blocks of time on your most important work."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Been exploring this idea of tools that think with you rather than for you.\n        AI is powerful but it's easy to become passive letting the AI do all the work.\n        That's fine for routine tasks but for creative or strategic work you want to\n        stay engaged. So the question is how do you design AI assistance that enhances\n        your thinking without replacing it. I think the key is keeping the human in the\n        loop at the right level of abstraction. Like the AI can do the heavy lifting of\n        searching through documents or generating initial ideas but you make the judgments\n        about what's relevant or promising. That keeps you engaged in the thinking while\n        offloading the tedious parts. Another approach is using AI to ask you questions\n        rather than give you answers. Questions activate your thinking in a way that\n        answers don't. So maybe the best AI tools are the ones that prompt reflection\n        and synthesis rather than trying to solve everything for you. They're thinking\n        partners not thinking replacements."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Reflecting on what makes certain products feel magical. I think it's when they\n        do something that seems impossible or at least much harder than it actually is.\n        Like the first time you used Google Maps navigation and it just worked perfectly.\n        Or when autocomplete suggests exactly what you were going to type. The technology\n        underneath might be complex but the experience is seamless. And that seamlessness\n        is what creates the magical feeling. It's like Arthur C Clarke said any sufficiently\n        advanced technology is indistinguishable from magic. But the magic isn't in the\n        technology itself it's in hiding the complexity and making the interaction feel\n        natural. Which is really hard because it requires deep understanding of the user's\n        mental model and careful design to match it. When there's friction or confusion\n        the magic breaks. So creating magical experiences is about ruthless simplification\n        and obsessive attention to interaction details. Make the complex feel simple and\n        the powerful feel accessible. That's the goal."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Thinking about how writing clarifies thought. There's something about the act\n        of writing that forces you to be more precise than when you're just thinking.\n        Vague ideas that seem coherent in your head fall apart when you try to write\n        them down. And that's actually really valuable because it reveals where your\n        thinking is fuzzy. It's like debugging but for ideas instead of code. The process\n        of writing forces you to articulate connections make transitions explicit resolve\n        contradictions. And through that process your thinking becomes clearer. That's\n        why writing is such a powerful learning tool you learn by trying to explain. And\n        it's why good writing is hard because it requires clear thinking first. You can't\n        write clearly about something you don't understand clearly. So when I'm stuck on\n        a problem I often try writing about it even if I don't intend to share what I\n        write. The act of writing surfaces the gaps in my understanding and forces me to\n        fill them in. It's a thinking tool not just a communication tool."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Had an interesting thought about the difference between organizing and synthesizing.\n        Organizing is about putting things in the right places creating categories and\n        hierarchies. Synthesizing is about creating something new by combining existing\n        pieces. And most knowledge management tools focus on organizing but the real value\n        is in synthesis. Like you can have a perfectly organized set of notes but if you\n        never synthesize across them you're not creating new understanding. Synthesis\n        requires actively looking for connections seeing patterns questioning contradictions.\n        It's more cognitively demanding than organizing which is why people do less of it.\n        But that's where the breakthroughs happen. So the question is how do you build\n        tools that support synthesis not just organization. Maybe by surfacing potential\n        connections for you to evaluate. Or by asking synthesis questions that prompt\n        integration. Or by making it easy to create new documents that pull together\n        multiple sources. The key is reducing the friction for synthesis so it becomes\n        a regular practice not something you only do occasionally."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Exploring the concept of progressive disclosure in interface design. The idea\n        is that you show people just enough information to take the next action and hide\n        everything else until they need it. This prevents overwhelming users with complexity\n        upfront. Start simple and let them discover more advanced features as they need\n        them. It's similar to how games work you learn basic mechanics first then gradually\n        unlock more complex systems. The challenge is deciding what to show by default\n        and what to hide. You need good defaults that work for most people most of the\n        time. And you need clear pathways to access the advanced stuff when needed. The\n        alternative is showing everything upfront which might seem more transparent but\n        actually makes the tool harder to learn and use. Progressive disclosure is about\n        matching the interface complexity to the user's current needs and level of expertise.\n        As they grow the interface can grow with them."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Been thinking about feedback loops and how they shape behavior. When feedback\n        is immediate and clear you can learn quickly and adjust course. When it's delayed\n        or ambiguous you keep repeating mistakes because you don't know what's working.\n        This applies to everything from learning new skills to product development to\n        personal goals. The tighter the feedback loop the faster you can improve. Which\n        makes me think about how to design better feedback loops into systems. Like how\n        can we make the consequences of decisions more visible and immediate? How can we\n        help people see cause and effect more clearly? Sometimes it's about instrumentation\n        measuring things you couldn't see before. Sometimes it's about visualization making\n        patterns visible. Sometimes it's about social feedback getting input from others.\n        But the core principle is the same reduce the time between action and consequence\n        so learning can happen faster. That's how you accelerate improvement in any domain."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Reflecting on the idea that constraints can be liberating rather than limiting.\n        When you have unlimited options decision-making becomes paralyzing. But when you\n        have clear constraints you can focus on solving the problem within those boundaries.\n        And often the constraints force creative solutions you wouldn't have found otherwise.\n        Like Twitter's character limit forced people to be more concise and creative with\n        language. Or how haiku's rigid structure produces beautiful poetry. The constraints\n        aren't the enemy they're the enabler. They channel creative energy in productive\n        directions. This applies to product design too. It's tempting to want to build\n        everything to serve everyone. But the best products are opinionated they say no\n        to most things and do a few things really well. Those choices are constraints\n        and they're what make the product great. So embrace constraints don't fight them.\n        Use them as creative fuel and as a forcing function for better decisions."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Thinking about the relationship between knowledge and action. You can know\n        something intellectually without it affecting your behavior. Like you might know\n        that exercise is good for you but still not exercise. The gap between knowing\n        and doing is huge. And I think it's because knowledge that isn't connected to\n        action is abstract and theoretical. To close the gap you need to connect knowledge\n        to specific situations and practices. Not just what to do but when and how. Not\n        just principles but implementations. That's why examples and case studies are so\n        valuable they make abstract knowledge concrete. And why practice is essential\n        for real learning. You have to do the thing repeatedly until it becomes automatic.\n        Knowledge alone isn't enough you need to encode it into behavior through deliberate\n        practice. So when you're learning something new don't just consume information\n        actively apply it. Create opportunities to practice. Reflect on what worked and\n        what didn't. That's how knowledge becomes skill."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Been exploring the psychology of habit formation and behavior change. Habits\n        are powerful because they run automatically without requiring willpower or conscious\n        decision-making. The challenge is that changing habits requires overriding that\n        automaticity which is really hard. The research shows that habits have a loop\n        structure cue routine reward. To change a habit you need to keep the cue and\n        reward but change the routine. That's easier than trying to eliminate the habit\n        entirely. You're working with the existing neural pathways rather than trying to\n        create entirely new ones. Another insight is that environment matters more than\n        willpower. If you design your environment to make good behaviors easy and bad\n        behaviors hard you don't have to rely on self-control. Like if you want to read\n        more put books in visible places and your phone in a drawer. The environment\n        shapes behavior automatically. So think about behavior change as environment\n        design not just personal discipline."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Reflecting on what makes collaboration effective. The best collaborations happen\n        when there's high trust low ego and clear shared goals. Trust means you can be\n        honest and vulnerable without fear of judgment. Low ego means you can focus on\n        the work not on proving you're right or protecting your status. Shared goals means\n        everyone is pulling in the same direction. Without these foundations collaboration\n        becomes politicking and performance rather than productive work. And the challenge\n        is that these things are hard to build especially in new teams. They require\n        psychological safety which takes time to develop. But there are practices that\n        help like retrospectives where you reflect together on what's working and what\n        isn't. Or working agreements where you make expectations explicit. Or modeling\n        vulnerability as a leader to show that it's safe. The point is that great collaboration\n        doesn't happen by accident it requires intentional culture building. And it's\n        worth the investment because the payoff in team performance is massive."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Thinking about the future of human-AI collaboration. Right now most AI tools\n        are either fully autonomous or purely assistive. But I think the most interesting\n        space is in between where human and AI work together each contributing their\n        strengths. Humans are good at judgment context understanding and creative leaps.\n        AI is good at processing large amounts of information finding patterns and generating\n        variations. So imagine workflows where the AI does the first pass the human provides\n        direction the AI refines and so on iteratively. That's more powerful than either\n        working alone. The challenge is designing interfaces that make this back-and-forth\n        natural and fluid. You want it to feel like collaboration not like controlling\n        a tool. And you want the handoffs between human and AI to be seamless not\n        friction-filled. This is still early days but I think this model of human-AI\n        collaboration will become dominant. It combines the best of both without the\n        downsides of full automation or manual work."
+    },
+    {
+      "class": "meaningful",
+      "kind": "transcription",
+      "text": "Been thinking about the importance of clear writing in product development.\n        When you write clearly about what you're building and why it forces you to think\n        clearly. Fuzzy writing reveals fuzzy thinking. And fuzzy thinking leads to confused\n        products. So one of the best investments is writing good specifications documents\n        proposals and explanations. Not to create bureaucracy but to clarify thinking.\n        The act of writing forces you to make decisions be specific about trade-offs and\n        anticipate problems. And the artifact you create becomes a shared understanding\n        that the team can reference. It aligns everyone around the same vision. Whereas\n        if you skip the writing and just start building you often end up with different\n        people having different implicit assumptions about what you're making. Then you\n        waste time building the wrong thing or having to redo work. So invest in writing\n        even though it feels slow upfront. It actually speeds up execution by ensuring\n        everyone understands the destination."
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "To do today:\n        - Call dentist to schedule checkup\n        - Buy milk and eggs from grocery store\n        - Email Sarah about meeting schedule\n        - Fix garage door that's been squeaking\n        - Return Amazon package at UPS\n        - Schedule oil change for car"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Tasks for this week:\n        - Finish project report by Friday\n        - Review budget spreadsheet\n        - Send invoices to clients\n        - Update website content\n        - Clean out garage\n        - Book flight for conference"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Errands to run:\n        - Drop off dry cleaning\n        - Pick up prescription at pharmacy\n        - Get stamps at post office\n        - Return library books\n        - Buy birthday card for Mom\n        - Get gas for car"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Work tasks:\n        - Review pull request from John\n        - Update documentation\n        - Reply to support tickets\n        - Prepare slides for presentation\n        - Schedule team meeting\n        - Submit expense report"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Weekend to-do:\n        - Mow lawn\n        - Clean bathroom\n        - Organize closet\n        - Change air filter\n        - Water plants\n        - Take out recycling"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Shopping list:\n        - Paper towels\n        - Laundry detergent\n        - Light bulbs\n        - Batteries\n        - Trash bags\n        - Dish soap"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Calls to make:\n        - Call insurance company\n        - Schedule haircut\n        - Contact plumber about leak\n        - Call credit card company\n        - Schedule vet appointment\n        - Cancel gym membership"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Things to remember:\n        - Pay electric bill\n        - Submit timesheet\n        - Renew driver's license\n        - Update password for bank\n        - Cancel subscription\n        - Order new checks"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Daily checklist:\n        - Take vitamins\n        - Check email\n        - Water plants\n        - Feed cat\n        - Lock doors\n        - Set alarm"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Projects:\n        - Paint bedroom\n        - Fix fence\n        - Install new light fixture\n        - Organize garage\n        - Clean gutters\n        - Patch drywall"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Admin tasks:\n        - File taxes\n        - Update insurance\n        - Review 401k\n        - Schedule dentist appointment\n        - Renew car registration\n        - Update emergency contacts"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Home maintenance:\n        - Replace furnace filter\n        - Test smoke detectors\n        - Clean dryer vent\n        - Check water heater\n        - Inspect roof\n        - Service HVAC"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Work week:\n        - Monday: team standup\n        - Tuesday: client call\n        - Wednesday: code review\n        - Thursday: sprint planning\n        - Friday: demo day\n        - Weekend: catchup"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Quick tasks:\n        - Reply to 3 emails\n        - Update calendar\n        - Print documents\n        - Charge devices\n        - Empty trash\n        - File papers"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "To buy:\n        - New phone case\n        - Running shoes\n        - Office chair\n        - Desk lamp\n        - Notebook\n        - Pens"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Appointments:\n        - Doctor 2pm Thursday\n        - Haircut 10am Saturday\n        - Car service 9am Monday\n        - Dentist 3pm next week\n        - Eye exam in 2 weeks\n        - Physical therapy Friday"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Reminders:\n        - Birthday party Saturday\n        - Conference call at 4pm\n        - Deadline Wednesday\n        - Payment due Friday\n        - Meeting tomorrow morning\n        - Event next month"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Daily routine:\n        - Wake up 6am\n        - Exercise 30 minutes\n        - Shower and breakfast\n        - Check messages\n        - Start work 9am\n        - Lunch at noon"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Packing list:\n        - Clothes for 3 days\n        - Toiletries\n        - Phone charger\n        - Laptop\n        - Documents\n        - Snacks"
+    },
+    {
+      "class": "mundane",
+      "kind": "todo_list",
+      "text": "Questions for doctor:\n        - Medicine side effects\n        - Test results\n        - Referral to specialist\n        - Prescription refill\n        - Diet recommendations\n        - Exercise advice"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Groceries:\n        Milk\n        Bread\n        Eggs\n        Butter\n        Cheese\n        Yogurt\n        Chicken\n        Ground beef\n        Pasta\n        Rice\n        Tomatoes\n        Lettuce\n        Apples\n        Bananas\n        Orange juice"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Costco run:\n        Paper towels (bulk)\n        Toilet paper (bulk)\n        Water bottles\n        Coffee\n        Granola bars\n        Mixed nuts\n        Frozen pizza\n        Chicken breast (family pack)\n        Ground turkey\n        Spinach (organic)"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Farmers market:\n        Fresh tomatoes\n        Zucchini\n        Bell peppers\n        Fresh basil\n        Strawberries\n        Blueberries\n        Local honey\n        Fresh bread\n        Farm eggs"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Target:\n        Shampoo\n        Conditioner\n        Body wash\n        Toothpaste\n        Deodorant\n        Razors\n        Hand soap\n        Cleaning spray\n        Sponges"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Whole Foods:\n        Organic chicken\n        Almond milk\n        Quinoa\n        Kale\n        Avocados\n        Wild salmon\n        Greek yogurt\n        Hummus\n        Gluten-free bread"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Trader Joe's:\n        Everything bagels\n        Cookie butter\n        Mandarin oranges\n        Frozen dumplings\n        Dark chocolate\n        Cauliflower rice\n        Organic eggs\n        Almond butter"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Asian market:\n        Rice noodles\n        Soy sauce\n        Sesame oil\n        Miso paste\n        Seaweed\n        Rice vinegar\n        Green onions\n        Ginger\n        Bok choy"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Pharmacy:\n        Allergy medicine\n        Pain reliever\n        Vitamins\n        Band-aids\n        Cough drops\n        Eye drops\n        First aid kit\n        Thermometer"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Pet store:\n        Dog food\n        Cat litter\n        Dog treats\n        Flea medication\n        Pet shampoo\n        Chew toys\n        Food bowls\n        Waste bags"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Hardware store:\n        Light bulbs (LED)\n        Air filters\n        Paint (white)\n        Paint brushes\n        Screws\n        Nails\n        Duct tape\n        Work gloves"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Office supplies:\n        Printer paper\n        Pens (black, blue)\n        Sticky notes\n        File folders\n        Staples\n        Paper clips\n        Highlighters\n        Notebooks"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Meal prep ingredients:\n        Chicken thighs\n        Broccoli\n        Sweet potatoes\n        Brown rice\n        Olive oil\n        Garlic\n        Onions\n        Bell peppers\n        Spices"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Breakfast items:\n        Oatmeal\n        Cereal\n        Milk\n        Orange juice\n        Bagels\n        Cream cheese\n        Coffee\n        English muffins"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Snacks:\n        Chips\n        Salsa\n        Crackers\n        Cheese sticks\n        Protein bars\n        Trail mix\n        Popcorn\n        Fruit cups"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Dinner tonight:\n        Salmon fillets\n        Asparagus\n        Lemon\n        Garlic\n        Olive oil\n        White wine\n        Fresh herbs\n        Bread"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Party supplies:\n        Plates (disposable)\n        Cups\n        Napkins\n        Utensils\n        Chips\n        Dip\n        Soda\n        Ice\n        Decorations"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Cleaning supplies:\n        All-purpose cleaner\n        Glass cleaner\n        Floor cleaner\n        Disinfecting wipes\n        Trash bags\n        Rubber gloves\n        Sponges\n        Paper towels"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Baking supplies:\n        Flour\n        Sugar\n        Baking powder\n        Vanilla extract\n        Chocolate chips\n        Butter\n        Eggs\n        Milk"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Drinks:\n        Coffee beans\n        Tea bags\n        Orange juice\n        Apple juice\n        Sparkling water\n        Sports drinks\n        Wine\n        Beer"
+    },
+    {
+      "class": "mundane",
+      "kind": "shopping_list",
+      "text": "Basics:\n        Bread\n        Milk\n        Eggs\n        Butter\n        Salt\n        Pepper\n        Oil\n        Sugar"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "WiFi password: TotallySecure2024!\n        Router admin: 192.168.1.1\n        Username: admin\n        Password: routerpass123"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Bank account info:\n        Checking: ****1234\n        Savings: ****5678\n        Routing: 123456789\n        Swift: BNKUS33"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Insurance:\n        Policy number: POL-987654321\n        Group: GRP-12345\n        Phone: 1-800-555-0123\n        Member ID: MEM123456"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Car info:\n        Make: Toyota\n        Model: Camry\n        Year: 2020\n        VIN: 1HGBH41JXMN109186\n        License: ABC123\n        Insurance: State Farm"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Loyalty programs:\n        Airlines: UA123456\n        Hotels: MAR987654\n        Rental car: HRZ123456\n        Rewards: REW654321"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Netflix: user@email.com / password123\n        Spotify: user@email.com / musicpass\n        Amazon: user@email.com / shoppingpass\n        Hulu: user@email.com / streampass"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Emergency contacts:\n        Mom: 555-0101\n        Dad: 555-0102\n        Sister: 555-0103\n        Doctor: 555-0104\n        Vet: 555-0105"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Work info:\n        Employee ID: EMP123456\n        Badge number: 98765\n        Ext: x4321\n        Email: user@company.com\n        VPN: vpn.company.com"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Measurements:\n        Height: 5'10\"\n        Weight: 170 lbs\n        Shirt: Medium\n        Pants: 32x32\n        Shoe: 10.5"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Home specs:\n        Square feet: 2000\n        Bedrooms: 3\n        Bathrooms: 2\n        Lot size: 0.25 acres\n        Year built: 1995"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Device info:\n        Phone: iPhone 14 Pro\n        IMEI: 123456789012345\n        Computer: MacBook Pro M2\n        Serial: C02XY1234567"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Subscriptions:\n        Netflix: $15.99/month\n        Spotify: $9.99/month\n        Amazon Prime: $139/year\n        NYTimes: $17/month\n        Gym: $50/month"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "License and IDs:\n        Driver's license: D1234567\n        Passport: 123456789\n        SSN: ***-**-1234\n        Tax ID: 12-3456789"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Utility accounts:\n        Electric: ACC123456\n        Gas: ACC789012\n        Water: ACC345678\n        Internet: ACC901234"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Frequent flyer:\n        United: UA1234567\n        Delta: DL9876543\n        American: AA5555555\n        Southwest: SW123456"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Medical:\n        Blood type: O+\n        Allergies: Penicillin\n        Medications: None\n        Doctor: Dr. Smith\n        Pharmacy: CVS Main St"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Pet info:\n        Name: Max\n        Breed: Golden Retriever\n        Age: 5 years\n        Vet: Dr. Johnson\n        Microchip: 123456789012345"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Storage units:\n        Unit number: 205\n        Access code: 1234#\n        Location: Main St Storage\n        Size: 10x10\n        Monthly: $125"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Gift card balances:\n        Amazon: $50.23\n        Starbucks: $15.00\n        Target: $37.50\n        Apple: $100.00"
+    },
+    {
+      "class": "mundane",
+      "kind": "reference_data",
+      "text": "Important dates:\n        Anniversary: June 15\n        Birthday: March 22\n        Renewal: Dec 31\n        Expiration: Aug 1"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Check this out later:\n        https://www.example.com/interesting-article\n        https://www.youtube.com/watch?v=abc123"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Quote: \"The only way to do great work is to love what you do\" - Anonymous"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Reminder: meeting moved to 3pm"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Phone number: 555-123-4567"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Address: 123 Main St, Anytown, USA 12345"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Tracking: 1Z999AA1234567890"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Confirmation: ABC123DEF"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Random idea: what if we tried blue instead of red?"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Note to self: follow up next week"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Link: www.example.com/important-link"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Code: XYZ789"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Price: $49.99"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Meeting ID: 123 456 789\n        Passcode: 987654"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Quick note: don't forget to check the settings"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Interesting: saw something about this on Twitter"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Maybe look into this: blockchain for supply chain"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Heard about: new restaurant downtown"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "Random: why is the sky blue?"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "FYI: office closed Monday"
+    },
+    {
+      "class": "mundane",
+      "kind": "brief_snippets",
+      "text": "BTW: Sarah mentioned the deadline changed"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Enzyme demo prep\n\n        Goal: Show how Enzyme helps with long-form writing by surfacing relevant\n        past thoughts. Why: This is the core value prop - synthesis over storage.\n\n        Tasks:\n        - Create sample vault with 50+ notes - needed to show trending entities\n        - Record screen demo - this will help with async communication\n        - Write demo script - depends on vault content being ready first\n        - Gather feedback from 3-5 users - validate that the demo resonates\n\n        Next steps: Start with vault creation this week. Open questions: How much\n        structure to show vs let emerge naturally? Should we show catalyst generation\n        live or pre-recorded?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Q2 roadmap planning\n\n        Goal: Ship Apple Notes integration and improve catalyst quality. Why: Apple\n        Notes expands our addressable users and better catalysts increase retention.\n\n        Key features:\n        - Apple Notes content extraction - technical complexity medium, high value\n        - Template-based classification - filters noise, ensures quality\n        - Catalyst generation improvements - based on user feedback from Q1\n        - Performance optimization - indexing is slow for large vaults\n\n        Trade-offs: Speed vs quality, breadth vs depth. Open questions: Do we support\n        folders in Apple Notes? How do we handle mixed-source vaults?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Website redesign project\n\n        Goal: Better communicate value proposition to new visitors. Why: Current site\n        has high bounce rate and unclear messaging.\n\n        Approach:\n        - User research first - interview 10 potential customers about their pain points\n        - Messaging workshop - align team on core value prop and positioning\n        - Design mockups - focus on clarity and simplicity\n        - A/B testing plan - validate changes actually improve conversion\n\n        Timeline: Research by end of month, designs by mid-next month. Questions: What\n        metrics matter most? How do we balance SEO with good design?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Content strategy for launch\n\n        Goal: Build awareness and drive signups for public launch. Why: We have a great\n        product but no audience yet.\n\n        Channels to explore:\n        - Blog posts about knowledge management - SEO value, long-term asset\n        - Twitter threads showing real examples - viral potential, immediate reach\n        - Guest posts on relevant sites - credibility, backlinks\n        - Video demos on YouTube - searchable, shareable\n\n        Questions: Should we focus on one channel or spread across multiple? What's\n        our content creation capacity? How do we measure what's working?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "User onboarding improvement\n\n        Goal: Reduce time to first value from 1 week to 1 day. Why: Most users churn\n        before experiencing the core benefit.\n\n        Current problems:\n        - Empty vault problem - no notes means no catalysts to generate\n        - Setup friction - too many configuration options upfront\n        - Unclear next steps - users don't know what to do after installation\n\n        Proposed solutions:\n        - Better sample vault that feels personal\n        - Progressive disclosure of advanced features\n        - In-app guidance for first session\n\n        Need to validate with user testing. What's the minimal viable first experience?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "API architecture refactor\n\n        Goal: Make the codebase more maintainable and testable. Why: Current architecture\n        makes it hard to add features without breaking things.\n\n        Changes needed:\n        - Separate indexing from querying - they have different performance characteristics\n        - Add proper abstraction layers - easier to swap implementations\n        - Improve error handling - silent failures are hard to debug\n        - Better test coverage - especially integration tests\n\n        Risk: Refactors can drag on forever. Need clear success criteria and timeline.\n        Question: Do we refactor while building features or dedicate separate time?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Customer research project\n\n        Goal: Deeply understand our best users to find patterns. Why: Product-market\n        fit comes from solving real problems well.\n\n        Research questions:\n        - What workflows do they use Enzyme in?\n        - What alternatives did they try before?\n        - What would make them recommend us to others?\n        - Where does the product fall short?\n\n        Method: 10 in-depth interviews, 1 hour each. Look for patterns across responses\n        not just individual feedback. Synthesize into user personas and job stories.\n        Timeline: Interviews this month, synthesis next month."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Pricing strategy review\n\n        Goal: Find pricing that captures value without limiting growth. Why: Current\n        free tier is unsustainable but we don't want to kill adoption.\n\n        Options to consider:\n        - Freemium with feature limits - standard SaaS model, well understood\n        - Usage-based pricing - fair but complex to communicate\n        - One-time purchase - appeals to privacy-conscious users\n        - Team pricing - where the real revenue probably is\n\n        Need to test with current users. What would they pay? What features matter most?\n        How price sensitive are different segments?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Documentation overhaul\n\n        Goal: Make docs actually helpful for new users. Why: Current docs assume too\n        much knowledge and don't address common questions.\n\n        Structure to build:\n        - Quick start guide - get running in 5 minutes\n        - Core concepts - explain the mental model\n        - How-to guides - task-oriented instructions\n        - Troubleshooting - common problems and solutions\n        - API reference - technical details\n\n        Start with quick start and concepts. Add others based on support ticket patterns.\n        Question: Do we need video tutorials or is text enough?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Performance optimization sprint\n\n        Goal: Make indexing 10x faster for large vaults. Why: Users with thousands of\n        notes hit performance walls.\n\n        Bottlenecks identified:\n        - Embedding generation is slow - batch processing could help\n        - Database writes aren't optimized - need transactions and bulk inserts\n        - File reading is synchronous - parallelize with worker pool\n\n        Approach: Profile first, optimize second. Don't guess, measure. Target the\n        biggest bottlenecks first. Timeline: 2 week sprint focused only on performance."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Marketing site content plan\n\n        Goal: Create content that attracts our ideal users. Why: Organic traffic is\n        more sustainable than paid ads.\n\n        Content types:\n        - Problem-focused articles - address pain points, good for SEO\n        - Tool comparisons - capture people researching alternatives\n        - Use case deep dives - show concrete value\n        - Behind-the-scenes - build connection with team\n\n        Publishing cadence: 1 post per week to start. Focus on quality over quantity.\n        Measure: traffic, time on page, signups from content."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Mobile app exploration\n\n        Goal: Understand if mobile makes sense for Enzyme. Why: Users capture on mobile\n        but we're desktop-only currently.\n\n        Questions to answer:\n        - What would mobile UI look like?\n        - What's the use case - capture or review?\n        - How does it sync with desktop?\n        - What's the development effort?\n\n        Approach: Build a prototype and test with 10 users before committing to full\n        development. Maybe start with a web app that works on mobile?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Team collaboration features\n\n        Goal: Enable team knowledge sharing. Why: Teams have more complex needs and\n        higher willingness to pay.\n\n        Features to explore:\n        - Shared vaults - what's the permission model?\n        - Collaborative catalysts - multiple people can respond\n        - Team analytics - what insights matter for teams?\n        - Admin controls - who manages the team account?\n\n        Start with interviews of potential team customers. What problems are they trying\n        to solve? How do they work today? What integrations matter?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Integration strategy\n\n        Goal: Connect Enzyme with tools users already use. Why: Reduce friction, increase\n        stickiness.\n\n        Priority integrations:\n        - Obsidian - our core users are already here\n        - Notion - large user base, good API\n        - Roam - similar philosophy around networked thought\n        - Apple Notes - huge installed base, easy capture\n\n        Question: Build deep integrations with fewer tools or shallow integrations with\n        many? What's the right first integration to validate the approach?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Beta program design\n\n        Goal: Get early user feedback to improve product. Why: Building in isolation\n        leads to products nobody wants.\n\n        Beta structure:\n        - 50 users to start - small enough to give personal attention\n        - Weekly feedback sessions - group call plus async channel\n        - Feature flags - gradually roll out new features\n        - Clear timeline - 8 week program\n\n        Selection criteria: Active note-takers, willing to give feedback, diverse use\n        cases. What incentives for participation? How do we collect actionable feedback?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Analytics implementation\n\n        Goal: Understand how people use the product. Why: Can't improve what you don't\n        measure.\n\n        Metrics that matter:\n        - Daily active users - measure engagement\n        - Time to first catalyst - onboarding success\n        - Catalysts generated per week - feature usage\n        - Retention curves - are we keeping users?\n\n        Privacy considerations: No user content, only interaction events. Clear opt-out.\n        Start minimal, add metrics as we learn what matters."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Community building plan\n\n        Goal: Create space for users to connect and help each other. Why: Community\n        reduces support burden and increases retention.\n\n        Platform options:\n        - Discord server - good for real-time chat\n        - Forum - better for searchable discussions\n        - Reddit community - existing audience\n\n        Content to seed:\n        - Tips and tricks from power users\n        - Workflow showcases\n        - Feature requests and voting\n        - Regular AMAs with team\n\n        Question: How much time can we dedicate to community management?"
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Accessibility audit\n\n        Goal: Make Enzyme usable by everyone. Why: It's the right thing to do and\n        expands our addressable market.\n\n        Areas to review:\n        - Keyboard navigation - can you use without mouse?\n        - Screen reader support - ARIA labels, semantic HTML\n        - Color contrast - meet WCAG guidelines\n        - Text sizing - user should be able to adjust\n\n        Get audit from accessibility expert. Fix critical issues first. Add to our\n        standard development checklist."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Localization planning\n\n        Goal: Support non-English users. Why: Knowledge work is global, we're leaving\n        value on the table.\n\n        Questions:\n        - Which languages first? Based on user requests or market size?\n        - How do embeddings work across languages? Multilingual models?\n        - What about RTL languages? UI changes needed\n        - Translation process - professional or community?\n\n        Start with one language to learn the process. Spanish or French make sense.\n        Validate there's demand before investing heavily."
+    },
+    {
+      "class": "borderline",
+      "kind": "project_planning",
+      "text": "Security hardening\n\n        Goal: Protect user data and build trust. Why: We're handling people's private\n        notes - security is table stakes.\n\n        Improvements needed:\n        - Encrypt vault databases - even local files should be protected\n        - Audit dependencies - check for known vulnerabilities\n        - Implement key management - how do users manage encryption keys?\n        - Security documentation - explain our approach transparently\n\n        Get external security review. Fix high-priority issues immediately. Plan for\n        regular security audits."
+    }
+  ]
+}

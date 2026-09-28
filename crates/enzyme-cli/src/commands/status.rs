@@ -347,6 +347,7 @@ mod tests {
                 unit: SqliteTimestampUnit::Ms,
                 epoch: None,
             },
+            filter: None,
         }
     }
 

@@ -128,6 +128,15 @@ pub struct SqliteSourceConfig {
     pub query: String,
     pub roles: SqliteSourceRoles,
     pub timestamp: SqliteTimestampConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<SqliteSourceFilter>,
+}
+
+/// Bundled classifiers for decoded SQLite source text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqliteSourceFilter {
+    AppleNotesContentV1,
 }
 
 /// Result columns assigned to Enzyme's source roles.
@@ -2145,6 +2154,7 @@ local_model = "catalyst-135m-v3"
                         unit: SqliteTimestampUnit::Ms,
                         epoch: Some("2001-01-01".to_string()),
                     },
+                    filter: None,
                 },
             )]),
             notes_path: None,
