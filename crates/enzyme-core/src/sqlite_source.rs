@@ -372,7 +372,7 @@ pub fn run_sqlite_source(
     let rows_seen = source_rows.len();
     let mut rows_filtered = 0;
     if matches!(source.filter, Some(SqliteSourceFilter::AppleNotesContentV1)) {
-        let texts: Vec<String> = source_rows.iter().map(|row| row.what.clone()).collect();
+        let texts: Vec<&str> = source_rows.iter().map(|row| row.what.as_str()).collect();
         let classifications = content_filter::classify_apple_notes_v1(&texts)?;
         source_rows = source_rows
             .into_iter()

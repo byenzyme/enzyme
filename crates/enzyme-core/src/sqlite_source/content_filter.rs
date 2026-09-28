@@ -48,7 +48,7 @@ pub(crate) struct Classification {
 /// Classify decoded source text with the built-in ESE backend. A note needs
 /// four mundane neighbors, a list-type nearest neighbor, and list-like line
 /// structure before exclusion. Ambiguous notes remain indexed.
-pub(crate) fn classify_apple_notes_v1(texts: &[String]) -> Result<Vec<Classification>> {
+pub(crate) fn classify_apple_notes_v1(texts: &[&str]) -> Result<Vec<Classification>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -118,7 +118,6 @@ pub(crate) fn classify_apple_notes_v1(texts: &[String]) -> Result<Vec<Classifica
 fn looks_like_list(text: &str) -> bool {
     let lines: Vec<&str> = text
         .lines()
-        .skip(1) // The first line is the title in the Apple Notes preset.
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
@@ -126,7 +125,7 @@ fn looks_like_list(text: &str) -> bool {
         .iter()
         .filter(|line| line.chars().count() <= 120)
         .count();
-    lines.len() >= 3 && short >= 3 && short * 10 >= lines.len() * 7
+    lines.len() >= 4 && short >= 4 && short * 10 >= lines.len() * 7
 }
 
 fn representative_sample(text: &str) -> String {
@@ -156,16 +155,18 @@ mod tests {
 
     #[test]
     fn examples_cover_both_sides_without_excluding_reflection() {
-        let texts = vec![
-            "Groceries\nMilk\nEggs\nBread\nCoffee\nBananas\nOlive oil".into(),
-            "To do today\nCall dentist\nBuy milk\nReturn package\nSchedule oil change".into(),
-            "I've been thinking about how conversations change when I listen longer. What surprised me was that the pause created space for a better question, and I want to try that again.".into(),
-            "A letter\nHi friend, I hope you are well. I have been thinking about our trip together. We walked for hours, talked about the year ahead, and remembered how much these conversations matter.\nLet's meet again soon.".into(),
+        let texts = [
+            "Groceries\nMilk\nEggs\nBread\nCoffee\nBananas\nOlive oil",
+            "To do today\nCall dentist\nBuy milk\nReturn package\nSchedule oil change",
+            "I've been thinking about how conversations change when I listen longer. What surprised me was that the pause created space for a better question, and I want to try that again.",
+            "A letter\nHi friend, I hope you are well. I have been thinking about our trip together. We walked for hours, talked about the year ahead, and remembered how much these conversations matter.\nLet's meet again soon.",
+            "Milk\nEggs\nBread\nCoffee\nBananas\nOlive oil",
         ];
         let labels = classify_apple_notes_v1(&texts).unwrap();
         assert!(labels[0].is_mundane, "grocery vote: {:?}", labels[0]);
         assert!(labels[1].is_mundane, "todo vote: {:?}", labels[1]);
         assert!(!labels[2].is_mundane, "reflection vote: {:?}", labels[2]);
         assert!(!labels[3].is_mundane, "letter vote: {:?}", labels[3]);
+        assert!(labels[4].is_mundane, "body-only list vote: {:?}", labels[4]);
     }
 }
