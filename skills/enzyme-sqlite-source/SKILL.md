@@ -1,6 +1,6 @@
 ---
 name: enzyme-sqlite-source
-description: Connect an unfamiliar SQLite database to Enzyme without changing the source data. Inspect the database, decide which query columns represent identity, people, time, content, and folders, show real examples for approval, save the mapping in TOML, and verify init and refresh. Use for email, message, CRM, archive, or other structured SQLite sources with no app-specific preset.
+description: Connect an unfamiliar SQLite database to Enzyme without changing the source data. Inspect the database, decide which query columns represent identity, people, time, content, and folders, show real examples for approval, save a workspace program in the Enzyme language, and verify init and refresh. Use for email, message, CRM, archive, or other structured SQLite sources with no app-specific preset.
 ---
 
 # Enzyme SQLite Source
@@ -16,7 +16,7 @@ Follow this order:
 1. Inspect the database read-only.
 2. Identify the person, date, message, folder, and ID columns and choose a workspace name.
 3. Show real examples and ask the user to confirm the mapping.
-4. Write only the confirmed source contract under `[workspaces.<name>.sources.<source>]`.
+4. Write the confirmed `source sqlite` declaration in `$ENZYME_HOME/configs/<name>.enzyme`.
 5. Validate it with `enzyme scan --collection <name>`.
 6. Build it with `enzyme --collection <name> init`, then use `refresh`.
 7. Verify document and embedding counts.
@@ -36,7 +36,7 @@ Never edit, migrate, vacuum, attach to, or create anything in the source databas
 
 Choose a short workspace name such as `imessage`, `mail`, or `crm`. It must be one filesystem component, not a path. Address it only as `--collection <name>`. Enzyme owns its index at `$ENZYME_HOME/workspaces/<name>/enzyme.db` (default `~/.enzyme/workspaces/<name>/enzyme.db`); the skill never chooses, creates, or writes that storage path.
 
-The global config is `$ENZYME_HOME/config.toml` when `ENZYME_HOME` is set and `~/.enzyme/config.toml` otherwise. The skill writes one source contract under `[workspaces.<name>.sources.<source>]`. It never writes `entities`, `excluded_*`, `catalyst_format`, `max_embedding_files`, targets, or storage paths. `init` derives or defaults those fields and persists them. For SQLite sources, mapped `who` values deterministically become people and mapped `where` values become threads/folders during indexing; there is no agent task to enumerate them.
+The readable program lives in `$ENZYME_HOME/configs/<name>.enzyme` when `ENZYME_HOME` is set and `~/.enzyme/configs/<name>.enzyme` otherwise. The skill writes one `workspace` with its confirmed `source sqlite` declaration and only the readings the user reviewed. It never chooses an index storage path. For SQLite sources, mapped `who` values deterministically become people and mapped `where` values become threads/folders during indexing; there is no agent task to enumerate them.
 
 Set absolute paths and check that the database and Enzyme command are available:
 
@@ -285,41 +285,46 @@ The example above shows the shape, not facts to copy. Build the real version fro
 
 The confirmation still gates every write. If the user corrects the interpretation, return to inspection, update the technical evidence, and present a new reveal. If they approve it, write the source contract and let Enzyme create its own local state. Approval never allows changes to the source database.
 
-## 4. Write the confirmed config
+## 4. Write the confirmed workspace program
 
-After confirmation, find the correct global config path:
+After confirmation, choose a `.enzyme` file in the global configs directory:
 
 ```bash
 ENZYME_CONFIG_HOME="${ENZYME_HOME:-$HOME/.enzyme}"
-CONFIG_PATH="$ENZYME_CONFIG_HOME/config.toml"
-mkdir -p "$ENZYME_CONFIG_HOME"
+PROGRAM_PATH="$ENZYME_CONFIG_HOME/configs/$WORKSPACE_NAME.enzyme"
+mkdir -p "$ENZYME_CONFIG_HOME/configs"
 ```
 
-Save the confirmed mapping under the chosen workspace name without changing unrelated settings. The only durable output from this skill is the source contract: `db`, `query`, `roles`, and `timestamp`. If this source section does not exist, append the reviewed text. If it exists, back up the config and edit that section in place; never add a duplicate and never replace the rest of `[workspaces.<name>]`.
+Save the confirmed mapping under the chosen workspace name without changing unrelated settings. The declaration contains the database, query, roles, and timestamp, plus any reviewed readings. If the file exists, back it up and edit its `source sqlite` block in place; never create two declarations for the same source. Keep other profiles, sources, and readings intact. For a new file, use this shape:
 
 ```bash
-cat <<'TOML' >> "$CONFIG_PATH"
-# Paste the exact confirmed stanza here.
-TOML
-```
-
-After the edit, re-read the written section and validate it read-only. Record the exact config path and the source contract's full text in the technical appendix; do not show raw TOML to the user unless they ask:
-
-```bash
-awk -v key="$WORKSPACE_NAME" '
-  /^\[workspaces\./ {
-    same_workspace = index($0, "[workspaces." key) == 1
-    if (showing && !same_workspace) exit
-    if (same_workspace) showing = 1
+cat > "$PROGRAM_PATH" <<'ENZYME'
+workspace "imessage" {
+  source sqlite "messages" {
+    database "/absolute/path/to/source.sqlite"
+    query "SELECT message_rowid, sender, sent_ns, body, thread FROM messages"
+    id "message_rowid"
+    who "sender"
+    when "sent_ns" unit ns epoch "2001-01-01"
+    what "body"
+    where "thread"
   }
-  showing { print }
-' "$CONFIG_PATH"
+  learn questions from source "messages"
+}
+ENZYME
+```
+
+The example is a shape, not a query to copy. Use the exact reviewed SQL and column aliases. Multi-line SQL may be wrapped in triple quotes. Optional `who` supports a column/list, `who json_array "column"`, or `who delimited "column" by ","`; optional `where`, `document ref`, and `weight` name result columns. `document ref` applies only when `where` is absent. After writing, re-read and compile the program, then validate the source read-only:
+
+```bash
+cat "$PROGRAM_PATH"
+"$ENZYME_BIN" spec compile "$PROGRAM_PATH"
 "$ENZYME_BIN" scan --collection "$WORKSPACE_NAME"
 ```
 
-`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. `enzyme compile` does not author SQLite contracts: it is a Markdown-structure path and refuses structured sources.
+`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. `spec compile` parses and lowers the program but does not write config or index data.
 
-Write the config in exactly this shape:
+The equivalent lower-level TOML contract is shown below for interpreting old installations and checking the compiled mapping. Do not write both forms for the same source:
 
 ```toml
 [workspaces.imessage.sources.messages]
@@ -370,7 +375,7 @@ The exact `enzyme.sqlite-source.v1` rules are:
 - Every array role also accepts a bare string as one-column shorthand; serialization emits arrays.
 - `timestamp.unit`: unit of the raw `when` value — one of `s`, `ms`, `us`, `ns`.
 - `timestamp.epoch`: optional `YYYY-MM-DD` origin for offset epochs (Apple = `2001-01-01`); absent means Unix epoch.
-- Human-readable conversion notes belong in TOML comments, not fields — unknown fields are dropped by programmatic config rewrites.
+- Human-readable conversion notes belong in comments beside the readable declaration, not in ad hoc config fields.
 
 Without `roles.where`, Enzyme uses `roles.id` to make the same per-row document ID every time it sees a source record. With `roles.where`, document identity comes from the source name, thread values, and UTC month; `roles.id` is only the stable tie-breaker for messages with the same timestamp. Refresh compares deterministic content fingerprints and does not store a source cursor.
 
@@ -380,9 +385,9 @@ The query must also follow these rules:
 - Every configured column is uniquely aliased and present. On every returned row, every `id` component and `when` must be non-null. A row whose mapped `what` values are all NULL/empty is skipped and counted. A `who` or `where` value may be NULL on an individual row; the row still indexes, simply without that entity or thread.
 - The `roles.id` tuple is stable and unique. It identifies documents for sources without `roles.where` and deterministically orders equal-time entries in log mode.
 - Enzyme converts time using the declared `unit` and `epoch`; the query returns the raw value.
-- The source contract contains every application-specific schema decision. Derived entity/exclusion/format/default fields are deliberately owned by `init`, not by this skill.
+- The source declaration contains every application-specific schema decision. The skill authors only confirmed readings; `init` owns derived defaults.
 
-After writing, show the exact config path and the source contract you added. Read it back from disk and require the read-only scan to pass.
+After writing, show the exact program path and the declaration you added. Read it back from disk and require the read-only scan to pass.
 
 ## 5. Initialize once, then use refresh
 

@@ -9,7 +9,7 @@
 
 </div>
 
-Enzyme introduces a compile step for your Markdown wiki that:
+Enzyme compiles your notes and other knowledge sources into a local index that:
 
 1. Uses temporally grounded context sampling that captures the contextual use of tags and wikilinks, or natural accumulation in folders (i.e. pseudo-[Zettelkasten](https://zettelkasten.de/introduction/))
 2. With this context, generate questions (called **catalysts**) and embed them as semantic routes to the whole knowledge base
@@ -17,7 +17,10 @@ Enzyme introduces a compile step for your Markdown wiki that:
 
 When your agent passes queries through the catalysts, it gets a more personalized way to get caught up on the knowledge base.
 
-**New:** Enzyme relies on a program that [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev) generates through a deterministic scan:
+Enzyme saves an editable reading program. For a Markdown folder, the program
+currently uses a `vault` block; named `workspace` blocks describe Are.na and
+SQLite sources. [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+can generate the Markdown program through a deterministic scan:
 
 ```
 profile relationships {
@@ -83,13 +86,27 @@ Then use the prompt above. For setup without an agent:
 ```bash
 enzyme compile -v
 # Review the .enzyme settings file at the path printed by compile.
-enzyme init
+enzyme init --quiet
+enzyme doctor
 enzyme petri --query "a question about your notes"
 enzyme catalyze "a question about your notes"
 ```
 
-`compile` uses online selection and saves proposed settings under
-`~/.enzyme/configs/`. Review that file before `init` builds the local index.
+For Markdown notes, run `enzyme compile` and review the settings file it saves
+before `enzyme init` builds the local index.
+
+For Apple Notes, a preset builds a named `workspace` program from your Notes
+database. Review the saved `.enzyme` program before running `init`:
+
+```bash
+enzyme --collection apple-notes compile --preset apple-notes \
+  "$HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+enzyme --collection apple-notes init
+```
+
+For Are.na, use `enzyme --collection <name> compile --preset arena <channel-url>`
+and then `enzyme --collection <name> init`. Run `refresh` with the
+same `--collection` name to pick up later changes.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
@@ -203,6 +220,10 @@ enzyme catalyze "why we keep rewriting the auth layer"
 
 Enzyme indexes SQLite tables alongside Markdown — iMessage, WhatsApp, Mail, or any table of dated rows.
 
+Declare a `source sqlite` inside a named `workspace` program, then run `init`
+and periodic `refresh`. The [SQLite source setup skill](https://github.com/byenzyme/enzyme/blob/main/skills/enzyme-sqlite-source/SKILL.md)
+shows the source declaration and source-scoped readings.
+
 None of these is a special case. A `handle_id` column is repeated person values across dated rows, the same way `[[links]]` are repeated person values across dated notes. Both collapse to entity occurrences with effective dates, and nothing downstream knows which one it came from: the same profiles, budgets, and catalysts apply to a message thread and a folder of meeting notes.
 
 A source names columns by the role they play rather than by the app they came from:
@@ -218,10 +239,10 @@ A source names columns by the role they play rather than by the app they came fr
 
 ## API keys
 
-Enzyme needs an API key only for catalyst generation and for `enzyme compile`'s selection step. By default `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not spend your personal key. Credential resolution is explicit key → configured local model → anonymous brokered free config, with no additional configuration.
+Enzyme needs an API key only for catalyst generation and for Markdown `enzyme compile`'s selection step. Source preset compilation does not call a model. By default `enzyme init` uses Enzyme's hosted bootstrap and ignores inherited `OPENAI_*` variables so it does not spend your personal key. Credential resolution is explicit key → configured local model → anonymous brokered free config, with no additional configuration.
 
 The first configured vault on a machine initializes without login. Refresh, publishing, account credits, and additional vaults require `enzyme login`.
 
 To bring your own OpenAI-compatible key, pass `--use-env-llm`, which reads `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. Without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
 
-`enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).
+Markdown `enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).

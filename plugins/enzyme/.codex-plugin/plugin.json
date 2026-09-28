@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
   "description": "Connect Enzyme's durable agent skills to a local knowledge vault",
-  "version": "0.10.2",
+  "version": "0.11.0",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/useenzyme"
