@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use enzyme_core::config::{EnzymeConfig, EnzymePaths, enzyme_config::CatalyzedEntity};
-use enzyme_spec::{Learning, Program, Reading};
+use enzyme_spec::{Learning, MarkdownSource, Program, Reading, Source, Workspace};
 use std::{
     collections::BTreeSet,
     io::{self, IsTerminal, Write},
@@ -54,8 +54,15 @@ pub async fn run(
             config.excluded_folders.push(folder.clone());
         }
     }
-    let evidence = if json { Some(generated.evidence()?) } else { None };
-    let temporal_policies = generated.proposal.decisions.iter()
+    let evidence = if json {
+        Some(generated.evidence()?)
+    } else {
+        None
+    };
+    let temporal_policies = generated
+        .proposal
+        .decisions
+        .iter()
         .filter(|d| d.selected)
         .map(|d| (d.spec.clone(), d.learning.clone()))
         .collect();
@@ -191,23 +198,47 @@ fn save_setup(
         .iter()
         .enumerate()
         .find_map(|(file_index, (_, program))| {
+            let matches_path = |raw: &str| {
+                let expanded = if raw == "~" {
+                    user_home.to_path_buf()
+                } else if let Some(p) = raw.strip_prefix("~/") {
+                    user_home.join(p)
+                } else {
+                    PathBuf::from(raw)
+                };
+                expanded.canonicalize().unwrap_or(expanded) == path
+            };
             program
-                .vaults
+                .workspaces
                 .iter()
-                .position(|vault| {
-                    let expanded = if vault.path == "~" {
-                        user_home.to_path_buf()
-                    } else if let Some(p) = vault.path.strip_prefix("~/") {
-                        user_home.join(p)
-                    } else {
-                        PathBuf::from(&vault.path)
-                    };
-                    expanded.canonicalize().unwrap_or(expanded) == path
+                .position(|workspace| workspace.markdown_path().is_some_and(matches_path))
+                .map(|index| (file_index, true, index))
+                .or_else(|| {
+                    program
+                        .vaults
+                        .iter()
+                        .position(|vault| matches_path(&vault.path))
+                        .map(|index| (file_index, false, index))
                 })
-                .map(|vault_index| (file_index, vault_index))
         });
-    let index = if let Some((index, vault)) = location {
-        namespace[index].1.vaults[vault] = generated.vaults[0].clone();
+    let index = if let Some((index, is_workspace, position)) = location {
+        if is_workspace {
+            let existing = &namespace[index].1.workspaces[position];
+            let mut replacement = generated.workspaces[0].clone();
+            replacement.name = existing.name.clone();
+            if let (Some(Source::Markdown(old)), Some(Source::Markdown(new))) =
+                (existing.sources.first(), replacement.sources.first_mut())
+            {
+                new.name = old.name.clone();
+            }
+            namespace[index].1.workspaces[position] = replacement;
+        } else {
+            namespace[index].1.vaults.remove(position);
+            namespace[index]
+                .1
+                .workspaces
+                .push(generated.workspaces[0].clone());
+        }
         namespace[index]
             .1
             .profiles
@@ -316,7 +347,29 @@ fn structured_setup(
         }
     }
     enzyme_spec::retain_patterns(&previous, &mut vault.readings);
-    program.vaults.push(vault);
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    program.workspaces.push(Workspace {
+        name,
+        sources: vec![Source::Markdown(MarkdownSource {
+            name: "notes".into(),
+            path: vault.path.clone(),
+        })],
+        learning: vault.learning,
+        readings: vault.readings,
+        format: vault.format,
+        targets: vault.targets,
+        exclusions: vault.exclusions,
+        excluded_tags: vault.excluded_tags,
+        excluded_links: vault.excluded_links,
+        frontmatter_link_fields: vault.frontmatter_link_fields,
+        embedding_limit: vault.embedding_limit,
+        memories: vault.memories,
+        retrieval: vault.retrieval,
+    });
     Ok(program)
 }
 

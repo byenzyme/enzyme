@@ -17,9 +17,9 @@ Enzyme compiles your notes and other knowledge sources into a local index that:
 
 When your agent passes queries through the catalysts, it gets a more personalized way to get caught up on the knowledge base.
 
-Enzyme saves an editable reading program. For a Markdown folder, the program
-currently uses a `vault` block; named `workspace` blocks describe Are.na and
-SQLite sources. [**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+Enzyme saves an editable reading program. `workspace` blocks describe Markdown,
+Are.na, and SQLite sources. Existing `vault` programs remain readable.
+[**Jev**](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
 can generate the Markdown program through a deterministic scan:
 
 ```
@@ -28,7 +28,9 @@ profile relationships {
   notice ["meaningful exchanges", "shared interests", "unfinished conversations"]
 }
 
-vault "~/notes" {
+workspace "notes" {
+  source markdown "notes" { path "~/notes" }
+
   question budget 40
   sample across time
   favor recent periods
@@ -50,6 +52,9 @@ vault "~/notes" {
   }
 }
 ```
+
+For a Markdown folder, the source path remains the runtime and index location.
+Changing an existing `vault` program to this form does not move its index.
 
 ## Get started
 

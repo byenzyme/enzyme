@@ -38,6 +38,9 @@ async fn compile_batches_all_candidates_and_merges_profiles() {
     // program with its merged profile, so assert the program itself.
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let program = result["program"].as_str().unwrap();
+    assert!(program.contains("workspace \"vault\""), "{program}");
+    assert!(program.contains("source markdown \"notes\""), "{program}");
+    assert!(!program.contains("\nvault \""), "{program}");
     assert_eq!(program.matches("learn questions from folder").count(), 18);
     assert_eq!(program.matches("about decision_trace").count(), 18);
     assert!(program.contains("sample by time"));
@@ -297,6 +300,12 @@ async fn compile_writes_a_program_without_touching_notes_or_legacy_config() {
         result["program"]
             .as_str()
             .unwrap()
+            .contains("source markdown")
+    );
+    assert!(
+        result["program"]
+            .as_str()
+            .unwrap()
             .contains("decision_trace")
     );
 
@@ -335,6 +344,39 @@ async fn compile_writes_a_program_without_touching_notes_or_legacy_config() {
         original_note
     );
     assert!(!vault.join(".enzyme").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compile_replaces_matching_legacy_vault_block_with_workspace_syntax() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(Decisions)
+        .mount(&server)
+        .await;
+    let (_root, vault, home) = fixture();
+    let file = home.join("configs/existing.enzyme");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "vault {:?} {{ learn questions from folder \"projects\" }}\n",
+            vault.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = command(&vault, &home, &server.uri()).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["saved_to"].as_str(), Some(file.to_str().unwrap()));
+    let saved = std::fs::read_to_string(&file).unwrap();
+    assert!(saved.contains("workspace \"vault\""), "{saved}");
+    assert!(saved.contains("source markdown \"notes\""), "{saved}");
+    assert!(!saved.contains("\nvault \""), "{saved}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

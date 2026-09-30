@@ -1019,16 +1019,33 @@ impl EnzymeConfig {
             .join("configs");
         let home = dirs::home_dir().context("cannot resolve home")?;
         let key = canonical_vault_key(vault_path);
+        let matches_path = |raw: &str| {
+            let expanded = if let Some(rest) = raw.strip_prefix("~/") {
+                home.join(rest)
+            } else {
+                PathBuf::from(raw)
+            };
+            canonical_vault_key(&expanded) == key
+        };
         for (path, mut program) in enzyme_spec::source_files(&directory)? {
-            for vault in &mut program.vaults {
-                let expanded = if let Some(rest) = vault.path.strip_prefix("~/") {
-                    home.join(rest)
+            for index in 0..program.vaults.len() + program.workspaces.len() {
+                let is_workspace = index >= program.vaults.len();
+                let mut vault = if is_workspace {
+                    let workspace = &program.workspaces[index - program.vaults.len()];
+                    let Some(raw) = workspace.markdown_path() else {
+                        continue;
+                    };
+                    if !matches_path(raw) {
+                        continue;
+                    }
+                    workspace.unresolved_vault()
                 } else {
-                    PathBuf::from(&vault.path)
+                    let vault = &program.vaults[index];
+                    if !matches_path(&vault.path) {
+                        continue;
+                    }
+                    vault.clone()
                 };
-                if canonical_vault_key(&expanded) != key {
-                    continue;
-                }
                 vault.exclusions = self.excluded_folders.clone();
                 vault.excluded_tags = self.excluded_tags.clone();
                 vault.excluded_links = self.excluded_links.clone();
@@ -1062,6 +1079,11 @@ impl EnzymeConfig {
                 }
                 enzyme_spec::retain_patterns(&vault.readings, &mut readings);
                 vault.readings = readings;
+                if is_workspace {
+                    program.workspaces[index - program.vaults.len()].set_markdown_vault(vault);
+                } else {
+                    program.vaults[index] = vault;
+                }
                 enzyme_spec::atomic_write(&path, &enzyme_spec::render_program(&program))?;
                 return Ok(true);
             }

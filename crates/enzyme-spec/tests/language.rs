@@ -241,7 +241,7 @@ fn short_token_lists_fill_inline_below_the_readings() {
         r#"vault "/notes" {{
   leave out folders [{}]
   references in fields ["people", "attendees"]
-  learn questions from folder "people" about relationships
+  learn questions from folder "people"
   learn questions from folder "inbox"
 }}
 "#,
@@ -936,6 +936,48 @@ workspace "arena-research" {
         r#"workspace "source-only" { source arena "channels" { channels { channel 275 slug "arena-influences" title "Arena Influences" } } }"#
     )
     .is_ok());
+}
+
+#[test]
+fn markdown_workspace_roundtrips_with_vault_runtime_identity() {
+    let source = r#"
+workspace "notes" {
+  source markdown "notes" { path "/tmp/enzyme-markdown-workspace" }
+  question budget 12
+  learn questions from folder "people" about relationships
+  leave out folders ["private"]
+  leave out tags ["draft"]
+  references in fields ["related"]
+  prepare up to 250 documents per run newest first
+  project questions into "/tmp/output"
+  when asked { "Cite source notes." }
+}"#;
+    let parsed = parse(source).unwrap();
+    let rendered = render_program(&parsed);
+    assert!(rendered.contains("workspace \"notes\""), "{rendered}");
+    assert!(rendered.contains("source markdown \"notes\""), "{rendered}");
+    assert_eq!(parse(&rendered).unwrap(), parsed);
+    let resolved = resolve(vec![parsed], Path::new("/home/demo")).unwrap();
+    assert_eq!(resolved.vaults[0].path, "/tmp/enzyme-markdown-workspace");
+    assert_eq!(resolved.vaults[0].exclusions, vec!["private"]);
+    assert_eq!(resolved.vaults[0].embedding_limit, Some(250));
+    let config = enzyme_spec::config_value(&resolved);
+    assert_eq!(
+        config["vaults"]["/tmp/enzyme-markdown-workspace"]["min_top_catalysts"],
+        12
+    );
+    assert!(config["workspaces"].as_object().unwrap().is_empty());
+    assert!(parse(r#"workspace "bad" { source markdown "notes" { path "relative" } }"#).is_ok());
+    assert!(
+        resolve(
+            vec![
+                parse(r#"workspace "bad" { source markdown "notes" { path "relative" } }"#)
+                    .unwrap()
+            ],
+            Path::new("/home/demo")
+        )
+        .is_err()
+    );
 }
 
 #[test]

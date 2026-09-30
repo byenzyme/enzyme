@@ -206,6 +206,12 @@ pub struct ArenaSource {
     pub channels: Vec<ArenaChannel>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MarkdownSource {
+    pub name: String,
+    pub path: String,
+}
+
 /// A read-only query over an existing SQLite database. Column names refer to
 /// unique aliases in the query result, not to columns in the source tables.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -240,6 +246,7 @@ pub enum SqliteWho {
 pub enum Source {
     Arena(ArenaSource),
     Sqlite(SqliteSource),
+    Markdown(MarkdownSource),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -251,18 +258,67 @@ pub struct Workspace {
     pub format: Option<String>,
     #[serde(default)]
     pub targets: Vec<String>,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+    #[serde(default)]
+    pub excluded_tags: Vec<String>,
+    #[serde(default)]
+    pub excluded_links: Vec<String>,
+    #[serde(default)]
+    pub frontmatter_link_fields: Vec<String>,
+    pub embedding_limit: Option<usize>,
+    #[serde(default)]
+    pub memories: Vec<Memory>,
+    pub retrieval: Option<Vec<String>>,
 }
 
 impl Workspace {
     pub fn unresolved_vault(&self) -> Vault {
+        let path = self
+            .sources
+            .iter()
+            .find_map(|source| match source {
+                Source::Markdown(source) => Some(source.path.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| format!("workspace:{}", self.name));
         Vault {
-            path: format!("workspace:{}", self.name),
+            path,
             learning: self.learning.clone(),
             readings: self.readings.clone(),
             format: self.format.clone(),
             targets: self.targets.clone(),
+            exclusions: self.exclusions.clone(),
+            excluded_tags: self.excluded_tags.clone(),
+            excluded_links: self.excluded_links.clone(),
+            frontmatter_link_fields: self.frontmatter_link_fields.clone(),
+            embedding_limit: self.embedding_limit,
+            memories: self.memories.clone(),
+            retrieval: self.retrieval.clone(),
             ..Default::default()
         }
+    }
+
+    pub fn markdown_path(&self) -> Option<&str> {
+        match self.sources.as_slice() {
+            [Source::Markdown(source)] => Some(&source.path),
+            _ => None,
+        }
+    }
+
+    pub fn set_markdown_vault(&mut self, vault: Vault) {
+        debug_assert!(self.markdown_path().is_some());
+        self.learning = vault.learning;
+        self.readings = vault.readings;
+        self.format = vault.format;
+        self.targets = vault.targets;
+        self.exclusions = vault.exclusions;
+        self.excluded_tags = vault.excluded_tags;
+        self.excluded_links = vault.excluded_links;
+        self.frontmatter_link_fields = vault.frontmatter_link_fields;
+        self.embedding_limit = vault.embedding_limit;
+        self.memories = vault.memories;
+        self.retrieval = vault.retrieval;
     }
 }
 impl Vault {
@@ -975,6 +1031,10 @@ impl Parser {
         self.need("vault")?;
         let path = self.string()?;
         self.need("{")?;
+        self.vault_body(path)
+    }
+
+    fn vault_body(&mut self, path: String) -> Result<Vault> {
         let mut v = Vault {
             path,
             ..Default::default()
@@ -1063,6 +1123,21 @@ impl Parser {
         }
         self.need("}")?;
         Ok(v)
+    }
+
+    fn markdown_source(&mut self) -> Result<Source> {
+        self.need("source")?;
+        self.need("markdown")?;
+        let name = self.string()?;
+        self.need("{")?;
+        self.need("path")?;
+        let path = self.string()?;
+        self.need("}")?;
+        ensure!(
+            !path.trim().is_empty(),
+            "Markdown source path must not be empty"
+        );
+        Ok(Source::Markdown(MarkdownSource { name, path }))
     }
 
     fn arena_source(&mut self) -> Result<Source> {
@@ -1237,6 +1312,21 @@ impl Parser {
             name,
             ..Default::default()
         };
+        if self.at("source")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| token.value == "markdown")
+        {
+            let source = self.markdown_source()?;
+            let Source::Markdown(markdown) = &source else {
+                unreachable!()
+            };
+            let vault = self.vault_body(markdown.path.clone())?;
+            workspace.sources.push(source);
+            workspace.set_markdown_vault(vault);
+            return Ok(workspace);
+        }
         let mut source_names = std::collections::BTreeSet::new();
         while !self.at("}") {
             if self.at("source") {
@@ -1247,11 +1337,15 @@ impl Parser {
                 {
                     Some("arena") => self.arena_source()?,
                     Some("sqlite") => self.sqlite_source()?,
+                    Some("markdown") => {
+                        return self.err("Markdown must be the first and only workspace source");
+                    }
                     _ => return self.err("expected source arena or source sqlite"),
                 };
                 let source_name = match &source {
                     Source::Arena(source) => &source.name,
                     Source::Sqlite(source) => &source.name,
+                    Source::Markdown(source) => &source.name,
                 };
                 ensure!(
                     source_names.insert(source_name.to_lowercase()),
@@ -1399,6 +1493,9 @@ fn expand(path: &str, home: &Path) -> String {
 }
 
 fn lower_workspace(workspace: Workspace) -> Result<Vault> {
+    if workspace.markdown_path().is_some() {
+        return Ok(workspace.unresolved_vault());
+    }
     let mut channels = BTreeMap::<String, String>::new();
     let mut sqlite_sources = BTreeMap::<String, String>::new();
     for source in &workspace.sources {
@@ -1440,6 +1537,7 @@ fn lower_workspace(workspace: Workspace) -> Result<Vault> {
                 );
                 sqlite_sources.insert(source.name.to_lowercase(), source.name.clone());
             }
+            Source::Markdown(_) => bail!("Markdown must be the only workspace source"),
         }
     }
     let mut vault = workspace.unresolved_vault();
@@ -1523,13 +1621,28 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
         let mut scopes = p.vaults;
         for mut workspace in p.workspaces {
             for source in &mut workspace.sources {
-                if let Source::Sqlite(source) = source {
-                    source.db = expand(&source.db, user_home);
-                    ensure!(
-                        Path::new(&source.db).is_absolute(),
-                        "SQLite database path must be absolute: {}",
-                        source.db
-                    );
+                match source {
+                    Source::Sqlite(source) => {
+                        source.db = expand(&source.db, user_home);
+                        ensure!(
+                            Path::new(&source.db).is_absolute(),
+                            "SQLite database path must be absolute: {}",
+                            source.db
+                        );
+                    }
+                    Source::Markdown(source) => {
+                        source.path = expand(&source.path, user_home);
+                        ensure!(
+                            Path::new(&source.path).is_absolute(),
+                            "Markdown path must be absolute: {}",
+                            source.path
+                        );
+                        source.path = std::fs::canonicalize(&source.path)
+                            .unwrap_or_else(|_| PathBuf::from(&source.path))
+                            .to_string_lossy()
+                            .into_owned();
+                    }
+                    Source::Arena(_) => {}
                 }
             }
             scopes.push(lower_workspace(workspace.clone())?);
@@ -1743,6 +1856,10 @@ pub fn config_value(p: &Program) -> serde_json::Value {
     root.insert("vaults".into(), Value::Object(vaults));
     let mut workspaces = Map::new();
     for workspace in &p.workspaces {
+        if workspace.markdown_path().is_some() {
+            // A path-addressed Markdown workspace keeps the legacy runtime and index identity.
+            continue;
+        }
         let mut sources = Map::new();
         for source in &workspace.sources {
             if let Source::Sqlite(source) = source {
@@ -2025,6 +2142,21 @@ pub fn render_vault(v: &Vault) -> String {
 }
 
 pub fn render_workspace(workspace: &Workspace) -> String {
+    if let [Source::Markdown(source)] = workspace.sources.as_slice() {
+        let vault = workspace.unresolved_vault();
+        let rendered = render_vault(&vault);
+        let header = format!("vault {} {{\n", quote(&source.path));
+        return rendered.replacen(
+            &header,
+            &format!(
+                "workspace {} {{\n  source markdown {} {{ path {} }}\n\n",
+                quote(&workspace.name),
+                quote(&source.name),
+                quote(&source.path)
+            ),
+            1,
+        );
+    }
     let mut normalized = workspace.clone();
     normalized.learning = workspace.learning.over(&Learning::default());
     for reading in &mut normalized.readings {
@@ -2100,6 +2232,7 @@ pub fn render_workspace(workspace: &Workspace) -> String {
                 }
                 output.push_str("  }\n\n");
             }
+            Source::Markdown(_) => unreachable!("Markdown workspace rendered above"),
         }
     }
     output.push_str(&render_learning(&workspace.learning, "  "));
@@ -2332,8 +2465,8 @@ pub fn playground(source: &str) -> serde_json::Value {
     let result = (|| -> Result<(Program, Program)> {
         let ast = parse(source)?;
         ensure!(
-            !ast.vaults.is_empty(),
-            "add a vault block to compile a reading plan"
+            !ast.vaults.is_empty() || !ast.workspaces.is_empty(),
+            "add a workspace or vault block to compile a reading plan"
         );
         let resolved = resolve(vec![ast.clone()], Path::new("/home/you"))?;
         Ok((ast, resolved))
