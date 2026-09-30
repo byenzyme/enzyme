@@ -133,6 +133,9 @@ pub struct Reading {
     pub definition: Option<Profile>,
     pub learning: Learning,
     pub include_linked_pages: bool,
+    /// A SQLite source reading expands the links emitted by its `who` role.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_who_links: bool,
     /// `tags|links matching "…"`: `entity` holds a `*` glob that expands at job
     /// build time into one reading per matching indexed entity.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -856,10 +859,16 @@ impl Parser {
         }
         let kind = kind.trim_end_matches('s');
         let mut include = false;
+        let mut include_who_links = false;
         if self.eat("including") {
-            self.need("linked")?;
-            self.need("pages")?;
-            include = true;
+            if self.eat("linked") {
+                self.need("pages")?;
+                include = true;
+            } else {
+                self.need("who")?;
+                self.need("links")?;
+                include_who_links = true;
+            }
         }
         let (profile, definition) = if self.eat("about") {
             if self.eat("profile") {
@@ -887,10 +896,16 @@ impl Parser {
         .any(|s| self.at(s))
         {
             if self.eat("including") {
-                ensure!(!include, "duplicate including linked pages");
-                self.need("linked")?;
-                self.need("pages")?;
-                include = true;
+                if self.eat("linked") {
+                    ensure!(!include, "duplicate including linked pages");
+                    self.need("pages")?;
+                    include = true;
+                } else {
+                    ensure!(!include_who_links, "duplicate including who links");
+                    self.need("who")?;
+                    self.need("links")?;
+                    include_who_links = true;
+                }
             } else {
                 self.learn_setting(&mut learning)?;
             }
@@ -900,8 +915,12 @@ impl Parser {
             "only folders can include linked pages"
         );
         ensure!(
-            learning.selection.is_none() || kind == "folder" || pattern,
-            "select applies only to linked children of folders and to tags/links matching a pattern"
+            !include_who_links || kind == "source",
+            "only SQLite sources can include who links"
+        );
+        ensure!(
+            learning.selection.is_none() || kind == "folder" || pattern || include_who_links,
+            "select applies only to linked children of folders, who links of sources, and tags/links matching a pattern"
         );
         Ok(names
             .into_iter()
@@ -911,6 +930,7 @@ impl Parser {
                 definition: definition.clone(),
                 learning: learning.clone(),
                 include_linked_pages: include,
+                include_who_links,
                 pattern,
             })
             .collect())
@@ -1562,6 +1582,20 @@ fn lower_workspace(workspace: Workspace) -> Result<Vault> {
                             workspace.name
                         )
                     })?;
+                if reading.include_who_links {
+                    let source = workspace
+                        .sources
+                        .iter()
+                        .find_map(|source| match source {
+                            Source::Sqlite(source) if source.name == *name => Some(source),
+                            _ => None,
+                        })
+                        .expect("resolved SQLite source exists");
+                    ensure!(
+                        !matches!(&source.who, SqliteWho::Columns { columns } if columns.is_empty()),
+                        "SQLite source {name:?} needs a who mapping for including who links"
+                    );
+                }
                 reading.entity =
                     entity_selector("collection", &format!("sqlite:{}", sqlite_source_key(name)));
             }
@@ -2050,6 +2084,9 @@ pub fn render_vault(v: &Vault) -> String {
         if r.include_linked_pages {
             s.push_str("\n    including linked pages")
         }
+        if r.include_who_links {
+            s.push_str("\n    including who links")
+        }
         if let Some(p) = &r.definition {
             s.push_str(&format!(
                 "\n    about {}",
@@ -2258,6 +2295,9 @@ pub fn render_workspace(workspace: &Workspace) -> String {
             quote(name)
         };
         output.push_str(&format!("  learn questions from {kind} {selector}"));
+        if reading.include_who_links {
+            output.push_str("\n    including who links");
+        }
         if let Some(profile) = &reading.definition {
             output.push_str(&format!(
                 "\n    about {}",
@@ -2489,7 +2529,7 @@ pub fn playground(source: &str) -> serde_json::Value {
             let mut trace = vec![];
             let mut vaults = vec![];
             for v in &p.vaults {
-                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"periods":r.learning.periods,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages,"pattern":r.pattern})}).collect();
+                let readings:Vec<_>=v.readings.iter().map(|r|{trace.push(json!({"line":source.lines().position(|l|l.contains(&format!("\"{}\"",split_entity(&r.entity).1))).unwrap_or(0)+1,"title":r.entity}));json!({"entity":r.entity,"profile":if let Some(def)=&r.definition{json!({"kind":"custom","name":r.profile,"definition":def})}else{json!({"kind":if r.profile=="auto"{"auto"}else{"builtin"},"key":r.profile})},"learning":{"budget":r.learning.budget.unwrap_or(15),"sample":r.learning.sample,"favor":r.learning.favor,"sampling_mode":r.learning.sampling_mode(),"periods":r.learning.periods,"selection":r.learning.selection},"includeLinkedPages":r.include_linked_pages,"includeWhoLinks":r.include_who_links,"pattern":r.pattern})}).collect();
                 vaults.push(json!({"path":v.path,"learning":{"as_of":v.learning.as_of,"budget":v.learning.budget.unwrap_or(15),"sample":v.learning.sample,"favor":v.learning.favor,"sampling_mode":v.learning.sampling_mode(),"periods":v.learning.periods,"selection":v.learning.selection},"readings":readings,"memories":v.memories,"targets":v.targets,"retrieval":v.retrieval.as_ref().map(|steps|steps.iter().map(|text|json!({"type":"guidance","text":text})).collect::<Vec<_>>())}));
             }
             json!({"ok":true,"configReady":true,"diagnostics":[],"plan":{"version":"0.2","profiles":p.profiles,"defaults":p.learning,"vaults":vaults},"runtimePlan":p,"configSource":render_program(&ast),"instructions":p.vaults.iter().map(instructions).collect::<Vec<_>>().join("\n"),"trace":trace})

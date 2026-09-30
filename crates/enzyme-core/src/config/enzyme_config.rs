@@ -1073,6 +1073,7 @@ impl EnzymeConfig {
                             definition: None,
                             learning: Default::default(),
                             include_linked_pages: options.expandable,
+                            include_who_links: false,
                             pattern: false,
                         });
                     }
@@ -1111,6 +1112,7 @@ impl EnzymeConfig {
                         definition: None,
                         learning: Default::default(),
                         include_linked_pages: false,
+                        include_who_links: false,
                         pattern: false,
                     }),
                     CatalyzedEntity::WithOptions(map) => {
@@ -1121,6 +1123,7 @@ impl EnzymeConfig {
                                 definition: None,
                                 learning: Default::default(),
                                 include_linked_pages: opt.expandable,
+                                include_who_links: false,
                                 pattern: false,
                             });
                         }
@@ -2348,6 +2351,7 @@ pub fn migrate_readable_configs(
                     definition: None,
                     learning: Default::default(),
                     include_linked_pages: options.expandable,
+                    include_who_links: false,
                     pattern: false,
                 });
             }

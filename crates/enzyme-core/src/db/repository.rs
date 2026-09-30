@@ -1136,6 +1136,16 @@ impl Database {
         entity_ids: &[i64],
         as_of_ms: Option<i64>,
     ) -> Result<HashMap<i64, EntitySelectionStats>> {
+        self.get_entity_selection_stats_in_prefix(entity_ids, as_of_ms, None)
+    }
+
+    /// Selection scores limited to one SQLite source's document namespace.
+    pub fn get_entity_selection_stats_in_prefix(
+        &self,
+        entity_ids: &[i64],
+        as_of_ms: Option<i64>,
+        source_prefix: Option<&str>,
+    ) -> Result<HashMap<i64, EntitySelectionStats>> {
         let now = as_of_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
         let ids: Vec<_> = entity_ids
             .iter()
@@ -1146,12 +1156,24 @@ impl Database {
         let mut rows = Vec::new();
         for batch in ids.chunks(500) {
             let placeholders = vec!["?"; batch.len()].join(",");
+            let mut params: Vec<Value> = batch.iter().copied().map(Value::Integer).collect();
+            let scope = if let Some(prefix) = source_prefix {
+                params.push(Value::Integer(prefix.len() as i64));
+                params.push(Value::Text(prefix.to_owned()));
+                format!(
+                    " AND substr(file_path, 1, ?{}) = ?{}",
+                    params.len() - 1,
+                    params.len()
+                )
+            } else {
+                String::new()
+            };
             rows.extend(self.query_read(
                 &format!("SELECT entity_id, file_path, COALESCE(effective_date, created_at, 0), SUM(weight)
-                 FROM entity_occurrences WHERE entity_id IN ({placeholders})
+                 FROM entity_occurrences WHERE entity_id IN ({placeholders}){scope}
                  GROUP BY entity_id, file_path, COALESCE(effective_date, created_at, 0)
                  ORDER BY entity_id, file_path, COALESCE(effective_date, created_at, 0)"),
-                batch.iter().copied().map(Value::Integer).collect(),
+                params,
                 |row| Ok((row.get::<i64>(0)?, row.get::<String>(1)?, row.get::<i64>(2)?, row.get::<f64>(3)?)),
             )?);
         }
@@ -1186,6 +1208,20 @@ impl Database {
                 )
             })
             .collect())
+    }
+
+    /// Link entities with at least one occurrence in the named SQLite source.
+    /// SQLite ingestion creates link occurrences from its mapped `who` values.
+    pub fn get_sqlite_who_link_candidates(&self, source_prefix: &str) -> Result<Vec<Entity>> {
+        Ok(self.query_read(
+            "SELECT DISTINCT e.id, e.name, e.type, e.frequency,
+                    CAST(COALESCE((SELECT SUM(weight) FROM entity_occurrences WHERE entity_id = e.id), e.frequency) AS REAL),
+                    e.first_seen, e.last_seen, e.trends, e.metadata
+             FROM entities e JOIN entity_occurrences eo ON eo.entity_id = e.id
+             WHERE e.type = 'link' AND substr(eo.file_path, 1, ?1) = ?2",
+            vec![Value::Integer(source_prefix.len() as i64), Value::Text(source_prefix.to_owned())],
+            map_entity_row,
+        )?)
     }
 
     /// Newest occurrence date (effective date, else creation time) not after `limit_ms`.

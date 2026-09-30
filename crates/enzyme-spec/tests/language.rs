@@ -58,6 +58,49 @@ fn invalid_programs_fail() {
         assert!(parse(s).is_err(), "{s}");
     }
 }
+
+#[test]
+fn sqlite_source_who_links_roundtrip_and_validate_mapping() {
+    let source = r#"workspace "conversations" {
+  source sqlite "messages" {
+    database "/tmp/messages.sqlite"
+    query "SELECT id, person, sent_at, body FROM messages"
+    id "id"
+    who "person"
+    when "sent_at" unit ms
+    what "body"
+  }
+  learn questions from source "messages"
+    including who links
+    select 2 by frequency
+}"#;
+    let resolved = compile(source);
+    let reading = &resolved.vaults[0].readings[0];
+    assert_eq!(reading.entity, "collection:sqlite:messages");
+    assert!(reading.include_who_links);
+    assert!(reading.learning.selection.is_some());
+    let rendered = render_program(&parse(source).unwrap());
+    assert!(rendered.contains("including who links"));
+    assert_eq!(
+        parse(&rendered).unwrap().workspaces[0].readings[0].include_who_links,
+        true
+    );
+
+    let no_who = source.replace("    who \"person\"\n", "");
+    assert!(
+        resolve(vec![parse(&no_who).unwrap()], Path::new("/home/demo"))
+            .unwrap_err()
+            .to_string()
+            .contains("needs a who mapping")
+    );
+    let invalid = r#"vault "/notes" { learn questions from folder "people" including who links }"#;
+    assert!(
+        parse(invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("only SQLite sources")
+    );
+}
 #[test]
 fn resolution_rejects_ambiguity() {
     for s in [

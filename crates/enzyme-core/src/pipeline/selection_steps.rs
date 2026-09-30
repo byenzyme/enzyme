@@ -47,6 +47,8 @@ pub struct SelectionDiagnostics {
     pub folders: BTreeMap<String, FolderExpansion>,
     /// One entry per name-pattern reading, in declaration order.
     pub patterns: Vec<PatternDiagnostics>,
+    /// One source-scoped `including who links` expansion per reading.
+    pub who_links: Vec<PatternDiagnostics>,
     /// Explicit readings whose entity is not in the index.
     pub missing: Vec<String>,
     /// Explicit readings dropped by `leave out` or structural exclusions.
@@ -253,6 +255,91 @@ impl PatternExpansion<'_> {
     }
 }
 
+pub(crate) struct WhoLinkExpansion<'a> {
+    pub reading: &'a enzyme_spec::Reading,
+    pub source_prefix: String,
+    pub selected: Vec<Entity>,
+    pub diagnostics: PatternDiagnostics,
+}
+
+/// Expand the `who` links emitted by each SQLite source, scoring only evidence
+/// from that source. A source key is already escaped and resolved in the spec.
+pub(crate) fn readable_who_link_children<'a>(
+    db: &Database,
+    spec: &'a enzyme_spec::Vault,
+    as_of_ms: Option<i64>,
+) -> Result<Vec<WhoLinkExpansion<'a>>> {
+    let mut expansions = Vec::new();
+    for reading in spec.readings.iter().filter(|r| r.include_who_links) {
+        let (kind, name) = enzyme_spec::split_entity(&reading.entity);
+        anyhow::ensure!(
+            kind == "collection" && name.starts_with("sqlite:"),
+            "including who links needs a resolved SQLite source reading"
+        );
+        let source_prefix = format!("{name}/");
+        let candidates = db.get_sqlite_who_link_candidates(&source_prefix)?;
+        let matched = candidates.len();
+        let kept: Vec<_> = candidates
+            .into_iter()
+            .filter(|e| {
+                !spec.excluded_links.iter().any(|x| {
+                    x.trim_start_matches("[[")
+                        .trim_end_matches("]]")
+                        .eq_ignore_ascii_case(&e.name)
+                })
+            })
+            .collect();
+        let left_out = matched - kept.len();
+        let candidates: Vec<_> = kept
+            .into_iter()
+            .filter(|e| spec.reading(&e.name, "link").is_none())
+            .collect();
+        let explicit = matched - left_out - candidates.len();
+        let ids: Vec<_> = candidates.iter().filter_map(|e| e.id).collect();
+        let stats =
+            db.get_entity_selection_stats_in_prefix(&ids, as_of_ms, Some(&source_prefix))?;
+        let unfiltered = candidates.len();
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|e| e.id.is_some_and(|id| stats.contains_key(&id)))
+            .collect();
+        let eligible = candidates.len();
+        let default_selection = enzyme_spec::Selection {
+            amount: enzyme_spec::SelectionAmount::Count {
+                count: MAX_FOLDER_CHILDREN,
+            },
+            by: enzyme_spec::SelectionMode::Frequency,
+        };
+        let selected = rank_and_limit(
+            candidates,
+            &stats,
+            Some(
+                reading
+                    .learning
+                    .selection
+                    .as_ref()
+                    .unwrap_or(&default_selection),
+            ),
+        );
+        let diagnostics = PatternDiagnostics {
+            entity: reading.entity.clone(),
+            matched,
+            left_out,
+            explicit,
+            undated: unfiltered - eligible,
+            eligible,
+            selected: scored(&selected, &stats),
+        };
+        expansions.push(WhoLinkExpansion {
+            reading,
+            source_prefix,
+            selected,
+            diagnostics,
+        });
+    }
+    Ok(expansions)
+}
+
 /// Expand every name-pattern reading, in declaration order. Explicit readings
 /// are not candidates: they keep their own policy and consume no pattern slot.
 /// There is no density, frequency or recent-year gate; naming the pattern is the
@@ -344,6 +431,7 @@ pub fn build_readable_selection(
         readable_folder_children_explained(db, &base, spec, as_of_ms)?;
     let mut entities = expand_with_folder_children(db, &base, &folders)?;
     let patterns = readable_pattern_children(db, spec, as_of_ms)?;
+    let who_links = readable_who_link_children(db, spec, as_of_ms)?;
     let mut existing: HashSet<(String, EntityType)> = entities
         .iter()
         .map(|e| (e.name.clone(), e.entity_type.clone()))
@@ -374,6 +462,13 @@ pub fn build_readable_selection(
             }
         }
     }
+    for expansion in &who_links {
+        for entity in &expansion.selected {
+            if existing.insert((entity.name.clone(), entity.entity_type.clone())) {
+                entities.push(entity.clone());
+            }
+        }
+    }
     let mut profiles = profile_assignment::assign_profiles(&entities, &HashMap::new(), None);
     let mut inherited = HashMap::<String, String>::new();
     for expansion in &patterns {
@@ -387,6 +482,22 @@ pub fn build_readable_selection(
                     previous == *profile || overrides.contains_key(&child.name),
                     "{} {} inherits conflicting profiles from reading patterns; declare an explicit reading for it",
                     child.entity_type.as_str(),
+                    child.name
+                );
+            }
+        }
+    }
+    for expansion in &who_links {
+        if expansion.reading.profile == "auto" {
+            continue;
+        }
+        for child in &expansion.selected {
+            if let Some(previous) =
+                inherited.insert(child.name.clone(), expansion.reading.profile.clone())
+            {
+                anyhow::ensure!(
+                    previous == expansion.reading.profile || overrides.contains_key(&child.name),
+                    "who link {} inherits conflicting profiles; declare an explicit reading for it",
                     child.name
                 );
             }
@@ -411,6 +522,7 @@ pub fn build_readable_selection(
         reference_ms: as_of_ms,
         folders: folder_diagnostics,
         patterns: patterns.iter().map(PatternExpansion::diagnostics).collect(),
+        who_links: who_links.iter().map(|e| e.diagnostics.clone()).collect(),
         missing: Vec::new(),
         left_out: Vec::new(),
     };
@@ -747,6 +859,71 @@ pub(crate) mod tests {
             vec![V::Text(name.into()), V::Text(file.into()), V::Integer(date)],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn who_links_expand_from_only_the_named_sqlite_source() {
+        let db = test_db();
+        let date = chrono::Utc::now().timestamp_millis() - 86_400_000;
+        insert_entity(&db, "sqlite:messages", "collection", 3, 3);
+        for name in ["alice", "bob", "carol"] {
+            insert_entity(&db, name, "link", 10, 10);
+        }
+        for (name, file) in [
+            ("alice", "sqlite:messages/custom-a"),
+            ("alice", "sqlite:messages/custom-b"),
+            ("bob", "sqlite:messages/custom-c"),
+            ("bob", "sqlite:other/custom-a"),
+            ("bob", "sqlite:other/custom-b"),
+            ("carol", "sqlite:other/custom-c"),
+        ] {
+            insert_doc(&db, file);
+            insert_occurrence(&db, name, file, date);
+        }
+        let program = enzyme_spec::resolve(
+            vec![
+                enzyme_spec::parse(
+                    r#"
+workspace "conversations" {
+  source sqlite "messages" {
+    database "/tmp/messages.sqlite"
+    query "SELECT id, person, sent_at, body FROM messages"
+    id "id"
+    who "person"
+    when "sent_at" unit ms
+    what "body"
+  }
+  learn questions from source "messages" including who links select 1 by frequency
+}"#,
+                )
+                .unwrap(),
+            ],
+            std::path::Path::new("/home/test"),
+        )
+        .unwrap();
+        let spec = &program.vaults[0];
+        let base = db
+            .get_entities_by_names(&[("sqlite:messages", EntityType::Collection)])
+            .unwrap();
+        let result = build_readable_selection(&db, base, &HashMap::new(), spec).unwrap();
+        assert_eq!(
+            result
+                .final_entities
+                .iter()
+                .filter(|e| e.entity_type == EntityType::Link)
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alice"]
+        );
+        let detail = &result.diagnostics.who_links[0];
+        assert_eq!(
+            (
+                detail.matched,
+                detail.eligible,
+                detail.selected[0].documents
+            ),
+            (2, 2, 2)
+        );
     }
 
     #[test]

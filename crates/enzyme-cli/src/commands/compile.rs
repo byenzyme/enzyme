@@ -342,6 +342,7 @@ fn structured_setup(
                 definition: None,
                 learning,
                 include_linked_pages: expandable,
+                include_who_links: false,
                 pattern: false,
             });
         }

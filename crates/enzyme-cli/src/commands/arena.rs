@@ -1085,6 +1085,7 @@ fn build_program(
             definition: None,
             learning: learning.clone(),
             include_linked_pages: false,
+            include_who_links: false,
             pattern: false,
         })
         .collect();

@@ -58,6 +58,7 @@ pub struct ReadingPlan {
     pub name: String,
     pub pattern: bool,
     pub including_linked_pages: bool,
+    pub including_who_links: bool,
     pub profile: String,
     pub custom_profile: bool,
     pub learning: LearningPlan,
@@ -67,6 +68,9 @@ pub struct ReadingPlan {
     /// Name-pattern resolution, for `tags|links matching`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matches: Option<PatternDiagnostics>,
+    /// Source-scoped `who` link selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub who_links: Option<PatternDiagnostics>,
     pub jobs: Vec<PlannedJob>,
     pub skipped: Vec<PlannedSkip>,
     /// Why this reading produced fewer jobs than it names, in plain words.
@@ -396,6 +400,7 @@ fn attribute(
                 name: name.to_string(),
                 pattern: reading.pattern,
                 including_linked_pages: reading.include_linked_pages,
+                including_who_links: reading.include_who_links,
                 profile: reading.profile.clone(),
                 custom_profile: spec.profiles.contains_key(&reading.profile)
                     || reading.profile.starts_with("inline:"),
@@ -408,6 +413,7 @@ fn attribute(
                 ),
                 expansion: None,
                 matches: None,
+                who_links: None,
                 jobs: Vec::new(),
                 skipped: Vec::new(),
                 notes: Vec::new(),
@@ -430,6 +436,25 @@ fn attribute(
                     ));
                 }
                 members.push(key(entity_type, name));
+                if reading.include_who_links {
+                    let expansion = diagnostics
+                        .who_links
+                        .iter()
+                        .find(|d| d.entity == reading.entity)
+                        .cloned();
+                    if let Some(d) = &expansion {
+                        members.extend(d.selected.iter().map(|e| key(&e.entity_type, &e.name)));
+                        if d.matched == 0 {
+                            plan.notes.push("source has no indexed who links".into());
+                        } else if d.explicit > 0 {
+                            plan.notes.push(format!(
+                                "{} who link(s) have their own reading, which takes precedence",
+                                d.explicit
+                            ));
+                        }
+                    }
+                    plan.who_links = expansion;
+                }
                 if kind == "folder" {
                     let folder = name.to_lowercase();
                     let expansion = diagnostics.folders.get(&folder).cloned();
@@ -500,6 +525,9 @@ fn source_text(r: &Reading) -> String {
     };
     if r.include_linked_pages {
         s.push_str(" including linked pages");
+    }
+    if r.include_who_links {
+        s.push_str(" including who links");
     }
     s
 }
@@ -730,6 +758,11 @@ fn render(plan: &VaultPlan) -> String {
                 d.eligible,
                 d.selected.len()
             ));
+            s.push_str(&scores(&d.selected));
+        }
+        if let Some(d) = &r.who_links {
+            s.push_str(&format!("   who links  {} matched · {} left out · {} explicit · {} undated · {} eligible → {} selected\n",
+                d.matched, d.left_out, d.explicit, d.undated, d.eligible, d.selected.len()));
             s.push_str(&scores(&d.selected));
         }
         s.push_str(&jobs_text(&r.jobs));

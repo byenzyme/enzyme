@@ -1722,6 +1722,7 @@ impl<'a> CatalystPipeline<'a> {
         let chunk_preload = self.preload_chunk_selection(entities);
 
         let mut inherited_learning = HashMap::<String, enzyme_spec::Learning>::new();
+        let mut inherited_source_scope = HashMap::<String, Vec<String>>::new();
         if let Some(spec) = config.reading_spec {
             let base: Vec<_> = entities
                 .iter()
@@ -1771,6 +1772,32 @@ impl<'a> CatalystPipeline<'a> {
                     }
                 }
             }
+            for expansion in crate::pipeline::selection_steps::readable_who_link_children(
+                self.db, spec, as_of_ms,
+            )? {
+                let mut learning = expansion.reading.learning.clone();
+                learning.selection = None;
+                for child in &expansion.selected {
+                    if spec.reading(&child.name, "link").is_some() {
+                        continue;
+                    }
+                    if let Some(previous) =
+                        inherited_learning.insert(child.name.clone(), learning.clone())
+                    {
+                        anyhow::ensure!(
+                            previous == learning,
+                            "who link {} inherits conflicting learning policies; declare an explicit reading for it",
+                            child.name
+                        );
+                    }
+                    let scopes = inherited_source_scope
+                        .entry(child.name.clone())
+                        .or_default();
+                    if !scopes.contains(&expansion.source_prefix) {
+                        scopes.push(expansion.source_prefix.clone());
+                    }
+                }
+            }
         }
         let mut jobs: Vec<EntityJob> = Vec::new();
         let mut skipped: Vec<SkippedEntity> = Vec::new();
@@ -1780,6 +1807,13 @@ impl<'a> CatalystPipeline<'a> {
             let entity_name = &entity.name;
 
             let mut occurrences = self.db.get_entity_occurrences(entity_id)?;
+            if let Some(prefixes) = inherited_source_scope.get(entity_name) {
+                occurrences.retain(|occ| {
+                    prefixes
+                        .iter()
+                        .any(|prefix| occ.file_path.starts_with(prefix))
+                });
+            }
             let all_occurrences = occurrences.len();
             let in_scope_occurrences = occurrences
                 .iter()
