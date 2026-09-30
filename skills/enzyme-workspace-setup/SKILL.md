@@ -64,7 +64,9 @@ to execute real commands is not missing permission inside the fictional dialogue
 Use the supplied workspace path, or the current workspace if none was supplied.
 Verify that Markdown notes live there. If it is empty, scratch, or points somewhere
 else, ask for the notes folder before creating state. For SQLite sources, hand off
-to `enzyme-sqlite-source`; this compile workflow supports a single Markdown vault.
+to `enzyme-sqlite-source`; this compile workflow supports one Markdown folder
+and writes a `workspace` program with a Markdown source. Existing `vault`
+programs remain readable.
 
 ```bash
 ENZYME_BIN="${ENZYME_BIN:-enzyme}"
