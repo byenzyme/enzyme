@@ -115,6 +115,131 @@ const EXCLUDED_TAGS: &[&str] = &[
     "migrations",
 ];
 
+/// Engine-independent inputs to Enzyme's greedy catalyst-candidate scorer.
+///
+/// Index-backed selection and pre-index workspace review build these inputs
+/// from different stores, then share the exact same scoring and marginal-file-
+/// coverage loop.
+#[derive(Debug, Clone)]
+pub struct CoverageCandidate {
+    pub entity_type: EntityType,
+    pub ranking_weight: f64,
+    pub recency_score: f64,
+    pub frequency_recent: i64,
+    pub files: HashSet<String>,
+    pub active_folder_links: usize,
+}
+
+/// Occurrences within this many days count toward `frequency_recent`.
+pub const COVERAGE_RECENT_WINDOW_DAYS: f64 = 365.0;
+
+/// Enzyme's occurrence decay signal: exponential decay with a 30-day
+/// half-life. Future occurrences (negative age) have today's weight.
+pub fn coverage_recency_weight(age_days: f64) -> f64 {
+    crate::models::activity_decay_for_age_days(age_days)
+}
+
+/// Convert accumulated occurrence decay into the entity recency score used by
+/// catalyst selection.
+pub fn coverage_recency_score(weighted_sum: f64, ranking_weight: f64) -> f64 {
+    weighted_sum * (1.0 + (1.0 + ranking_weight.max(0.0)).ln())
+}
+
+/// Whether an occurrence of this age counts toward `frequency_recent`.
+pub fn is_recent_coverage_occurrence(age_days: f64) -> bool {
+    age_days <= COVERAGE_RECENT_WINDOW_DAYS
+}
+
+/// Return candidate indices in Enzyme's catalyst-selection order.
+pub fn select_coverage_candidate_indices(
+    candidates: &[CoverageCandidate],
+    limit: usize,
+) -> Vec<usize> {
+    let mut picked = Vec::new();
+    let mut picked_indices = HashSet::new();
+    let mut covered_files: HashSet<&str> = HashSet::new();
+
+    for _ in 0..limit {
+        let mut best = None;
+        let mut best_score = f64::NEG_INFINITY;
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            if picked_indices.contains(&index) {
+                continue;
+            }
+
+            let recency_sig = candidate.recency_score / 100.0;
+            let freq_sig = (candidate.ranking_weight.max(0.0) + 1.0).ln();
+            let freq_recent_sig = (candidate.frequency_recent as f64 + 1.0).ln();
+
+            let mut score = 0.7 * (recency_sig.max(0.001) * freq_sig).sqrt()
+                + 0.5 * freq_recent_sig
+                + 0.4 * freq_sig;
+
+            // Type baseline. A deliberately declared log or collection is
+            // high-signal: above a tag, just above a folder.
+            match candidate.entity_type {
+                EntityType::Folder => {
+                    score += 1.0;
+                    score += 0.3 * (candidate.active_folder_links as f64 + 1.0).ln();
+                }
+                EntityType::Tag => score += 0.8,
+                EntityType::AppendLog | EntityType::Collection => score += 1.1,
+                EntityType::Link => {}
+            }
+
+            // Marginal file coverage
+            if !candidate.files.is_empty() {
+                let unique = candidate
+                    .files
+                    .iter()
+                    .filter(|file| !covered_files.contains(file.as_str()))
+                    .count();
+                let marginal = unique as f64 / candidate.files.len() as f64;
+                score += 1.2 * marginal + 0.3 * (unique as f64 + 1.0).ln();
+                score -= (0.6 * (1.0 - marginal)).min(0.5);
+            }
+
+            if score > best_score {
+                best = Some(index);
+                best_score = score;
+            }
+        }
+
+        let Some(winner) = best else { break };
+        picked.push(winner);
+        picked_indices.insert(winner);
+        covered_files.extend(candidates[winner].files.iter().map(String::as_str));
+    }
+
+    picked
+}
+
+/// Enzyme's automatic catalyst-candidate eligibility policy, shared with the
+/// pre-index workspace review. Explicitly curated entities intentionally do
+/// not pass through this soft-tier filter.
+pub fn is_automatic_coverage_candidate(
+    entity_type: &EntityType,
+    name: &str,
+    ranking_weight: f64,
+    folder_exclusions: &FolderExclusions,
+) -> bool {
+    match entity_type {
+        EntityType::Folder => {
+            !name.contains('/')
+                && !folder_exclusions.is_excluded(name)
+                && !GENERIC_FOLDERS.contains(&name.to_lowercase().as_str())
+                && !name.starts_with('.')
+        }
+        // Only root tags — EntityMap folds children into parents
+        EntityType::Tag => {
+            !name.contains('/') && !EXCLUDED_TAGS.contains(&name.to_lowercase().as_str())
+        }
+        EntityType::Link => !name.contains('/') && ranking_weight >= 3.0,
+        EntityType::AppendLog | EntityType::Collection => true,
+    }
+}
+
 impl EntityMap {
     /// Build an EntityMap from an arbitrary list of entities.
     ///
@@ -428,136 +553,56 @@ impl EntityMap {
             strength
         };
 
-        let generic_folders: HashSet<&str> = GENERIC_FOLDERS.iter().copied().collect();
-        let excluded_tags: HashSet<&str> = EXCLUDED_TAGS.iter().copied().collect();
-
         // Filter to candidates: root-level, non-system, non-generic
         let candidates: Vec<&Entity> = all
             .iter()
-            .filter(|e| {
-                match e.entity_type {
-                    EntityType::Folder => {
-                        !e.name.contains('/')
-                            && !folder_exclusions.is_excluded(&e.name)
-                            && !generic_folders.contains(e.name.to_lowercase().as_str())
-                            && !e.name.starts_with('.')
-                    }
-                    EntityType::Tag => {
-                        // Only root tags — EntityMap folds children into parents
-                        !e.name.contains('/')
-                            && !excluded_tags.contains(e.name.to_lowercase().as_str())
-                    }
-                    EntityType::Link => !e.name.contains('/') && e.ranking_weight >= 3.0,
-                    EntityType::AppendLog => true,
-                    EntityType::Collection => true,
-                }
+            .filter(|entity| {
+                is_automatic_coverage_candidate(
+                    &entity.entity_type,
+                    &entity.name,
+                    entity.ranking_weight,
+                    folder_exclusions,
+                )
             })
             .collect();
 
-        let mut picked: Vec<Entity> = Vec::new();
-        let mut covered_files: HashSet<String> = HashSet::new();
-
-        for _ in 0..limit {
-            let picked_keys: HashSet<(&str, &EntityType)> = picked
-                .iter()
-                .map(|e| (e.name.as_str(), &e.entity_type))
-                .collect();
-
-            let mut best: Option<&Entity> = None;
-            let mut best_score: f64 = f64::NEG_INFINITY;
-
-            for entity in &candidates {
-                if picked_keys.contains(&(entity.name.as_str(), &entity.entity_type)) {
-                    continue;
-                }
-
-                let recency_sig = entity.trends.recency_score / 100.0;
-                let freq_sig = (entity.ranking_weight.max(0.0) + 1.0).ln();
-                let freq_recent_sig = (entity.trends.frequency_recent as f64 + 1.0).ln();
-
-                let mut score = 0.7 * (recency_sig.max(0.001) * freq_sig).sqrt()
-                    + 0.5 * freq_recent_sig
-                    + 0.4 * freq_sig;
-
-                // Type baseline
-                match entity.entity_type {
-                    EntityType::Folder => {
-                        score += 1.0;
-                        let active = *folder_active_links
-                            .get(&entity.name.to_lowercase())
-                            .unwrap_or(&0);
-                        score += 0.3 * (active as f64 + 1.0).ln();
-                    }
-                    EntityType::Tag => {
-                        score += 0.8;
-                    }
-                    // A deliberately declared log is high-signal: above a tag,
-                    // just above a folder.
-                    EntityType::AppendLog => {
-                        score += 1.1;
-                    }
-                    EntityType::Collection => {
-                        score += 1.1;
-                    }
-                    EntityType::Link => {}
-                }
-
-                // Marginal file coverage
-                let entity_files: HashSet<&String> = match entity.entity_type {
+        let coverage_candidates = candidates
+            .iter()
+            .map(|entity| {
+                let files = match entity.entity_type {
                     EntityType::Tag
                     | EntityType::Link
                     | EntityType::AppendLog
                     | EntityType::Collection => entity
                         .id
                         .and_then(|id| entity_file_sets.get(&id))
-                        .map(|s| s.iter().collect())
+                        .cloned()
                         .unwrap_or_default(),
                     EntityType::Folder => folder_file_sets
                         .get(&entity.name.to_lowercase())
-                        .map(|s| s.iter().collect())
+                        .cloned()
                         .unwrap_or_default(),
                 };
-
-                if !entity_files.is_empty() {
-                    let unique = entity_files
-                        .iter()
-                        .filter(|f| !covered_files.contains(**f))
-                        .count();
-                    let marginal = unique as f64 / entity_files.len() as f64;
-                    score += 1.2 * marginal + 0.3 * (unique as f64 + 1.0).ln();
-                    score -= (0.6 * (1.0 - marginal)).min(0.5);
+                CoverageCandidate {
+                    entity_type: entity.entity_type.clone(),
+                    ranking_weight: entity.ranking_weight,
+                    recency_score: entity.trends.recency_score,
+                    frequency_recent: entity.trends.frequency_recent,
+                    files,
+                    active_folder_links: folder_active_links
+                        .get(&entity.name.to_lowercase())
+                        .copied()
+                        .unwrap_or(0),
                 }
+            })
+            .collect::<Vec<_>>();
 
-                if score > best_score {
-                    best = Some(entity);
-                    best_score = score;
-                }
-            }
-
-            let Some(winner) = best else { break };
-            picked.push(winner.clone());
-
-            // Update coverage
-            match winner.entity_type {
-                EntityType::Tag
-                | EntityType::Link
-                | EntityType::AppendLog
-                | EntityType::Collection => {
-                    if let Some(id) = winner.id {
-                        if let Some(files) = entity_file_sets.get(&id) {
-                            covered_files.extend(files.iter().cloned());
-                        }
-                    }
-                }
-                EntityType::Folder => {
-                    if let Some(files) = folder_file_sets.get(&winner.name.to_lowercase()) {
-                        covered_files.extend(files.iter().cloned());
-                    }
-                }
-            }
-        }
-
-        Ok(picked)
+        Ok(
+            select_coverage_candidate_indices(&coverage_candidates, limit)
+                .into_iter()
+                .map(|index| candidates[index].clone())
+                .collect(),
+        )
     }
 
     /// Get the page entity map (folder name → link names).
@@ -667,6 +712,57 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn coverage_selector_prefers_new_files_over_a_redundant_peer() {
+        let candidate = |files: &[&str]| CoverageCandidate {
+            entity_type: EntityType::Link,
+            ranking_weight: 10.0,
+            recency_score: 50.0,
+            frequency_recent: 10,
+            files: files.iter().map(|file| (*file).to_string()).collect(),
+            active_folder_links: 0,
+        };
+        let candidates = vec![
+            candidate(&["a.md", "b.md"]),
+            candidate(&["a.md", "b.md"]),
+            candidate(&["c.md", "d.md"]),
+        ];
+
+        assert_eq!(select_coverage_candidate_indices(&candidates, 2), vec![0, 2]);
+    }
+
+    #[test]
+    fn coverage_recency_helpers_match_indexing_decay() {
+        let now = 1_000 * 86_400_000_i64;
+        for age_days in [0_i64, 1, 30, 365, 400] {
+            let date = now - age_days * 86_400_000;
+            assert_eq!(
+                coverage_recency_weight(age_days as f64),
+                crate::models::activity_decay(now, date)
+            );
+        }
+        // Future occurrences have today's weight, never a boost.
+        assert_eq!(coverage_recency_weight(-5.0), 1.0);
+        assert!(is_recent_coverage_occurrence(365.0));
+        assert!(!is_recent_coverage_occurrence(365.5));
+        // Negative ranking weight is clamped, leaving only the decay sum.
+        assert_eq!(coverage_recency_score(2.0, -3.0), 2.0);
+    }
+
+    #[test]
+    fn automatic_candidate_policy_matches_soft_and_hard_tiers() {
+        let exclusions = FolderExclusions::with_extra(["private"]);
+        let eligible = |kind: EntityType, name: &str, weight: f64| {
+            is_automatic_coverage_candidate(&kind, name, weight, &exclusions)
+        };
+        assert!(eligible(EntityType::Folder, "projects", 0.0));
+        assert!(!eligible(EntityType::Folder, "private", 0.0));
+        assert!(!eligible(EntityType::Folder, "a/b", 0.0));
+        assert!(!eligible(EntityType::Link, "rare", 2.0));
+        assert!(eligible(EntityType::Link, "common", 3.0));
+        assert!(eligible(EntityType::Collection, "c", 0.0));
     }
 
     // ── Link-tag dedup ──────────────────────────────────────────────────

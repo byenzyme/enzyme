@@ -132,6 +132,11 @@ fn default_occurrence_weight() -> f64 {
 
 /// Thirty-day activity decay. Future timestamps have today's weight, never a boost.
 pub fn activity_decay(now: i64, date: i64) -> f64 {
-    let age_days = now.saturating_sub(date).max(0) as f64 / 86_400_000.0;
-    (-0.693_147 / 30.0 * age_days).exp()
+    activity_decay_for_age_days(now.saturating_sub(date).max(0) as f64 / 86_400_000.0)
+}
+
+/// [`activity_decay`] for an age already expressed in days. Negative ages
+/// (future occurrences) have today's weight.
+pub fn activity_decay_for_age_days(age_days: f64) -> f64 {
+    (-0.693_147 / 30.0 * age_days.max(0.0)).exp()
 }
