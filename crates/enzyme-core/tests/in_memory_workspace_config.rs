@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use enzyme_core::config::{EnzymeConfig, NotesRootConfig};
+use enzyme_core::config::EnzymeConfig;
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::initialize_sqlite_runtime;
 use enzyme_core::kernel::{Bridged, SearchIndex, SearchOptions, ensure_searchable_sync};
@@ -150,6 +150,7 @@ fn named_workspace_indexes_markdown_and_sqlite_from_in_memory_config() {
         &format!(
             r#"
 workspace "practice" {{
+  source markdown "notes" {{ path "{}" }}
   source sqlite "messages" {{
     database "{}"
     query "SELECT id, sender, sent_ms, body FROM messages"
@@ -158,9 +159,12 @@ workspace "practice" {{
     when "sent_ms" unit ms
     what "body"
   }}
+  leave out folders {{ "private" }}
+  references in fields {{ "people" }}
   learn questions from source "messages"
 }}
 "#,
+            notes.display(),
             messages.display()
         ),
         &homes.user_home,
@@ -169,15 +173,11 @@ workspace "practice" {{
     let mut config = EnzymeConfig::from_program_workspace(program, "practice").unwrap();
     assert_eq!(config.sources["messages"].db, messages);
     assert!(config.has_curated_entities());
-    config.notes_roots.push(NotesRootConfig {
-        name: "notes".into(),
-        path: notes.clone(),
-        document_ref_prefix: None,
-        exclusions: Vec::new(),
-        writable: false,
-    });
-    config.excluded_folders = vec!["private".into()];
-    config.frontmatter_link_fields = vec!["people".into()];
+    // Every policy below comes from the grammar alone: no hand-built roots.
+    assert_eq!(config.notes_roots.len(), 1);
+    assert_eq!(config.notes_roots[0].path, notes);
+    assert_eq!(config.excluded_folders, ["private"]);
+    assert_eq!(config.frontmatter_link_fields, ["people"]);
 
     let discovered = FileDiscovery::from_notes_roots(config.notes_roots.clone())
         .with_excluded_folders(config.excluded_folders.clone())
