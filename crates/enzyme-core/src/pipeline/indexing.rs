@@ -16,6 +16,9 @@ use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
     representative_excerpt,
 };
+use crate::pipeline::entity_map::{
+    coverage_recency_score, coverage_recency_weight, is_recent_coverage_occurrence,
+};
 
 /// Orchestrates the full indexing pipeline:
 /// discover files -> process -> diff against DB -> upsert new/changed ->
@@ -800,11 +803,10 @@ impl<'a> IndexingPipeline<'a> {
                 timeline_weights: HashMap::new(),
             });
 
-            // Exponential decay with a half-life of 30 days
-            let weight = crate::models::activity_decay(now_millis, effective_date);
+            let weight = coverage_recency_weight(age_days);
             acc.weighted_sum += weight * occurrence_weight;
 
-            if age_days <= 365.0 {
+            if is_recent_coverage_occurrence(age_days) {
                 acc.frequency_recent += 1;
             }
 
@@ -820,7 +822,6 @@ impl<'a> IndexingPipeline<'a> {
             .iter()
             .filter_map(|e| {
                 let entity_id = e.id?;
-                let frequency = e.ranking_weight.max(0.0);
 
                 let acc = accums.remove(&entity_id);
                 let (weighted_sum, frequency_recent, timeline_buckets, timeline_weights) = match acc
@@ -834,7 +835,7 @@ impl<'a> IndexingPipeline<'a> {
                     None => (0.0, 0, HashMap::new(), HashMap::new()),
                 };
 
-                let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
+                let recency_score = coverage_recency_score(weighted_sum, e.ranking_weight);
 
                 Some((
                     entity_id,

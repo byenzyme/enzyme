@@ -39,6 +39,13 @@ pub struct SearchOptions {
     /// exclusions, configured logs, frontmatter link fields, and catalyst
     /// selection. No default path is resolved when it is absent.
     pub config_path: Option<PathBuf>,
+    /// Optional caller-built configuration for one workspace, typically from
+    /// [`EnzymeConfig::from_program_workspace`]. It drives SQLite sources,
+    /// notes roots, exclusions, configured logs, frontmatter link fields, and
+    /// (unless `selection_config` is set) catalyst selection exactly as a
+    /// loaded `config_path` does, without reading any file or Enzyme home.
+    /// Mutually exclusive with `config_path`.
+    pub workspace_config: Option<EnzymeConfig>,
     /// Folders excluded from indexing. An explicit empty list means no
     /// caller-defined exclusions; no config path is resolved implicitly.
     pub excluded_folders: Vec<String>,
@@ -81,6 +88,7 @@ impl Default for SearchOptions {
             vault_path: PathBuf::new(),
             db_path: PathBuf::new(),
             config_path: None,
+            workspace_config: None,
             excluded_folders: Vec::new(),
             configured_logs: HashSet::new(),
             frontmatter_link_fields: HashSet::new(),
@@ -153,6 +161,23 @@ impl SearchIndex {
                 path: hit.file_path,
                 score: hit.similarity,
                 content: hit.content,
+            })
+            .collect())
+    }
+
+    /// Bounded literal phrase lookup over indexed chunks.
+    ///
+    /// Catalyst selection controls associative handles, not the reachability
+    /// of documents already inside the declared recall boundary.
+    pub fn exact_phrase_search(&self, phrase: &str, limit: usize) -> Result<Vec<Hit>> {
+        Ok(self
+            .db
+            .get_chunks_containing_phrase(phrase, limit)?
+            .into_iter()
+            .map(|chunk| Hit {
+                path: chunk.file_path,
+                score: 1.0,
+                content: chunk.content,
             })
             .collect())
     }
@@ -265,7 +290,8 @@ impl SearchIndex {
 /// Open an already-provisioned index for search without running provisioning.
 ///
 /// Returns `None` when the index file does not exist yet so the embedder can
-/// choose whether to cold-provision. The worker owns initialization and keeps
+/// choose whether to cold-provision. The index is opened read-only and is
+/// never migrated; an index whose schema predates this binary is an error. The worker owns initialization and keeps
 /// the sync API safe in callers that already have an async runtime.
 #[cfg(feature = "embedder-compat")]
 pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<SearchIndex>> {
@@ -275,7 +301,11 @@ pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<Se
     let vault = vault_path.to_path_buf();
     let db_path = db_path.to_path_buf();
     std::thread::spawn(move || -> Result<SearchIndex> {
-        let db = Database::open(&db_path)
+        // Searching must never create, migrate, or otherwise write the index;
+        // provisioning (`ensure_searchable`) owns schema upgrades.
+        let db = Database::open_read_only(&db_path)
+            .with_context(|| format!("opening search index {}", db_path.display()))?;
+        db.validate_expected_schema()
             .with_context(|| format!("opening search index {}", db_path.display()))?;
         let document_count = db.get_document_count().unwrap_or(0) as usize;
         let service = get_embedding_service(&vault).context("initializing embeddings")?;
@@ -328,6 +358,7 @@ fn ensure_searchable_owned(
         vault_path,
         db_path,
         config_path,
+        workspace_config,
         mut excluded_folders,
         mut configured_logs,
         mut frontmatter_link_fields,
@@ -339,10 +370,21 @@ fn ensure_searchable_owned(
     } = options;
     let mut configured_sources = None;
     let mut configured_notes_roots = Vec::new();
-    if let Some(config_path) = config_path {
+    let loaded = match (config_path, workspace_config) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("SearchOptions accepts config_path or workspace_config, not both")
+        }
+        (Some(config_path), None) => Some(
+            EnzymeConfig::load_at(&vault_path, &config_path)
+                .with_context(|| format!("loading search config {}", config_path.display()))?,
+        ),
+        (None, Some(config)) => Some(Some(config)),
+        (None, None) => None,
+    };
+    // A supplied config (file or in-memory) owns the SQLite source set, even
+    // when it declares none: stale source namespaces are reconciled away.
+    if let Some(loaded) = loaded {
         configured_sources = Some(HashMap::new());
-        let loaded = EnzymeConfig::load_at(&vault_path, &config_path)
-            .with_context(|| format!("loading search config {}", config_path.display()))?;
         if selection_config.is_none() {
             selection_config = loaded.clone();
         }
@@ -562,6 +604,41 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[cfg(feature = "embedder-compat")]
+    #[test]
+    fn open_existing_reads_provisioned_index_without_migrating_foreign_files() {
+        let (temp, vault, db_path) = fixture();
+        drop(ensure_searchable_sync(SearchOptions::new(&vault, &db_path), None).unwrap());
+        let index = open_existing_sync(&vault, &db_path).unwrap().unwrap();
+        assert_eq!(index.document_count, 1);
+        assert_eq!(
+            index
+                .exact_phrase_search("search boundaries", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            index
+                .database()
+                .execute_write("DELETE FROM docs", vec![])
+                .is_err()
+        );
+
+        let foreign = temp.path().join("foreign.db");
+        rusqlite::Connection::open(&foreign)
+            .unwrap()
+            .execute_batch("CREATE TABLE docs (id INTEGER)")
+            .unwrap();
+        let error = open_existing_sync(&vault, &foreign).err().unwrap();
+        assert!(format!("{error:#}").contains("missing table"), "{error:#}");
+        let tables: i64 = rusqlite::Connection::open(&foreign)
+            .unwrap()
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tables, 1, "opening must not migrate a foreign database");
+    }
+
     #[test]
     fn sync_api_uses_explicit_path_and_builds_direct_search() {
         let (_temp, vault, db_path) = fixture();
@@ -575,6 +652,26 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn exact_phrase_search_finds_literal_text_case_insensitively() {
+        let (_temp, vault, db_path) = fixture();
+        std::fs::write(vault.join("other.md"), "Unrelated gardening notes.").unwrap();
+        let index = ensure_searchable_sync(SearchOptions::new(&vault, &db_path), None).unwrap();
+
+        let hits = index.exact_phrase_search("SEARCH boundaries", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "note.md");
+        assert!(hits[0].content.contains("Rust search boundaries"));
+        assert!(
+            index
+                .exact_phrase_search("absent phrase", 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(index.exact_phrase_search("   ", 5).unwrap().is_empty());
+        assert!(index.exact_phrase_search("search", 0).unwrap().is_empty());
     }
 
     #[test]

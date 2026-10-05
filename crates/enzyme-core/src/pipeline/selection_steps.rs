@@ -1170,6 +1170,40 @@ vault {:?} {{ learn questions from folder "efforts" including linked pages about
     }
 
     #[test]
+    fn readable_expansion_matches_source_qualified_folder_identity() {
+        // Multi-root workspaces qualify folder identities with the root's
+        // document namespace; linked pages must still resolve under them.
+        let db = test_db();
+        let folder = "markdown_fixture/people";
+        insert_entity(&db, folder, "folder", 100, 10);
+        insert_entity(&db, "alice smith", "link", 12, 4);
+        insert_doc(&db, "markdown_fixture/People/Alice Smith.md");
+        insert_doc(&db, "markdown_fixture/people/nested/Bob.md");
+        insert_entity(&db, "bob", "link", 12, 4);
+        let program = enzyme_spec::resolve(
+            vec![
+                enzyme_spec::parse(&format!(
+                    r#"vault "/notes" {{ learn questions from folder "{folder}" including linked pages about relationships }}"#
+                ))
+                .unwrap(),
+            ],
+            std::path::Path::new("/home/test"),
+        )
+        .unwrap();
+        let spec = &program.vaults[0];
+        let base = vec![make_entity(folder, EntityType::Folder, 100)];
+        let overrides = HashMap::from([(folder.to_string(), "relational".to_string())]);
+        let result = build_readable_selection(&db, base, &overrides, spec).unwrap();
+
+        assert_eq!(
+            result.expandable_folders.get(folder),
+            Some(&vec!["alice smith".to_string()])
+        );
+        assert_eq!(result.entity_profiles["alice smith"], "relational");
+        assert!(!result.final_entities.iter().any(|e| e.name == "bob"));
+    }
+
+    #[test]
     fn auto_expandable_folder_loads_page_entities_from_db() {
         let db = test_db();
         insert_doc(&db, "people/Alice Smith.md");
