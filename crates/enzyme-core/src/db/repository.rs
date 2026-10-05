@@ -1448,20 +1448,28 @@ impl Database {
             row.get::<String>(0)
         })?;
 
-        // Map: folder → set of doc stems
+        // Map: folder → set of direct-child doc stems. Folder identities can
+        // be source-qualified (for example `markdown_<hash>/people` in a
+        // multi-root workspace), so match the complete folder prefix rather
+        // than assuming the first source-ref segment is the folder name.
         let mut folder_stems: HashMap<String, HashSet<String>> = HashMap::new();
+        let normalized_folders = folders
+            .iter()
+            .map(|folder| {
+                let folder = folder.to_lowercase();
+                let prefix = format!("{folder}/");
+                (folder, prefix)
+            })
+            .collect::<Vec<_>>();
         for source_ref in &docs {
-            if let Some(slash) = source_ref.find('/') {
-                let folder = source_ref[..slash].to_lowercase();
-                if folders.contains(folder.as_str()) {
-                    let filename = &source_ref[slash + 1..];
-                    if !filename.contains('/') {
-                        let stem = filename
-                            .strip_suffix(".md")
-                            .unwrap_or(filename)
-                            .to_lowercase();
-                        folder_stems.entry(folder).or_default().insert(stem);
-                    }
+            let normalized_source_ref = source_ref.to_lowercase();
+            for (folder, prefix) in &normalized_folders {
+                let Some(filename) = normalized_source_ref.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                if !filename.is_empty() && !filename.contains('/') {
+                    let stem = filename.strip_suffix(".md").unwrap_or(filename).to_string();
+                    folder_stems.entry(folder.clone()).or_default().insert(stem);
                 }
             }
         }
