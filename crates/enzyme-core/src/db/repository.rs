@@ -2207,6 +2207,42 @@ impl Database {
     // Chunk operations
     // -----------------------------------------------------------------------
 
+    /// Find chunks containing a literal phrase, case-insensitively.
+    ///
+    /// This is deliberately a bounded verification path rather than a general
+    /// lexical ranker. It lets callers prove that indexed material remains
+    /// reachable even when the active catalyst surface is narrowly curated.
+    pub fn get_chunks_containing_phrase(
+        &self,
+        phrase: &str,
+        limit: usize,
+    ) -> Result<Vec<FileChunk>> {
+        let phrase = phrase.trim();
+        if phrase.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self.query_read(
+            "SELECT d.source_ref, c.chunk_index, c.content, c.entry_date
+             FROM chunks c
+             JOIN docs d ON d.id = c.doc_id
+             WHERE instr(lower(c.content), lower(?1)) > 0
+             ORDER BY d.modified_at DESC, d.source_ref, c.chunk_index
+             LIMIT ?2",
+            vec![
+                Value::Text(phrase.to_string()),
+                Value::Integer(limit as i64),
+            ],
+            |row| {
+                Ok(FileChunk {
+                    file_path: row.get::<String>(0)?,
+                    chunk_index: row.get::<i64>(1)? as u32,
+                    content: row.get::<String>(2)?,
+                    entry_date: row.get::<Option<i64>>(3)?,
+                })
+            },
+        )?)
+    }
+
     /// Get all chunks belonging to documents that have been embedded.
     pub fn get_all_chunks_with_embeddings(&self) -> Result<Vec<(String, i64, String)>> {
         let rows = self.query_read(

@@ -157,6 +157,23 @@ impl SearchIndex {
             .collect())
     }
 
+    /// Bounded literal phrase lookup over indexed chunks.
+    ///
+    /// Catalyst selection controls associative handles, not the reachability
+    /// of documents already inside the declared recall boundary.
+    pub fn exact_phrase_search(&self, phrase: &str, limit: usize) -> Result<Vec<Hit>> {
+        Ok(self
+            .db
+            .get_chunks_containing_phrase(phrase, limit)?
+            .into_iter()
+            .map(|chunk| Hit {
+                path: chunk.file_path,
+                score: 1.0,
+                content: chunk.content,
+            })
+            .collect())
+    }
+
     /// Catalyst-based search rendered as the legacy `catalyze` JSON envelope.
     ///
     /// This compatibility surface lets embedders that previously parsed the
@@ -575,6 +592,21 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn exact_phrase_search_finds_literal_text_case_insensitively() {
+        let (_temp, vault, db_path) = fixture();
+        std::fs::write(vault.join("other.md"), "Unrelated gardening notes.").unwrap();
+        let index = ensure_searchable_sync(SearchOptions::new(&vault, &db_path), None).unwrap();
+
+        let hits = index.exact_phrase_search("SEARCH boundaries", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "note.md");
+        assert!(hits[0].content.contains("Rust search boundaries"));
+        assert!(index.exact_phrase_search("absent phrase", 5).unwrap().is_empty());
+        assert!(index.exact_phrase_search("   ", 5).unwrap().is_empty());
+        assert!(index.exact_phrase_search("search", 0).unwrap().is_empty());
     }
 
     #[test]
