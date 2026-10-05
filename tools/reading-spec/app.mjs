@@ -1,4 +1,4 @@
-// Parsing and compilation live in enzyme-spec (Rust).
+// Parsing and compilation live in enzyme-spec (Rust, github.com/byenzyme/enzyme-spec).
 const $ = id => document.getElementById(id);
 const editor = $('source');
 let compileVersion = 0;

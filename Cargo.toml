@@ -38,6 +38,9 @@ ese = { path = "crates/enzyme-core/vendor/ese", features = ["dim-512", "rayon", 
 # HNSW
 instant-distance = "0.6"
 
+# Readable workspace language (public: github.com/byenzyme/enzyme-spec)
+enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }
+
 # Document processing
 pulldown-cmark = "0.12"
 
