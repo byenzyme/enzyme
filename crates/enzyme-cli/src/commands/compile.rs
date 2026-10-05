@@ -370,6 +370,7 @@ fn structured_setup(
         embedding_limit: vault.embedding_limit,
         memories: vault.memories,
         retrieval: vault.retrieval,
+        note_policies: vault.note_policies,
     });
     Ok(program)
 }

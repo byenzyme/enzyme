@@ -172,6 +172,38 @@ pub struct Memory {
     pub conditions: Vec<String>,
     pub guidance: Vec<String>,
 }
+/// `remember in folder "<dir>" [in source "<name>"] [when { … }] create note [{ … }]`.
+///
+/// Agent guidance, not a hook: it states where new notes belong. `folder` is
+/// relative to the Markdown source root (`"."` is the root itself) and is never
+/// absolute or `..`-escaping. `source` names the declaring Markdown source; it
+/// is required only when a workspace declares several Markdown sources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotePolicy {
+    pub folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guidance: Vec<String>,
+    /// Absolute Markdown root the folder is relative to. Filled by [`resolve`];
+    /// always `None` in a parsed program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+impl NotePolicy {
+    /// The absolute write folder once resolved, e.g. `/notes/inbox`.
+    pub fn resolved_folder(&self) -> Option<PathBuf> {
+        self.root.as_ref().map(|root| {
+            if self.folder == "." {
+                PathBuf::from(root)
+            } else {
+                Path::new(root).join(&self.folder)
+            }
+        })
+    }
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Vault {
     #[serde(default)]
@@ -188,6 +220,8 @@ pub struct Vault {
     pub targets: Vec<String>,
     pub memories: Vec<Memory>,
     pub retrieval: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub note_policies: Vec<NotePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -244,12 +278,76 @@ pub enum SqliteWho {
     Delimited { column: String, delimiter: String },
 }
 
+/// One value of a host source field: quoted text, a non-negative integer,
+/// `true`/`false`, or a `{ "…" … }` list of strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum HostValue {
+    Bool(bool),
+    Integer(u64),
+    Text(String),
+    List(Vec<String>),
+}
+
+/// `<words…> <value>` inside a host source. `key` holds the words joined by
+/// single spaces, e.g. `backfill days`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostField {
+    pub key: String,
+    pub value: HostValue,
+}
+
+/// A source whose kind the language does not interpret, e.g.
+/// `source google-mail "mail" { account "me@example.com" backfill days 365 }`.
+/// The embedding host lowers it to a native source with
+/// [`Program::lower_host_sources`] before [`resolve`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostSource {
+    /// Serialized as `host_kind`: `kind` is the [`Source`] tag.
+    #[serde(rename = "host_kind")]
+    pub kind: String,
+    pub name: String,
+    /// Fields in declaration order; keys are unique.
+    pub fields: Vec<HostField>,
+}
+
+impl HostSource {
+    pub fn field(&self, key: &str) -> Option<&HostValue> {
+        self.fields
+            .iter()
+            .find(|field| field.key == key)
+            .map(|field| &field.value)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Source {
     Arena(ArenaSource),
     Sqlite(SqliteSource),
     Markdown(MarkdownSource),
+    Host(HostSource),
+}
+
+impl Source {
+    pub fn name(&self) -> &str {
+        match self {
+            Source::Arena(source) => &source.name,
+            Source::Sqlite(source) => &source.name,
+            Source::Markdown(source) => &source.name,
+            Source::Host(source) => &source.name,
+        }
+    }
+
+    /// The kind word as written: `markdown`, `sqlite`, `arena`, or the host kind.
+    pub fn kind(&self) -> &str {
+        match self {
+            Source::Arena(_) => "arena",
+            Source::Sqlite(_) => "sqlite",
+            Source::Markdown(_) => "markdown",
+            Source::Host(source) => &source.kind,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -273,17 +371,18 @@ pub struct Workspace {
     #[serde(default)]
     pub memories: Vec<Memory>,
     pub retrieval: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub note_policies: Vec<NotePolicy>,
 }
 
 impl Workspace {
+    /// The workspace body as a vault. A workspace whose only source is one
+    /// Markdown source keeps that path (legacy, path-keyed index identity);
+    /// every other workspace is the named scope `workspace:<name>`.
     pub fn unresolved_vault(&self) -> Vault {
         let path = self
-            .sources
-            .iter()
-            .find_map(|source| match source {
-                Source::Markdown(source) => Some(source.path.clone()),
-                _ => None,
-            })
+            .markdown_path()
+            .map(str::to_string)
             .unwrap_or_else(|| format!("workspace:{}", self.name));
         Vault {
             path,
@@ -298,6 +397,7 @@ impl Workspace {
             embedding_limit: self.embedding_limit,
             memories: self.memories.clone(),
             retrieval: self.retrieval.clone(),
+            note_policies: self.note_policies.clone(),
             ..Default::default()
         }
     }
@@ -309,8 +409,52 @@ impl Workspace {
         }
     }
 
+    pub fn markdown_sources(&self) -> impl Iterator<Item = &MarkdownSource> {
+        self.sources.iter().filter_map(|source| match source {
+            Source::Markdown(source) => Some(source),
+            _ => None,
+        })
+    }
+
+    /// Sources a host must lower before [`resolve`].
+    pub fn host_sources(&self) -> impl Iterator<Item = &HostSource> {
+        self.sources.iter().filter_map(|source| match source {
+            Source::Host(source) => Some(source),
+            _ => None,
+        })
+    }
+
+    /// The Markdown source a create-note policy writes into: its `in source`
+    /// name, or the workspace's only Markdown source.
+    pub fn note_policy_source(&self, policy: &NotePolicy) -> Option<&MarkdownSource> {
+        let mut markdown = self.markdown_sources();
+        match &policy.source {
+            Some(name) => markdown.find(|source| source.name.eq_ignore_ascii_case(name)),
+            None => {
+                let only = markdown.next();
+                markdown.next().is_none().then_some(only).flatten()
+            }
+        }
+    }
+
+    /// Whether a Markdown source is named by a create-note policy. Lowering
+    /// marks exactly these sources writable in named workspaces.
+    pub fn is_writable_markdown(&self, source_name: &str) -> bool {
+        self.note_policies.iter().any(|policy| {
+            self.note_policy_source(policy)
+                .is_some_and(|source| source.name.eq_ignore_ascii_case(source_name))
+        })
+    }
+
     pub fn set_markdown_vault(&mut self, vault: Vault) {
         debug_assert!(self.markdown_path().is_some());
+        self.set_body(vault);
+    }
+
+    /// Replace every body statement (readings, settings, exclusions, agent
+    /// policies) from a vault, leaving the sources untouched.
+    pub fn set_body(&mut self, vault: Vault) {
+        self.note_policies = vault.note_policies;
         self.learning = vault.learning;
         self.readings = vault.readings;
         self.format = vault.format;
@@ -354,6 +498,50 @@ pub struct Program {
     #[serde(default)]
     pub workspaces: Vec<Workspace>,
     pub retrieval: Option<Vec<String>>,
+}
+impl Program {
+    /// Let the embedding host replace its own source kinds with native sources
+    /// before [`resolve`]. `lower` receives the workspace name and each host
+    /// source in declaration order; `Ok(Some(source))` replaces it and
+    /// `Ok(None)` leaves it in place (so `resolve` will reject it). A lowered
+    /// source keeps the host source's name, so readings such as
+    /// `learn questions from source "mail"` keep resolving.
+    pub fn lower_host_sources(
+        &mut self,
+        mut lower: impl FnMut(&str, &HostSource) -> Result<Option<Source>>,
+    ) -> Result<()> {
+        for workspace in &mut self.workspaces {
+            for source in &mut workspace.sources {
+                let Source::Host(host) = source else {
+                    continue;
+                };
+                let lowered = lower(&workspace.name, host).with_context(|| {
+                    format!(
+                        "lowering source {} {:?} in workspace {:?}",
+                        host.kind, host.name, workspace.name
+                    )
+                })?;
+                let Some(lowered) = lowered else { continue };
+                ensure!(
+                    !matches!(lowered, Source::Host(_)),
+                    "source {} {:?} in workspace {:?} must lower to markdown, sqlite, or arena",
+                    host.kind,
+                    host.name,
+                    workspace.name
+                );
+                ensure!(
+                    lowered.name().eq_ignore_ascii_case(&host.name),
+                    "source {} {:?} in workspace {:?} lowered to a source named {:?}; lowering must keep the name",
+                    host.kind,
+                    host.name,
+                    workspace.name,
+                    lowered.name()
+                );
+                *source = lowered;
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone)]
 struct Token {
@@ -1061,13 +1249,29 @@ impl Parser {
         };
         let mut seen = std::collections::BTreeSet::new();
         while !self.at("}") {
+            self.body_statement(&mut v, &mut seen, false)?;
+        }
+        self.need("}")?;
+        Ok(v)
+    }
+
+    /// One statement shared by `vault` and `workspace` bodies. Source-backed
+    /// readings and `in source` qualifiers exist only inside workspaces.
+    fn body_statement(
+        &mut self,
+        v: &mut Vault,
+        seen: &mut std::collections::BTreeSet<&'static str>,
+        in_workspace: bool,
+    ) -> Result<()> {
+        {
             if self.at("learn") {
                 let readings = self.reading()?;
                 ensure!(
-                    readings.iter().all(|reading| !matches!(
-                        split_entity(&reading.entity).0,
-                        "channel" | "source" | "thread"
-                    )),
+                    in_workspace
+                        || readings.iter().all(|reading| !matches!(
+                            split_entity(&reading.entity).0,
+                            "channel" | "source" | "thread"
+                        )),
                     "channel, source, and thread readings require a workspace source declaration"
                 );
                 v.readings.extend(readings);
@@ -1131,18 +1335,88 @@ impl Parser {
                 };
                 self.set(&mut v.format, f.into())?;
             } else if self.at("remember") {
-                v.memories.push(self.memory()?);
+                if self
+                    .tokens
+                    .get(self.pos + 2)
+                    .is_some_and(|token| !token.string && token.value == "folder")
+                {
+                    let policy = self.note_policy()?;
+                    ensure!(
+                        in_workspace || policy.source.is_none(),
+                        "in source applies only inside a workspace"
+                    );
+                    ensure!(
+                        !v.note_policies.iter().any(|existing| existing.folder
+                            == policy.folder
+                            && existing.source.as_deref().map(str::to_lowercase)
+                                == policy.source.as_deref().map(str::to_lowercase)),
+                        "duplicate create note policy for folder {:?}",
+                        policy.folder
+                    );
+                    v.note_policies.push(policy);
+                } else {
+                    v.memories.push(self.memory()?);
+                }
             } else if self.at("when") {
                 let r = self.retrieval()?;
                 self.set(&mut v.retrieval, r)?;
             } else {
-                return self.err(
-                    "expected a reading, learning settings, exclusions, target, or agent policy",
-                );
+                return self.err(if in_workspace {
+                    "expected a source, a reading, learning settings, exclusions, target, or agent policy"
+                } else {
+                    "expected a reading, learning settings, exclusions, target, or agent policy"
+                });
             }
         }
-        self.need("}")?;
-        Ok(v)
+        Ok(())
+    }
+
+    fn note_policy(&mut self) -> Result<NotePolicy> {
+        self.need("remember")?;
+        self.need("in")?;
+        self.need("folder")?;
+        let folder = self.string()?;
+        if let Err(problem) = check_note_folder(&folder) {
+            return self.err(&problem);
+        }
+        let source = if self.eat("in") {
+            self.need("source")?;
+            Some(self.string()?)
+        } else {
+            None
+        };
+        let mut conditions = vec![];
+        if self.eat("when") {
+            self.need("{")?;
+            while !self.at("}") {
+                conditions.push(self.string()?);
+            }
+            self.need("}")?;
+            ensure!(
+                !conditions.is_empty(),
+                "remember in folder … when needs at least one condition"
+            );
+        }
+        if !self.at("create") {
+            return self.err("expected create note");
+        }
+        self.pos += 1;
+        self.need("note")?;
+        let mut guidance = vec![];
+        if self.eat("{") {
+            while !self.at("}") {
+                guidance.push(self.string()?);
+            }
+            self.need("}")?;
+            ensure!(!guidance.is_empty(), "create note guidance must not be empty");
+        }
+        Ok(NotePolicy {
+            folder,
+            source,
+            conditions,
+            guidance,
+            root: None,
+        })
     }
 
     fn markdown_source(&mut self) -> Result<Source> {
@@ -1324,6 +1598,53 @@ impl Parser {
         }))
     }
 
+    /// `source <kind> "name" { <words…> <value> … }` for any kind the language
+    /// does not interpret itself. Values are text, integers, booleans, or lists.
+    fn host_source(&mut self) -> Result<Source> {
+        self.need("source")?;
+        let kind = self.word()?;
+        let name = self.string()?;
+        self.need("{")?;
+        let mut fields: Vec<HostField> = Vec::new();
+        while !self.at("}") {
+            let mut words = vec![self.word()?];
+            while !self.t().string
+                && !self.at("{")
+                && !self.at("[")
+                && !self.at("}")
+                && !self.at("true")
+                && !self.at("false")
+                && !self.t().value.starts_with(|c: char| c.is_ascii_digit())
+            {
+                words.push(self.word()?);
+            }
+            let key = words.join(" ");
+            let value = if self.t().string {
+                HostValue::Text(self.string()?)
+            } else if self.eat("true") {
+                HostValue::Bool(true)
+            } else if self.eat("false") {
+                HostValue::Bool(false)
+            } else if self.at("{") || self.at("[") {
+                HostValue::List(self.list()?)
+            } else if self.at("}") {
+                return self.err(&format!("field {key:?} needs a value"));
+            } else {
+                let Ok(n) = self.t().value.parse::<u64>() else {
+                    return self.err(&format!("field {key:?} needs a non-negative integer"));
+                };
+                self.pos += 1;
+                HostValue::Integer(n)
+            };
+            if fields.iter().any(|field| field.key == key) {
+                bail!("source {kind} {name:?} repeats field {key:?}");
+            }
+            fields.push(HostField { key, value });
+        }
+        self.need("}")?;
+        Ok(Source::Host(HostSource { kind, name, fields }))
+    }
+
     fn workspace(&mut self) -> Result<Workspace> {
         self.need("workspace")?;
         let name = self.string()?;
@@ -1332,74 +1653,82 @@ impl Parser {
             name,
             ..Default::default()
         };
-        if self.at("source")
-            && self
-                .tokens
-                .get(self.pos + 1)
-                .is_some_and(|token| token.value == "markdown")
-        {
-            let source = self.markdown_source()?;
-            let Source::Markdown(markdown) = &source else {
-                unreachable!()
-            };
-            let vault = self.vault_body(markdown.path.clone())?;
-            workspace.sources.push(source);
-            workspace.set_markdown_vault(vault);
-            return Ok(workspace);
-        }
+        let mut body = Vault::default();
+        let mut seen = std::collections::BTreeSet::new();
         let mut source_names = std::collections::BTreeSet::new();
         while !self.at("}") {
             if self.at("source") {
-                let source = match self
-                    .tokens
-                    .get(self.pos + 1)
-                    .map(|token| token.value.as_str())
-                {
-                    Some("arena") => self.arena_source()?,
-                    Some("sqlite") => self.sqlite_source()?,
-                    Some("markdown") => {
-                        return self.err("Markdown must be the first and only workspace source");
+                let source = match self.tokens.get(self.pos + 1) {
+                    Some(token) if token.string => {
+                        return self.err("expected a source kind such as markdown or sqlite");
                     }
-                    _ => return self.err("expected source arena or source sqlite"),
+                    Some(token) if token.value == "arena" => self.arena_source()?,
+                    Some(token) if token.value == "sqlite" => self.sqlite_source()?,
+                    Some(token) if token.value == "markdown" => self.markdown_source()?,
+                    _ => self.host_source()?,
                 };
-                let source_name = match &source {
-                    Source::Arena(source) => &source.name,
-                    Source::Sqlite(source) => &source.name,
-                    Source::Markdown(source) => &source.name,
-                };
+                let source_name = source.name();
                 ensure!(
                     source_names.insert(source_name.to_lowercase()),
                     "duplicate workspace source {source_name}"
                 );
                 workspace.sources.push(source);
-            } else if self.at("learn") {
-                workspace.readings.extend(self.reading()?);
-            } else if ["sample", "favor", "question", "select", "as", "periods"]
-                .iter()
-                .any(|setting| self.at(setting))
-            {
-                self.learn_setting(&mut workspace.learning)?;
-            } else if self.eat("produce") {
-                let value = self.word()?;
-                let format = match value.as_str() {
-                    "questions" => "question",
-                    "theses" => "thesis",
-                    "claims" => "claim",
-                    _ => return self.err("produce questions, theses, or claims"),
-                };
-                self.set(&mut workspace.format, format.into())?;
-            } else if self.eat("project") {
-                self.need("questions")?;
-                self.need("into")?;
-                workspace.targets.push(self.string()?);
             } else {
-                return self.err("expected source arena/sqlite, a reading, learning settings, or project questions into");
+                self.body_statement(&mut body, &mut seen, true)?;
             }
         }
         self.need("}")?;
         ensure!(!workspace.sources.is_empty(), "workspace needs a source");
+        workspace.set_body(body);
+        let markdown: Vec<&str> = workspace
+            .markdown_sources()
+            .map(|source| source.name.as_str())
+            .collect();
+        for policy in &workspace.note_policies {
+            match &policy.source {
+                Some(source) => ensure!(
+                    markdown.iter().any(|name| name.eq_ignore_ascii_case(source)),
+                    "create note in source {source:?}: workspace {:?} declares no Markdown source with that name",
+                    workspace.name
+                ),
+                None => ensure!(
+                    markdown.len() == 1,
+                    "create note in folder {:?} needs in source \"…\" naming {}",
+                    policy.folder,
+                    if markdown.is_empty() {
+                        format!(
+                            "a Markdown source; workspace {:?} declares none",
+                            workspace.name
+                        )
+                    } else {
+                        format!("one of the Markdown sources {}", markdown.join(", "))
+                    }
+                ),
+            }
+        }
         Ok(workspace)
     }
+}
+
+/// Create-note folders stay inside their Markdown source.
+fn check_note_folder(folder: &str) -> std::result::Result<(), String> {
+    let windows_drive = folder.len() >= 2 && folder.as_bytes()[1] == b':';
+    if folder.starts_with(['/', '\\', '~']) || windows_drive {
+        return Err(format!(
+            "create note folder {folder:?} must be relative to the Markdown source root; use \".\" for the root"
+        ));
+    }
+    if folder.split(['/', '\\']).any(|part| part == "..") {
+        return Err(format!(
+            "create note folder {folder:?} must not leave the Markdown source root"
+        ));
+    }
+    if folder != folder.trim() {
+        return Err(format!(
+            "create note folder {folder:?} must not have surrounding whitespace"
+        ));
+    }
+    Ok(())
 }
 pub fn parse(source: &str) -> Result<Program> {
     let mut p = Parser {
@@ -1512,19 +1841,49 @@ fn expand(path: &str, home: &Path) -> String {
     }
 }
 
+/// Whether `folder` (a root-relative path) is inside one of `exclusions`.
+fn folder_is_excluded(folder: &str, exclusions: &[String]) -> bool {
+    exclusions
+        .iter()
+        .any(|ex| folder == ex || folder.starts_with(&format!("{ex}/")))
+}
+
 fn lower_workspace(workspace: Workspace) -> Result<Vault> {
+    if let Some(host) = workspace.host_sources().next() {
+        bail!(
+            "source {} {:?} in workspace {:?} is a host source; the host must lower it before resolution",
+            host.kind,
+            host.name,
+            workspace.name
+        );
+    }
+    let mut vault = workspace.unresolved_vault();
+    let markdown: Vec<&MarkdownSource> = workspace.markdown_sources().collect();
+    for policy in &mut vault.note_policies {
+        let source = workspace
+            .note_policy_source(policy)
+            .with_context(|| {
+                format!(
+                    "create note in folder {:?} names no Markdown source of workspace {:?}",
+                    policy.folder, workspace.name
+                )
+            })?;
+        policy.root = Some(source.path.clone());
+    }
     if workspace.markdown_path().is_some() {
-        return Ok(workspace.unresolved_vault());
+        // A lone Markdown source keeps the legacy path-keyed lowering.
+        return Ok(vault);
     }
     let mut channels = BTreeMap::<String, String>::new();
     let mut sqlite_sources = BTreeMap::<String, String>::new();
     for source in &workspace.sources {
+        let name = source.name();
+        ensure!(
+            !name.contains('/') && !name.contains(':') && !name.contains('\\'),
+            "source name must not contain /, \\, or :"
+        );
         match source {
             Source::Arena(source) => {
-                ensure!(
-                    !source.name.contains('/') && !source.name.contains(':'),
-                    "source name must not contain / or :"
-                );
                 for channel in &source.channels {
                     let stable = format!("arena:{}/channel/{}", source.name, channel.remote_id);
                     let mut selectors = vec![channel.remote_id.as_str(), stable.as_str()];
@@ -1551,16 +1910,16 @@ fn lower_workspace(workspace: Workspace) -> Result<Vault> {
                 }
             }
             Source::Sqlite(source) => {
-                ensure!(
-                    !source.name.contains('/') && !source.name.contains(':'),
-                    "source name must not contain / or :"
-                );
                 sqlite_sources.insert(source.name.to_lowercase(), source.name.clone());
             }
-            Source::Markdown(_) => bail!("Markdown must be the only workspace source"),
+            Source::Markdown(_) | Source::Host(_) => {}
         }
     }
-    let mut vault = workspace.unresolved_vault();
+    // SQLite `where` labels index as unprefixed folder entities.
+    let sqlite_folders = workspace
+        .sources
+        .iter()
+        .any(|source| matches!(source, Source::Sqlite(s) if !s.where_columns.is_empty()));
     for reading in &mut vault.readings {
         let (kind, selector) = split_entity(&reading.entity);
         match kind {
@@ -1616,13 +1975,55 @@ fn lower_workspace(workspace: Workspace) -> Result<Vault> {
                     &format!("sqlite:{}/thread/{thread}", sqlite_source_key(name)),
                 );
             }
-            "link" | "folder" if !sqlite_sources.is_empty() => {}
-            _ => bail!("workspace reading kind {kind} has no declared source"),
+            "folder" if markdown.len() > 1 => {
+                // Several Markdown roots: the engine names each root's folders
+                // `<source name>/<path>` (the root itself is `<source name>`).
+                let (first, rest) = selector.split_once('/').unwrap_or((selector, ""));
+                if markdown
+                    .iter()
+                    .any(|source| source.name.eq_ignore_ascii_case(first))
+                {
+                    ensure!(
+                        rest.is_empty() || !folder_is_excluded(rest, &vault.exclusions),
+                        "reading {} is excluded",
+                        reading.entity
+                    );
+                } else {
+                    ensure!(
+                        sqlite_folders,
+                        "folder {selector:?} in workspace {:?} must start with the name of one of its Markdown sources ({}), e.g. \"{}/{selector}\"",
+                        workspace.name,
+                        markdown
+                            .iter()
+                            .map(|source| source.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        markdown[0].name
+                    );
+                }
+            }
+            "folder" => {
+                ensure!(
+                    !markdown.is_empty() || !sqlite_sources.is_empty(),
+                    "workspace reading kind folder has no declared source in workspace {:?}",
+                    workspace.name
+                );
+                ensure!(
+                    !folder_is_excluded(selector, &vault.exclusions),
+                    "reading {} is excluded",
+                    reading.entity
+                );
+            }
+            "link" if !markdown.is_empty() || !sqlite_sources.is_empty() => {}
+            "tag" | "log" if !markdown.is_empty() => {}
+            _ => bail!(
+                "workspace reading kind {kind} has no declared source in workspace {:?}",
+                workspace.name
+            ),
         }
     }
     Ok(vault)
 }
-
 /// Resolve files as one namespace. Identical reusable profiles may be shared; conflicting declarations are errors.
 pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
     let mut all = Program::default();
@@ -1676,7 +2077,7 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
                             .to_string_lossy()
                             .into_owned();
                     }
-                    Source::Arena(_) => {}
+                    Source::Arena(_) | Source::Host(_) => {}
                 }
             }
             scopes.push(lower_workspace(workspace.clone())?);
@@ -1719,16 +2120,21 @@ pub fn resolve(programs: Vec<Program>, user_home: &Path) -> Result<Program> {
                         bail!("unknown profile {}", r.profile)
                     }
                 }
+                // Named workspaces check folder exclusions per Markdown root
+                // while lowering; a path-keyed vault has exactly one root.
                 let (kind, name) = split_entity(&r.entity);
                 ensure!(
                     kind != "folder"
-                        || !v
-                            .exclusions
-                            .iter()
-                            .any(|ex| name == ex || name.starts_with(&format!("{ex}/"))),
+                        || v.path.starts_with("workspace:")
+                        || !folder_is_excluded(name, &v.exclusions),
                     "reading {} is excluded",
                     r.entity
                 );
+            }
+            for policy in &mut v.note_policies {
+                if policy.root.is_none() {
+                    policy.root = Some(v.path.clone());
+                }
             }
             v.targets = v.targets.iter().map(|t| expand(t, user_home)).collect();
             all.vaults.push(v);
@@ -1823,6 +2229,29 @@ pub fn instructions(vault: &Vault) -> String {
         }
         s.push_str("- Follow current user instructions and host write permissions. Append dated, source-linked observations without overwriting history.\n- After writing, run `enzyme refresh --quiet` so the material enters retrieval.\n");
     }
+    for policy in &vault.note_policies {
+        let place = match (policy.resolved_folder(), &policy.source) {
+            (Some(folder), _) => folder.to_string_lossy().into_owned(),
+            (None, Some(source)) => {
+                format!("{} in Markdown source {}", policy.folder, quote(source))
+            }
+            (None, None) => policy.folder.clone(),
+        };
+        s.push_str(&format!("\n## Create notes in {place}\n\n"));
+        if policy.conditions.is_empty() {
+            s.push_str("New notes belong in this folder.\n");
+        } else {
+            s.push_str("Consider creating a new note when any of these conditions is supported:\n");
+            for x in &policy.conditions {
+                s.push_str(&format!("- {x}\n"));
+            }
+        }
+        s.push_str("\nWhen creating a note:\n");
+        for x in &policy.guidance {
+            s.push_str(&format!("- {x}\n"));
+        }
+        s.push_str("- Follow current user instructions and host write permissions. Create new Markdown files only in this folder; never overwrite or move existing notes.\n- After writing, run `enzyme refresh --quiet` so the material enters retrieval.\n");
+    }
     for t in &vault.targets {
         s.push_str(&format!("\nExternal target: {t}. Use `enzyme catalyze --target` when relevant; target-only themes may be missed.\n"))
     }
@@ -1896,6 +2325,17 @@ pub fn config_value(p: &Program) -> serde_json::Value {
         }
         let mut sources = Map::new();
         for source in &workspace.sources {
+            if let Source::Markdown(source) = source {
+                // Matches NotesSourceToml. Folder exclusions are workspace-wide
+                // (`excluded_folders`), which the engine applies in every root.
+                sources.insert(
+                    source.name.clone(),
+                    json!({
+                        "path": source.path,
+                        "writable": workspace.is_writable_markdown(&source.name),
+                    }),
+                );
+            }
             if let Source::Sqlite(source) = source {
                 let who = match &source.who {
                     SqliteWho::Columns { columns } => json!(columns),
@@ -1953,6 +2393,21 @@ pub fn config_value(p: &Program) -> serde_json::Value {
         }
         if let Some(format) = &workspace.format {
             item["catalyst_format"] = json!(format);
+        }
+        // These names match WorkspaceTomlSection; empty lists are omitted so
+        // source-only workspaces lower exactly as before.
+        for (key, list) in [
+            ("excluded_folders", &workspace.exclusions),
+            ("excluded_tags", &workspace.excluded_tags),
+            ("excluded_links", &workspace.excluded_links),
+            ("frontmatter_link_fields", &workspace.frontmatter_link_fields),
+        ] {
+            if !list.is_empty() {
+                item[key] = json!(list);
+            }
+        }
+        if let Some(limit) = workspace.embedding_limit {
+            item["max_embedding_files"] = json!(limit);
         }
         workspaces.insert(workspace.name.clone(), item);
     }
@@ -2042,14 +2497,19 @@ pub fn render_profile(name: &str, p: &Profile) -> String {
     s
 }
 pub fn render_vault(v: &Vault) -> String {
-    // Rendering accepts both unresolved legacy input and effective specs.
+    format!("vault {} {{\n{}}}\n", quote(&v.path), render_body(v))
+}
+
+/// Render the statements inside a `vault` or `workspace` block, each line
+/// indented by two spaces. Accepts both unresolved input and effective specs.
+fn render_body(v: &Vault) -> String {
     let mut normalized = v.clone();
     normalized.learning = v.learning.over(&Learning::default());
     for r in &mut normalized.readings {
         r.learning = r.learning.over(&normalized.learning);
     }
     let v = &normalized;
-    let mut s = format!("vault {} {{\n", quote(&v.path));
+    let mut s = String::new();
     if let Some(n) = v.embedding_limit {
         s.push_str(&format!(
             "  prepare up to {n} documents per run newest first\n"
@@ -2068,7 +2528,7 @@ pub fn render_vault(v: &Vault) -> String {
     }
     // Separate the preamble from the readings only when there is a preamble; with
     // exclusions moved below, a vault now commonly opens straight on its readings.
-    if s.lines().count() > 1 {
+    if !s.is_empty() {
         s.push('\n');
     }
     for r in &v.readings {
@@ -2079,7 +2539,16 @@ pub fn render_vault(v: &Vault) -> String {
                 quote(n)
             ));
         } else {
-            s.push_str(&format!("  learn questions from {k} {}", quote(n)));
+            let selector = if k == "thread" {
+                let (source, thread) = n.split_once('/').expect("parsed thread has source");
+                format!("{} in source {}", quote(thread), quote(source))
+            } else if k == "channel" && !n.is_empty() && n.chars().all(|ch| ch.is_ascii_digit())
+            {
+                n.to_string()
+            } else {
+                quote(n)
+            };
+            s.push_str(&format!("  learn questions from {k} {selector}"));
         }
         if r.include_linked_pages {
             s.push_str("\n    including linked pages")
@@ -2153,6 +2622,28 @@ pub fn render_vault(v: &Vault) -> String {
     for t in &v.targets {
         s.push_str(&format!("\n  project questions into {}\n", quote(t)));
     }
+    for policy in &v.note_policies {
+        s.push_str(&format!("\n  remember in folder {}", quote(&policy.folder)));
+        if let Some(source) = &policy.source {
+            s.push_str(&format!(" in source {}", quote(source)));
+        }
+        if !policy.conditions.is_empty() {
+            s.push_str(" when {\n");
+            for c in &policy.conditions {
+                s.push_str(&format!("    {}\n", quote(c)));
+            }
+            s.push_str("  }");
+        }
+        s.push_str(" create note");
+        if !policy.guidance.is_empty() {
+            s.push_str(" {\n");
+            for g in &policy.guidance {
+                s.push_str(&format!("    {}\n", quote(g)));
+            }
+            s.push_str("  }");
+        }
+        s.push('\n');
+    }
     for m in &v.memories {
         s.push_str(&format!(
             "\n  remember in {} when {{\n",
@@ -2174,174 +2665,149 @@ pub fn render_vault(v: &Vault) -> String {
         }
         s.push_str("  }\n");
     }
-    s.push_str("}\n");
     s
 }
 
 pub fn render_workspace(workspace: &Workspace) -> String {
-    if let [Source::Markdown(source)] = workspace.sources.as_slice() {
-        let vault = workspace.unresolved_vault();
-        let rendered = render_vault(&vault);
-        let header = format!("vault {} {{\n", quote(&source.path));
-        return rendered.replacen(
-            &header,
-            &format!(
-                "workspace {} {{\n  source markdown {} {{ path {} }}\n\n",
-                quote(&workspace.name),
-                quote(&source.name),
-                quote(&source.path)
-            ),
-            1,
-        );
-    }
-    let mut normalized = workspace.clone();
-    normalized.learning = workspace.learning.over(&Learning::default());
-    for reading in &mut normalized.readings {
-        reading.learning = reading.learning.over(&normalized.learning);
-    }
-    let workspace = &normalized;
     let mut output = format!("workspace {} {{\n", quote(&workspace.name));
-    for source in &workspace.sources {
-        match source {
-            Source::Arena(source) => {
-                output.push_str(&format!("  source arena {} {{\n", quote(&source.name)));
-                output.push_str("    channels {\n");
-                for channel in &source.channels {
-                    output.push_str(&format!("      channel {}", channel.remote_id));
-                    if let Some(alias) = &channel.alias {
-                        output.push_str(&format!(" as {}", quote(alias)));
-                    } else if let (Some(slug), Some(title)) = (&channel.slug, &channel.title) {
-                        output.push_str(&format!(" slug {} title {}", quote(slug), quote(title)));
-                    }
-                    output.push('\n');
-                }
-                output.push_str("    }\n  }\n\n");
-            }
-            Source::Sqlite(source) => {
-                output.push_str(&format!("  source sqlite {} {{\n", quote(&source.name)));
-                output.push_str(&format!("    database {}\n", quote(&source.db)));
-                if source.query.contains('\n') && !source.query.contains("\"\"\"") {
-                    output.push_str("    query \"\"\"");
-                    output.push_str(&source.query);
-                    output.push_str("\"\"\"\n");
-                } else {
-                    output.push_str(&format!("    query {}\n", quote(&source.query)));
-                }
-                output.push_str(&format!("    id {}\n", render_columns(&source.id)));
-                if let Some(column) = &source.document_ref {
-                    output.push_str(&format!("    document ref {}\n", quote(column)));
-                }
-                match &source.who {
-                    SqliteWho::Columns { columns } if !columns.is_empty() => {
-                        output.push_str(&format!("    who {}\n", render_columns(columns)))
-                    }
-                    SqliteWho::JsonArray { column } => {
-                        output.push_str(&format!("    who json_array {}\n", quote(column)))
-                    }
-                    SqliteWho::Delimited { column, delimiter } => output.push_str(&format!(
-                        "    who delimited {} by {}\n",
-                        quote(column),
-                        quote(delimiter)
-                    )),
-                    _ => {}
-                }
-                output.push_str(&format!(
-                    "    when {} unit {}",
-                    quote(&source.when),
-                    source.timestamp_unit
-                ));
-                if let Some(epoch) = &source.timestamp_epoch {
-                    output.push_str(&format!(" epoch {}", quote(epoch)));
-                }
-                output.push('\n');
-                output.push_str(&format!("    what {}\n", render_columns(&source.what)));
-                if !source.where_columns.is_empty() {
-                    output.push_str(&format!(
-                        "    where {}\n",
-                        render_columns(&source.where_columns)
-                    ));
-                }
-                if let Some(column) = &source.weight {
-                    output.push_str(&format!("    weight {}\n", quote(column)));
-                }
-                if let Some(filter) = &source.filter {
-                    output.push_str(&format!("    filter {}\n", quote(filter)));
-                }
-                output.push_str("  }\n\n");
-            }
-            Source::Markdown(_) => unreachable!("Markdown workspace rendered above"),
+    let rendered: Vec<String> = workspace.sources.iter().map(render_source).collect();
+    for (index, source) in rendered.iter().enumerate() {
+        output.push_str(source);
+        // One-line sources stack; a block source is followed by a blank line,
+        // as is the whole source list.
+        let next_is_block = rendered
+            .get(index + 1)
+            .is_some_and(|next| next.lines().count() > 1);
+        if source.lines().count() > 1 || next_is_block || index + 1 == rendered.len() {
+            output.push('\n');
         }
     }
-    output.push_str(&render_learning(&workspace.learning, "  "));
-    if let Some(format) = &workspace.format {
-        let plural = match format.as_str() {
-            "thesis" => "theses",
-            "claim" => "claims",
-            _ => "questions",
-        };
-        output.push_str(&format!("  produce {plural}\n"));
-    }
-    if workspace.learning != Learning::default() || workspace.format.is_some() {
-        output.push('\n');
-    }
-    for reading in &workspace.readings {
-        let (kind, name) = split_entity(&reading.entity);
-        let selector = if kind == "thread" {
-            let (source, thread) = name.split_once('/').expect("parsed thread has source");
-            format!("{} in source {}", quote(thread), quote(source))
-        } else if kind == "channel" && name.chars().all(|ch| ch.is_ascii_digit()) {
-            name.to_string()
-        } else {
-            quote(name)
-        };
-        output.push_str(&format!("  learn questions from {kind} {selector}"));
-        if reading.include_who_links {
-            output.push_str("\n    including who links");
-        }
-        if let Some(profile) = &reading.definition {
-            output.push_str(&format!(
-                "\n    about {}",
-                render_profile("", profile)
-                    .replacen("profile  {", "profile {", 1)
-                    .trim_end()
-            ));
-        } else if reading.profile != "auto" {
-            output.push_str(&format!("\n    about {}", reading.profile));
-        }
-        let local = Learning {
-            as_of: None,
-            selection: reading
-                .learning
-                .selection
-                .clone()
-                .filter(|value| Some(value) != workspace.learning.selection.as_ref()),
-            budget: reading
-                .learning
-                .budget
-                .filter(|value| Some(*value) != workspace.learning.budget),
-            sample: (reading.learning.sampling_mode() != workspace.learning.sampling_mode())
-                .then(|| reading.learning.sample.clone())
-                .flatten(),
-            favor: (reading.learning.sampling_mode() != workspace.learning.sampling_mode())
-                .then(|| reading.learning.favor.clone())
-                .flatten(),
-            periods: reading
-                .learning
-                .periods
-                .filter(|value| Some(value) != workspace.learning.periods.as_ref()),
-        };
-        if local != Learning::default() {
-            output.push_str(" {\n");
-            output.push_str(&render_learning(&local, "      "));
-            output.push_str("    }");
-        }
-        output.push('\n');
-    }
-    for target in &workspace.targets {
-        output.push_str(&format!("\n  project questions into {}\n", quote(target)));
-    }
+    output.push_str(&render_body(&workspace.unresolved_vault()));
     output.push_str("}\n");
     output
+}
+
+fn render_source(source: &Source) -> String {
+    let mut output = String::new();
+    match source {
+        Source::Markdown(source) => output.push_str(&format!(
+            "  source markdown {} {{ path {} }}\n",
+            quote(&source.name),
+            quote(&source.path)
+        )),
+        Source::Host(source) => {
+            let header = format!("  source {} {}", source.kind, quote(&source.name));
+            let fields: Vec<String> = source
+                .fields
+                .iter()
+                .map(|field| format!("{} {}", field.key, render_host_value(&field.value)))
+                .collect();
+            match fields.as_slice() {
+                [] => output.push_str(&format!("{header} {{}}\n")),
+                [only] if !only.contains('\n') && header.len() + only.len() + 5 <= LINE_BUDGET => {
+                    output.push_str(&format!("{header} {{ {only} }}\n"))
+                }
+                _ => {
+                    output.push_str(&format!("{header} {{\n"));
+                    for field in &fields {
+                        output.push_str(&format!("    {}\n", field.replace('\n', "\n    ")));
+                    }
+                    output.push_str("  }\n");
+                }
+            }
+        }
+        Source::Arena(source) => {
+            output.push_str(&format!("  source arena {} {{\n", quote(&source.name)));
+            output.push_str("    channels {\n");
+            for channel in &source.channels {
+                output.push_str(&format!("      channel {}", channel.remote_id));
+                if let Some(alias) = &channel.alias {
+                    output.push_str(&format!(" as {}", quote(alias)));
+                } else if let (Some(slug), Some(title)) = (&channel.slug, &channel.title) {
+                    output.push_str(&format!(" slug {} title {}", quote(slug), quote(title)));
+                }
+                output.push('\n');
+            }
+            output.push_str("    }\n  }\n");
+        }
+        Source::Sqlite(source) => {
+            output.push_str(&format!("  source sqlite {} {{\n", quote(&source.name)));
+            output.push_str(&format!("    database {}\n", quote(&source.db)));
+            if source.query.contains('\n') && !source.query.contains("\"\"\"") {
+                output.push_str("    query \"\"\"");
+                output.push_str(&source.query);
+                output.push_str("\"\"\"\n");
+            } else {
+                output.push_str(&format!("    query {}\n", quote(&source.query)));
+            }
+            output.push_str(&format!("    id {}\n", render_columns(&source.id)));
+            if let Some(column) = &source.document_ref {
+                output.push_str(&format!("    document ref {}\n", quote(column)));
+            }
+            match &source.who {
+                SqliteWho::Columns { columns } if !columns.is_empty() => {
+                    output.push_str(&format!("    who {}\n", render_columns(columns)))
+                }
+                SqliteWho::JsonArray { column } => {
+                    output.push_str(&format!("    who json_array {}\n", quote(column)))
+                }
+                SqliteWho::Delimited { column, delimiter } => output.push_str(&format!(
+                    "    who delimited {} by {}\n",
+                    quote(column),
+                    quote(delimiter)
+                )),
+                _ => {}
+            }
+            output.push_str(&format!(
+                "    when {} unit {}",
+                quote(&source.when),
+                source.timestamp_unit
+            ));
+            if let Some(epoch) = &source.timestamp_epoch {
+                output.push_str(&format!(" epoch {}", quote(epoch)));
+            }
+            output.push('\n');
+            output.push_str(&format!("    what {}\n", render_columns(&source.what)));
+            if !source.where_columns.is_empty() {
+                output.push_str(&format!(
+                    "    where {}\n",
+                    render_columns(&source.where_columns)
+                ));
+            }
+            if let Some(column) = &source.weight {
+                output.push_str(&format!("    weight {}\n", quote(column)));
+            }
+            if let Some(filter) = &source.filter {
+                output.push_str(&format!("    filter {}\n", quote(filter)));
+            }
+            output.push_str("  }\n");
+        }
+    }
+    output
+}
+
+fn render_host_value(value: &HostValue) -> String {
+    match value {
+        HostValue::Bool(value) => value.to_string(),
+        HostValue::Integer(value) => value.to_string(),
+        HostValue::Text(value) => quote(value),
+        HostValue::List(items) => {
+            let inline = format!(
+                "{{ {} }}",
+                items.iter().map(|item| quote(item)).collect::<Vec<_>>().join(" ")
+            );
+            if inline.len() <= LINE_BUDGET - 8 {
+                inline
+            } else {
+                let mut block = String::from("{\n");
+                for item in items {
+                    block.push_str(&format!("  {}\n", quote(item)));
+                }
+                block.push('}');
+                block
+            }
+        }
+    }
 }
 
 fn render_columns(columns: &[String]) -> String {
