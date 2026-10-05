@@ -209,19 +209,34 @@ workspace "practice" {{
         "{refs:?}"
     );
     assert_eq!(index.document_count, 3);
-    assert_eq!(index.exact_phrase_search("quartz harbor", 5).unwrap().len(), 1);
     assert_eq!(
-        index.exact_phrase_search("orchid telemetry", 5).unwrap().len(),
+        index.exact_phrase_search("quartz harbor", 5).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        index
+            .exact_phrase_search("orchid telemetry", 5)
+            .unwrap()
+            .len(),
         2
     );
-    assert!(index.exact_phrase_search("sealed vault", 5).unwrap().is_empty());
+    assert!(
+        index
+            .exact_phrase_search("sealed vault", 5)
+            .unwrap()
+            .is_empty()
+    );
     let entities = index.database().get_all_entities().unwrap();
-    assert!(entities.iter().any(|e| {
-        e.name == "jay vidyarthi" && e.entity_type == EntityType::Link
-    }));
-    assert!(entities.iter().any(|e| {
-        e.name == "sqlite:messages" && e.entity_type == EntityType::Collection
-    }));
+    assert!(
+        entities
+            .iter()
+            .any(|e| { e.name == "jay vidyarthi" && e.entity_type == EntityType::Link })
+    );
+    assert!(
+        entities
+            .iter()
+            .any(|e| { e.name == "sqlite:messages" && e.entity_type == EntityType::Collection })
+    );
 
     // A later run with the source removed reconciles its documents away,
     // exactly as a file-loaded config does.
@@ -274,7 +289,12 @@ workspace "notes" {{
     let index = ensure_searchable_sync(options, None).unwrap();
 
     assert_eq!(source_refs(&index), ["harbor.md"]);
-    assert!(index.exact_phrase_search("sealed vault", 5).unwrap().is_empty());
+    assert!(
+        index
+            .exact_phrase_search("sealed vault", 5)
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         index
             .database()

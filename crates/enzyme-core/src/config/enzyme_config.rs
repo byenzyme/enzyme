@@ -710,9 +710,10 @@ impl EnzymeConfig {
                 Some(path) => Target::Path(path.to_string()),
                 None => Target::Named(declared.name.clone()),
             },
-            None if program.vaults.iter().any(|v| {
-                v.path == workspace && !v.path.starts_with("workspace:")
-            }) =>
+            None if program
+                .vaults
+                .iter()
+                .any(|v| v.path == workspace && !v.path.starts_with("workspace:")) =>
             {
                 Target::Path(workspace.to_string())
             }
@@ -1883,7 +1884,10 @@ vault "{journal}" {{
         };
 
         let mail = EnzymeConfig::from_program_workspace(program.clone(), "mail").unwrap();
-        assert_eq!(as_json(&mail), as_json(&file(&home.join("workspaces/mail"))));
+        assert_eq!(
+            as_json(&mail),
+            as_json(&file(&home.join("workspaces/mail")))
+        );
         assert_eq!(mail.sources["messages"].db, database);
         assert!(mail.notes_roots.is_empty());
 

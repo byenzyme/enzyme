@@ -288,7 +288,8 @@ mod tests {
         let foreign = dir.path().join("foreign.db");
         {
             let conn = rusqlite::Connection::open(&foreign).unwrap();
-            conn.execute_batch("CREATE TABLE docs (id INTEGER)").unwrap();
+            conn.execute_batch("CREATE TABLE docs (id INTEGER)")
+                .unwrap();
         }
         let error = Database::open_read_only(&foreign)
             .unwrap()

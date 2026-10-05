@@ -730,7 +730,10 @@ mod tests {
             candidate(&["c.md", "d.md"]),
         ];
 
-        assert_eq!(select_coverage_candidate_indices(&candidates, 2), vec![0, 2]);
+        assert_eq!(
+            select_coverage_candidate_indices(&candidates, 2),
+            vec![0, 2]
+        );
     }
 
     #[test]

@@ -612,10 +612,18 @@ mod tests {
         let index = open_existing_sync(&vault, &db_path).unwrap().unwrap();
         assert_eq!(index.document_count, 1);
         assert_eq!(
-            index.exact_phrase_search("search boundaries", 5).unwrap().len(),
+            index
+                .exact_phrase_search("search boundaries", 5)
+                .unwrap()
+                .len(),
             1
         );
-        assert!(index.database().execute_write("DELETE FROM docs", vec![]).is_err());
+        assert!(
+            index
+                .database()
+                .execute_write("DELETE FROM docs", vec![])
+                .is_err()
+        );
 
         let foreign = temp.path().join("foreign.db");
         rusqlite::Connection::open(&foreign)
@@ -656,7 +664,12 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "note.md");
         assert!(hits[0].content.contains("Rust search boundaries"));
-        assert!(index.exact_phrase_search("absent phrase", 5).unwrap().is_empty());
+        assert!(
+            index
+                .exact_phrase_search("absent phrase", 5)
+                .unwrap()
+                .is_empty()
+        );
         assert!(index.exact_phrase_search("   ", 5).unwrap().is_empty());
         assert!(index.exact_phrase_search("search", 0).unwrap().is_empty());
     }
