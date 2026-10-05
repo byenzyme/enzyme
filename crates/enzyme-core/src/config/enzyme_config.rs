@@ -687,6 +687,44 @@ impl EnzymeConfig {
         }
     }
 
+    /// The runtime view of one workspace declared by a resolved program,
+    /// built entirely in memory.
+    ///
+    /// `workspace` names either a `workspace "<name>" { … }` declaration or,
+    /// for a path-addressed `vault "<path>" { … }`, its resolved path. A
+    /// workspace whose only source is Markdown keeps its legacy path-keyed
+    /// lowering (its Markdown path is the indexing root and `notes_roots` stays
+    /// empty); every other workspace yields named sources and notes roots.
+    ///
+    /// Unlike [`Self::load_at`] and [`Self::from_readable_program`], this reads
+    /// no config file and never consults `ENZYME_HOME`, `~/.enzyme`, or the
+    /// workspace binding registry, so embedders can own their own program
+    /// files and pass the result to [`crate::kernel::SearchOptions`].
+    pub fn from_program_workspace(program: enzyme_spec::Program, workspace: &str) -> Result<Self> {
+        enum Target {
+            Named(String),
+            Path(String),
+        }
+        let target = match program.workspaces.iter().find(|w| w.name == workspace) {
+            Some(declared) => match declared.markdown_path() {
+                Some(path) => Target::Path(path.to_string()),
+                None => Target::Named(declared.name.clone()),
+            },
+            None if program.vaults.iter().any(|v| {
+                v.path == workspace && !v.path.starts_with("workspace:")
+            }) =>
+            {
+                Target::Path(workspace.to_string())
+            }
+            None => anyhow::bail!("workspace {workspace:?} is not declared by the program"),
+        };
+        let global = overlay_program(serde_json::json!({}), Some(program))?;
+        Ok(match target {
+            Target::Named(name) => Self::from_workspace_config(&name, &global),
+            Target::Path(path) => Self::from_global_config(Path::new(&path), &global),
+        })
+    }
+
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
         let key = canonical_vault_key(vault_path);
         let vault = global
@@ -1787,6 +1825,82 @@ workspace "mail" {{
             config.reading_spec.unwrap().readings[0].entity,
             "collection:sqlite:messages"
         );
+    }
+
+    /// The in-memory API must produce exactly the config the file path does,
+    /// for named, single-Markdown, and path-addressed declarations.
+    #[test]
+    fn program_workspace_matches_file_loaded_config_without_home_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let configs = home.join("configs");
+        std::fs::create_dir_all(home.join("workspaces/mail")).unwrap();
+        std::fs::create_dir_all(&configs).unwrap();
+        let dir = |name: &str| {
+            let path = temp.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path.canonicalize().unwrap()
+        };
+        let (notes, journal) = (dir("notes"), dir("journal"));
+        let database = temp.path().join("mail.db");
+        std::fs::write(&database, []).unwrap();
+        let source = format!(
+            r#"
+workspace "mail" {{
+  source sqlite "messages" {{
+    database "{db}"
+    query "SELECT id, sender, sent_ms, body FROM messages"
+    id "id"
+    who "sender"
+    when "sent_ms" unit ms
+    what "body"
+  }}
+  learn questions from source "messages" about relationships
+}}
+workspace "notes" {{
+  source markdown "notes" {{ path "{notes}" }}
+  leave out folders {{ "private" }}
+  references in fields ["people"]
+  learn questions from folder "people" including linked pages
+}}
+vault "{journal}" {{
+  leave out folders {{ "drafts" }}
+  learn questions from tag "focus"
+}}
+"#,
+            db = database.display(),
+            notes = notes.display(),
+            journal = journal.display(),
+        );
+        std::fs::write(configs.join("all.enzyme"), &source).unwrap();
+        let program =
+            enzyme_spec::resolve(vec![enzyme_spec::parse(&source).unwrap()], &home).unwrap();
+        let as_json = |config: &EnzymeConfig| serde_json::to_value(config).unwrap();
+        let file = |vault: &Path| {
+            EnzymeConfig::load_at(vault, &home.join("config.toml"))
+                .unwrap()
+                .unwrap()
+        };
+
+        let mail = EnzymeConfig::from_program_workspace(program.clone(), "mail").unwrap();
+        assert_eq!(as_json(&mail), as_json(&file(&home.join("workspaces/mail"))));
+        assert_eq!(mail.sources["messages"].db, database);
+        assert!(mail.notes_roots.is_empty());
+
+        let markdown = EnzymeConfig::from_program_workspace(program.clone(), "notes").unwrap();
+        assert_eq!(as_json(&markdown), as_json(&file(&notes)));
+        assert_eq!(markdown.excluded_folders, vec!["private"]);
+        assert_eq!(markdown.frontmatter_link_fields, vec!["people"]);
+        assert!(markdown.notes_roots.is_empty());
+        assert!(markdown.has_curated_entities());
+
+        let key = journal.to_string_lossy().into_owned();
+        let vault = EnzymeConfig::from_program_workspace(program.clone(), &key).unwrap();
+        assert_eq!(as_json(&vault), as_json(&file(&journal)));
+        assert_eq!(vault.excluded_folders, vec!["drafts"]);
+
+        let error = EnzymeConfig::from_program_workspace(program, "missing").unwrap_err();
+        assert!(error.to_string().contains("not declared"), "{error}");
     }
 
     #[test]

@@ -39,6 +39,13 @@ pub struct SearchOptions {
     /// exclusions, configured logs, frontmatter link fields, and catalyst
     /// selection. No default path is resolved when it is absent.
     pub config_path: Option<PathBuf>,
+    /// Optional caller-built configuration for one workspace, typically from
+    /// [`EnzymeConfig::from_program_workspace`]. It drives SQLite sources,
+    /// notes roots, exclusions, configured logs, frontmatter link fields, and
+    /// (unless `selection_config` is set) catalyst selection exactly as a
+    /// loaded `config_path` does, without reading any file or Enzyme home.
+    /// Mutually exclusive with `config_path`.
+    pub workspace_config: Option<EnzymeConfig>,
     /// Folders excluded from indexing. An explicit empty list means no
     /// caller-defined exclusions; no config path is resolved implicitly.
     pub excluded_folders: Vec<String>,
@@ -81,6 +88,7 @@ impl Default for SearchOptions {
             vault_path: PathBuf::new(),
             db_path: PathBuf::new(),
             config_path: None,
+            workspace_config: None,
             excluded_folders: Vec::new(),
             configured_logs: HashSet::new(),
             frontmatter_link_fields: HashSet::new(),
@@ -350,6 +358,7 @@ fn ensure_searchable_owned(
         vault_path,
         db_path,
         config_path,
+        workspace_config,
         mut excluded_folders,
         mut configured_logs,
         mut frontmatter_link_fields,
@@ -361,10 +370,21 @@ fn ensure_searchable_owned(
     } = options;
     let mut configured_sources = None;
     let mut configured_notes_roots = Vec::new();
-    if let Some(config_path) = config_path {
+    let loaded = match (config_path, workspace_config) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("SearchOptions accepts config_path or workspace_config, not both")
+        }
+        (Some(config_path), None) => Some(
+            EnzymeConfig::load_at(&vault_path, &config_path)
+                .with_context(|| format!("loading search config {}", config_path.display()))?,
+        ),
+        (None, Some(config)) => Some(Some(config)),
+        (None, None) => None,
+    };
+    // A supplied config (file or in-memory) owns the SQLite source set, even
+    // when it declares none: stale source namespaces are reconciled away.
+    if let Some(loaded) = loaded {
         configured_sources = Some(HashMap::new());
-        let loaded = EnzymeConfig::load_at(&vault_path, &config_path)
-            .with_context(|| format!("loading search config {}", config_path.display()))?;
         if selection_config.is_none() {
             selection_config = loaded.clone();
         }
