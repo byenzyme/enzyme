@@ -282,7 +282,8 @@ impl SearchIndex {
 /// Open an already-provisioned index for search without running provisioning.
 ///
 /// Returns `None` when the index file does not exist yet so the embedder can
-/// choose whether to cold-provision. The worker owns initialization and keeps
+/// choose whether to cold-provision. The index is opened read-only and is
+/// never migrated; an index whose schema predates this binary is an error. The worker owns initialization and keeps
 /// the sync API safe in callers that already have an async runtime.
 #[cfg(feature = "embedder-compat")]
 pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<SearchIndex>> {
@@ -292,7 +293,11 @@ pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<Se
     let vault = vault_path.to_path_buf();
     let db_path = db_path.to_path_buf();
     std::thread::spawn(move || -> Result<SearchIndex> {
-        let db = Database::open(&db_path)
+        // Searching must never create, migrate, or otherwise write the index;
+        // provisioning (`ensure_searchable`) owns schema upgrades.
+        let db = Database::open_read_only(&db_path)
+            .with_context(|| format!("opening search index {}", db_path.display()))?;
+        db.validate_expected_schema()
             .with_context(|| format!("opening search index {}", db_path.display()))?;
         let document_count = db.get_document_count().unwrap_or(0) as usize;
         let service = get_embedding_service(&vault).context("initializing embeddings")?;
@@ -577,6 +582,33 @@ mod tests {
         std::fs::create_dir(&vault).unwrap();
         let result = open_existing_sync(&vault, &temp.path().join("missing.db")).unwrap();
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "embedder-compat")]
+    #[test]
+    fn open_existing_reads_provisioned_index_without_migrating_foreign_files() {
+        let (temp, vault, db_path) = fixture();
+        drop(ensure_searchable_sync(SearchOptions::new(&vault, &db_path), None).unwrap());
+        let index = open_existing_sync(&vault, &db_path).unwrap().unwrap();
+        assert_eq!(index.document_count, 1);
+        assert_eq!(
+            index.exact_phrase_search("search boundaries", 5).unwrap().len(),
+            1
+        );
+        assert!(index.database().execute_write("DELETE FROM docs", vec![]).is_err());
+
+        let foreign = temp.path().join("foreign.db");
+        rusqlite::Connection::open(&foreign)
+            .unwrap()
+            .execute_batch("CREATE TABLE docs (id INTEGER)")
+            .unwrap();
+        let error = open_existing_sync(&vault, &foreign).err().unwrap();
+        assert!(format!("{error:#}").contains("missing table"), "{error:#}");
+        let tables: i64 = rusqlite::Connection::open(&foreign)
+            .unwrap()
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tables, 1, "opening must not migrate a foreign database");
     }
 
     #[test]
