@@ -137,9 +137,15 @@ fn memory_compiles_guidance_without_writing() {
 }
 #[test]
 fn render_roundtrip() {
+    // The examples live in the enzyme-rust repository, not in the packaged crate.
+    let examples =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/reading-spec/examples");
+    if !examples.is_dir() && !Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.git").exists() {
+        eprintln!("skipping: repository examples are not part of the packaged crate");
+        return;
+    }
     for name in ["vault", "memory", "current-engine", "overrides"] {
-        let s = std::fs::read_to_string(format!("../../tools/reading-spec/examples/{name}.enzyme"))
-            .unwrap();
+        let s = std::fs::read_to_string(examples.join(format!("{name}.enzyme"))).unwrap();
         let ast = parse(&s).unwrap();
         let rendered = render_program(&ast);
         assert_eq!(
