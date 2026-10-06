@@ -39,7 +39,7 @@ ese = { path = "crates/enzyme-core/vendor/ese", features = ["dim-512", "rayon", 
 instant-distance = "0.6"
 
 # Readable workspace language (public: github.com/byenzyme/enzyme-spec)
-enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.1.0" }
+enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", rev = "19c7da93f70a1a059fdcc7a1f5a66b645fff1542" } # S2 plan-apply branch; retag before merge
 
 # Document processing
 pulldown-cmark = "0.12"
