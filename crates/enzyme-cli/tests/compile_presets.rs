@@ -64,7 +64,7 @@ fn cli(home: &Path) -> Command {
 }
 
 #[test]
-fn apple_notes_preset_compiles_full_body_query_without_indexing() {
+fn apple_notes_preset_compiles_builtin_kind_without_indexing() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let source = temp.path().join("NoteStore.sqlite");
@@ -88,7 +88,9 @@ fn apple_notes_preset_compiles_full_body_query_without_indexing() {
         "{}",
         String::from_utf8_lossy(&dry.stderr)
     );
-    assert!(String::from_utf8_lossy(&dry.stdout).contains("gzip_pb_text(d.ZDATA, '2.3.2')"));
+    let dry_program = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry_program.contains("source apple-notes \"notes\" { database "));
+    assert!(!dry_program.contains("gzip_pb_text"), "{dry_program}");
     assert!(!home.exists(), "dry-run wrote to Enzyme home");
 
     let saved = cli(&home)
@@ -111,7 +113,7 @@ fn apple_notes_preset_compiles_full_body_query_without_indexing() {
     let receipt: serde_json::Value = serde_json::from_slice(&saved.stdout).unwrap();
     assert_eq!(receipt["inspection"]["rows"], 1);
     let program = std::fs::read_to_string(home.join("configs/apple-notes.enzyme")).unwrap();
-    assert!(program.contains("filter \"apple-notes-content-v1\""));
+    assert!(program.contains("source apple-notes \"notes\""));
     assert!(!home.join("workspaces/apple-notes/enzyme.db").exists());
 
     let scan = cli(&home)

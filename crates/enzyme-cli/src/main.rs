@@ -35,9 +35,10 @@ struct Cli {
 enum Commands {
     /// Generate and save readable setup; -v prints the configuration
     Compile {
-        /// Generate a structured source program from a known source layout
-        #[arg(long, value_enum)]
-        preset: Option<commands::compile_preset::Preset>,
+        /// Generate a program from a built-in preset (arena, apple-notes) or
+        /// the path to a `.enzyme.in` template
+        #[arg(long, value_name = "NAME|PATH")]
+        preset: Option<String>,
         /// Source URL, channel selector, or database path for the preset
         #[arg(value_name = "SOURCE")]
         sources: Vec<String>,
@@ -460,7 +461,7 @@ async fn main() -> Result<()> {
                 .as_deref()
                 .context("preset compilation requires --collection <name>")?;
             return commands::compile_preset::run(
-                *preset,
+                preset,
                 sources,
                 workspace_name,
                 output.as_deref(),
@@ -472,7 +473,7 @@ async fn main() -> Result<()> {
         }
         anyhow::ensure!(
             sources.is_empty(),
-            "source arguments require --preset arena or --preset apple-notes"
+            "source arguments require --preset"
         );
         anyhow::ensure!(
             cli.collection.is_none(),

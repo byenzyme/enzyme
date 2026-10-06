@@ -2,23 +2,67 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::ValueEnum;
 use enzyme_core::config::{EnzymePaths, SqliteSourceConfig};
 use enzyme_core::sqlite_source::validate_sqlite_source;
 use enzyme_spec::{Program, Source};
-use serde::Serialize;
 
 use super::arena;
 
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
-#[serde(rename_all = "kebab-case")]
+const APPLE_NOTES: &str = include_str!("../../presets/apple-notes.enzyme.in");
+const APPLE_NOTES_DATABASE: &str = include_str!("../../presets/apple-notes-database.enzyme.in");
+
+/// `--preset <name|path>`: a built-in preset, or a `.enzyme.in` template file.
+#[derive(Debug, Clone)]
 pub enum Preset {
     Arena,
     AppleNotes,
+    Template(PathBuf),
+}
+
+impl Preset {
+    pub fn parse(raw: &str) -> Result<Self> {
+        Ok(match raw {
+            "arena" => Self::Arena,
+            "apple-notes" => Self::AppleNotes,
+            _ => {
+                let path = PathBuf::from(raw);
+                ensure!(
+                    path.is_file(),
+                    "unknown preset {raw:?}; use arena, apple-notes, or the path to a .enzyme.in template"
+                );
+                Self::Template(path)
+            }
+        })
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Arena => "arena".into(),
+            Self::AppleNotes => "apple-notes".into(),
+            Self::Template(path) => path.display().to_string(),
+        }
+    }
+}
+
+/// Fill a `.enzyme.in` template: `__WORKSPACE__` becomes the quoted workspace
+/// name and `__SOURCE__` the quoted source argument. A template that uses
+/// `__SOURCE__` needs exactly one source argument; one that does not takes none.
+pub fn fill_template(template: &str, workspace_name: &str, sources: &[String]) -> Result<String> {
+    let filled = template.replace("__WORKSPACE__", &serde_json::to_string(workspace_name)?);
+    if template.contains("__SOURCE__") {
+        ensure!(
+            sources.len() == 1,
+            "this preset needs exactly one source argument"
+        );
+        Ok(filled.replace("__SOURCE__", &serde_json::to_string(&sources[0])?))
+    } else {
+        ensure!(sources.is_empty(), "this preset takes no source arguments");
+        Ok(filled)
+    }
 }
 
 pub async fn run(
-    preset: Preset,
+    preset: &str,
     sources: &[String],
     workspace_name: &str,
     output: Option<&Path>,
@@ -26,10 +70,12 @@ pub async fn run(
     json: bool,
     arena_api_base: &str,
 ) -> Result<()> {
+    let preset = Preset::parse(preset)?;
     EnzymePaths::workspace_root(workspace_name)?;
     let home = EnzymePaths::enzyme_home()?;
     let directory = home.join("configs");
-    let (program, source, inspection) = match preset {
+    let environment = enzyme_core::config::spec_environment(&user_home()?, &home)?;
+    let (program, source, inspection) = match &preset {
         Preset::Arena => {
             let (program, channels) =
                 arena::compile_preset_program(workspace_name, sources, arena_api_base).await?;
@@ -38,19 +84,25 @@ pub async fn run(
         }
         Preset::AppleNotes => {
             ensure!(
-                sources.len() == 1,
-                "the Apple Notes preset needs exactly one database path"
+                sources.len() <= 1,
+                "the Apple Notes preset takes at most one database path"
             );
-            let db = source_path(&sources[0])?;
-            let source = include_str!("../../presets/apple-notes.enzyme.in")
-                .replace("__WORKSPACE__", &serde_json::to_string(workspace_name)?)
-                .replace(
-                    "__DATABASE__",
-                    &serde_json::to_string(&db.to_string_lossy())?,
-                );
+            let (template, arguments) = match sources.first() {
+                Some(raw) => (
+                    APPLE_NOTES_DATABASE,
+                    vec![source_path(raw)?.to_string_lossy().into_owned()],
+                ),
+                None => (APPLE_NOTES, vec![]),
+            };
+            let source = fill_template(template, workspace_name, &arguments)?;
             let program = enzyme_spec::parse(&source).context("parse Apple Notes preset")?;
-            let resolved = enzyme_spec::resolve(vec![program.clone()], &user_home()?)?;
+            let resolved = enzyme_spec::resolve_in(vec![program.clone()], &environment)?;
             let config = sqlite_source_config(&resolved, workspace_name)?;
+            ensure!(
+                config.db.is_file(),
+                "Apple Notes database not found at {}; pass the path to NoteStore.sqlite",
+                config.db.display()
+            );
             let validation = validate_sqlite_source("notes", &config)
                 .context("Apple Notes layout does not match this preset")?;
             ensure!(
@@ -60,18 +112,36 @@ pub async fn run(
             (
                 program,
                 source,
-                serde_json::json!({"database": db, "rows": validation.row_count}),
+                serde_json::json!({"database": config.db, "rows": validation.row_count}),
             )
+        }
+        Preset::Template(path) => {
+            let template = std::fs::read_to_string(path)
+                .with_context(|| format!("read preset {}", path.display()))?;
+            let source = fill_template(&template, workspace_name, sources)?;
+            let program = enzyme_spec::parse(&source)
+                .with_context(|| format!("parse preset {}", path.display()))?;
+            ensure!(
+                program
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.name == workspace_name),
+                "preset {} declares no workspace __WORKSPACE__",
+                path.display()
+            );
+            (program, source, serde_json::json!({"template": path}))
         }
     };
     let file_name = match preset {
         Preset::Arena => format!("arena-{}.enzyme", safe_file_name(workspace_name)),
-        Preset::AppleNotes => format!("{}.enzyme", safe_file_name(workspace_name)),
+        Preset::AppleNotes | Preset::Template(_) => {
+            format!("{}.enzyme", safe_file_name(workspace_name))
+        }
     };
     let destination = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| directory.join(file_name));
-    validate_namespace(&directory, &destination, &program)?;
+    validate_namespace(&directory, &destination, &program, &environment)?;
 
     let saved_to = if dry_run {
         None
@@ -84,7 +154,7 @@ pub async fn run(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "schema_version": "compile.v2",
-                "preset": preset,
+                "preset": preset.label(),
                 "workspace": workspace_name,
                 "program": source,
                 "saved_to": saved_to,
@@ -136,14 +206,19 @@ fn sqlite_source_config(program: &Program, workspace_name: &str) -> Result<Sqlit
         .context("compile Apple Notes source mapping")
 }
 
-fn validate_namespace(directory: &Path, destination: &Path, candidate: &Program) -> Result<()> {
+fn validate_namespace(
+    directory: &Path,
+    destination: &Path,
+    candidate: &Program,
+    environment: &enzyme_spec::Environment,
+) -> Result<()> {
     let mut programs = enzyme_spec::source_files(directory)?
         .into_iter()
         .filter(|(path, _)| path != destination)
         .map(|(_, program)| program)
         .collect::<Vec<_>>();
     programs.push(candidate.clone());
-    enzyme_spec::resolve(programs, &user_home()?)
+    enzyme_spec::resolve_in(programs, environment)
         .context("generated program conflicts with existing Enzyme configuration")?;
     Ok(())
 }
