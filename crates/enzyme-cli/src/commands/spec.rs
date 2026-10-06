@@ -14,7 +14,11 @@ pub enum SpecCommand {
         normalized: bool,
     },
     /// Export full built-in profile definitions
-    Profiles,
+    Profiles {
+        /// Emit the versioned `enzyme.profiles.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
     /// Migrate config.toml to configs/*.enzyme, retaining a timestamped backup
     Migrate {
         #[arg(long)]
@@ -67,7 +71,11 @@ pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Resu
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .context("HOME missing")?;
-            let plan = enzyme_spec::resolve(vec![ast.clone()], &home)?;
+            let environment = enzyme_core::config::spec_environment(
+                &home,
+                &enzyme_core::config::EnzymePaths::enzyme_home()?,
+            )?;
+            let plan = enzyme_spec::resolve_in(vec![ast.clone()], &environment)?;
             if *instructions {
                 for v in &plan.vaults {
                     println!("{}", enzyme_spec::instructions(v));
@@ -78,9 +86,13 @@ pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Resu
                 println!("{}", serde_json::to_string_pretty(&plan)?);
             }
         }
-        SpecCommand::Profiles => {
-            for (name, p) in enzyme_core::config::readable_builtin_profiles() {
-                print!("{}", enzyme_spec::render_profile(&name, &p));
+        SpecCommand::Profiles { json } => {
+            if *json {
+                println!("{}", serde_json::to_string(&profiles_json())?);
+            } else {
+                for (name, p) in enzyme_core::config::readable_builtin_profiles() {
+                    print!("{}", enzyme_spec::render_profile(&name, &p));
+                }
             }
         }
         SpecCommand::Migrate {
@@ -201,4 +213,42 @@ async fn serve(bind: &str, port: u16) -> Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+pub const PROFILES_SCHEMA: &str = "enzyme.profiles.v1";
+
+/// Built-in catalyst profiles and formats, for setup UIs.
+fn profiles_json() -> serde_json::Value {
+    use enzyme_core::llm::{
+        CATALYST_FORMATS, CATALYST_PROFILES, DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY,
+    };
+    let definitions = enzyme_core::config::readable_builtin_profiles();
+    let profiles: Vec<_> = CATALYST_PROFILES
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "key": p.key,
+                "display_name": p.display_name,
+                "description": p.user_description,
+                "default": p.key == DEFAULT_PROFILE_KEY,
+                "definition": definitions.get(p.key),
+            })
+        })
+        .collect();
+    let formats: Vec<_> = CATALYST_FORMATS
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "key": f.key,
+                "display_name": f.display_name,
+                "description": f.description,
+                "default": f.key == DEFAULT_FORMAT_KEY,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema": PROFILES_SCHEMA,
+        "profiles": profiles,
+        "formats": formats,
+    })
 }

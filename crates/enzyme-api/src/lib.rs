@@ -40,8 +40,12 @@ impl GenerationSetup {
     }
 }
 
+// `ui/dist` is a build artifact (`npm run build` in `ui/`) and is not tracked,
+// so a fresh clone must still compile: a missing folder embeds nothing and
+// `serve` answers the UI routes with a build hint instead.
 #[derive(Embed)]
 #[folder = "../../ui/dist"]
+#[allow_missing = true]
 struct UiAssets;
 
 pub struct AppState {
@@ -90,7 +94,11 @@ async fn serve_embedded(req: Request) -> Response {
     } else if let Some(file) = UiAssets::get("index.html") {
         (file, "index.html".to_string())
     } else {
-        return StatusCode::NOT_FOUND.into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "Explore UI assets are not built into this binary; run `npm run build` in ui/ and rebuild.",
+        )
+            .into_response();
     };
 
     let mime = mime_for_path(&resolved_path);

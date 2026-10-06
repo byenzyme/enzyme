@@ -95,12 +95,18 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
     let service = get_embedding_service(&paths.home)?;
     let (emb_stats, similarity) = project_ingest_batch(&db, &paths, &processed, service)?;
     db.reconcile_corpus_generation(epoch_now_ms())?;
-    let contract = super::init::generation_contract(vault_path, &paths, false).await?;
+    let contract =
+        super::init::generation_contract(vault_path, &paths, super::generator::LlmMode::Auto)
+            .await?;
     db.bootstrap_legacy_epoch(&contract, epoch_now_ms(), false)?;
     super::init::recover_abandoned_epoch_worker(&db, &paths)?;
     let schedule = db.schedule_catalyst_epoch(epoch_now_ms(), &contract, false)?;
-    let background_spawned =
-        schedule.launch_needed && super::init::spawn_background_refresh(vault_path, &paths, false);
+    let background_spawned = schedule.launch_needed
+        && super::init::spawn_background_refresh(
+            vault_path,
+            &paths,
+            super::generator::LlmMode::Auto,
+        );
     let epoch_state = db.get_epoch_state()?;
     let epoch_age_ms = epoch_state
         .active_epoch_completed_at_ms

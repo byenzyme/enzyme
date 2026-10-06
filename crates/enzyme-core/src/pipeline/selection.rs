@@ -201,11 +201,10 @@ mod tests {
     use crate::config::paths::EnzymePaths;
     use crate::db::Database;
     use crate::models::{EntityTrends, EntityType, ROOT_FOLDER_ENTITY};
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
     /// Serialize tests that modify ENZYME_HOME to avoid env var races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::ENZYME_HOME_TEST_LOCK as ENV_LOCK;
 
     /// Set up a temp vault with .enzyme dir and return (vault_dir, enzyme_home_dir).
     /// Sets ENZYME_HOME so config.toml goes to the temp dir.
@@ -269,7 +268,7 @@ mod tests {
 
     #[test]
     fn selection_uses_shortlist_without_toml() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -289,7 +288,7 @@ mod tests {
 
     #[test]
     fn selection_uses_config_from_toml() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -335,7 +334,7 @@ mod tests {
 
     #[test]
     fn selection_auto_expands_folder_from_toml() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -383,7 +382,7 @@ mod tests {
     /// candidate set (not only the user's own `excluded_names`).
     #[test]
     fn curated_selection_drops_structural_folder() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -417,7 +416,7 @@ mod tests {
     /// curated path's candidate set.
     #[test]
     fn curated_selection_honors_config_excluded_folders() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -452,7 +451,7 @@ mod tests {
 
     #[test]
     fn selection_uses_root_folder_from_toml() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -479,7 +478,7 @@ mod tests {
     fn shortlist_expands_folder_children_for_catalyst_generation() {
         // End-to-end: no config → shortlist path → folder children appear in
         // sel_result.entities (which is what CatalystPipeline receives).
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -512,7 +511,7 @@ mod tests {
 
     #[test]
     fn toml_excluded_entities_are_filtered() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -544,7 +543,7 @@ mod tests {
 
     #[test]
     fn toml_entities_missing_from_db_are_skipped_gracefully() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());
@@ -573,7 +572,7 @@ mod tests {
 
     #[test]
     fn config_path_preserves_user_entity_list() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let old = std::env::var("ENZYME_HOME").ok();
         let (vault, _home) = setup_test_env();
         let db = open_db(vault.path());

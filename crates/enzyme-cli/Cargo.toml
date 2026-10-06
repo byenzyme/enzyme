@@ -27,6 +27,7 @@ chrono = { workspace = true }
 crossterm = { workspace = true }
 atty = { workspace = true }
 serde = { workspace = true }
+dirs = { workspace = true }
 sha2 = { workspace = true }
 libsql = { workspace = true }
 ignore = { workspace = true }

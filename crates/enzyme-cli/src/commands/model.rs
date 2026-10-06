@@ -99,7 +99,9 @@ pub async fn run_install(
     Ok(())
 }
 
-pub fn run_list() -> Result<()> {
+pub const MODELS_SCHEMA: &str = "enzyme.models.v1";
+
+pub fn run_list(json_output: bool) -> Result<()> {
     let installed = model_registry::installed();
     let mode = EnzymeConfig::catalyst_llm_config()?.mode;
     let active = if mode == CatalystMode::Hosted {
@@ -107,6 +109,45 @@ pub fn run_list() -> Result<()> {
     } else {
         model_registry::active().map(|(n, _)| n)
     };
+
+    if json_output {
+        let entry_json = |name: &str| -> Result<serde_json::Value> {
+            let entry = model_registry::REGISTRY.iter().find(|e| e.name == name);
+            let path = model_registry::model_path(name)?;
+            let is_installed = installed.iter().any(|n| n == name);
+            Ok(serde_json::json!({
+                "name": name,
+                "installed": is_installed,
+                "active": active.as_deref() == Some(name),
+                "path": is_installed.then(|| path.display().to_string()),
+                "size_bytes": if is_installed { Some(file_len(&path)) } else { entry.map(|e| e.size) },
+                "registry": entry.is_some(),
+                "url": entry.map(|e| e.url),
+                "sha256": entry.map(|e| e.sha256),
+                "context_window": entry.map(|e| e.context_window),
+                "description": entry.map(|e| e.description),
+            }))
+        };
+        let mut models = Vec::new();
+        for name in &installed {
+            models.push(entry_json(name)?);
+        }
+        for entry in model_registry::REGISTRY {
+            if !installed.iter().any(|n| n == entry.name) {
+                models.push(entry_json(entry.name)?);
+            }
+        }
+        let output = serde_json::json!({
+            "schema": MODELS_SCHEMA,
+            "mode": mode.to_string(),
+            "selected": model_registry::selected_name(),
+            "active": active,
+            "models_dir": model_registry::models_dir()?.display().to_string(),
+            "models": models,
+        });
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
 
     if installed.is_empty() && model_registry::REGISTRY.is_empty() {
         println!("no models");

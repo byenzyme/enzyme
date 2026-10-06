@@ -70,7 +70,10 @@ pub async fn run(
     let program = structured_setup(&path, config, &temporal_policies)?;
     let source = render(&program);
     // Exercise the same parser/resolver as init before emitting any configuration.
-    enzyme_spec::resolve(vec![enzyme_spec::parse(&source)?], &path)?;
+    enzyme_spec::resolve_in(
+        vec![enzyme_spec::parse(&source)?],
+        &enzyme_core::config::default_spec_environment()?,
+    )?;
     let saved = if dry_run {
         None
     } else if let Some(file) = output {
@@ -268,9 +271,12 @@ fn save_setup(
         namespace.push((file, generated.clone()));
         namespace.len() - 1
     };
-    enzyme_spec::resolve(
+    enzyme_spec::resolve_in(
         namespace.iter().map(|(_, p)| p.clone()).collect(),
-        user_home,
+        &enzyme_core::config::spec_environment(
+            user_home,
+            &enzyme_core::config::EnzymePaths::enzyme_home()?,
+        )?,
     )?;
     for (file, previous) in snapshots {
         ensure!(
