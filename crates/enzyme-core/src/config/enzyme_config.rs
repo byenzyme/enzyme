@@ -581,7 +581,7 @@ impl EnzymeConfig {
             global
                 .vaults
                 .keys()
-                .filter(|key| !lone_paths.contains(key.as_str()))
+                .filter(|key| !lone_paths.contains(key.as_str()) && !key.starts_with("workspace:"))
                 .cloned(),
         );
         keys.sort();
@@ -663,11 +663,24 @@ impl EnzymeConfig {
                 .is_some_and(|p| p.join("configs").exists())
         {
             debug!(?config_path, "loading enzyme config from global TOML");
-            let global = load_global_toml(&config_path)?;
             let home = config_path.parent().unwrap_or_else(|| Path::new("."));
             if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {
+                let global = load_global_toml_for(config_path, ConfigTarget::Workspace(&name))?;
                 return Ok(Some(Self::from_named_workspace(&name, &global)));
             }
+            let global = load_global_toml_for(config_path, ConfigTarget::Path(vault_path))?;
+            let key = canonical_vault_key(vault_path);
+            let sharing: Vec<&str> = global
+                .lone_markdown_workspaces
+                .iter()
+                .filter(|(_, source)| source.path == key)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            anyhow::ensure!(
+                sharing.len() < 2 || global.vaults.contains_key(&key),
+                "{key} is the notes folder of workspaces {}; address one of them with --workspace",
+                sharing.join(", ")
+            );
             return Ok(Some(Self::from_global_config(vault_path, &global)));
         }
 
@@ -725,10 +738,7 @@ impl EnzymeConfig {
             Path(String),
         }
         let target = match program.workspaces.iter().find(|w| w.name == workspace) {
-            Some(declared) => match declared.markdown_path() {
-                Some(path) => Target::Path(path.to_string()),
-                None => Target::Named(declared.name.clone()),
-            },
+            Some(declared) => Target::Named(declared.name.clone()),
             None if program
                 .vaults
                 .iter()
@@ -740,7 +750,7 @@ impl EnzymeConfig {
         };
         let global = overlay_program(serde_json::json!({}), Some(program))?;
         Ok(match target {
-            Target::Named(name) => Self::from_workspace_config(&name, &global),
+            Target::Named(name) => Self::from_named_workspace(&name, &global),
             Target::Path(path) => Self::from_global_config(Path::new(&path), &global),
         })
     }
@@ -758,7 +768,8 @@ impl EnzymeConfig {
             return Self::from_workspace_config(name, global);
         };
         let path = PathBuf::from(&source.path);
-        let mut config = Self::from_global_config(&path, global);
+        // Keyed by name: several workspaces may read the same folder.
+        let mut config = Self::from_vault_key(&format!("workspace:{name}"), global);
         config.notes_roots = vec![NotesRootConfig {
             name: source.name.clone(),
             path: path.clone(),
@@ -781,15 +792,24 @@ impl EnzymeConfig {
         let home = config_path.parent().unwrap_or_else(|| Path::new("."));
         let user_home = dirs::home_dir().context("cannot resolve home directory")?;
         let environment = super::spec_environment(&user_home, home)?;
-        let Some(program) = enzyme_spec::load_directory_in(&home.join("configs"), &environment)?
+        let Some(namespace) =
+            enzyme_spec::load_namespace_in(&home.join("configs"), &environment)?
         else {
             return Ok(false);
         };
+        // A declaration that does not resolve is still the program's: never
+        // write a TOML or generated copy of it.
         if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {
-            return Ok(program.workspaces.iter().any(|w| w.name == name));
+            return Ok(namespace.program.workspaces.iter().any(|w| w.name == name)
+                || !namespace.workspace_problems(&name).is_empty());
         }
         let key = canonical_vault_key(vault_path);
-        Ok(program.vaults.iter().any(|v| v.path == key))
+        Ok(namespace
+            .program
+            .vaults
+            .iter()
+            .any(|v| v.path == key)
+            || !namespace.vault_problems(&key).is_empty())
     }
 
     /// Whether a workspace addressed by name is declared anywhere: by a
@@ -801,7 +821,7 @@ impl EnzymeConfig {
         let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? else {
             return Ok(true);
         };
-        let global = load_global_toml(&config_path)?;
+        let global = load_global_toml_for(&config_path, ConfigTarget::Workspace(&name))?;
         Ok(global.workspaces.contains_key(&name)
             || global.lone_markdown_workspaces.contains_key(&name))
     }
@@ -819,7 +839,16 @@ impl EnzymeConfig {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("configs");
-        Ok(config_path.exists() || enzyme_spec::source_files(&configs)?.is_empty())
+        // Count files without parsing them: another workspace's invalid
+        // program must not fail this one.
+        let has_programs = configs.is_dir()
+            && fs::read_dir(&configs)?.any(|entry| {
+                entry.is_ok_and(|entry| {
+                    let path = entry.path();
+                    path.is_file() && path.extension().is_some_and(|e| e == "enzyme")
+                })
+            });
+        Ok(config_path.exists() || !has_programs)
     }
 
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
@@ -828,6 +857,20 @@ impl EnzymeConfig {
             .vaults
             .get(&key)
             .or_else(|| global.vaults.get(&vault_path.to_string_lossy().to_string()));
+        Self::from_vault_entry(&key, vault, global)
+    }
+
+    /// The runtime view of the vault `global` keys as `key`: a path, or
+    /// `workspace:<name>` for a lone-Markdown program workspace.
+    fn from_vault_key(key: &str, global: &GlobalTomlConfig) -> Self {
+        Self::from_vault_entry(key, global.vaults.get(key), global)
+    }
+
+    fn from_vault_entry(
+        key: &str,
+        vault: Option<&VaultTomlSection>,
+        global: &GlobalTomlConfig,
+    ) -> Self {
 
         let trending = SelectionConfig {
             minimum_tags: global.defaults.minimum_tags,
@@ -838,12 +881,12 @@ impl EnzymeConfig {
         };
 
         Self {
-            reading_spec: global.readings.get(&key).cloned(),
+            reading_spec: global.readings.get(key).cloned(),
             catalyzed_entities: vault.map(|v| v.entities.clone()).unwrap_or_default(),
             trending: Some(trending),
             catalyst_format: global
                 .readings
-                .get(&key)
+                .get(key)
                 .and_then(|v| v.format.clone())
                 .or_else(|| global.defaults.catalyst_format.clone()),
             excluded_tags: vault.map(|v| v.excluded_tags.clone()).unwrap_or_default(),
@@ -1530,7 +1573,24 @@ impl EnzymeConfig {
     }
 }
 
+/// What a config load is for. Problems in `configs/` fail the load only when
+/// they break this target; any other declaration's problems are warnings, so
+/// one invalid workspace never stops the others.
+#[derive(Debug, Clone, Copy)]
+enum ConfigTarget<'a> {
+    /// A named workspace (`--workspace <name>`).
+    Workspace(&'a str),
+    /// A path-addressed vault.
+    Path(&'a Path),
+    /// Machine-wide settings only (generation, updates, configured keys).
+    Machine,
+}
+
 fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
+    load_global_toml_for(path, ConfigTarget::Machine)
+}
+
+fn load_global_toml_for(path: &Path, target: ConfigTarget<'_>) -> Result<GlobalTomlConfig> {
     let value = if path.exists() {
         let contents = fs::read_to_string(path)?;
         if contents.trim().is_empty() {
@@ -1548,8 +1608,53 @@ fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
     let directory = enzyme_home.join("configs");
     let user_home = dirs::home_dir().context("cannot resolve home directory")?;
     let environment = super::spec_environment(&user_home, enzyme_home)?;
-    let program = enzyme_spec::load_directory_in(&directory, &environment)?;
+    let program = match enzyme_spec::load_namespace_in(&directory, &environment)? {
+        Some(namespace) => Some(checked_program(namespace, target)?),
+        None => None,
+    };
     overlay_program(value, program)
+}
+
+/// The resolved program, or an error naming every problem that breaks
+/// `target`. Other problems are logged once per process as warnings.
+fn checked_program(
+    namespace: enzyme_spec::Namespace,
+    target: ConfigTarget<'_>,
+) -> Result<enzyme_spec::Program> {
+    let fatal = match target {
+        ConfigTarget::Workspace(name) => namespace.workspace_problems(name),
+        ConfigTarget::Path(path) => namespace.vault_problems(&canonical_vault_key(path)),
+        ConfigTarget::Machine => Vec::new(),
+    };
+    if !fatal.is_empty() {
+        let messages: Vec<String> = fatal
+            .iter()
+            .map(|problem| format!("{}: {}", problem.scope, problem.message()))
+            .collect();
+        anyhow::bail!("{}", messages.join("; "));
+    }
+    for problem in &namespace.problems {
+        warn_once(format!(
+            "ignoring {} in {}: {}",
+            problem.scope,
+            "configs/",
+            problem.message()
+        ));
+    }
+    Ok(namespace.program)
+}
+
+fn warn_once(message: String) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if seen
+        .lock()
+        .map(|mut seen| seen.insert(message.clone()))
+        .unwrap_or(true)
+    {
+        tracing::warn!("{message}");
+    }
 }
 
 /// Overlay a resolved readable program on a legacy config value, exactly as
@@ -1583,9 +1688,9 @@ fn overlay_program(
             })
             .collect();
         global.readings = program
-            .vaults
+            .keyed_vaults()
             .into_iter()
-            .map(|v| (v.path.clone(), v))
+            .map(|(key, v)| (key, v.clone()))
             .collect();
     }
     Ok(global)
@@ -1823,6 +1928,56 @@ timestamp = { unit = "ms" }
         let ws = typed.workspaces.get("imessage").expect("workspace present");
         assert!(ws.sources.contains_key("messages"), "source dropped");
         assert_eq!(ws.entities.len(), 1);
+    }
+
+    #[test]
+    fn a_workspace_fails_only_on_problems_that_break_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let configs = home.join("configs");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&configs).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        let config_path = home.join("config.toml");
+        let workspace = |name: &str, reading: &str| {
+            format!(
+                "workspace \"{name}\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  {reading}\n}}\n",
+                notes.display()
+            )
+        };
+        let profile = |seek: &str| format!("profile decisions {{ seek \"{seek}\" notice [\"x\"] }}\n");
+        std::fs::write(configs.join("a.enzyme"), profile("one")).unwrap();
+        std::fs::write(configs.join("b.enzyme"), profile("two")).unwrap();
+        std::fs::write(
+            configs.join("user.enzyme"),
+            workspace("user", r#"learn questions from tag "x" about decisions"#),
+        )
+        .unwrap();
+        std::fs::write(
+            configs.join("other.enzyme"),
+            workspace("other", r#"learn questions from tag "x""#),
+        )
+        .unwrap();
+        let store = |name: &str| home.join("workspaces").join(name);
+
+        // The conflicting profile breaks the workspace that uses it…
+        let error = EnzymeConfig::load_at(&store("user"), &config_path).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("which config files define differently"),
+            "{error:#}"
+        );
+        // …and nothing else, including machine-wide settings.
+        let other = EnzymeConfig::load_at(&store("other"), &config_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.notes_roots.len(), 1);
+        EnzymeConfig::catalyst_llm_config_at(&config_path).unwrap();
+
+        // What every workspace inherits is still one namespace.
+        std::fs::write(configs.join("s1.enzyme"), "settings { updates disabled }\n").unwrap();
+        std::fs::write(configs.join("s2.enzyme"), "settings { updates disabled }\n").unwrap();
+        let error = EnzymeConfig::load_at(&store("other"), &config_path).unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate setting"), "{error:#}");
     }
 
     #[test]

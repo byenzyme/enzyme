@@ -247,15 +247,28 @@ fn validate_namespace(
     candidate: &Program,
     environment: &enzyme_spec::Environment,
 ) -> Result<()> {
-    let mut programs = enzyme_spec::source_files(directory)?
+    // Another workspace's invalid file does not block this one, but the
+    // generated program must resolve and must not break any other file.
+    let others = enzyme_config_files(directory)?
         .into_iter()
-        .filter(|(path, _)| path != destination)
-        .map(|(_, program)| program)
+        .filter(|path| path != destination)
+        .filter_map(|path| enzyme_spec::parse(&std::fs::read_to_string(&path).ok()?).ok())
         .collect::<Vec<_>>();
-    programs.push(candidate.clone());
-    enzyme_spec::resolve_in(programs, environment)
+    enzyme_spec::resolve_with_in(others, candidate.clone(), environment)
         .context("generated program conflicts with existing Enzyme configuration")?;
     Ok(())
+}
+
+fn enzyme_config_files(directory: &Path) -> Result<Vec<std::path::PathBuf>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = std::fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.retain(|path| path.is_file() && path.extension().is_some_and(|e| e == "enzyme"));
+    files.sort();
+    Ok(files)
 }
 
 fn save_without_overwrite(path: &Path, source: &str) -> Result<()> {

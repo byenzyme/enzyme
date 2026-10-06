@@ -146,15 +146,24 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         .context("HOME missing")?;
     // A file inside the runtime configs directory shares its namespace (e.g.
     // profiles defined in profiles.enzyme), so resolve it with its siblings.
-    let mut programs = vec![ast.clone()];
+    // Another workspace's invalid file does not block planning this one.
+    let mut others = Vec::new();
     if let Some(directory) = runtime_configs_directory(file)? {
-        for (path, program) in enzyme_spec::source_files(&directory)? {
-            if !same_file(&path, file) {
-                programs.push(program);
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "enzyme")
+                && path.is_file()
+                && !same_file(&path, file)
+                && let Ok(program) = enzyme_spec::parse(&std::fs::read_to_string(&path)?)
+            {
+                others.push(program);
             }
         }
     }
-    let globals: Vec<Learning> = programs.iter().map(|p| p.learning.clone()).collect();
+    let globals: Vec<Learning> = std::iter::once(&ast)
+        .chain(&others)
+        .map(|p| p.learning.clone())
+        .collect();
     let raw_scopes: Vec<enzyme_spec::Vault> = ast
         .vaults
         .iter()
@@ -167,8 +176,8 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         .collect();
     let environment =
         enzyme_core::config::spec_environment(&user_home, &EnzymePaths::enzyme_home()?)?;
-    let mut resolved = enzyme_spec::resolve_in(programs, &environment)?;
-    // `resolve` keeps program order, so this file's vaults/workspaces come first.
+    let mut resolved = enzyme_spec::resolve_with_in(others, ast.clone(), &environment)?.program;
+    // The candidate resolves first and fully, so its vaults/workspaces come first.
     resolved.vaults.truncate(raw_scopes.len());
     anyhow::ensure!(
         !resolved.vaults.is_empty(),

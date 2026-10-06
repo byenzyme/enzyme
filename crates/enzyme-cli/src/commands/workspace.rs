@@ -82,10 +82,13 @@ pub fn run(command: &WorkspaceCommand) -> Result<()> {
 
 fn store() -> Result<ConfigStore> {
     let user_home = dirs::home_dir().context("cannot resolve home directory")?;
-    Ok(ConfigStore::new(
-        EnzymePaths::enzyme_home()?.join("configs"),
-        user_home,
-    ))
+    let enzyme_home = EnzymePaths::enzyme_home()?;
+    // Validate with the runtime's environment: built-in kinds and `{home}`.
+    let environment = enzyme_core::config::spec_environment(&user_home, &enzyme_home)?;
+    Ok(
+        ConfigStore::new(enzyme_home.join("configs"), user_home)
+            .with_validator(enzyme_spec::plan::resolver_in(environment)),
+    )
 }
 
 fn read_input(path: &Path) -> Result<String> {

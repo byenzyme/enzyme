@@ -338,7 +338,12 @@ workspace "empty" {{ source markdown "notes" {{ path "{empty}" }} }}
     let bad_flag = h.run(&["init", "--no-such-flag"]);
     assert_code(&bad_flag, 2);
 
+    // Another workspace's invalid program does not fail this one…
     h.program("broken.enzyme", "workspace oops");
+    let neighbour = h.run(&["--collection", "real", "init", "--stage", "index", "--quiet"]);
+    assert_code(&neighbour, 0);
+    // …but its own does.
+    h.program("ws.enzyme", "workspace oops");
     let broken = h.run(&["--collection", "real", "init", "--quiet"]);
     assert_code(&broken, 3);
 
@@ -485,4 +490,104 @@ fn three_concurrent_forced_inits_serialize_and_all_succeed() {
         document_refs(&h.store("lone").join("enzyme.db")),
         vec!["note-0.md", "note-1.md", "note-2.md"]
     );
+}
+
+/// One home, many workspaces: two workspaces may read one notes folder, and a
+/// workspace whose program is invalid fails only when it is addressed.
+#[test]
+fn workspaces_in_one_home_do_not_fail_together() {
+    let h = Home::new();
+    let notes = h.notes("shared", 3);
+    h.program("settings.enzyme", "settings { updates disabled }\n");
+    for (name, reading) in [
+        ("meetings", r#"learn questions from tag "focus""#),
+        ("people", r#"learn questions from tag "focus" about relationships"#),
+    ] {
+        h.program(
+            &format!("{name}.enzyme"),
+            &format!(
+                "workspace \"{name}\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  {reading}\n}}\n",
+                notes.display()
+            ),
+        );
+    }
+    // One program resolves to nothing usable; another does not parse.
+    h.program(
+        "broken.enzyme",
+        "workspace \"broken\" {\n  source markdown \"notes\" { path \"relative/notes\" }\n}\n",
+    );
+    h.program("typo.enzyme", "workspace \"typo\" {\n  learn questions from\n");
+    let before = h.config_snapshot();
+
+    for name in ["meetings", "people"] {
+        let init = h.run(&["--workspace", name, "init", "--quiet", "--use-env-llm"]);
+        assert_code(&init, 0);
+        let result = summary(&init);
+        assert_eq!(result["indexing"]["files_discovered"], 3, "{}", text(&init));
+        assert!(result["catalysts_generated"].as_u64().unwrap() > 0);
+        let db = h.store(name).join("enzyme.db");
+        assert_eq!(
+            document_refs(&db),
+            vec!["note-0.md", "note-1.md", "note-2.md"]
+        );
+    }
+    assert!(!notes.join(".enzyme").exists());
+    assert_eq!(h.config_snapshot(), before, "init rewrote configuration");
+
+    // Each workspace keeps its own readings although they share a folder.
+    let inspect = |name: &str| {
+        let output = h
+            .command(&["spec", "inspect"])
+            .arg(h.store(name))
+            .output()
+            .unwrap();
+        assert_code(&output, 0);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    // `relationships` resolves to the built-in `relational` profile.
+    assert!(!inspect("meetings").contains("relational"));
+    assert!(inspect("people").contains("about relational"));
+
+    // The invalid programs fail when addressed, with their own errors.
+    let broken = h.run(&["--workspace", "broken", "init", "--quiet"]);
+    assert_code(&broken, 3);
+    assert!(text(&broken).contains("must be absolute"), "{}", text(&broken));
+    let typo = h.run(&["--workspace", "typo", "init", "--quiet"]);
+    assert_code(&typo, 3);
+    assert!(
+        text(&typo).contains("invalid reading config"),
+        "{}",
+        text(&typo)
+    );
+
+    // By path, the shared folder does not say which workspace is meant.
+    let by_path = h
+        .command(&["init", "--stage", "index", "--quiet"])
+        .arg("-p")
+        .arg(&notes)
+        .output()
+        .unwrap();
+    assert_ne!(by_path.status.code(), Some(0), "{}", text(&by_path));
+    assert!(
+        text(&by_path).contains("address one of them with --workspace"),
+        "{}",
+        text(&by_path)
+    );
+
+    // Planning one workspace is not blocked by the others' invalid files.
+    let desired = h.root.path().join("desired.enzyme");
+    fs::write(
+        &desired,
+        format!(
+            "workspace \"meetings\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  learn questions from tag \"focus\" about decisions\n}}\n",
+            notes.display()
+        ),
+    )
+    .unwrap();
+    let plan = h
+        .command(&["workspace", "plan", "meetings", "--json", "--desired"])
+        .arg(&desired)
+        .output()
+        .unwrap();
+    assert_code(&plan, 0);
 }
