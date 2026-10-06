@@ -17,8 +17,8 @@ Follow this order:
 2. Identify the person, date, message, folder, and ID columns and choose a workspace name.
 3. Show real examples and ask the user to confirm the mapping.
 4. Write the confirmed `source sqlite` declaration in `$ENZYME_HOME/configs/<name>.enzyme`.
-5. Validate it with `enzyme scan --collection <name>`.
-6. Build it with `enzyme --collection <name> init`, then use `refresh`.
+5. Validate it with `enzyme scan --workspace <name>`.
+6. Build it with `enzyme --workspace <name> init`, then use `refresh`.
 7. Verify document and embedding counts.
 8. Test whether searches for a person are actually about that person.
 
@@ -34,7 +34,7 @@ Never edit, migrate, vacuum, attach to, or create anything in the source databas
 
 ## Choose the source and workspace
 
-Choose a short workspace name such as `imessage`, `mail`, or `crm`. It must be one filesystem component, not a path. Address it only as `--collection <name>`. Enzyme owns its index at `$ENZYME_HOME/workspaces/<name>/enzyme.db` (default `~/.enzyme/workspaces/<name>/enzyme.db`); the skill never chooses, creates, or writes that storage path.
+Choose a short workspace name such as `imessage`, `mail`, or `crm`. It must be one filesystem component, not a path. Address it only as `--workspace <name>`. Enzyme owns its index at `$ENZYME_HOME/workspaces/<name>/enzyme.db` (default `~/.enzyme/workspaces/<name>/enzyme.db`); the skill never chooses, creates, or writes that storage path.
 
 The readable program lives in `$ENZYME_HOME/configs/<name>.enzyme` when `ENZYME_HOME` is set and `~/.enzyme/configs/<name>.enzyme` otherwise. The skill writes one `workspace` with its confirmed `source sqlite` declaration and only the readings the user reviewed. It never chooses an index storage path. For SQLite sources, mapped `who` values deterministically become people and mapped `where` values become threads/folders during indexing; there is no agent task to enumerate them.
 
@@ -319,10 +319,10 @@ The example is a shape, not a query to copy. Use the exact reviewed SQL and colu
 ```bash
 cat "$PROGRAM_PATH"
 "$ENZYME_BIN" spec compile "$PROGRAM_PATH"
-"$ENZYME_BIN" scan --collection "$WORKSPACE_NAME"
+"$ENZYME_BIN" scan --workspace "$WORKSPACE_NAME"
 ```
 
-`scan --collection` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. `spec compile` parses and lowers the program but does not write config or index data.
+`scan --workspace` opens the source read-only, runs the query, resolves every configured role column, and reports the row count in `source_checks`. Require every source check to pass before initialization. `spec compile` parses and lowers the program but does not write config or index data.
 
 The equivalent lower-level TOML contract is shown below for interpreting old installations and checking the compiled mapping. Do not write both forms for the same source:
 
@@ -394,9 +394,9 @@ After writing, show the exact program path and the declaration you added. Read i
 Use this configured source as the only ingestion path. Run `init` once for a workspace. Use `refresh` after that. Running `init` again regenerates and **replaces** catalysts, so their wording and counts may change even when the config and source data did not. `refresh` is the normal, repeatable way to sync again.
 
 ```bash
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" init --quiet
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" status
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" init --quiet
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" status
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" petri
 ```
 
 Zero Markdown files is valid because the configured SQLite source supplies the documents. If another setup flow already configured a `sources.notes` path in this named workspace, `init` and `refresh` must keep and update both Markdown and SQLite documents; this skill does not author that notes contract.
@@ -404,8 +404,8 @@ Zero Markdown files is valid because the configured SQLite source supplies the d
 After the first `init`, use these commands whenever the source changes:
 
 ```bash
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" refresh --quiet
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" status
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" refresh --quiet
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" status
 ```
 
 `status` reports each source's row count, bucket count, and last refresh time. Enzyme manages fingerprint comparison, document rebuilds/pruning, embeddings, and catalyst scheduling. If `refresh` reports a schema change, a configured output column disappears, a join starts returning a different number of rows, or converted dates stop making sense, inspect the source again. Show the user new evidence and get confirmation before changing the saved mapping.
@@ -518,8 +518,8 @@ SQL
 Now test the user-facing search. A query for a top person must return material that is mostly about that person and follows the expected time periods. If much of the result is unrelated, report that as a problem instead of calling the test successful.
 
 ```bash
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri --query "<one exact top person name>"
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" catalyze "What changed with <one exact top person name>?"
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" petri --query "<one exact top person name>"
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" catalyze "What changed with <one exact top person name>?"
 ```
 
 Build the post-init reveal from questions that work, not from generic promises. Choose two or three questions grounded in the actual names, places, and dates you verified. When the source has both people and places, pre-test at least one person question and one familiar-place question; include each in the reveal only if it passes, and disclose the failure plainly if it does not. Run each proposed question first, using the same `petri` and `catalyze` checks. Only offer a question when its results are predominantly about the named person or place and use the expected dates.
@@ -529,8 +529,8 @@ If every focused person or place question fails, run a positive control before w
 For a place question, adapt the same check:
 
 ```bash
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" petri --query "<one familiar collection name>"
-"$ENZYME_BIN" --collection "$WORKSPACE_NAME" catalyze "What was I collecting in <one familiar collection name> during <one supported year>?"
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" petri --query "<one familiar collection name>"
+"$ENZYME_BIN" --workspace "$WORKSPACE_NAME" catalyze "What was I collecting in <one familiar collection name> during <one supported year>?"
 ```
 
 After the private checks, explain what became possible as an anchor paired with a question. Start by explaining the simple mechanism: dates put entries in order; repeated people and places gather those dated moments into histories. Then use the user's real data. For example:

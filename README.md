@@ -53,8 +53,11 @@ workspace "notes" {
 }
 ```
 
-For a Markdown folder, the source path remains the runtime and index location.
-Changing an existing `vault` program to this form does not move its index.
+For a Markdown folder addressed by path (`enzyme -p <folder>`), the source path
+remains the runtime and index location, and changing an existing `vault`
+program to this form does not move its index. Addressed with
+`--workspace <name>`, the same folder gets its own index under
+`$ENZYME_HOME/workspaces/<name>/`, built from scratch on the first `init`.
 
 ## Get started
 
@@ -104,14 +107,20 @@ For Apple Notes, a preset builds a named `workspace` program from your Notes
 database. Review the saved `.enzyme` program before running `init`:
 
 ```bash
-enzyme --collection apple-notes compile --preset apple-notes \
+enzyme --workspace apple-notes compile --preset apple-notes \
   "$HOME/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
-enzyme --collection apple-notes init
+enzyme --workspace apple-notes init
 ```
 
-For Are.na, use `enzyme --collection <name> compile --preset arena <channel-url>`
-and then `enzyme --collection <name> init`. Run `refresh` with the
-same `--collection` name to pick up later changes.
+For Are.na, use `enzyme --workspace <name> compile --preset arena <channel-url>`
+and then `enzyme --workspace <name> init`. Run `refresh` with the
+same `--workspace` name to pick up later changes (`--collection` is an accepted
+alias).
+
+Scripts and host apps can rely on defined exit codes (0 ok, 1 runtime failure,
+2 usage, 3 configuration, 4 workspace busy, 5 `init` indexed but catalysts
+failed their quality gate). Concurrent `init`/`refresh` calls
+on one workspace wait for each other, bounded by `--lock-timeout`.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
@@ -248,6 +257,6 @@ Enzyme needs an API key only for catalyst generation and for Markdown `enzyme co
 
 The first configured vault on a machine initializes without login. Refresh, publishing, account credits, and additional vaults require `enzyme login`.
 
-To bring your own OpenAI-compatible key, pass `--use-env-llm`, which reads `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. Without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
+To bring your own OpenAI-compatible key, pass `--llm env` (alias `--use-env-llm`), which reads only `OPENAI_API_KEY` plus optional `OPENAI_BASE_URL` and `OPENAI_MODEL`. `init` and `refresh` also take `--llm local` (the installed local model; fails if none is installed), `--llm hosted`, and `--llm none` (index, embed, and select without generating catalysts). Without `--llm` and without any hosted or env key, catalyst generation is skipped and indexing, embedding, and local search still work.
 
 Markdown `enzyme compile` is an explicit OpenRouter Decisions operation. It reuses the hosted lease from `enzyme login` and the free-config broker; an explicit `OPENAI_API_KEY` with `OPENAI_BASE_URL=https://openrouter.ai/api/v1` takes precedence. Catalyst generation uses `OPENAI_MODEL`; Decisions uses `ENZYME_JEV_MODEL` (default `typesafe/jev-1.13`).
