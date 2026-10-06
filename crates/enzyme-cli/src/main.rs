@@ -19,8 +19,14 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
-    /// Named workspace/collection (home-rooted; configured under [workspaces.<name>])
-    #[arg(long, global = true, conflicts_with = "vault")]
+    /// Named workspace declared in $ENZYME_HOME (alias: --collection)
+    #[arg(
+        long = "workspace",
+        visible_alias = "collection",
+        value_name = "NAME",
+        global = true,
+        conflicts_with = "vault"
+    )]
     collection: Option<String>,
 
     /// Verbosity level
@@ -234,10 +240,14 @@ enum Commands {
     ///
     /// Hidden rather than removed. `enzyme compile` is the setup path and
     /// carries this inventory in its own output, but the SQLite source skill
-    /// still validates a configured source with `scan --collection <name>`,
+    /// still validates a configured source with `scan --workspace <name>`,
     /// which has no compile equivalent yet.
     #[command(hide = true)]
-    Scan {},
+    Scan {
+        /// Accepted for symmetry; scan output is always `scan.v2` JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Install or update this workspace's agent integration
     Install {
@@ -419,7 +429,7 @@ async fn main() -> Result<()> {
         Commands::Spec { command } => {
             anyhow::ensure!(
                 cli.collection.is_none(),
-                "spec commands take Markdown vault paths, not named collections"
+                "spec commands take Markdown vault paths, not named workspaces"
             );
             return commands::spec::run(command, cli.vault.as_deref()).await;
         }
@@ -481,12 +491,12 @@ async fn main() -> Result<()> {
         if let Some(preset) = preset {
             anyhow::ensure!(
                 cli.vault.is_none(),
-                "preset compilation uses --collection, not --vault"
+                "preset compilation uses --workspace, not --vault"
             );
             let workspace_name = cli
                 .collection
                 .as_deref()
-                .context("preset compilation requires --collection <name>")?;
+                .context("preset compilation requires --workspace <name>")?;
             return commands::compile_preset::run(
                 *preset,
                 sources,
@@ -504,7 +514,7 @@ async fn main() -> Result<()> {
         );
         anyhow::ensure!(
             cli.collection.is_none(),
-            "compile supports Markdown vaults, not named collections"
+            "compile supports Markdown vaults, not named workspaces"
         );
         return commands::compile::run(
             &vault_path,
@@ -652,7 +662,7 @@ async fn main() -> Result<()> {
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan {} => {
+        Commands::Scan { .. } => {
             commands::scan::run_scan(&vault_path)?;
         }
         Commands::Install { target, source } => {
