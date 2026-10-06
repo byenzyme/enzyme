@@ -1242,7 +1242,10 @@ fn validate_existing_program(
             program_path.display()
         );
     }
-    let resolved = enzyme_spec::resolve(vec![program], Path::new("/"))?;
+    let resolved = enzyme_spec::resolve_in(
+        vec![program],
+        &enzyme_core::config::default_spec_environment()?,
+    )?;
     let vault = resolved
         .vaults
         .iter()
@@ -1508,6 +1511,35 @@ mod tests {
             .unwrap(),
             "sample by recency"
         );
+        // An existing program may also declare a built-in source kind.
+        let with_notes = rendered.replacen(
+            "  source arena \"channels\"",
+            "  source apple-notes \"notes\" {}\n  source arena \"channels\"",
+            1,
+        );
+        assert!(with_notes.contains("source apple-notes"), "{with_notes}");
+        let coverage = ChannelCoverage {
+            channel_id: 9,
+            slug: "research".into(),
+            title: "Research".into(),
+            entity: "arena:channels/channel/9".into(),
+            reported_connections: 0,
+            fetched_connections: 0,
+            indexed_documents: 0,
+            excluded_images: 0,
+            nested_channels: 0,
+            oldest_connected_at: None,
+            newest_connected_at: None,
+            connected_by_month: BTreeMap::new(),
+            partial: false,
+        };
+        validate_existing_program(
+            &with_notes,
+            "arena-test",
+            &[coverage],
+            Path::new("/tmp/config.enzyme"),
+        )
+        .unwrap();
         let scope =
             declared_channel_scope(&rendered, "arena-test", Path::new("/tmp/config.enzyme"))
                 .unwrap();

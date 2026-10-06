@@ -48,16 +48,51 @@ impl Preset {
 /// name and `__SOURCE__` the quoted source argument. A template that uses
 /// `__SOURCE__` needs exactly one source argument; one that does not takes none.
 pub fn fill_template(template: &str, workspace_name: &str, sources: &[String]) -> Result<String> {
-    let filled = template.replace("__WORKSPACE__", &serde_json::to_string(workspace_name)?);
-    if template.contains("__SOURCE__") {
+    const WORKSPACE: &str = "__WORKSPACE__";
+    const SOURCE: &str = "__SOURCE__";
+    let source = if template.contains(SOURCE) {
         ensure!(
             sources.len() == 1,
             "this preset needs exactly one source argument"
         );
-        Ok(filled.replace("__SOURCE__", &serde_json::to_string(&sources[0])?))
+        Some(serde_json::to_string(&sources[0])?)
     } else {
         ensure!(sources.is_empty(), "this preset takes no source arguments");
-        Ok(filled)
+        None
+    };
+    let workspace = serde_json::to_string(workspace_name)?;
+    // One left-to-right pass, so substituted text is never rescanned: a
+    // workspace name containing `__SOURCE__` stays as written.
+    let mut filled = String::with_capacity(template.len());
+    let mut rest = template;
+    loop {
+        let next = [(WORKSPACE, Some(&workspace)), (SOURCE, source.as_ref())]
+            .into_iter()
+            .filter_map(|(token, value)| Some((rest.find(token)?, token, value?)))
+            .min_by_key(|(at, _, _)| *at);
+        let Some((at, token, value)) = next else {
+            filled.push_str(rest);
+            return Ok(filled);
+        };
+        filled.push_str(&rest[..at]);
+        filled.push_str(value);
+        rest = &rest[at + token.len()..];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fill_template;
+
+    #[test]
+    fn fill_substitutes_each_token_once_without_rescanning() {
+        let template = "workspace __WORKSPACE__ { source markdown \"h\" { path __SOURCE__ } }";
+        assert_eq!(
+            fill_template(template, "a__SOURCE__b", &["/x __WORKSPACE__".into()]).unwrap(),
+            "workspace \"a__SOURCE__b\" { source markdown \"h\" { path \"/x __WORKSPACE__\" } }"
+        );
+        assert!(fill_template(template, "w", &[]).is_err());
+        assert!(fill_template("workspace __WORKSPACE__ {}", "w", &["x".into()]).is_err());
     }
 }
 
