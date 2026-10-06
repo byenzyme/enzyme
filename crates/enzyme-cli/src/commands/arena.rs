@@ -522,7 +522,9 @@ pub async fn run(
     let (catalyst_epoch_scheduled, catalyst_generation_due, background_spawned) = if index_only {
         (false, false, false)
     } else {
-        let contract = super::init::generation_contract(&vault_path, &paths, false).await?;
+        let contract =
+            super::init::generation_contract(&vault_path, &paths, super::generator::LlmMode::Auto)
+                .await?;
         db.bootstrap_legacy_epoch(&contract, epoch_now_ms(), false)?;
         super::init::recover_abandoned_epoch_worker(&db, &paths)?;
         let schedule = db.schedule_catalyst_epoch(epoch_now_ms(), &contract, false)?;
@@ -530,7 +532,11 @@ pub async fn run(
             schedule.scheduled,
             schedule.due,
             schedule.launch_needed
-                && super::init::spawn_background_refresh(&vault_path, &paths, false),
+                && super::init::spawn_background_refresh(
+                    &vault_path,
+                    &paths,
+                    super::generator::LlmMode::Auto,
+                ),
         )
     };
 

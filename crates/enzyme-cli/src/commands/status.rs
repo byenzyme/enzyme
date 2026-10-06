@@ -10,10 +10,13 @@ use enzyme_core::config::enzyme_config::{CatalystMode, EnzymeConfig, SqliteSourc
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::db::update_sentinel::{self, UpdateStatus};
-use enzyme_core::llm::model_registry;
+use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient, model_registry};
+use enzyme_core::pipeline::catalysts::{CatalystConfig, CatalystPipeline, SkipReason};
+use enzyme_core::pipeline::epoch::GenerationContract;
+use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::sqlite_source::{check_sqlite_source_reachability, source_refresh_staleness};
 
-use super::init::BINARY_VERSION;
+use super::init::{BINARY_VERSION, EvidenceLimits, read_collection_cache_epoch};
 use super::refresh_outcome::{BackgroundRefreshOutcome, OutcomeStatus, load_outcome};
 use super::update::{
     BinaryUpdateOutcome, BinaryUpdateStatus, load_outcome as load_binary_update, update_available,
@@ -180,6 +183,160 @@ fn build_source_statuses(
         .collect()
 }
 
+pub const STATUS_SCHEMA: &str = "enzyme.status.v1";
+
+/// Generation readiness of one selected entity.
+#[derive(Debug, Serialize)]
+struct EntityReadiness {
+    name: String,
+    #[serde(rename = "type")]
+    entity_type: String,
+    /// `ready` (has catalysts), `skipped` (no generation job; see
+    /// `skip_reason`), or `pending` (has a job but no catalysts yet).
+    state: &'static str,
+    catalysts: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_reason: Option<SkipReason>,
+}
+
+/// Selected entities with their catalyst counts and, for entities without
+/// catalysts, why generation would not produce any. Read-only: runs the same
+/// selection and job construction init runs, without a model.
+fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_json::Value> {
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let selection = SelectionPipeline::new(db, vault_path).run_with_config(Some(&config))?;
+    let counts = db.get_catalyst_counts_by_entity()?;
+    let catalysts_for = |name: &str, entity_type: &str| -> usize {
+        counts
+            .iter()
+            .filter(|((entity, kind), _)| {
+                entity == name && (kind == entity_type || kind.is_empty())
+            })
+            .map(|(_, count)| *count)
+            .sum()
+    };
+
+    let waiting: Vec<_> = selection
+        .entities
+        .iter()
+        .filter(|entity| catalysts_for(&entity.name, entity.entity_type.as_str()) == 0)
+        .cloned()
+        .collect();
+    let mut skips = HashMap::new();
+    if !waiting.is_empty() {
+        let limits = EvidenceLimits::from_env();
+        let cat_config = CatalystConfig {
+            reading_spec: config.reading_spec.as_ref(),
+            entity_profiles: &selection.entity_profiles,
+            catalysts_per_entity: 7,
+            default_profile: DEFAULT_PROFILE_KEY,
+            format_key: config
+                .catalyst_format
+                .as_deref()
+                .unwrap_or(DEFAULT_FORMAT_KEY),
+            prompt_context: None,
+            model: "status",
+            per_entity_allocations: None,
+            max_context_chars: limits.max_context_chars,
+            max_samples: limits.max_samples,
+            concurrency: None,
+            stream_partial_catalysts: false,
+            force_regenerate: false,
+            min_context_documents: limits.min_context_documents,
+            min_context_tokens: limits.min_context_tokens,
+            epoch_id: None,
+        };
+        // Never contacted: job construction only builds prompts.
+        let llm = LlmClient::with_base_url("status", "https://status.invalid/v1");
+        let plan = CatalystPipeline::new(db, &llm, None).plan_jobs(&waiting, &cat_config)?;
+        for skip in plan.skipped {
+            skips.insert((skip.entity_name, skip.entity_type), skip.reason);
+        }
+    }
+
+    let entities: Vec<EntityReadiness> = selection
+        .entities
+        .iter()
+        .map(|entity| {
+            let entity_type = entity.entity_type.as_str().to_string();
+            let catalysts = catalysts_for(&entity.name, &entity_type);
+            let skip_reason = skips.remove(&(entity.name.clone(), entity_type.clone()));
+            let state = match (catalysts, &skip_reason) {
+                (n, _) if n > 0 => "ready",
+                (_, Some(_)) => "skipped",
+                _ => "pending",
+            };
+            EntityReadiness {
+                name: entity.name.clone(),
+                entity_type,
+                state,
+                catalysts,
+                skip_reason,
+            }
+        })
+        .collect();
+    let count = |state: &str| entities.iter().filter(|e| e.state == state).count();
+    Ok(json!({
+        "selected": entities.len(),
+        "ready": count("ready"),
+        "pending": count("pending"),
+        "skipped": count("skipped"),
+        "entities": entities,
+    }))
+}
+
+/// What built the index and which catalyst epoch is active.
+fn build_index_manifest(db: &Database) -> Result<serde_json::Value> {
+    let epoch = db.get_epoch_state()?;
+    let contract_fingerprint = epoch
+        .active_generation_contract
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<GenerationContract>(json).ok())
+        .and_then(|contract| contract.fingerprint().ok());
+    Ok(json!({
+        "built_by": db.get_config(update_sentinel::BINARY_VERSION_KEY)?,
+        "schema_fingerprint": db.get_config(update_sentinel::SCHEMA_FINGERPRINT_KEY)?,
+        "cache_epoch": read_collection_cache_epoch(db)?,
+        "epoch": {
+            "active_epoch_id": epoch.active_epoch_id,
+            "active_epoch_completed_at_ms": epoch.active_epoch_completed_at_ms,
+            "active_epoch_corpus_generation": epoch.active_epoch_corpus_generation,
+            "corpus_generation": epoch.corpus_generation,
+            "corpus_changed_since_epoch":
+                epoch.active_epoch_corpus_generation != Some(epoch.corpus_generation),
+            "build_epoch_id": epoch.build_epoch_id,
+            "contract_fingerprint": contract_fingerprint,
+        },
+    }))
+}
+
+/// `status --json`: [`build_status_json`] plus selection readiness and the
+/// index manifest, under a versioned schema. An uninitialized vault still
+/// answers, with `initialized: false`.
+pub async fn build_status_json_v1(vault_path: &Path) -> Result<serde_json::Value> {
+    let Some(mut status) = build_status_json(vault_path).await? else {
+        let paths = EnzymePaths::new(vault_path)?;
+        return Ok(json!({
+            "schema": STATUS_SCHEMA,
+            "initialized": false,
+            "workspace": EnzymePaths::bound_workspace(vault_path)?,
+            "vault": vault_path.display().to_string(),
+            "database": paths.vault_db.display().to_string(),
+        }));
+    };
+    let paths = EnzymePaths::new(vault_path)?;
+    let db = Database::open(&paths.vault_db)?;
+    let object = status.as_object_mut().expect("status JSON is an object");
+    object.insert("schema".into(), json!(STATUS_SCHEMA));
+    object.insert("initialized".into(), json!(true));
+    object.insert(
+        "selection".into(),
+        build_selection_readiness(&db, vault_path)?,
+    );
+    object.insert("index".into(), build_index_manifest(&db)?);
+    Ok(status)
+}
+
 fn escape_like_pattern(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -195,7 +352,12 @@ fn format_finished_at(finished_at_ms: i64) -> String {
         .unwrap_or_else(|| format!("{finished_at_ms} ms"))
 }
 
-pub async fn run_status(vault_path: &Path) -> Result<()> {
+pub async fn run_status(vault_path: &Path, json_output: bool) -> Result<()> {
+    if json_output {
+        let status = build_status_json_v1(vault_path).await?;
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
     match build_status_json(vault_path).await? {
         None => {
             if let Some(workspace) = EnzymePaths::bound_workspace(vault_path)? {

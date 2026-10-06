@@ -19,8 +19,14 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
-    /// Named workspace/collection (home-rooted; configured under [workspaces.<name>])
-    #[arg(long, global = true, conflicts_with = "vault")]
+    /// Named workspace declared in $ENZYME_HOME
+    #[arg(
+        long = "workspace",
+        visible_alias = "collection",
+        value_name = "NAME",
+        global = true,
+        conflicts_with = "vault"
+    )]
     collection: Option<String>,
 
     /// Verbosity level
@@ -100,9 +106,8 @@ enum Commands {
         #[arg(long, hide = true)]
         stream_partial_catalysts: bool,
 
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
@@ -132,9 +137,8 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Force a complete catalyst rebase epoch now (still built detached).
         #[arg(long, visible_alias = "force")]
@@ -162,6 +166,28 @@ enum Commands {
         /// Deprecated no-op: presentation is controlled by installed agent instructions
         #[arg(long, default_value = "explore", hide = true)]
         register: String,
+
+        /// Always emit the JSON envelope, even when stdout is a terminal
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search the index: catalyst, direct, and exact-phrase hits (read-only)
+    Search {
+        /// Search query
+        query: String,
+
+        /// Maximum results per search mode
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+
+        /// Literal phrase for exact-phrase hits (defaults to the query)
+        #[arg(long)]
+        phrase: Option<String>,
+
+        /// Emit the versioned `enzyme.search.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show the current petri (top catalysts and entities)
@@ -180,7 +206,11 @@ enum Commands {
     },
 
     /// Show vault status and configuration
-    Status,
+    Status {
+        /// Emit the versioned `enzyme.status.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Check for and install Enzyme binary updates
     Update {
@@ -220,10 +250,14 @@ enum Commands {
     ///
     /// Hidden rather than removed. `enzyme compile` is the setup path and
     /// carries this inventory in its own output, but the SQLite source skill
-    /// still validates a configured source with `scan --collection <name>`,
+    /// still validates a configured source with `scan --workspace <name>`,
     /// which has no compile equivalent yet.
     #[command(hide = true)]
-    Scan {},
+    Scan {
+        /// Accepted for symmetry; scan output is always `scan.v2` JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Install or update this workspace's agent integration
     Install {
@@ -307,7 +341,11 @@ enum ModelCommands {
     },
 
     /// List installed and available models
-    List,
+    List {
+        /// Emit the versioned `enzyme.models.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Select an installed model and require local catalyst generation
     Use {
@@ -486,7 +524,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Spec { command } => {
             anyhow::ensure!(
                 cli.collection.is_none(),
-                "spec commands take Markdown vault paths, not named collections"
+                "spec commands take Markdown vault paths, not named workspaces"
             );
             return commands::spec::run(command, cli.vault.as_deref()).await;
         }
@@ -508,7 +546,7 @@ async fn run(cli: Cli) -> Result<()> {
                 ModelCommands::Install { name, url, sha256 } => {
                     commands::model::run_install(name.clone(), url.clone(), sha256.clone()).await
                 }
-                ModelCommands::List => commands::model::run_list(),
+                ModelCommands::List { json } => commands::model::run_list(*json),
                 ModelCommands::Use { name } => commands::model::run_use(name),
                 ModelCommands::Auto => commands::model::run_auto(),
                 ModelCommands::Disable => commands::model::run_disable(),
@@ -549,12 +587,12 @@ async fn run(cli: Cli) -> Result<()> {
         if let Some(preset) = preset {
             anyhow::ensure!(
                 cli.vault.is_none(),
-                "preset compilation uses --collection, not --vault"
+                "preset compilation uses --workspace, not --vault"
             );
             let workspace_name = cli
                 .collection
                 .as_deref()
-                .context("preset compilation requires --collection <name>")?;
+                .context("preset compilation requires --workspace <name>")?;
             return commands::compile_preset::run(
                 *preset,
                 sources,
@@ -572,7 +610,7 @@ async fn run(cli: Cli) -> Result<()> {
         );
         anyhow::ensure!(
             cli.collection.is_none(),
-            "compile supports Markdown vaults, not named collections"
+            "compile supports Markdown vaults, not named workspaces"
         );
         return commands::compile::run(
             &vault_path,
@@ -607,11 +645,12 @@ async fn run(cli: Cli) -> Result<()> {
             voice_min_catalysts,
             voice_timeout_secs,
             stream_partial_catalysts,
-            use_env_llm,
+            llm,
             stage,
             force,
             lock_timeout: _,
         } => {
+            let llm = llm.mode();
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
             } else if voice_ready {
@@ -621,7 +660,7 @@ async fn run(cli: Cli) -> Result<()> {
                     voice_min_catalysts,
                     std::time::Duration::from_secs(voice_timeout_secs),
                     min_top_catalysts,
-                    use_env_llm,
+                    llm,
                 )
                 .await?;
 
@@ -638,7 +677,7 @@ async fn run(cli: Cli) -> Result<()> {
                     json_progress,
                     min_top_catalysts,
                     stream_partial_catalysts,
-                    use_env_llm,
+                    llm,
                     force,
                 )
                 .await?;
@@ -655,7 +694,7 @@ async fn run(cli: Cli) -> Result<()> {
             detached,
             quiet,
             min_top_catalysts,
-            use_env_llm,
+            llm,
             full,
             lock_timeout: _,
         } => {
@@ -664,7 +703,7 @@ async fn run(cli: Cli) -> Result<()> {
                 detached,
                 quiet,
                 min_top_catalysts,
-                use_env_llm,
+                llm.mode(),
                 full,
             )
             .await?;
@@ -674,6 +713,7 @@ async fn run(cli: Cli) -> Result<()> {
             limit,
             target,
             register,
+            json,
         } => {
             commands::catalyze::run_catalyze(
                 &vault_path,
@@ -681,8 +721,17 @@ async fn run(cli: Cli) -> Result<()> {
                 limit,
                 target.as_deref(),
                 &register,
+                json,
             )
             .await?;
+        }
+        Commands::Search {
+            query,
+            limit,
+            phrase,
+            json,
+        } => {
+            commands::search::run_search(&vault_path, &query, limit, phrase.as_deref(), json)?;
         }
         Commands::Petri {
             top,
@@ -706,13 +755,13 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
         }
-        Commands::Status => {
-            commands::status::run_status(&vault_path).await?;
+        Commands::Status { json } => {
+            commands::status::run_status(&vault_path, json).await?;
         }
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan {} => {
+        Commands::Scan { .. } => {
             commands::scan::run_scan(&vault_path)?;
         }
         Commands::Install { target, source } => {

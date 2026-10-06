@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
-use crate::embedding::{EmbeddingService, get_embedding_service};
+use crate::embedding::get_embedding_service;
 pub use crate::llm::Generator;
 #[cfg(feature = "embedder-compat")]
 use crate::models::Embedding;
@@ -25,7 +25,8 @@ use crate::pipeline::epoch::{GenerationContract, now_ms};
 use crate::pipeline::indexing::IndexingPipeline;
 use crate::pipeline::selection::SelectionPipeline;
 use crate::pipeline::similarity::SimilarityPipeline;
-use crate::search::{CatalyzeResponse, ContextSearch};
+#[cfg(feature = "embedder-compat")]
+use crate::search::ContextSearch;
 use crate::sqlite_source::run_configured_sqlite_sources;
 
 /// Caller-owned policy for indexing and selecting catalyst entities.
@@ -102,86 +103,10 @@ impl Default for SearchOptions {
     }
 }
 
-/// Whether thematic bridge search was provisioned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bridged {
-    Ready,
-    NoGenerator,
-    NoEntities,
-}
+pub use crate::search::index::{Bridged, Hit, SearchIndex};
 
-/// A normalized search result for embedders.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Hit {
-    pub path: String,
-    pub score: f64,
-    pub content: String,
-}
-
-/// A provisioned local search index.
-pub struct SearchIndex {
-    db: Database,
-    service: &'static EmbeddingService,
-    pub document_count: usize,
-    pub bridged: Bridged,
-}
-
+#[cfg(feature = "embedder-compat")]
 impl SearchIndex {
-    pub fn database(&self) -> &Database {
-        &self.db
-    }
-
-    pub fn catalyst_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        Ok(self
-            .catalyst_search_response(query, limit)?
-            .results
-            .into_iter()
-            .map(|hit| Hit {
-                path: hit.file_path,
-                score: hit.similarity,
-                content: hit.content,
-            })
-            .collect())
-    }
-
-    /// Catalyst search with contributing bridge metadata and per-result
-    /// catalyst provenance retained for embedding applications.
-    pub fn catalyst_search_response(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
-        ContextSearch::new(&self.db, self.service)
-            .catalyze_search(query, limit)
-            .context("catalyst search")
-    }
-
-    pub fn direct_search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        Ok(ContextSearch::new(&self.db, self.service)
-            .direct_search(query, limit)
-            .context("direct embedding search")?
-            .into_iter()
-            .map(|hit| Hit {
-                path: hit.file_path,
-                score: hit.similarity,
-                content: hit.content,
-            })
-            .collect())
-    }
-
-    /// Bounded literal phrase lookup over indexed chunks.
-    ///
-    /// Catalyst selection controls associative handles, not the reachability
-    /// of documents already inside the declared recall boundary.
-    pub fn exact_phrase_search(&self, phrase: &str, limit: usize) -> Result<Vec<Hit>> {
-        Ok(self
-            .db
-            .get_chunks_containing_phrase(phrase, limit)?
-            .into_iter()
-            .map(|chunk| Hit {
-                path: chunk.file_path,
-                score: 1.0,
-                content: chunk.content,
-            })
-            .collect())
-    }
-
     /// Catalyst-based search rendered as the legacy `catalyze` JSON envelope.
     ///
     /// This compatibility surface lets embedders that previously parsed the
@@ -300,30 +225,13 @@ pub fn open_existing_sync(vault_path: &Path, db_path: &Path) -> Result<Option<Se
     }
     let vault = vault_path.to_path_buf();
     let db_path = db_path.to_path_buf();
-    std::thread::spawn(move || -> Result<SearchIndex> {
+    std::thread::spawn(move || -> Result<Option<SearchIndex>> {
         // Searching must never create, migrate, or otherwise write the index;
         // provisioning (`ensure_searchable`) owns schema upgrades.
-        let db = Database::open_read_only(&db_path)
-            .with_context(|| format!("opening search index {}", db_path.display()))?;
-        db.validate_expected_schema()
-            .with_context(|| format!("opening search index {}", db_path.display()))?;
-        let document_count = db.get_document_count().unwrap_or(0) as usize;
-        let service = get_embedding_service(&vault).context("initializing embeddings")?;
-        let bridged = if db.get_all_catalysts().map(|c| c.is_empty()).unwrap_or(true) {
-            Bridged::NoGenerator
-        } else {
-            Bridged::Ready
-        };
-        Ok(SearchIndex {
-            db,
-            service,
-            document_count,
-            bridged,
-        })
+        crate::search::index::open_read_only(&vault, &db_path)
     })
     .join()
     .map_err(|_| anyhow::anyhow!("search open worker panicked"))?
-    .map(Some)
 }
 
 /// Open `db_path` and run index -> embed -> select -> catalyst -> similarity.

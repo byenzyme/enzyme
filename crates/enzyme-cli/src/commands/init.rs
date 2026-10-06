@@ -13,7 +13,7 @@ use enzyme_core::db::update_sentinel::{self, UpdateStatus};
 use enzyme_core::document::FileDiscovery;
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::llm::{
-    DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmCredentialMode, preload_preferred_local_llm_client,
+    DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmCredentialMode, preload_llm_client_for_mode,
     resolve_api_config_for_mode, resolve_llm_client_for_mode,
 };
 use enzyme_core::models::Entity;
@@ -33,6 +33,7 @@ use enzyme_core::pipeline::staleness::store_staleness_bookkeeping;
 use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
 use super::exit::CliFailure;
+use super::generator::LlmMode;
 use super::lock::{
     acquire_projection_lock, acquire_refresh_lock, is_refresh_locked, wait_for_refresh_lock,
 };
@@ -120,7 +121,7 @@ impl UpdateOutcome {
 pub async fn apply_update_policy(
     vault_path: &Path,
     paths: &EnzymePaths,
-    use_env_llm: bool,
+    llm: LlmMode,
 ) -> Result<UpdateOutcome> {
     let status = {
         let db = Database::open(&paths.vault_db)?;
@@ -149,29 +150,10 @@ pub async fn apply_update_policy(
                 reason,
                 "schema drift after binary update; regenerating index via full init"
             );
-            run_init(
-                vault_path,
-                false,
-                true,
-                false,
-                None,
-                false,
-                use_env_llm,
-                true,
-            )
-            .await?;
+            run_init(vault_path, false, true, false, None, false, llm, true).await?;
             Ok(UpdateOutcome::RegenPerformed { reason })
         }
     }
-}
-
-async fn preflight_env_llm(use_env_llm: bool) -> Result<()> {
-    if use_env_llm {
-        let _ = resolve_llm_client_for_mode(LlmCredentialMode::Env)
-            .await
-            .context("--use-env-llm was set but no env LLM config could be resolved")?;
-    }
-    Ok(())
 }
 
 fn loginless_hosted_init_allowed_for_keys(current_key: &str, configured_keys: &[String]) -> bool {
@@ -428,7 +410,7 @@ fn evaluate_catalyst_quality(stats: &CatalystStats, total_entities: usize) -> Ca
 // should be invalidated, not when user-visible collection content is versioned.
 const COLLECTION_CACHE_EPOCH_CONFIG_KEY: &str = "collection.index_generation";
 
-fn read_collection_cache_epoch(db: &Database) -> Result<u64> {
+pub(super) fn read_collection_cache_epoch(db: &Database) -> Result<u64> {
     Ok(db
         .get_config(COLLECTION_CACHE_EPOCH_CONFIG_KEY)?
         .and_then(|value| value.parse::<u64>().ok())
@@ -571,23 +553,27 @@ pub async fn run_init_voice_ready(
     seed_min_catalysts: usize,
     timeout: Duration,
     min_top_catalysts: Option<usize>,
-    use_env_llm: bool,
+    llm: LlmMode,
 ) -> Result<serde_json::Value> {
     let start = Instant::now();
     let seed_entities = seed_entities.max(1);
     let seed_min_catalysts = seed_min_catalysts.max(1);
     let paths = EnzymePaths::new(vault_path)?;
-    if !use_env_llm {
+    anyhow::ensure!(
+        llm.generates(),
+        "--voice-ready waits for generated catalysts; it cannot run with --llm none"
+    );
+    if llm.may_use_hosted() {
         require_login_for_hosted_init_if_needed(vault_path, &paths)?;
     }
-    preflight_env_llm(use_env_llm).await?;
+    llm.preflight().await?;
 
     if let Some(parent) = paths.vault_db.parent() {
         ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
     let background_spawned =
-        spawn_background_init(vault_path, &paths, min_top_catalysts, true, use_env_llm);
+        spawn_background_init(vault_path, &paths, min_top_catalysts, true, llm);
     let log_path = paths
         .vault_db
         .parent()
@@ -751,14 +737,14 @@ pub async fn run_init(
     json_progress: bool,
     min_top_catalysts: Option<usize>,
     stream_partial_catalysts: bool,
-    use_env_llm: bool,
+    llm: LlmMode,
     force: bool,
 ) -> Result<Option<InitResult>> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
-    // Local env-var check only — fail an explicit --use-env-llm misconfiguration
+    // Local checks only — fail an explicit `--llm env|local` misconfiguration
     // before the vault database is reset below.
-    preflight_env_llm(use_env_llm).await?;
+    llm.preflight().await?;
 
     // Ensure .enzyme directory exists
     if let Some(parent) = paths.vault_db.parent() {
@@ -822,16 +808,17 @@ pub async fn run_init(
 
     // Local model startup (especially cold Metal initialization) is independent
     // of the vault. Hide it behind indexing, but never touch local inference
-    // for an explicit environment-provider run. The core helper applies the
-    // remaining mode rules (feature, persisted provider preference, selected
+    // for an explicit env, hosted, or no-generator run. The core helper applies
+    // the remaining mode rules (feature, persisted provider preference, selected
     // installed model, and ENZYME_LOCAL_ENGINE opt-out) without consulting
     // hosted credentials.
-    let local_preload = if use_env_llm {
-        None
-    } else {
-        Some(tokio::task::spawn_blocking(
-            preload_preferred_local_llm_client,
-        ))
+    let local_preload = match llm.credential_mode() {
+        Some(mode @ (LlmCredentialMode::Auto | LlmCredentialMode::Local)) => {
+            Some(tokio::task::spawn_blocking(move || {
+                preload_llm_client_for_mode(mode)
+            }))
+        }
+        _ => None,
     };
 
     // ── Step 1: Indexing ───────────────────────────────────────────────────
@@ -946,7 +933,11 @@ pub async fn run_init(
     // distinguish a reachable server's structured 402 (credits exhausted) from
     // a genuine network/parse failure.
     let mut hosted_resolve_error: Option<anyhow::Error> = None;
-    let api_config = if catalyst_generation_planned(&sel_result.entities) {
+    let generation_mode = llm.credential_mode();
+    let api_config = if let (Some(llm_mode), true) = (
+        generation_mode,
+        catalyst_generation_planned(&sel_result.entities),
+    ) {
         let preloaded_local = match local_preload {
             Some(handle) => handle
                 .await
@@ -954,15 +945,15 @@ pub async fn run_init(
             None => None,
         };
 
-        if !use_env_llm && preloaded_local.is_none() && !byok_active() {
+        let hosted_possible = match llm {
+            LlmMode::Hosted => true,
+            LlmMode::Auto => preloaded_local.is_none() && !byok_active(),
+            LlmMode::Env | LlmMode::Local | LlmMode::None => false,
+        };
+        if hosted_possible {
             require_login_for_hosted_init_if_needed(vault_path, &paths)?;
         }
 
-        let llm_mode = if use_env_llm {
-            LlmCredentialMode::Env
-        } else {
-            LlmCredentialMode::Auto
-        };
         let resolved_result = match preloaded_local {
             Some(local) => Ok(local),
             None => resolve_llm_client_for_mode(llm_mode).await,
@@ -970,9 +961,14 @@ pub async fn run_init(
         let resolved = match resolved_result {
             Ok(resolved) => Some(resolved),
             Err(e) => {
-                if use_env_llm {
-                    return Err(e)
-                        .context("--use-env-llm was set but no env LLM config could be resolved");
+                match llm {
+                    LlmMode::Env => {
+                        return Err(e).context("--llm env could not resolve an env LLM config");
+                    }
+                    LlmMode::Local => {
+                        return Err(e).context("--llm local could not load the local model");
+                    }
+                    LlmMode::Auto | LlmMode::Hosted | LlmMode::None => {}
                 }
                 tracing::warn!("API config resolution failed: {}", e);
                 hosted_resolve_error = Some(e);
@@ -1005,7 +1001,11 @@ pub async fn run_init(
         // no refund endpoint exists to compensate an up-front charge.
         resolved
     } else {
-        debug!("init selected no entities; skipping LLM credential resolution");
+        if generation_mode.is_none() {
+            debug!("--llm none; skipping catalyst generation");
+        } else {
+            debug!("init selected no entities; skipping LLM credential resolution");
+        }
         None
     };
 
@@ -1233,6 +1233,9 @@ pub async fn run_init(
         }
 
         Some(stats)
+    } else if !llm.generates() {
+        // An explicit `--llm none` is the requested outcome, not a warning.
+        None
     } else {
         // Only an explicit account-credit refusal receives top-up guidance.
         // Shared pool exhaustion is a neutral capacity condition, not billing.
@@ -1349,7 +1352,7 @@ pub async fn run_init(
             .is_some_and(|gate| gate.quality == CatalystQuality::Passed)
     {
         db.reconcile_corpus_generation(now_ms())?;
-        let contract = generation_contract(vault_path, &paths, use_env_llm).await?;
+        let contract = generation_contract(vault_path, &paths, llm).await?;
         db.bootstrap_legacy_epoch(&contract, now_ms(), true)?;
     }
 
@@ -1507,23 +1510,47 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
     // Update sentinel first: a binary update with schema drift regens the
     // whole vault via full init, which already does everything below.
     if let UpdateOutcome::RegenPerformed { .. } =
-        apply_update_policy(vault_path, &paths, false).await?
+        apply_update_policy(vault_path, &paths, LlmMode::Auto).await?
     {
         return Ok(());
     }
 
     let db = Database::open(&paths.vault_db)?;
     let local = run_local_refresh_work(&db, vault_path, &paths).await?;
-    db.reconcile_corpus_generation(now_ms())?;
-    let contract = generation_contract(vault_path, &paths, false).await?;
-    db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
-    recover_abandoned_epoch_worker(&db, &paths)?;
-    let schedule = db.schedule_catalyst_epoch(now_ms(), &contract, false)?;
-    if schedule.launch_needed {
-        let _ = spawn_background_refresh(vault_path, &paths, false);
-    }
+    schedule_refresh_epoch(&db, vault_path, &paths, LlmMode::Auto, false).await?;
     let _ = maybe_bump_collection_cache_epoch(&db, local.collection_changed())?;
     Ok(())
+}
+
+/// Schedule (and launch a worker for) a due catalyst epoch after local refresh
+/// work. Returns the schedule and whether a worker was spawned. `--llm none`
+/// resolves no generator, so it schedules nothing.
+async fn schedule_refresh_epoch(
+    db: &Database,
+    vault_path: &Path,
+    paths: &EnzymePaths,
+    llm: LlmMode,
+    force_full: bool,
+) -> Result<(EpochSchedule, bool)> {
+    db.reconcile_corpus_generation(now_ms())?;
+    if !llm.generates() {
+        recover_abandoned_epoch_worker(db, paths)?;
+        let idle = EpochSchedule {
+            due: false,
+            scheduled: false,
+            launch_needed: false,
+            coalesced: false,
+            epoch_id: None,
+            reason: None,
+        };
+        return Ok((idle, false));
+    }
+    let contract = generation_contract(vault_path, paths, llm).await?;
+    db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
+    recover_abandoned_epoch_worker(db, paths)?;
+    let schedule = db.schedule_catalyst_epoch(now_ms(), &contract, force_full)?;
+    let spawned = schedule.launch_needed && spawn_background_refresh(vault_path, paths, llm);
+    Ok((schedule, spawned))
 }
 
 /// Lightweight refresh: dispatches to the appropriate path based on flags.
@@ -1536,20 +1563,20 @@ pub async fn run_refresh(
     detached: bool,
     quiet: bool,
     min_top_catalysts: Option<usize>,
-    use_env_llm: bool,
+    llm: LlmMode,
     force_full: bool,
 ) -> Result<()> {
-    // Local env-var check only — a misconfigured --use-env-llm should fail
-    // here rather than inside a detached worker whose errors only reach a log.
-    preflight_env_llm(use_env_llm).await?;
+    // Local checks only — a misconfigured `--llm env|local` should fail here
+    // rather than inside a detached worker whose errors only reach a log.
+    llm.preflight().await?;
 
     if detached {
-        return run_refresh_detached(vault_path, use_env_llm).await;
+        return run_refresh_detached(vault_path).await;
     }
     if quiet {
-        return run_refresh_fast(vault_path, use_env_llm, force_full).await;
+        return run_refresh_fast(vault_path, llm, force_full).await;
     }
-    run_refresh_interactive(vault_path, min_top_catalysts, use_env_llm, force_full).await
+    run_refresh_interactive(vault_path, min_top_catalysts, llm, force_full).await
 }
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
@@ -1557,7 +1584,7 @@ pub async fn run_refresh(
 /// Runs only cheap local work (indexing, embedding, similarity) synchronously,
 /// then spawns a background process for expensive LLM catalyst generation if
 /// the vault is stale.
-async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool) -> Result<()> {
+async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> Result<()> {
     let start = Instant::now();
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -1570,7 +1597,7 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
     // binary update means the incremental paths cannot be trusted, so the
     // vault is regenerated via full init and the refresh continues against
     // the rebuilt (already-fresh) database.
-    let update_outcome = apply_update_policy(vault_path, &paths, use_env_llm).await?;
+    let update_outcome = apply_update_policy(vault_path, &paths, llm).await?;
 
     let db = Database::open(&paths.vault_db)?;
     // Snapshot before spawning so the response describes state that existed at
@@ -1582,13 +1609,8 @@ async fn run_refresh_fast(vault_path: &Path, use_env_llm: bool, force_full: bool
     let local = run_local_refresh_work(&db, vault_path, &paths).await?;
     let collection_changed = local.collection_changed();
     let collection_change_reasons = local.change_reasons();
-    db.reconcile_corpus_generation(now_ms())?;
-    let contract = generation_contract(vault_path, &paths, use_env_llm).await?;
-    db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
-    recover_abandoned_epoch_worker(&db, &paths)?;
-    let schedule = db.schedule_catalyst_epoch(now_ms(), &contract, force_full)?;
-    let background_spawned =
-        schedule.launch_needed && spawn_background_refresh(vault_path, &paths, use_env_llm);
+    let (schedule, background_spawned) =
+        schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
     let cache_epoch = maybe_bump_collection_cache_epoch(&db, collection_changed)?;
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────
@@ -1742,15 +1764,13 @@ impl EvidenceLimits {
 pub(super) async fn generation_contract(
     vault_path: &Path,
     paths: &EnzymePaths,
-    use_env_llm: bool,
+    llm: LlmMode,
 ) -> Result<GenerationContract> {
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let service = get_embedding_service(&paths.home)?;
-    let mode = if use_env_llm {
-        LlmCredentialMode::Env
-    } else {
-        LlmCredentialMode::Auto
-    };
+    let mode = llm
+        .credential_mode()
+        .context("--llm none has no generation contract")?;
     let resolved_llm = resolve_api_config_for_mode(mode).await?;
     let model = resolved_llm.model;
     let llm_mode = match mode {
@@ -1922,7 +1942,7 @@ fn database_has_catalysts(db: &Database) -> bool {
 ///
 /// Called by `spawn_background_refresh` via `enzyme refresh --detached --quiet`.
 /// Acquires a lockfile to prevent concurrent runs.
-async fn run_refresh_detached(vault_path: &Path, use_env_llm: bool) -> Result<()> {
+async fn run_refresh_detached(vault_path: &Path) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
     let enzyme_dir = paths
         .vault_db
@@ -1949,7 +1969,7 @@ async fn run_refresh_detached(vault_path: &Path, use_env_llm: bool) -> Result<()
         return Ok(());
     };
     let epoch_id = claim.epoch_id.clone();
-    match build_and_activate_epoch(vault_path, &paths, &db, claim, use_env_llm).await {
+    match build_and_activate_epoch(vault_path, &paths, &db, claim).await {
         Ok(report) => {
             // Written on success as well as failure so a stale recorded
             // failure clears on the next good run. Best-effort: an epoch that
@@ -1998,7 +2018,6 @@ async fn build_and_activate_epoch(
     paths: &EnzymePaths,
     active_db: &Database,
     mut claim: enzyme_core::pipeline::epoch::EpochClaim,
-    _use_env_llm: bool,
 ) -> Result<EpochBuildReport> {
     let contract: GenerationContract = serde_json::from_str(&claim.generation_contract_json)
         .context("decode frozen generation contract")?;
@@ -2070,10 +2089,12 @@ async fn build_and_activate_epoch(
         anyhow::bail!("catalyst epoch has no selected entities");
     }
 
-    let llm_mode = if contract.llm_mode == "env" {
-        LlmCredentialMode::Env
-    } else {
-        LlmCredentialMode::Auto
+    // The frozen contract, not the worker's own flags, decides the generator.
+    let llm_mode = match contract.llm_mode.as_str() {
+        "env" => LlmCredentialMode::Env,
+        "local" => LlmCredentialMode::Local,
+        "hosted" => LlmCredentialMode::Hosted,
+        _ => LlmCredentialMode::Auto,
     };
     let (api_config, llm) = resolve_llm_client_for_mode(llm_mode).await?;
     let resolved_provider = match &api_config.provider {
@@ -2440,7 +2461,7 @@ fn open_vault_db_with_retry(vault_db: &Path) -> Result<Database> {
 pub(super) fn spawn_background_refresh(
     vault_path: &Path,
     paths: &EnzymePaths,
-    use_env_llm: bool,
+    llm: LlmMode,
 ) -> bool {
     let enzyme_dir = match paths.vault_db.parent() {
         Some(p) => p,
@@ -2482,9 +2503,7 @@ pub(super) fn spawn_background_refresh(
     let mut cmd = std::process::Command::new(exe);
     cmd.args(["refresh", "--detached", "--quiet", "-p"])
         .arg(vault_path);
-    if use_env_llm {
-        cmd.arg("--use-env-llm");
-    }
+    llm.push_flag(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_stderr));
@@ -2528,7 +2547,7 @@ fn spawn_background_init(
     paths: &EnzymePaths,
     min_top_catalysts: Option<usize>,
     stream_partial_catalysts: bool,
-    use_env_llm: bool,
+    llm: LlmMode,
 ) -> bool {
     let enzyme_dir = match paths.vault_db.parent() {
         Some(p) => p,
@@ -2573,9 +2592,7 @@ fn spawn_background_init(
     if stream_partial_catalysts {
         cmd.arg("--stream-partial-catalysts");
     }
-    if use_env_llm {
-        cmd.arg("--use-env-llm");
-    }
+    llm.push_flag(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_stderr));
@@ -2616,7 +2633,7 @@ fn spawn_background_init(
 async fn run_refresh_interactive(
     vault_path: &Path,
     min_top_catalysts: Option<usize>,
-    use_env_llm: bool,
+    llm: LlmMode,
     force_full: bool,
 ) -> Result<()> {
     let start = Instant::now();
@@ -2635,7 +2652,7 @@ async fn run_refresh_interactive(
             false,
             min_top_catalysts,
             false,
-            use_env_llm,
+            llm,
             false,
         )
         .await?;
@@ -2652,13 +2669,8 @@ async fn run_refresh_interactive(
     ) {
         eprintln!("{message}");
     }
-    db.reconcile_corpus_generation(now_ms())?;
-    let contract = generation_contract(vault_path, &paths, use_env_llm).await?;
-    db.bootstrap_legacy_epoch(&contract, now_ms(), false)?;
-    recover_abandoned_epoch_worker(&db, &paths)?;
-    let schedule = db.schedule_catalyst_epoch(now_ms(), &contract, force_full)?;
-    let spawned =
-        schedule.launch_needed && spawn_background_refresh(vault_path, &paths, use_env_llm);
+    let (schedule, spawned) =
+        schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
     let _ = maybe_bump_collection_cache_epoch(&db, local.collection_changed())?;
     println!(
         "{}",

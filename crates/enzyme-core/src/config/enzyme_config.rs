@@ -28,7 +28,7 @@ const CONFIG_HEADER: &str = "\
 # [update]
 # auto = false                      # opt out of background binary updates
 #
-# Named workspaces use the same name as `enzyme --collection <name>`.
+# Named workspaces use the same name as `enzyme --workspace <name>`.
 # Markdown is an optional source alongside SQLite and other structured sources:
 #
 # [workspaces.notes]
