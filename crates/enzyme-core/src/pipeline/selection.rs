@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
+use crate::models::EntityType;
 use crate::pipeline::exclusions::FolderExclusions;
 use crate::pipeline::selection_steps;
 
@@ -31,6 +32,34 @@ pub struct SelectionResult {
     pub source: SelectionSource,
     /// Why readable readings resolved as they did (empty for other paths).
     pub diagnostics: selection_steps::SelectionDiagnostics,
+}
+
+impl SelectionResult {
+    /// Whether automatic selection chose this entity: every entity on the
+    /// coverage path, and `learn questions automatically` additions on the
+    /// readings path.
+    pub fn is_automatic(&self, name: &str, entity_type: &str) -> bool {
+        match self.source {
+            SelectionSource::Coverage => true,
+            SelectionSource::Config => self.diagnostics.automatic.as_ref().is_some_and(|a| {
+                a.picked
+                    .iter()
+                    .chain(&a.expanded)
+                    .any(|e| e.name == name && e.entity_type == entity_type)
+            }),
+        }
+    }
+}
+
+/// `leave out tags|links` as (lowercase name, type).
+fn left_out_names(config: &EnzymeConfig) -> HashSet<(String, EntityType)> {
+    config
+        .parse_preferences()
+        .excluded_names
+        .into_iter()
+        .filter(|e| e.entity_type != EntityType::Folder)
+        .map(|e| (e.name.to_lowercase(), e.entity_type))
+        .collect()
 }
 
 /// Selects entities for catalyst generation, either from user config or coverage selection.
@@ -75,14 +104,20 @@ impl<'a> SelectionPipeline<'a> {
         };
 
         if let Some(cfg) = config {
-            if cfg.has_curated_entities() {
+            let automatic = cfg.reading_spec.as_ref().and_then(|s| s.automatic.as_ref());
+            if cfg.has_curated_entities() || automatic.is_some() {
                 info!("selecting entities from enzyme-config.yaml");
                 return self.select_from_config(cfg, &exclusions);
             }
         }
 
         info!("selecting entities from coverage-aware catalyst-candidate selection");
-        self.select_catalyst_candidates(&exclusions)
+        let left_out = config.map(left_out_names).unwrap_or_default();
+        self.select_catalyst_candidates(
+            &exclusions,
+            &left_out,
+            selection_steps::AUTOMATIC_LIMIT,
+        )
     }
 
     /// Select entities from user-curated config.
@@ -163,6 +198,23 @@ impl<'a> SelectionPipeline<'a> {
         materialized.diagnostics.missing = missing;
         materialized.diagnostics.left_out = left_out;
 
+        if let Some(spec) = config
+            .reading_spec
+            .as_ref()
+            .filter(|spec| spec.automatic.is_some())
+        {
+            // Readings plus automatic selection. Only readable programs can
+            // ask for it, and init never writes their selection back.
+            selection_steps::add_automatic_selection(
+                self.db,
+                &mut materialized,
+                spec,
+                selection_steps::AUTOMATIC_LIMIT,
+                exclusions,
+                &left_out_names(config),
+            )?;
+        }
+
         Ok(SelectionResult {
             entities: materialized.final_entities,
             entity_profiles: materialized.entity_profiles,
@@ -173,9 +225,15 @@ impl<'a> SelectionPipeline<'a> {
     }
 
     /// Select entities using coverage-aware catalyst-candidate selection + deterministic profiles.
-    fn select_catalyst_candidates(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
-        let materialized =
-            selection_steps::build_catalyst_candidate_selection(self.db, 20, exclusions)?;
+    fn select_catalyst_candidates(
+        &self,
+        exclusions: &FolderExclusions,
+        left_out: &HashSet<(String, EntityType)>,
+        limit: usize,
+    ) -> Result<SelectionResult> {
+        let materialized = selection_steps::build_catalyst_candidate_selection(
+            self.db, limit, exclusions, left_out,
+        )?;
 
         info!(
             count = materialized.final_entities.len(),

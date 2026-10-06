@@ -261,6 +261,9 @@ struct EntityReadiness {
     /// `skip_reason`), `pending` (has a job but no catalysts yet), or
     /// `unchecked` (no catalysts; beyond `STATUS_PLAN_LIMIT`, not planned).
     state: &'static str,
+    /// `reading` (a declared reading selected it) or `automatic` (automatic
+    /// selection did, with or without `learn questions automatically`).
+    origin: &'static str,
     catalysts: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     skip_reason: Option<SkipReason>,
@@ -337,6 +340,11 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
             let entity_type = entity.entity_type.as_str().to_string();
             let catalysts = catalysts_for(&entity.name, &entity_type);
             let skip_reason = skips.remove(&(entity.name.clone(), entity_type.clone()));
+            let origin = if selection.is_automatic(&entity.name, &entity_type) {
+                "automatic"
+            } else {
+                "reading"
+            };
             let state = match (catalysts, &skip_reason) {
                 (n, _) if n > 0 => "ready",
                 (_, Some(_)) => "skipped",
@@ -349,6 +357,7 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
                 name: entity.name.clone(),
                 entity_type,
                 state,
+                origin,
                 catalysts,
                 skip_reason,
             }
@@ -361,6 +370,7 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
         "pending": count("pending"),
         "skipped": count("skipped"),
         "unchecked": count("unchecked"),
+        "automatic": entities.iter().filter(|e| e.origin == "automatic").count(),
         "entities": entities,
     }))
 }

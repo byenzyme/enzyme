@@ -16,6 +16,7 @@ accepted alias.
 | `enzyme search <query> --json` | `enzyme.search.v1` |
 | `enzyme status --json` | `enzyme.status.v1` |
 | `enzyme spec profiles --json` | `enzyme.profiles.v1` |
+| `enzyme spec plan <file> --json` | `enzyme.spec-plan.v1` |
 | `enzyme model list --json` | `enzyme.models.v1` |
 | `enzyme scan [--json]` | `scan.v2` (in `schema_version`, see below) |
 | `enzyme catalyze <query> --json` | unversioned legacy envelope (see below) |
@@ -140,10 +141,14 @@ Initialized:
                 "files_deleted": 0, "stale": true },
   "selection": {
     "selected": 5, "ready": 3, "pending": 1, "skipped": 1, "unchecked": 0,
+    "automatic": 2,
     "entities": [
-      { "name": "projects", "type": "folder", "state": "ready", "catalysts": 7 },
-      { "name": "radio", "type": "tag", "state": "pending", "catalysts": 0 },
-      { "name": "Marisol", "type": "link", "state": "skipped", "catalysts": 0,
+      { "name": "projects", "type": "folder", "state": "ready", "origin": "reading",
+        "catalysts": 7 },
+      { "name": "radio", "type": "tag", "state": "pending", "origin": "automatic",
+        "catalysts": 0 },
+      { "name": "Marisol", "type": "link", "state": "skipped", "origin": "automatic",
+        "catalysts": 0,
         "skip_reason": { "kind": "thin_context", "documents": 1, "tokens": 40,
                          "min_documents": 2, "min_tokens": 200 } }
     ]
@@ -184,6 +189,10 @@ Initialized:
     `no_usable_evidence` (`occurrences`), or `thin_context` (`documents`, `tokens`,
     `min_documents`, `min_tokens`).
   - `unchecked`: no catalysts, and beyond the 16-entity planning cap.
+  - `origin` (added within v1): `reading` when a declared reading selected the
+    entity, `automatic` when automatic selection did (every entity of a vault
+    without readings; additions from `learn questions automatically`).
+    `selection.automatic` counts the `automatic` entries.
 - `index.built_by`: binary version that last wrote the index. `cache_epoch` increases
   whenever collection-derived caches should be invalidated. `epoch` describes the
   active catalyst epoch, and `contract_fingerprint` identifies the generation
@@ -191,6 +200,34 @@ Initialized:
 
 The text output of `enzyme status` adds a `Markdown: stale (…)` line when Markdown
 files changed since the last index, and an outdated-schema notice.
+
+## `enzyme.spec-plan.v1`
+
+`enzyme spec plan <file> --json` previews selection and generation jobs for each
+vault or workspace the file declares, without model calls or writes.
+
+```json
+{
+  "schema": "enzyme.spec-plan.v1",
+  "vaults": [
+    { "vault": "…", "database": "…", "reference": { "instant": "…", "ms": 0, "source": "wall clock" },
+      "prompts": "hosted",
+      "selection": "readings and automatic",
+      "readings": [ { "source": "folder \"meetings\"", "jobs": [ … ], "notes": [ … ] } ],
+      "automatic": { "limit": 20, "declared": 2, "up_to": null, "slots": 18,
+                     "picked": [ { "name": "research", "entity_type": "folder" } ],
+                     "expanded": [] },
+      "other_jobs": [ … ], "other_skipped": [ … ],
+      "totals": { "jobs": 9, "requested_questions": 80, "excerpts": 40, "skipped": 1 } }
+  ]
+}
+```
+
+- `selection`: `readings`, `automatic` (no readings), or `readings and automatic`
+  (`learn questions automatically`). `automatic` is present only with that statement.
+- Jobs under a reading came from that reading; `other_jobs`/`other_skipped` are
+  automatic selection's. The language reference (`tools/reading-spec/README.md`)
+  describes every field.
 
 ## `enzyme.profiles.v1`
 

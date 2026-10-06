@@ -1694,6 +1694,21 @@ fn overlay_program(
     }
     let mut global: GlobalTomlConfig = serde_json::from_value(value)?;
     if let Some(program) = program {
+        // v0.10 migration wrote the legacy defaults into every program;
+        // only a value someone chose deserves a warning.
+        for (setting, value, migrated) in [
+            ("tags", program.settings.minimum_tags, default_min_tags()),
+            ("links", program.settings.minimum_links, default_min_links()),
+            ("folders", program.settings.minimum_folders, default_min_folders()),
+            ("limit", program.settings.total_limit, default_total_limit()),
+        ] {
+            if let Some(value) = value.filter(|value| *value != migrated) {
+                warn_once(format!(
+                    "settings: `selection {setting} {value}` has no effect; \
+                     cap automatic selection with `learn questions automatically up to N`"
+                ));
+            }
+        }
         global.lone_markdown_workspaces = program
             .workspaces
             .iter()
@@ -2688,10 +2703,12 @@ pub fn migrate_readable_configs(
             local_model: global.llm.local_model.clone(),
             updates: Some(global.update.auto),
             embedding_limit: global.defaults.max_embedding_files,
-            minimum_tags: Some(global.defaults.minimum_tags),
-            minimum_links: Some(global.defaults.minimum_links),
-            minimum_folders: Some(global.defaults.minimum_folders),
-            total_limit: Some(global.defaults.total_limit),
+            // The legacy selection minimums and total limit never affected
+            // selection, so they are not carried over.
+            minimum_tags: None,
+            minimum_links: None,
+            minimum_folders: None,
+            total_limit: None,
             format: global.defaults.catalyst_format.clone(),
         };
         let machine = enzyme_spec::Program {
@@ -2776,7 +2793,13 @@ pub fn migrate_readable_configs(
             "migration changed vault count"
         );
         // Round-trip every supported field before publishing or retiring legacy config.
-        let lowered: GlobalTomlConfig = serde_json::from_value(enzyme_spec::config_value(&loaded))?;
+        let mut lowered: GlobalTomlConfig =
+            serde_json::from_value(enzyme_spec::config_value(&loaded))?;
+        // Inert legacy fields, deliberately not migrated (see above).
+        lowered.defaults.minimum_tags = global.defaults.minimum_tags;
+        lowered.defaults.minimum_links = global.defaults.minimum_links;
+        lowered.defaults.minimum_folders = global.defaults.minimum_folders;
+        lowered.defaults.total_limit = global.defaults.total_limit;
         anyhow::ensure!(
             serde_json::to_value(&lowered)? == serde_json::to_value(&global)?,
             "migration changed configuration semantics"

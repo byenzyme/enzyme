@@ -367,6 +367,7 @@ fn structured_setup(
         })],
         learning: vault.learning,
         readings: vault.readings,
+        automatic: vault.automatic,
         format: vault.format,
         targets: vault.targets,
         exclusions: vault.exclusions,

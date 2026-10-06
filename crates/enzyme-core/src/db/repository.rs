@@ -1331,13 +1331,15 @@ impl Database {
         )?)
     }
 
-    /// Retrieve every entity in the database.
+    /// Retrieve every entity in the database, in insertion (id) order, so
+    /// selection ties break the same way on every run.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.query_read(
             "SELECT e.id, e.name, e.type, e.frequency,
                     CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
                     e.first_seen, e.last_seen, e.trends, e.metadata
-             FROM entities e",
+             FROM entities e
+             ORDER BY e.id",
             vec![],
             map_entity_row,
         )?;
