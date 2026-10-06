@@ -669,18 +669,6 @@ impl EnzymeConfig {
                 return Ok(Some(Self::from_named_workspace(&name, &global)));
             }
             let global = load_global_toml_for(config_path, ConfigTarget::Path(vault_path))?;
-            let key = canonical_vault_key(vault_path);
-            let sharing: Vec<&str> = global
-                .lone_markdown_workspaces
-                .iter()
-                .filter(|(_, source)| source.path == key)
-                .map(|(name, _)| name.as_str())
-                .collect();
-            anyhow::ensure!(
-                sharing.len() < 2 || global.vaults.contains_key(&key),
-                "{key} is the notes folder of workspaces {}; address one of them with --workspace",
-                sharing.join(", ")
-            );
             return Ok(Some(Self::from_global_config(vault_path, &global)));
         }
 
@@ -803,16 +791,7 @@ impl EnzymeConfig {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("configs");
-        // Count files without parsing them: another workspace's invalid
-        // program must not fail this one.
-        let has_programs = configs.is_dir()
-            && fs::read_dir(&configs)?.any(|entry| {
-                entry.is_ok_and(|entry| {
-                    let path = entry.path();
-                    path.is_file() && path.extension().is_some_and(|e| e == "enzyme")
-                })
-            });
-        Ok(config_path.exists() || !has_programs)
+        Ok(config_path.exists() || !has_program_files(&configs)?)
     }
 
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
@@ -1169,70 +1148,87 @@ impl EnzymeConfig {
             };
             canonical_vault_key(&expanded) == key
         };
-        for (path, mut program) in enzyme_spec::source_files(&directory)? {
-            for index in 0..program.vaults.len() + program.workspaces.len() {
-                let is_workspace = index >= program.vaults.len();
-                let mut vault = if is_workspace {
-                    let workspace = &program.workspaces[index - program.vaults.len()];
-                    let Some(raw) = workspace.markdown_path() else {
-                        continue;
-                    };
-                    if !matches_path(raw) {
-                        continue;
-                    }
-                    workspace.unresolved_vault()
-                } else {
-                    let vault = &program.vaults[index];
-                    if !matches_path(&vault.path) {
-                        continue;
-                    }
-                    vault.clone()
-                };
-                vault.exclusions = self.excluded_folders.clone();
-                vault.excluded_tags = self.excluded_tags.clone();
-                vault.excluded_links = self.excluded_links.clone();
-                vault.frontmatter_link_fields = self.frontmatter_link_fields.clone();
-                vault.targets = self.targets.clone();
-                vault.embedding_limit = self.max_embedding_files;
-                vault.learning.budget = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
-                let mut readings = Vec::new();
-                for entity in &self.catalyzed_entities {
-                    let (name, options) = match entity {
-                        CatalyzedEntity::Simple(name) => (name.clone(), EntityOptions::default()),
-                        CatalyzedEntity::WithOptions(map) => {
-                            let Some((name, options)) = map.iter().next() else {
-                                continue;
-                            };
-                            (name.clone(), options.clone())
-                        }
-                    };
-                    if let Some(existing) = vault.readings.iter().find(|r| r.entity == name) {
-                        readings.push(existing.clone());
-                    } else {
-                        readings.push(enzyme_spec::Reading {
-                            entity: name,
-                            profile: options.profile.unwrap_or_else(|| "auto".into()),
-                            definition: None,
-                            learning: Default::default(),
-                            include_linked_pages: options.expandable,
-                            include_who_links: false,
-                            pattern: false,
-                        });
-                    }
+        // Another workspace's file that does not parse must not fail this save.
+        let mut files = readable_files(&directory)?;
+        // A `vault "<path>"` declaration owns its path. A lone-Markdown
+        // workspace is rewritten only when it is the one declaration of it.
+        let mut vault_match = None;
+        let mut workspace_matches = Vec::new();
+        for (file, (_, program)) in files.iter().enumerate() {
+            for (index, vault) in program.vaults.iter().enumerate() {
+                if vault_match.is_none() && matches_path(&vault.path) {
+                    vault_match = Some((file, index));
                 }
-                enzyme_spec::retain_patterns(&vault.readings, &mut readings);
-                vault.readings = readings;
-                if is_workspace {
-                    program.workspaces[index - program.vaults.len()].set_markdown_vault(vault);
-                } else {
-                    program.vaults[index] = vault;
+            }
+            for (index, workspace) in program.workspaces.iter().enumerate() {
+                if workspace.markdown_path().is_some_and(|raw| matches_path(raw)) {
+                    workspace_matches.push((file, index, workspace.name.clone()));
                 }
-                enzyme_spec::atomic_write(&path, &enzyme_spec::render_program(&program))?;
-                return Ok(true);
             }
         }
+        let target = match (vault_match, workspace_matches.as_slice()) {
+            (Some((file, index)), _) => Some((file, index, false)),
+            (None, [(file, index, _)]) => Some((*file, *index, true)),
+            (None, []) => None,
+            (None, many) => anyhow::bail!(
+                "{key} is the notes folder of workspaces {}; address one of them with --workspace",
+                many.iter()
+                    .map(|(_, _, name)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        if let Some((file, index, is_workspace)) = target {
+            let (path, program) = &mut files[file];
+            let mut vault = if is_workspace {
+                program.workspaces[index].unresolved_vault()
+            } else {
+                program.vaults[index].clone()
+            };
+        vault.exclusions = self.excluded_folders.clone();
+        vault.excluded_tags = self.excluded_tags.clone();
+        vault.excluded_links = self.excluded_links.clone();
+        vault.frontmatter_link_fields = self.frontmatter_link_fields.clone();
+        vault.targets = self.targets.clone();
+        vault.embedding_limit = self.max_embedding_files;
+        vault.learning.budget = self.trending.as_ref().and_then(|t| t.min_top_catalysts);
+        let mut readings = Vec::new();
+        for entity in &self.catalyzed_entities {
+            let (name, options) = match entity {
+                CatalyzedEntity::Simple(name) => (name.clone(), EntityOptions::default()),
+                CatalyzedEntity::WithOptions(map) => {
+                    let Some((name, options)) = map.iter().next() else {
+                        continue;
+                    };
+                    (name.clone(), options.clone())
+                }
+            };
+            if let Some(existing) = vault.readings.iter().find(|r| r.entity == name) {
+                readings.push(existing.clone());
+            } else {
+                readings.push(enzyme_spec::Reading {
+                    entity: name,
+                    profile: options.profile.unwrap_or_else(|| "auto".into()),
+                    definition: None,
+                    learning: Default::default(),
+                    include_linked_pages: options.expandable,
+                    include_who_links: false,
+                    pattern: false,
+                });
+            }
+        }
+        enzyme_spec::retain_patterns(&vault.readings, &mut readings);
+        vault.readings = readings;
+            if is_workspace {
+                program.workspaces[index].set_markdown_vault(vault);
+            } else {
+                program.vaults[index] = vault;
+            }
+            enzyme_spec::atomic_write(path, &enzyme_spec::render_program(program))?;
+            return Ok(true);
+        }
         let config_home = config_path.parent().unwrap_or_else(|| Path::new("."));
-        if !enzyme_spec::source_files(&directory)?.is_empty()
+        if has_program_files(&directory)?
             && !config_path.exists()
             && EnzymePaths::bound_workspace_with_home(vault_path, config_home)?.is_none()
         {
@@ -1590,6 +1586,27 @@ fn checked_program(
         ConfigTarget::Path(path) => namespace.vault_problems(&canonical_vault_key(path)),
         ConfigTarget::Machine => Vec::new(),
     };
+    if let ConfigTarget::Path(path) = target {
+        // Count workspaces as declared, not only as resolved, so a path does
+        // not change meaning while one of the workspaces sharing it is invalid.
+        let key = canonical_vault_key(path);
+        let sharing: Vec<&str> = namespace
+            .lone_markdown_paths
+            .iter()
+            .filter(|(_, folder)| *folder == key)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let declared_vault = namespace
+            .program
+            .vaults
+            .iter()
+            .any(|v| v.workspace.is_none() && v.path == key);
+        anyhow::ensure!(
+            sharing.len() < 2 || declared_vault,
+            "{key} is the notes folder of workspaces {}; address one of them with --workspace",
+            sharing.join(", ")
+        );
+    }
     if !fatal.is_empty() {
         let messages: Vec<String> = fatal
             .iter()
@@ -1597,15 +1614,51 @@ fn checked_program(
             .collect();
         anyhow::bail!("{}", messages.join("; "));
     }
+    // Name the scope only: its error belongs to commands addressed to it,
+    // not to this workspace's log.
     for problem in &namespace.problems {
         warn_once(format!(
-            "ignoring {} in {}: {}",
-            problem.scope,
-            "configs/",
-            problem.message()
+            "ignoring {} in configs/: it does not resolve; address it to see why",
+            problem.scope
         ));
     }
     Ok(namespace.program)
+}
+
+/// Whether `directory` holds any `.enzyme` file, without parsing it: another
+/// workspace's invalid program must not fail this one.
+fn has_program_files(directory: &Path) -> Result<bool> {
+    if !directory.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == "enzyme") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Every `.enzyme` file in `directory` that parses, with its path. Files
+/// that do not parse are skipped: config loads already report them to the
+/// workspace they could break.
+fn readable_files(directory: &Path) -> Result<Vec<(PathBuf, enzyme_spec::Program)>> {
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.retain(|path| path.is_file() && path.extension().is_some_and(|e| e == "enzyme"));
+    paths.sort();
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            let program = enzyme_spec::parse(&fs::read_to_string(&path).ok()?).ok()?;
+            Some((path, program))
+        })
+        .collect())
 }
 
 fn warn_once(message: String) {
@@ -1892,6 +1945,57 @@ timestamp = { unit = "ms" }
         let ws = typed.workspaces.get("imessage").expect("workspace present");
         assert!(ws.sources.contains_key("messages"), "source dropped");
         assert_eq!(ws.entities.len(), 1);
+    }
+
+    #[test]
+    fn path_saves_prefer_the_vault_and_never_pick_among_shared_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let configs = home.join("configs");
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&configs).unwrap();
+        std::fs::create_dir_all(&notes).unwrap();
+        let notes = notes.canonicalize().unwrap();
+        let config_path = home.join("config.toml");
+        let workspaces = format!(
+            "workspace \"a\" {{\n  source markdown \"notes\" {{ path \"{0}\" }}\n}}\nworkspace \"b\" {{\n  source markdown \"notes\" {{ path \"{0}\" }}\n}}\n",
+            notes.display()
+        );
+        // Sorts first, so a first-match search would rewrite workspace "a".
+        std::fs::write(configs.join("a-shared.enzyme"), &workspaces).unwrap();
+        std::fs::write(configs.join("broken.enzyme"), "workspace oops").unwrap();
+        let vault_file = configs.join("z-vault.enzyme");
+        std::fs::write(&vault_file, format!("vault \"{}\" {{}}\n", notes.display())).unwrap();
+        let config = EnzymeConfig {
+            targets: vec!["/srv/target".into()],
+            ..Default::default()
+        };
+
+        // The vault declaration owns the path; an unparsable file is skipped.
+        config.save_at(&notes, &config_path, CONFIG_HEADER).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(configs.join("a-shared.enzyme")).unwrap(),
+            workspaces
+        );
+        assert!(
+            std::fs::read_to_string(&vault_file)
+                .unwrap()
+                .contains("/srv/target")
+        );
+
+        // Without it, two workspaces claim the path and neither is rewritten.
+        std::fs::remove_file(&vault_file).unwrap();
+        let error = config
+            .save_at(&notes, &config_path, CONFIG_HEADER)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("address one of them with --workspace"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(configs.join("a-shared.enzyme")).unwrap(),
+            workspaces
+        );
     }
 
     #[test]

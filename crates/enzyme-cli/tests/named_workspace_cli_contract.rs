@@ -574,6 +574,26 @@ fn workspaces_in_one_home_do_not_fail_together() {
         text(&by_path)
     );
 
+    // It stays ambiguous while one of the workspaces sharing it is invalid.
+    h.program(
+        "people.enzyme",
+        &format!(
+            "workspace \"people\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  learn questions from tag \"focus\" about no-such-profile\n}}\n",
+            notes.display()
+        ),
+    );
+    let by_path = h
+        .command(&["init", "--stage", "index", "--quiet"])
+        .arg("-p")
+        .arg(&notes)
+        .output()
+        .unwrap();
+    assert!(
+        text(&by_path).contains("address one of them with --workspace"),
+        "{}",
+        text(&by_path)
+    );
+
     // Planning one workspace is not blocked by the others' invalid files.
     let desired = h.root.path().join("desired.enzyme");
     fs::write(
