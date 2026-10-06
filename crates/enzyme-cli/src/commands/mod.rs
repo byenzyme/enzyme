@@ -24,6 +24,7 @@ pub mod status;
 pub mod target;
 pub mod update;
 pub mod vault_summary;
+pub mod workspace;
 
 pub mod spec;
 pub mod spec_plan;

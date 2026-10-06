@@ -68,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::spec::SpecCommand,
     },
+    /// Plan and apply reviewed changes to a workspace's .enzyme program
+    Workspace {
+        #[command(subcommand)]
+        command: commands::workspace::WorkspaceCommand,
+    },
     /// Build or update the vault index and catalysts
     Init {
         /// Internal background worker mode
@@ -551,6 +556,14 @@ async fn run(cli: Cli) -> Result<()> {
             )?;
             return commands::spec::run(command, cli.vault.as_deref()).await;
         }
+        Commands::Workspace { command } => {
+            anyhow::ensure!(
+                cli.vault.is_none() && cli.collection.is_none(),
+                "workspace commands take the workspace name as an argument"
+            );
+            init_tracing(cli.verbose, None);
+            return commands::workspace::run(command);
+        }
         Commands::Mcp => {
             init_tracing(cli.verbose, None);
             return commands::mcp::run_mcp(cli.vault).await;
@@ -821,6 +834,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Mcp
         | Commands::Model { .. }
         | Commands::Spec { .. }
+        | Commands::Workspace { .. }
         | Commands::Compile { .. } => unreachable!(),
     }
 
