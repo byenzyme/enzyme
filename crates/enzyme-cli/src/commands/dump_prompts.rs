@@ -64,7 +64,6 @@ pub async fn run_dump_prompts(
         max_context_chars: None,
         max_samples: DEFAULT_MAX_CONTEXT_SAMPLES,
         concurrency: None,
-        stream_partial_catalysts: false,
         force_regenerate: false,
         min_context_documents: std::env::var("ENZYME_MIN_CONTEXT_DOCUMENTS")
             .ok()

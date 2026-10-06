@@ -99,7 +99,7 @@ fn convert(schema: &Value, name: &str, rules: &mut Vec<String>) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{catalyst_entries_json_schema, catalyst_json_schema};
+    use crate::llm::catalyst_json_schema;
 
     #[test]
     fn converts_the_catalyst_schema() {
@@ -111,13 +111,6 @@ mod tests {
         assert!(gbnf.contains(r#""\"topicNames\"""#), "{gbnf}");
         assert!(gbnf.contains("ws ::="));
         assert!(gbnf.contains("string ::="));
-    }
-
-    #[test]
-    fn converts_the_streaming_entries_schema() {
-        let gbnf = json_schema_to_gbnf(&catalyst_entries_json_schema(true)).unwrap();
-        assert!(gbnf.contains(r#""\"entries\"""#), "{gbnf}");
-        assert!(gbnf.contains(r#""\"eraLabel\"""#), "{gbnf}");
     }
 
     #[test]

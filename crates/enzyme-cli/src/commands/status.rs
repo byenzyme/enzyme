@@ -317,7 +317,6 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
             max_context_chars: limits.max_context_chars,
             max_samples: limits.max_samples,
             concurrency: None,
-            stream_partial_catalysts: false,
             force_regenerate: false,
             min_context_documents: limits.min_context_documents,
             min_context_tokens: limits.min_context_tokens,
