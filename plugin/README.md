@@ -53,8 +53,11 @@ workspace "notes" {
 }
 ```
 
-For a Markdown folder, the source path remains the runtime and index location.
-Changing an existing `vault` program to this form does not move its index.
+For a Markdown folder addressed by path (`enzyme -p <folder>`), the source path
+remains the runtime and index location, and changing an existing `vault`
+program to this form does not move its index. Addressed with
+`--workspace <name>`, the same folder gets its own index under
+`$ENZYME_HOME/workspaces/<name>/`, built from scratch on the first `init`.
 
 ## Get started
 
@@ -113,6 +116,11 @@ For Are.na, use `enzyme --workspace <name> compile --preset arena <channel-url>`
 and then `enzyme --workspace <name> init`. Run `refresh` with the
 same `--workspace` name to pick up later changes (`--collection` is an accepted
 alias).
+
+Scripts and host apps can rely on defined exit codes (0 ok, 1 runtime failure,
+2 usage, 3 configuration, 4 workspace busy, 5 `init` indexed but catalysts
+failed their quality gate). Concurrent `init`/`refresh` calls
+on one workspace wait for each other, bounded by `--lock-timeout`.
 
 Enzyme was built for knowledge bases that grow rapidly:
 
