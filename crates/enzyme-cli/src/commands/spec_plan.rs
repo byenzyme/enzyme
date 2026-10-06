@@ -165,7 +165,9 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
                 .map(|workspace| workspace.unresolved_vault()),
         )
         .collect();
-    let mut resolved = enzyme_spec::resolve(programs, &user_home)?;
+    let environment =
+        enzyme_core::config::spec_environment(&user_home, &EnzymePaths::enzyme_home()?)?;
+    let mut resolved = enzyme_spec::resolve_in(programs, &environment)?;
     // `resolve` keeps program order, so this file's vaults/workspaces come first.
     resolved.vaults.truncate(raw_scopes.len());
     anyhow::ensure!(

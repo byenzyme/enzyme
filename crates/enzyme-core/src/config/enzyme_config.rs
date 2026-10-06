@@ -1432,12 +1432,11 @@ fn load_global_toml(path: &Path) -> Result<GlobalTomlConfig> {
     } else {
         serde_json::json!({})
     };
-    let directory = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("configs");
+    let enzyme_home = path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = enzyme_home.join("configs");
     let user_home = dirs::home_dir().context("cannot resolve home directory")?;
-    let program = enzyme_spec::load_directory(&directory, &user_home)?;
+    let environment = super::spec_environment(&user_home, enzyme_home)?;
+    let program = enzyme_spec::load_directory_in(&directory, &environment)?;
     overlay_program(value, program)
 }
 

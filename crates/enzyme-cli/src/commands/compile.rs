@@ -268,9 +268,12 @@ fn save_setup(
         namespace.push((file, generated.clone()));
         namespace.len() - 1
     };
-    enzyme_spec::resolve(
+    enzyme_spec::resolve_in(
         namespace.iter().map(|(_, p)| p.clone()).collect(),
-        user_home,
+        &enzyme_core::config::spec_environment(
+            user_home,
+            &enzyme_core::config::EnzymePaths::enzyme_home()?,
+        )?,
     )?;
     for (file, previous) in snapshots {
         ensure!(

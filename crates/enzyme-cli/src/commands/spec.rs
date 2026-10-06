@@ -67,7 +67,11 @@ pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Resu
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .context("HOME missing")?;
-            let plan = enzyme_spec::resolve(vec![ast.clone()], &home)?;
+            let environment = enzyme_core::config::spec_environment(
+                &home,
+                &enzyme_core::config::EnzymePaths::enzyme_home()?,
+            )?;
+            let plan = enzyme_spec::resolve_in(vec![ast.clone()], &environment)?;
             if *instructions {
                 for v in &plan.vaults {
                     println!("{}", enzyme_spec::instructions(v));

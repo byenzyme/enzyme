@@ -1,0 +1,27 @@
+// Source kinds built into the Enzyme binary. A program's own `source kind`
+// of the same name takes precedence.
+
+// Apple Notes: notes in the account's "Notes" folder, full body text decoded
+// from the gzipped protobuf. Declare it with `source apple-notes "notes" {}`;
+// give `database "…"` to read a copy of NoteStore.sqlite elsewhere.
+source kind apple-notes {
+  database "~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
+  query """
+SELECT n.ZIDENTIFIER AS note_id,
+       n.ZTITLE1 AS title,
+       n.ZMODIFICATIONDATE1 AS modified,
+       gzip_pb_text(d.ZDATA, '2.3.2') AS body
+FROM ZICCLOUDSYNCINGOBJECT AS n
+JOIN ZICNOTEDATA AS d ON d.ZNOTE = n.Z_PK
+JOIN ZICCLOUDSYNCINGOBJECT AS f ON f.Z_PK = n.ZFOLDER AND f.Z_ENT = 15
+WHERE n.Z_ENT = 12
+  AND n.ZISPASSWORDPROTECTED = 0
+  AND f.ZTITLE2 = 'Notes'
+  AND n.ZMODIFICATIONDATE1 IS NOT NULL
+  AND d.ZDATA IS NOT NULL
+"""
+  id "note_id"
+  when "modified" unit s epoch "2001-01-01"
+  what ["title", "body"]
+  filter "apple-notes-content-v1"
+}
