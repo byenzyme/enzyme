@@ -2552,7 +2552,7 @@ local_model = "catalyst-135m-v3"
                 minimum_folders: 5,
                 total_limit: 21,
                 min_top_catalysts: Some(13),
-                }),
+            }),
             catalyst_format: Some("question".to_string()),
             excluded_tags: vec!["todo".to_string()],
             excluded_links: vec!["Template".to_string()],
