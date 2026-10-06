@@ -103,10 +103,15 @@ pub struct VaultPlan {
     pub reference: Reference,
     /// `hosted` or `local` prompt construction.
     pub prompts: &'static str,
-    /// `readings`, or `automatic` coverage selection when none are declared.
+    /// `readings`, `automatic` coverage selection when none are declared, or
+    /// `readings and automatic` (`learn questions automatically`).
     pub selection: &'static str,
     pub readings: Vec<ReadingPlan>,
-    /// Jobs no reading accounts for (automatic coverage selection).
+    /// How `learn questions automatically` split the automatic limit, and
+    /// what it picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automatic: Option<enzyme_core::pipeline::selection_steps::AutomaticDiagnostics>,
+    /// Jobs no reading accounts for: automatic selection's.
     pub other_jobs: Vec<PlannedJob>,
     pub other_skipped: Vec<PlannedSkip>,
     pub totals: Totals,
@@ -352,12 +357,14 @@ fn plan_vault(
             },
         },
         prompts: if llm.is_local() { "local" } else { "hosted" },
-        selection: if config.has_curated_entities() {
-            "readings"
-        } else {
-            "automatic"
+        selection: match (&selection.diagnostics.automatic, spec.readings.is_empty()) {
+            (Some(_), false) => "readings and automatic",
+            (Some(_), true) => "automatic",
+            (None, _) if config.has_curated_entities() => "readings",
+            (None, _) => "automatic",
         },
         readings,
+        automatic: selection.diagnostics.automatic.clone(),
         other_jobs: jobs
             .jobs
             .iter()
@@ -717,8 +724,18 @@ fn render(plan: &VaultPlan) -> String {
         "  reference    {} ({})\n  prompts      {}\n",
         plan.reference.instant, plan.reference.source, plan.prompts
     ));
-    if plan.selection == "automatic" {
-        s.push_str("  selection    automatic (no readings declared)\n");
+    match &plan.automatic {
+        Some(a) => {
+            let up_to = a.up_to.map_or_else(String::new, |n| format!(", up to {n}"));
+            s.push_str(&format!(
+                "  selection    {} (learn questions automatically: {} declared of limit {}{up_to} → {} automatic slots)\n",
+                plan.selection, a.declared, a.limit, a.slots
+            ));
+        }
+        None if plan.selection == "automatic" => {
+            s.push_str("  selection    automatic (no readings declared)\n");
+        }
+        None => {}
     }
     for (i, r) in plan.readings.iter().enumerate() {
         s.push_str(&format!("\n{}. {}  about {}\n", i + 1, r.source, r.profile));
@@ -780,8 +797,26 @@ fn render(plan: &VaultPlan) -> String {
             s.push_str(&format!("   ! {note}\n"));
         }
     }
+    if let Some(a) = &plan.automatic {
+        s.push_str(&format!(
+            "\nautomatic selection  {} picked · {} linked pages of picked folders\n",
+            a.picked.len(),
+            a.expanded.len()
+        ));
+        for e in &a.picked {
+            s.push_str(&format!("   picked     {} {}\n", e.entity_type, e.name));
+        }
+        for e in &a.expanded {
+            s.push_str(&format!("   expanded   {} {}\n", e.entity_type, e.name));
+        }
+        if plan.other_jobs.is_empty() && plan.other_skipped.is_empty() {
+            s.push_str("   jobs       none\n");
+        }
+    }
     if !plan.other_jobs.is_empty() || !plan.other_skipped.is_empty() {
-        s.push_str("\nother selected entities\n");
+        if plan.automatic.is_none() {
+            s.push_str("\nother selected entities\n");
+        }
         s.push_str(&jobs_text(&plan.other_jobs));
         for skip in &plan.other_skipped {
             s.push_str(&format!(

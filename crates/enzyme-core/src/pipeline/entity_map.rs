@@ -155,9 +155,19 @@ pub fn select_coverage_candidate_indices(
     candidates: &[CoverageCandidate],
     limit: usize,
 ) -> Vec<usize> {
+    select_coverage_candidate_indices_after(candidates, limit, HashSet::new())
+}
+
+/// [`select_coverage_candidate_indices`] continued after earlier picks whose
+/// files are `covered_files`, so each new pick's marginal coverage counts
+/// only files those picks do not already cover.
+pub fn select_coverage_candidate_indices_after<'a>(
+    candidates: &'a [CoverageCandidate],
+    limit: usize,
+    mut covered_files: HashSet<&'a str>,
+) -> Vec<usize> {
     let mut picked = Vec::new();
     let mut picked_indices = HashSet::new();
-    let mut covered_files: HashSet<&str> = HashSet::new();
 
     for _ in 0..limit {
         let mut best = None;
@@ -513,15 +523,52 @@ impl EntityMap {
         limit: usize,
         folder_exclusions: &FolderExclusions,
     ) -> Result<Vec<Entity>> {
+        Self::select_catalyst_candidates_after(db, limit, folder_exclusions, &[], &|_| false)
+    }
+
+    /// [`Self::select_catalyst_candidates`] continued after `earlier` picks
+    /// (entities declared by readings): their files count as already covered,
+    /// and candidates `skip` rejects (already selected or left out) are never
+    /// picked. `limit` counts only the new picks.
+    pub fn select_catalyst_candidates_after(
+        db: &Database,
+        limit: usize,
+        folder_exclusions: &FolderExclusions,
+        earlier: &[Entity],
+        skip: &dyn Fn(&Entity) -> bool,
+    ) -> Result<Vec<Entity>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let all = db.get_all_entities()?;
         let entity_file_sets = db.get_entity_file_sets()?;
         let folder_file_sets = db.get_folder_file_sets()?;
+        let files_of = |entity: &Entity| -> HashSet<String> {
+            match entity.entity_type {
+                EntityType::Tag
+                | EntityType::Link
+                | EntityType::AppendLog
+                | EntityType::Collection => entity
+                    .id
+                    .and_then(|id| entity_file_sets.get(&id))
+                    .cloned()
+                    .unwrap_or_default(),
+                EntityType::Folder => folder_file_sets
+                    .get(&entity.name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        };
 
         if folder_file_sets.is_empty() {
             if let Some(root) = all.iter().find(|entity| {
                 entity.entity_type == EntityType::Folder && entity.name == ROOT_FOLDER_ENTITY
             }) {
-                return Ok(vec![root.clone()]);
+                return Ok(if skip(root) {
+                    Vec::new()
+                } else {
+                    vec![root.clone()]
+                });
             }
         }
 
@@ -562,27 +609,14 @@ impl EntityMap {
                     &entity.name,
                     entity.ranking_weight,
                     folder_exclusions,
-                )
+                ) && !skip(entity)
             })
             .collect();
 
         let coverage_candidates = candidates
             .iter()
             .map(|entity| {
-                let files = match entity.entity_type {
-                    EntityType::Tag
-                    | EntityType::Link
-                    | EntityType::AppendLog
-                    | EntityType::Collection => entity
-                        .id
-                        .and_then(|id| entity_file_sets.get(&id))
-                        .cloned()
-                        .unwrap_or_default(),
-                    EntityType::Folder => folder_file_sets
-                        .get(&entity.name.to_lowercase())
-                        .cloned()
-                        .unwrap_or_default(),
-                };
+                let files = files_of(entity);
                 CoverageCandidate {
                     entity_type: entity.entity_type.clone(),
                     ranking_weight: entity.ranking_weight,
@@ -597,8 +631,10 @@ impl EntityMap {
             })
             .collect::<Vec<_>>();
 
+        let earlier_files: Vec<HashSet<String>> = earlier.iter().map(files_of).collect();
+        let covered = earlier_files.iter().flatten().map(String::as_str).collect();
         Ok(
-            select_coverage_candidate_indices(&coverage_candidates, limit)
+            select_coverage_candidate_indices_after(&coverage_candidates, limit, covered)
                 .into_iter()
                 .map(|index| candidates[index].clone())
                 .collect(),
@@ -734,6 +770,30 @@ mod tests {
             select_coverage_candidate_indices(&candidates, 2),
             vec![0, 2]
         );
+    }
+
+    #[test]
+    fn coverage_selector_continues_after_declared_files() {
+        let candidate = |files: &[&str]| CoverageCandidate {
+            entity_type: EntityType::Link,
+            ranking_weight: 10.0,
+            recency_score: 50.0,
+            frequency_recent: 10,
+            files: files.iter().map(|file| (*file).to_string()).collect(),
+            active_folder_links: 0,
+        };
+        let candidates = vec![candidate(&["a.md", "b.md"]), candidate(&["c.md", "d.md"])];
+
+        // A reading already covers a.md and b.md, so the uncovered peer wins.
+        assert_eq!(
+            select_coverage_candidate_indices_after(
+                &candidates,
+                1,
+                HashSet::from(["a.md", "b.md"])
+            ),
+            vec![1]
+        );
+        assert_eq!(select_coverage_candidate_indices(&candidates, 1), vec![0]);
     }
 
     #[test]

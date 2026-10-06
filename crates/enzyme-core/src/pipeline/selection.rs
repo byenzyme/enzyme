@@ -33,6 +33,23 @@ pub struct SelectionResult {
     pub diagnostics: selection_steps::SelectionDiagnostics,
 }
 
+impl SelectionResult {
+    /// Whether automatic selection chose this entity: every entity on the
+    /// coverage path, and `learn questions automatically` additions on the
+    /// readings path.
+    pub fn is_automatic(&self, name: &str, entity_type: &str) -> bool {
+        match self.source {
+            SelectionSource::Coverage => true,
+            SelectionSource::Config => self.diagnostics.automatic.as_ref().is_some_and(|a| {
+                a.picked
+                    .iter()
+                    .chain(&a.expanded)
+                    .any(|e| e.name == name && e.entity_type == entity_type)
+            }),
+        }
+    }
+}
+
 /// Selects entities for catalyst generation, either from user config or coverage selection.
 pub struct SelectionPipeline<'a> {
     db: &'a Database,
@@ -75,7 +92,8 @@ impl<'a> SelectionPipeline<'a> {
         };
 
         if let Some(cfg) = config {
-            if cfg.has_curated_entities() {
+            let automatic = cfg.reading_spec.as_ref().and_then(|s| s.automatic.as_ref());
+            if cfg.has_curated_entities() || automatic.is_some() {
                 info!("selecting entities from enzyme-config.yaml");
                 return self.select_from_config(cfg, &exclusions);
             }
@@ -163,6 +181,27 @@ impl<'a> SelectionPipeline<'a> {
         materialized.diagnostics.missing = missing;
         materialized.diagnostics.left_out = left_out;
 
+        if let Some(automatic) = config
+            .reading_spec
+            .as_ref()
+            .and_then(|spec| spec.automatic.as_ref())
+        {
+            // Readings plus automatic selection. Only readable programs can
+            // ask for it, and init never writes their selection back.
+            let left_out = prefs
+                .excluded_names
+                .iter()
+                .map(|e| (e.name.to_lowercase(), e.entity_type.clone()))
+                .collect();
+            selection_steps::add_automatic_selection(
+                self.db,
+                &mut materialized,
+                automatic.up_to,
+                exclusions,
+                &left_out,
+            )?;
+        }
+
         Ok(SelectionResult {
             entities: materialized.final_entities,
             entity_profiles: materialized.entity_profiles,
@@ -174,8 +213,11 @@ impl<'a> SelectionPipeline<'a> {
 
     /// Select entities using coverage-aware catalyst-candidate selection + deterministic profiles.
     fn select_catalyst_candidates(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
-        let materialized =
-            selection_steps::build_catalyst_candidate_selection(self.db, 20, exclusions)?;
+        let materialized = selection_steps::build_catalyst_candidate_selection(
+            self.db,
+            selection_steps::AUTOMATIC_LIMIT,
+            exclusions,
+        )?;
 
         info!(
             count = materialized.final_entities.len(),
