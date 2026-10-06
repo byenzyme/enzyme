@@ -18,9 +18,11 @@ keep the two in step.
 Errors print `Error: …` on stderr. With `init --json-progress`, the last stderr
 line is also a JSON event: `{"stage":"error","exit_code":N,"message":"…"}`.
 
-JSON error envelopes cover `init` only (the `--json-progress` error event, and
-the stdout summary for exit 5). `catalyze` also prints its legacy envelope with
-an `error` field when the index is missing (exit 3). Other `--json` commands
+JSON error envelopes cover `init` (the `--json-progress` error event, and the
+stdout summary for exit 5) and `workspace plan|apply|recover --json`, which print
+`{"ok":false,"error":{"kind":"stale|altered|unsupported|unrecoverable|invalid","message":…}}`
+on stdout (exit 1; an invalid workspace name exits 2). `catalyze` also prints its
+legacy envelope with an `error` field when the index is missing (exit 3). Other `--json` commands
 (`search`, `status`, `spec profiles`, `model list`, `scan`) report errors as
 `Error: …` text on stderr with the exit codes above; their stdout is empty.
 

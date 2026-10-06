@@ -100,8 +100,8 @@ fn read_input(path: &Path) -> Result<String> {
 }
 
 fn run_plan(name: &str, desired: &Path, json: bool, out: Option<&Path>) -> Result<()> {
-    // The same rule `--collection` applies, so the planned workspace can be indexed.
-    EnzymePaths::workspace_root(name)?;
+    // The same rule `--workspace` applies, so the planned workspace can be indexed.
+    EnzymePaths::workspace_root(name).map_err(super::exit::CliFailure::usage)?;
     let desired = read_input(desired)?;
     let plan = store()?.plan(name, &desired)?;
     let body = serde_json::to_string_pretty(&plan)?;
@@ -212,7 +212,7 @@ fn print_receipt(receipt: &Receipt) {
         if receipt.changes.len() == 1 { "" } else { "s" }
     );
     println!(
-        "Index it with: enzyme refresh --collection {}",
+        "Index it with: enzyme refresh --workspace {}",
         receipt.workspace
     );
 }
