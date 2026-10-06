@@ -680,3 +680,91 @@ workspace "mixed" {{
     }
     assert_eq!(h.llm.request_count(), requests, "unchanged data called the LLM");
 }
+
+fn count(db: &Path, sql: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+}
+
+/// SQLite sources index before embedding, renaming or removing a source in
+/// the program reconciles its documents, and a supplied document ref is kept
+/// as given even when it looks like a Markdown path. (Ported from the
+/// retired embedder kernel's tests.)
+#[test]
+fn sqlite_source_documents_follow_the_program() {
+    let h = Home::new();
+    let notes = h.notes("notes", 1);
+    let source = h.root.path().join("messages.db");
+    rusqlite::Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, sent_at INTEGER, body TEXT, ref TEXT);
+             INSERT INTO messages VALUES
+               (1, 1700000000000, 'source row about migration evidence', 'sqlite:{name}/thread-9.md');",
+        )
+        .unwrap();
+    let program = |source_block: &str| {
+        h.program(
+            "ws.enzyme",
+            &format!(
+                "settings {{ updates disabled }}\nworkspace \"ws\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n{source_block}}}\n",
+                notes.display()
+            ),
+        )
+    };
+    let sqlite = |name: &str, document_ref: bool| {
+        let (query, role) = if document_ref {
+            (
+                format!("SELECT id, sent_at, body, replace(ref, '{{name}}', '{name}') AS ref FROM messages"),
+                "  document ref \"ref\"\n",
+            )
+        } else {
+            ("SELECT id, sent_at, body FROM messages".to_string(), "")
+        };
+        format!(
+            "  source sqlite \"{name}\" {{\n    database \"{}\"\n    query \"{query}\"\n    id \"id\"\n{role}    when \"sent_at\" unit ms\n    what \"body\"\n  }}\n",
+            source.display()
+        )
+    };
+    let db = h.store("ws").join("enzyme.db");
+    let index = || assert_code(&h.run(&["--workspace", "ws", "init", "--llm", "none", "--quiet"]), 0);
+    let in_source = |name: &str| {
+        count(
+            &db,
+            &format!("SELECT COUNT(*) FROM docs WHERE source_ref LIKE 'sqlite:{name}/%'"),
+        )
+    };
+
+    program(&sqlite("messages", false));
+    index();
+    assert_eq!(in_source("messages"), 1);
+    assert!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE file_path LIKE 'sqlite:messages/%'"
+        ) > 0,
+        "SQLite documents must reach embedding"
+    );
+
+    program(&sqlite("renamed", false));
+    index();
+    assert_eq!(in_source("messages"), 0);
+    assert_eq!(in_source("renamed"), 1);
+
+    program("");
+    index();
+    assert_eq!(in_source("renamed"), 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM docs"), 1);
+
+    program(&sqlite("mail-stable", true));
+    index();
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM docs WHERE source_ref = 'sqlite:mail-stable/thread-9.md'"
+        ),
+        1
+    );
+}

@@ -1,7 +1,6 @@
 //! Query a provisioned search index: catalyst, direct, and exact-phrase hits.
 //!
-//! Shared by the CLI's `enzyme search` and the embedder [`crate::kernel`], so
-//! both read an index through one code path.
+//! Used by the CLI's `enzyme search`.
 
 use std::path::Path;
 
@@ -98,7 +97,7 @@ impl SearchIndex {
 /// and never migrated or written; an index whose schema predates this binary
 /// is an error rather than an in-place upgrade. `home` locates the embedding
 /// model. Callers already inside a Tokio runtime should run this on a worker
-/// thread (see [`crate::kernel::open_existing_sync`]).
+/// thread.
 pub fn open_read_only(home: &Path, db_path: &Path) -> Result<Option<SearchIndex>> {
     if !db_path.exists() {
         return Ok(None);
