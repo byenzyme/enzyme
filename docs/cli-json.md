@@ -33,6 +33,11 @@ catalysts; `catalyze`, `search`, and `status` never do.
 | `hosted` | Enzyme hosted generation, ignoring `OPENAI_*` and installed local models. |
 | `none` | Index, embed, and select only. No catalyst generation, no generator resolution, no network. `refresh` schedules no catalyst epoch. |
 
+With `env`, `local`, or `none`, `refresh --quiet` also skips the background binary
+update check, so the only network these modes use is `OPENAI_BASE_URL` (for `env`).
+Hosted generation caches its short-lived lease at `$ENZYME_HOME/api-cache`
+(`ENZYME_API_CACHE_PATH` overrides), never in a directory shared between homes.
+
 `--use-env-llm` is an alias for `--llm env` and cannot be combined with `--llm`.
 Workers that `init`/`refresh` spawn in the background inherit the chosen mode.
 
@@ -42,7 +47,8 @@ Workers that `init`/`refresh` spawn in the background inherit the chosen mode.
 
 Opens the index read-only (never creates, migrates, or writes it). Runs three searches
 and returns each list separately so the host decides how to merge them. A missing
-index is an error that tells the caller to run `enzyme init`.
+index is an error (exit 3) that tells the caller to run `enzyme init`; an index
+built by an older binary is an error (exit 1) until `init` or `refresh` rebuilds it.
 
 ```json
 {
@@ -88,11 +94,24 @@ index is an error that tells the caller to run `enzyme init`.
 `enzyme status --json`
 
 Includes every field of the MCP `status` tool, plus `schema`, `initialized`,
-`selection`, and `index`. An uninitialized vault or workspace still exits 0:
+`selection`, and `index`. Status never creates, migrates, or writes the index: it
+opens it read-only. An uninitialized vault or workspace still exits 0:
 
 ```json
 { "schema": "enzyme.status.v1", "initialized": false, "workspace": "notes",
   "vault": "…", "database": "…/enzyme.db" }
+```
+
+An index built by an older binary (missing tables or migrated columns) is reported
+without reading further, and without migrating it; the next `init` or `refresh`
+rebuilds it:
+
+```json
+{ "schema": "enzyme.status.v1", "initialized": true, "schema_outdated": true,
+  "workspace": "notes", "vault": "…", "database": "…/enzyme.db",
+  "update": { "status": "schema_outdated", "regen_required": true,
+              "reason": "search index schema is not compatible: missing column chunks.entry_date",
+              "binary": { "current": "0.11.1", "last_outcome": null } } }
 ```
 
 Initialized:
@@ -104,6 +123,7 @@ Initialized:
   "workspace": "notes",
   "vault": "…",
   "database": "…/enzyme.db",
+  "schema_outdated": false,
   "documents": 42, "embedded": 42, "awaiting_embedding": 0,
   "entities": 12, "catalysts": 35,
   "catalyst_mode_configured": "auto", "catalyst_mode": "hosted",
@@ -116,8 +136,10 @@ Initialized:
       "row_count": 7, "bucket_count": 1, "last_refresh_ms": 1700000000000,
       "stale": false, "reachable": true }
   ],
+  "markdown": { "files_discovered": 35, "files_new": 1, "files_modified": 0,
+                "files_deleted": 0, "stale": true },
   "selection": {
-    "selected": 5, "ready": 3, "pending": 1, "skipped": 1,
+    "selected": 5, "ready": 3, "pending": 1, "skipped": 1, "unchecked": 0,
     "entities": [
       { "name": "projects", "type": "folder", "state": "ready", "catalysts": 7 },
       { "name": "radio", "type": "tag", "state": "pending", "catalysts": 0 },
@@ -145,8 +167,15 @@ Initialized:
 - `sources[]`: one entry per SQLite source. `stale`/`stale_reason` compare the
   source database with the last indexed refresh. `reachable`/`reachability_error`
   report whether the source opens read-only now.
+- `markdown`: Markdown freshness, `null` for a named workspace without a Markdown
+  source. `files_new` are on disk but not indexed, `files_modified` changed on disk
+  (by mtime) after they were indexed, `files_deleted` are indexed but gone or now
+  excluded; `stale` is true when any is non-zero. An edit that keeps an older mtime
+  is not detected here (`refresh` still hashes every file).
 - `selection.entities[]`: the entities selection would choose now, computed with the
-  same selection and job construction `init` uses, without calling a model.
+  same selection and job construction `init` uses, without calling a model. To keep
+  status cheap, at most 16 entities without catalysts get a job built; any others
+  report `unchecked`.
   - `ready`: has catalysts.
   - `pending`: a generation job exists, but there are no catalysts yet (not
     generated, generation failed, or the last run used `--llm none`).
@@ -154,12 +183,14 @@ Initialized:
     `no_occurrences`, `no_evidence_before_reference` (`occurrences`),
     `no_usable_evidence` (`occurrences`), or `thin_context` (`documents`, `tokens`,
     `min_documents`, `min_tokens`).
+  - `unchecked`: no catalysts, and beyond the 16-entity planning cap.
 - `index.built_by`: binary version that last wrote the index. `cache_epoch` increases
   whenever collection-derived caches should be invalidated. `epoch` describes the
   active catalyst epoch, and `contract_fingerprint` identifies the generation
   contract it was built under.
 
-The text output of `enzyme status` is unchanged.
+The text output of `enzyme status` adds a `Markdown: stale (…)` line when Markdown
+files changed since the last index, and an outdated-schema notice.
 
 ## `enzyme.profiles.v1`
 
@@ -216,6 +247,7 @@ registry fields. `active` is the model `--llm local` (and the default mode) woul
   `file_path`/`similarity`/`content`/`via_catalyst_*`, `top_contributing_catalysts`,
   `query`, `search_strategy`, `processing_time`, `total_results`). Without `--json` it
   draws a text tree when stdout is a terminal. With `--json` it always prints JSON.
+  Before the index exists it prints the envelope with an `error` field and exits 3.
   New integrations should use `search --json`.
 - `enzyme init --quiet` / `--json-progress`, `enzyme refresh --quiet`, and
   `enzyme doctor --json` keep their existing unversioned shapes.

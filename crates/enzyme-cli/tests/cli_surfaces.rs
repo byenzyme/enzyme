@@ -123,6 +123,7 @@ fn llm_env_without_key_fails_before_touching_the_index() {
     let fixture = VaultFixture::new();
     let out = fixture.cli().args(["init", "--llm", "env"]).run();
     out.assert_failure().assert_contains("OPENAI_API_KEY");
+    assert_eq!(out.code, Some(3), "{}", out.combined());
     assert!(
         !fixture.vault_enzyme_dir().join("enzyme.db").exists(),
         "a failed env preflight must not create the index"
@@ -308,7 +309,37 @@ fn search_on_uninitialized_vault_fails_without_creating_an_index() {
     let fixture = VaultFixture::new();
     let out = fixture.cli().args(["search", "anything", "--json"]).run();
     out.assert_failure().assert_contains("enzyme init");
+    assert_eq!(out.code, Some(3), "{}", out.combined());
     assert!(!fixture.vault_enzyme_dir().join("enzyme.db").exists());
+}
+
+#[test]
+fn catalyze_on_uninitialized_vault_prints_envelope_and_exits_3() {
+    let fixture = VaultFixture::new();
+    let out = fixture.cli().args(["catalyze", "anything", "--json"]).run();
+    assert_eq!(out.code, Some(3), "{}", out.combined());
+    let envelope: Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert!(envelope["error"].as_str().unwrap().contains("enzyme init"));
+    assert!(!fixture.vault_enzyme_dir().join("enzyme.db").exists());
+}
+
+#[test]
+fn init_whose_catalysts_all_fail_exits_5_with_summary() {
+    let fixture = VaultFixture::new();
+    let llm = MockLlm::start();
+    llm.set_response(500, r#"{"error":{"message":"down","type":"server_error"}}"#);
+    let out = fixture
+        .cli()
+        .args(["init", "--quiet", "--llm", "env"])
+        .env_llm(&llm)
+        .run();
+    assert_eq!(out.code, Some(5), "{}", out.combined());
+    let summary: Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(summary["status"], "failed", "{summary:#}");
+    assert!(summary["indexing"]["files_discovered"].as_u64().unwrap() > 0);
+    // The index is still built and searchable.
+    let search = json_stdout(&fixture.cli().args(["search", "antenna", "--json"]).run());
+    assert!(search["document_count"].as_u64().unwrap() > 0);
 }
 
 #[test]
@@ -376,6 +407,69 @@ fn status_json_explains_entities_without_catalysts() {
         assert_eq!(entity["state"], "skipped", "{entity:#}");
         assert_eq!(entity["skip_reason"]["kind"], "thin_context", "{entity:#}");
     }
+}
+
+#[test]
+fn status_json_reports_markdown_freshness() {
+    let (fixture, _llm) = initialized_with_catalysts();
+    let fresh = json_stdout(&fixture.cli().args(["status", "--json"]).run());
+    assert_eq!(fresh["markdown"]["stale"], false, "{fresh:#}");
+    assert!(fresh["markdown"]["files_discovered"].as_u64().unwrap() > 0);
+
+    fixture.write_note("brand-new.md", "# Brand new\nUnindexed thoughts.\n");
+    fn first_note(dir: &Path) -> Option<std::path::PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| !path.ends_with(".enzyme") && !path.ends_with("brand-new.md"))
+            .collect();
+        entries.sort();
+        entries.iter().find_map(|path| {
+            if path.is_dir() {
+                first_note(path)
+            } else {
+                path.extension().is_some_and(|ext| ext == "md").then(|| path.clone())
+            }
+        })
+    }
+    let existing = first_note(&fixture.vault_path()).expect("canary vault has a note");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .append(true)
+        .open(&existing)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let stale = json_stdout(&fixture.cli().args(["status", "--json"]).run());
+    assert_eq!(stale["markdown"]["stale"], true, "{stale:#}");
+    assert_eq!(stale["markdown"]["files_new"], 1, "{stale:#}");
+    assert_eq!(stale["markdown"]["files_modified"], 1, "{stale:#}");
+    assert_eq!(stale["markdown"]["files_deleted"], 0, "{stale:#}");
+}
+
+#[test]
+fn status_json_reports_outdated_schema_without_migrating() {
+    let (fixture, _llm) = initialized_with_catalysts();
+    let db_path = fixture.vault_enzyme_dir().join("enzyme.db");
+    {
+        let db = rusqlite::Connection::open(&db_path).unwrap();
+        db.execute_batch("DROP TABLE doc_links; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+    }
+    let before = file_digest(&db_path);
+    let out = json_stdout(&fixture.cli().args(["status", "--json"]).run());
+    assert_eq!(out["schema_outdated"], true, "{out:#}");
+    assert_eq!(out["update"]["status"], "schema_outdated", "{out:#}");
+    assert_eq!(file_digest(&db_path), before, "status must not migrate the index");
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    let restored: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'doc_links'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(restored, 0, "status recreated a dropped table");
 }
 
 #[test]
