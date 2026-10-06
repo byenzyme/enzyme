@@ -100,9 +100,8 @@ enum Commands {
         #[arg(long, hide = true)]
         stream_partial_catalysts: bool,
 
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
@@ -127,9 +126,8 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Force a complete catalyst rebase epoch now (still built detached).
         #[arg(long, visible_alias = "force")]
@@ -510,10 +508,11 @@ async fn main() -> Result<()> {
             voice_min_catalysts,
             voice_timeout_secs,
             stream_partial_catalysts,
-            use_env_llm,
+            llm,
             stage,
             force,
         } => {
+            let llm = llm.mode();
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
             } else if voice_ready {
@@ -523,7 +522,7 @@ async fn main() -> Result<()> {
                     voice_min_catalysts,
                     std::time::Duration::from_secs(voice_timeout_secs),
                     min_top_catalysts,
-                    use_env_llm,
+                    llm,
                 )
                 .await?;
 
@@ -540,7 +539,7 @@ async fn main() -> Result<()> {
                     json_progress,
                     min_top_catalysts,
                     stream_partial_catalysts,
-                    use_env_llm,
+                    llm,
                     force,
                 )
                 .await?;
@@ -557,7 +556,7 @@ async fn main() -> Result<()> {
             detached,
             quiet,
             min_top_catalysts,
-            use_env_llm,
+            llm,
             full,
         } => {
             commands::init::run_refresh(
@@ -565,7 +564,7 @@ async fn main() -> Result<()> {
                 detached,
                 quiet,
                 min_top_catalysts,
-                use_env_llm,
+                llm.mode(),
                 full,
             )
             .await?;

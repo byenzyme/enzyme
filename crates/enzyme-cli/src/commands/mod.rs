@@ -7,6 +7,7 @@ pub mod compile_preset;
 pub mod doctor;
 pub mod dump_prompts;
 pub mod embed_entries;
+pub mod generator;
 pub mod ingest;
 pub mod init;
 pub mod lock;

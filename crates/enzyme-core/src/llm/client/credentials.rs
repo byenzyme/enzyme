@@ -310,6 +310,9 @@ fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
     }
     match local_model_config_inner() {
         Some(config) => Ok(Some(config)),
+        None if required && !cfg!(feature = "local-llm") => {
+            bail!("this Enzyme binary was built without local-model support")
+        }
         None if required => bail!(
             "local catalyst mode requires model '{}', but it is not installed; run `enzyme model install {}`",
             super::super::model_registry::selected_name(),
@@ -935,10 +938,33 @@ pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, Ll
     if matches!(mode, CatalystMode::Hosted) {
         return Ok(None);
     }
-    let config = match local_model_config(matches!(mode, CatalystMode::Local))? {
-        Some(config) => config,
-        None => return Ok(None),
-    };
+    match local_model_config(matches!(mode, CatalystMode::Local))? {
+        Some(config) => load_local_llm_client(config).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Load the local model `mode` would generate with, ahead of first use.
+///
+/// `Auto` applies the persisted preference like
+/// [`preload_preferred_local_llm_client`]; `Local` requires the selected
+/// installed model and fails when it is absent; `Hosted` and `Env` never touch
+/// local inference.
+pub fn preload_llm_client_for_mode(
+    mode: LlmCredentialMode,
+) -> Result<Option<(ResolvedConfig, LlmClient)>> {
+    match mode {
+        LlmCredentialMode::Auto => preload_preferred_local_llm_client(),
+        LlmCredentialMode::Local => {
+            let config = local_model_config(true)?
+                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable"))?;
+            load_local_llm_client(config).map(Some)
+        }
+        LlmCredentialMode::Hosted | LlmCredentialMode::Env => Ok(None),
+    }
+}
+
+fn load_local_llm_client(config: ResolvedConfig) -> Result<(ResolvedConfig, LlmClient)> {
     let started = std::time::Instant::now();
     let client = LlmClient::from_config(&config)?;
     info!(
@@ -946,7 +972,7 @@ pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, Ll
         duration_ms = started.elapsed().as_millis(),
         "local LLM preload complete"
     );
-    Ok(Some((config, client)))
+    Ok((config, client))
 }
 
 pub async fn resolve_llm_client_for_mode(
