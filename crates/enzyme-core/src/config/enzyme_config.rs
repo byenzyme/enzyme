@@ -2348,9 +2348,12 @@ local_model = "catalyst-135m-v3"
 
     #[test]
     fn test_save_and_load_global_toml() {
+        let _env = crate::ENZYME_HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = TempDir::new().unwrap();
         let old_home = std::env::var("ENZYME_HOME").ok();
-        // SAFETY: test-only, single-threaded
+        // SAFETY: test-only, serialized by ENZYME_HOME_TEST_LOCK
         unsafe { std::env::set_var("ENZYME_HOME", tmp.path()) };
 
         let vault = tmp.path().join("vault");
@@ -2447,7 +2450,7 @@ local_model = "catalyst-135m-v3"
         let rewritten = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(rewritten.sources, expected_sources);
 
-        // SAFETY: test-only, single-threaded
+        // SAFETY: test-only, serialized by ENZYME_HOME_TEST_LOCK
         unsafe {
             match old_home {
                 Some(v) => std::env::set_var("ENZYME_HOME", v),
