@@ -20,7 +20,9 @@ const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
 const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/llm/free-config";
 const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Enzyme-Bootstrap-Id";
-const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
+/// Hosted lease cache file under `$ENZYME_HOME` (private to the user and to
+/// that home, unlike the former shared `/tmp/enzyme-api-cache`).
+const API_CACHE_FILE: &str = "api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
 /// Leave enough lease life for broker/request latency and modest clock skew.
 const FREE_CONFIG_EXPIRY_SAFETY_MARGIN_SECS: u64 = 30;
@@ -277,7 +279,11 @@ fn api_cache_path() -> std::path::PathBuf {
         .ok()
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
+        .unwrap_or_else(|| {
+            crate::config::paths::EnzymePaths::enzyme_home()
+                .map(|home| home.join(API_CACHE_FILE))
+                .unwrap_or_else(|_| std::env::temp_dir().join("enzyme-api-cache"))
+        })
 }
 
 fn configured_catalyst_mode() -> Result<CatalystMode> {
@@ -310,6 +316,9 @@ fn local_model_config(required: bool) -> Result<Option<ResolvedConfig>> {
     }
     match local_model_config_inner() {
         Some(config) => Ok(Some(config)),
+        None if required && !cfg!(feature = "local-llm") => {
+            bail!("this Enzyme binary was built without local-model support")
+        }
         None if required => bail!(
             "local catalyst mode requires model '{}', but it is not installed; run `enzyme model install {}`",
             super::super::model_registry::selected_name(),
@@ -887,7 +896,7 @@ pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<Reso
         LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "No env LLM config found. Set OPENAI_API_KEY, or omit \
-                 `--use-env-llm` to use Enzyme hosted credits."
+                 `--llm env` to use the configured default."
             )
         }),
     }
@@ -935,10 +944,33 @@ pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, Ll
     if matches!(mode, CatalystMode::Hosted) {
         return Ok(None);
     }
-    let config = match local_model_config(matches!(mode, CatalystMode::Local))? {
-        Some(config) => config,
-        None => return Ok(None),
-    };
+    match local_model_config(matches!(mode, CatalystMode::Local))? {
+        Some(config) => load_local_llm_client(config).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Load the local model `mode` would generate with, ahead of first use.
+///
+/// `Auto` applies the persisted preference like
+/// [`preload_preferred_local_llm_client`]; `Local` requires the selected
+/// installed model and fails when it is absent; `Hosted` and `Env` never touch
+/// local inference.
+pub fn preload_llm_client_for_mode(
+    mode: LlmCredentialMode,
+) -> Result<Option<(ResolvedConfig, LlmClient)>> {
+    match mode {
+        LlmCredentialMode::Auto => preload_preferred_local_llm_client(),
+        LlmCredentialMode::Local => {
+            let config = local_model_config(true)?
+                .ok_or_else(|| anyhow::anyhow!("selected local catalyst model is unavailable"))?;
+            load_local_llm_client(config).map(Some)
+        }
+        LlmCredentialMode::Hosted | LlmCredentialMode::Env => Ok(None),
+    }
+}
+
+fn load_local_llm_client(config: ResolvedConfig) -> Result<(ResolvedConfig, LlmClient)> {
     let started = std::time::Instant::now();
     let client = LlmClient::from_config(&config)?;
     info!(
@@ -946,7 +978,7 @@ pub fn preload_preferred_local_llm_client() -> Result<Option<(ResolvedConfig, Ll
         duration_ms = started.elapsed().as_millis(),
         "local LLM preload complete"
     );
-    Ok(Some((config, client)))
+    Ok((config, client))
 }
 
 pub async fn resolve_llm_client_for_mode(

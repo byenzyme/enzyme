@@ -124,6 +124,48 @@ impl Database {
         })
     }
 
+    /// Confirm every table of the current schema, and every column migrations
+    /// add, exists without migrating.
+    ///
+    /// Pair with [`Self::open_read_only`] when a reader must refuse an index
+    /// built by an older binary with a clear error instead of a query failure.
+    pub fn validate_expected_schema(&self) -> Result<(), DbError> {
+        let tables: std::collections::HashSet<String> = self
+            .query_read(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+                vec![],
+                |row| row.get::<String>(0),
+            )?
+            .into_iter()
+            .collect();
+        if let Some(missing) = super::schema::EXPECTED_TABLES
+            .iter()
+            .find(|table| !tables.contains(**table))
+        {
+            return Err(DbError::Migration(format!(
+                "search index schema is not compatible: missing table {missing}"
+            )));
+        }
+        for (table, column) in super::schema::MIGRATED_COLUMNS {
+            let present = !self
+                .query_read(
+                    "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                    vec![
+                        libsql::Value::Text((*table).to_string()),
+                        libsql::Value::Text((*column).to_string()),
+                    ],
+                    |row| row.get::<i64>(0),
+                )?
+                .is_empty();
+            if !present {
+                return Err(DbError::Migration(format!(
+                    "search index schema is not compatible: missing column {table}.{column}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Open an **in-memory** database — useful for tests and ephemeral sessions.
     pub fn open_in_memory() -> Result<Self, DbError> {
         initialize_sqlite_runtime()?;
@@ -250,6 +292,29 @@ async fn apply_pragmas(conn: &Connection, wal: bool, busy_timeout_ms: u64) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_schema_validation_rejects_foreign_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enzyme.db");
+        drop(Database::open(&path).unwrap());
+        Database::open_read_only(&path)
+            .unwrap()
+            .validate_expected_schema()
+            .unwrap();
+
+        let foreign = dir.path().join("foreign.db");
+        {
+            let conn = rusqlite::Connection::open(&foreign).unwrap();
+            conn.execute_batch("CREATE TABLE docs (id INTEGER)")
+                .unwrap();
+        }
+        let error = Database::open_read_only(&foreign)
+            .unwrap()
+            .validate_expected_schema()
+            .unwrap_err();
+        assert!(error.to_string().contains("missing table"), "{error}");
+    }
 
     #[test]
     fn read_only_open_reads_but_never_writes_or_creates() {

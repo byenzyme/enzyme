@@ -8,7 +8,7 @@ repository = "https://github.com/useenzyme/enzyme-rust"
 publish = false
 
 [dependencies]
-enzyme-spec = { path = "../enzyme-spec" }
+enzyme-spec = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -40,7 +40,6 @@ default = []
 # Login/logout, account credit billing, and account credential storage. The
 # anonymous resolver stays in the default embedder build.
 account = ["libsql/tls"]
-embedder-compat = []
 # Benchmarks/examples and the vendored ESE test/benchmark harnesses are opt-in
 # so embedders receive a lean default build without downstream pruning.
 scaffolding = ["ese/scaffolding"]

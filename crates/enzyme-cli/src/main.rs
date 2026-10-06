@@ -19,8 +19,14 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
-    /// Named workspace/collection (home-rooted; configured under [workspaces.<name>])
-    #[arg(long, global = true, conflicts_with = "vault")]
+    /// Named workspace declared in $ENZYME_HOME
+    #[arg(
+        long = "workspace",
+        visible_alias = "collection",
+        value_name = "NAME",
+        global = true,
+        conflicts_with = "vault"
+    )]
     collection: Option<String>,
 
     /// Verbosity level
@@ -35,9 +41,10 @@ struct Cli {
 enum Commands {
     /// Generate and save readable setup; -v prints the configuration
     Compile {
-        /// Generate a structured source program from a known source layout
-        #[arg(long, value_enum)]
-        preset: Option<commands::compile_preset::Preset>,
+        /// Generate a program from a built-in preset (arena, apple-notes) or
+        /// the path to a `.enzyme.in` template
+        #[arg(long, value_name = "NAME|PATH")]
+        preset: Option<String>,
         /// Source URL, channel selector, or database path for the preset
         #[arg(value_name = "SOURCE")]
         sources: Vec<String>,
@@ -61,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         command: commands::spec::SpecCommand,
     },
+    /// Plan and apply reviewed changes to a workspace's .enzyme program
+    Workspace {
+        #[command(subcommand)]
+        command: commands::workspace::WorkspaceCommand,
+    },
     /// Build or update the vault index and catalysts
     Init {
         /// Internal background worker mode
@@ -80,29 +92,8 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
-        /// Return once a seed petri is available while a detached worker finishes init.
-        #[arg(long)]
-        voice_ready: bool,
-
-        /// Number of catalyzed petri entities required before --voice-ready returns.
-        #[arg(long, default_value_t = 1)]
-        voice_entities: usize,
-
-        /// Minimum catalysts each voice-ready entity must expose.
-        #[arg(long, default_value_t = 1)]
-        voice_min_catalysts: usize,
-
-        /// Seconds to wait for seed petri readiness before failing --voice-ready.
-        #[arg(long, default_value_t = 90)]
-        voice_timeout_secs: u64,
-
-        /// Internal worker mode: stream and persist complete catalyst records as they arrive.
-        #[arg(long, hide = true)]
-        stream_partial_catalysts: bool,
-
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Stop after a specific pipeline stage (e.g. "index")
         #[arg(long)]
@@ -111,6 +102,11 @@ enum Commands {
         /// Discard the existing index and regenerate every entity's catalysts
         #[arg(long, visible_alias = "regenerate")]
         force: bool,
+
+        /// Seconds to wait for another init/refresh of this workspace before
+        /// exiting busy (exit code 4); 0 fails immediately
+        #[arg(long, value_name = "SECS", default_value_t = commands::lock::DEFAULT_LOCK_TIMEOUT_SECS)]
+        lock_timeout: u64,
     },
 
     /// Incrementally refresh the vault index
@@ -127,13 +123,18 @@ enum Commands {
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
-        /// Use OPENAI_* environment credentials instead of Enzyme hosted credits.
-        #[arg(long)]
-        use_env_llm: bool,
+        #[command(flatten)]
+        llm: commands::generator::LlmArgs,
 
         /// Force a complete catalyst rebase epoch now (still built detached).
         #[arg(long, visible_alias = "force")]
         full: bool,
+
+        /// Seconds to wait for another init/refresh of this workspace before
+        /// exiting busy (exit code 4); 0 fails immediately. Default 1800, or 5
+        /// with --quiet
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
     },
 
     /// Search using catalyst-based approximate matching
@@ -152,6 +153,28 @@ enum Commands {
         /// Deprecated no-op: presentation is controlled by installed agent instructions
         #[arg(long, default_value = "explore", hide = true)]
         register: String,
+
+        /// Always emit the JSON envelope, even when stdout is a terminal
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search the index: catalyst, direct, and exact-phrase hits (read-only)
+    Search {
+        /// Search query
+        query: String,
+
+        /// Maximum results per search mode
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+
+        /// Literal phrase for exact-phrase hits (defaults to the query)
+        #[arg(long)]
+        phrase: Option<String>,
+
+        /// Emit the versioned `enzyme.search.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show the current petri (top catalysts and entities)
@@ -170,7 +193,11 @@ enum Commands {
     },
 
     /// Show vault status and configuration
-    Status,
+    Status {
+        /// Emit the versioned `enzyme.status.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Check for and install Enzyme binary updates
     Update {
@@ -210,10 +237,14 @@ enum Commands {
     ///
     /// Hidden rather than removed. `enzyme compile` is the setup path and
     /// carries this inventory in its own output, but the SQLite source skill
-    /// still validates a configured source with `scan --collection <name>`,
+    /// still validates a configured source with `scan --workspace <name>`,
     /// which has no compile equivalent yet.
     #[command(hide = true)]
-    Scan {},
+    Scan {
+        /// Accepted for symmetry; scan output is always `scan.v2` JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Install or update this workspace's agent integration
     Install {
@@ -297,7 +328,11 @@ enum ModelCommands {
     },
 
     /// List installed and available models
-    List,
+    List {
+        /// Emit the versioned `enzyme.models.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Select an installed model and require local catalyst generation
     Use {
@@ -367,6 +402,73 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
         .init();
 }
 
+/// Foreground `init` and `refresh` hold `workspace.lock` beside the index for
+/// their whole run, so concurrent callers on one workspace wait (announced on
+/// stderr) instead of racing. `run_init` takes the same lock re-entrantly, so
+/// MCP init is covered too. Detached workers coordinate through
+/// `refresh.lock` instead. A quiet refresh of a never-initialized vault does
+/// nothing, so it takes no lock and creates no `.enzyme` directory.
+fn foreground_workspace_lock(
+    command: &Commands,
+    vault_path: &Path,
+) -> Result<Option<commands::lock::WorkspaceLock>> {
+    use commands::lock::{
+        DEFAULT_LOCK_TIMEOUT_SECS, QUIET_REFRESH_LOCK_TIMEOUT_SECS, WaitNotice,
+        configure_lock_wait,
+    };
+    let (timeout, notice) = match command {
+        Commands::Init {
+            detached: false,
+            quiet,
+            json_progress,
+            lock_timeout,
+            ..
+        } => (
+            *lock_timeout,
+            if *json_progress {
+                WaitNotice::JsonProgress
+            } else if *quiet {
+                WaitNotice::Silent
+            } else {
+                WaitNotice::Text
+            },
+        ),
+        Commands::Refresh {
+            detached: false,
+            quiet,
+            lock_timeout,
+            ..
+        } => (
+            lock_timeout.unwrap_or(if *quiet {
+                QUIET_REFRESH_LOCK_TIMEOUT_SECS
+            } else {
+                DEFAULT_LOCK_TIMEOUT_SECS
+            }),
+            if *quiet {
+                WaitNotice::Silent
+            } else {
+                WaitNotice::Text
+            },
+        ),
+        _ => return Ok(None),
+    };
+    configure_lock_wait(std::time::Duration::from_secs(timeout), notice);
+    let paths = enzyme_core::config::paths::EnzymePaths::new(vault_path)?;
+    if matches!(command, Commands::Refresh { quiet: true, .. }) && !paths.vault_db.exists() {
+        return Ok(None);
+    }
+    commands::init::acquire_foreground_workspace_lock(vault_path, &paths).map(Some)
+}
+
+/// Fail with the usage exit code (2) unless `condition` holds.
+fn usage_ensure(condition: bool, message: &'static str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(commands::exit::CliFailure::usage(anyhow::anyhow!(message)))
+    }
+}
+
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     match vault {
         Some(p) => Ok(p),
@@ -382,18 +484,65 @@ fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Exit codes are defined in `commands::exit` and `docs/cli-exit-codes.md`.
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let json_progress = matches!(
+        &cli.command,
+        Commands::Init {
+            json_progress: true,
+            ..
+        }
+    );
+    // Commands whose failures still owe stdout a JSON summary.
+    let machine_output = json_progress
+        || matches!(
+            &cli.command,
+            Commands::Init { quiet: true, .. } | Commands::Catalyze { .. }
+        );
+    match run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            let kind = commands::exit::exit_kind(&error);
+            if machine_output
+                && let Some(summary) = commands::exit::failure_summary(&error)
+            {
+                println!("{summary}");
+            }
+            if json_progress {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "stage": "error",
+                        "exit_code": kind as u8,
+                        "message": format!("{error:#}"),
+                    })
+                );
+            }
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::from(kind as u8)
+        }
+    }
+}
 
+async fn run(cli: Cli) -> Result<()> {
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
         Commands::Spec { command } => {
-            anyhow::ensure!(
+            usage_ensure(
                 cli.collection.is_none(),
-                "spec commands take Markdown vault paths, not named collections"
-            );
+                "spec commands take Markdown vault paths, not named workspaces",
+            )?;
             return commands::spec::run(command, cli.vault.as_deref()).await;
+        }
+        Commands::Workspace { command } => {
+            anyhow::ensure!(
+                cli.vault.is_none() && cli.collection.is_none(),
+                "workspace commands take the workspace name as an argument"
+            );
+            init_tracing(cli.verbose, None);
+            return commands::workspace::run(command);
         }
         Commands::Mcp => {
             init_tracing(cli.verbose, None);
@@ -413,7 +562,7 @@ async fn main() -> Result<()> {
                 ModelCommands::Install { name, url, sha256 } => {
                     commands::model::run_install(name.clone(), url.clone(), sha256.clone()).await
                 }
-                ModelCommands::List => commands::model::run_list(),
+                ModelCommands::List { json } => commands::model::run_list(*json),
                 ModelCommands::Use { name } => commands::model::run_use(name),
                 ModelCommands::Auto => commands::model::run_auto(),
                 ModelCommands::Disable => commands::model::run_disable(),
@@ -427,7 +576,8 @@ async fn main() -> Result<()> {
 
     let collection_name = cli.collection.clone();
     let vault_path = if let Some(ref collection_id) = collection_name {
-        enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)?
+        enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)
+            .map_err(commands::exit::CliFailure::usage)?
     } else {
         resolve_vault_path(cli.vault.clone())?
     };
@@ -451,16 +601,17 @@ async fn main() -> Result<()> {
     } = &cli.command
     {
         if let Some(preset) = preset {
-            anyhow::ensure!(
+            usage_ensure(
                 cli.vault.is_none(),
-                "preset compilation uses --collection, not --vault"
-            );
+                "preset compilation uses --workspace, not --vault",
+            )?;
             let workspace_name = cli
                 .collection
                 .as_deref()
-                .context("preset compilation requires --collection <name>")?;
+                .context("preset compilation requires --workspace <name>")
+                .map_err(commands::exit::CliFailure::usage)?;
             return commands::compile_preset::run(
-                *preset,
+                preset,
                 sources,
                 workspace_name,
                 output.as_deref(),
@@ -470,14 +621,14 @@ async fn main() -> Result<()> {
             )
             .await;
         }
-        anyhow::ensure!(
+        usage_ensure(
             sources.is_empty(),
-            "source arguments require --preset arena or --preset apple-notes"
-        );
-        anyhow::ensure!(
+            "source arguments require --preset",
+        )?;
+        usage_ensure(
             cli.collection.is_none(),
-            "compile supports Markdown vaults, not named collections"
-        );
+            "compile supports Markdown vaults, not named workspaces",
+        )?;
         return commands::compile::run(
             &vault_path,
             *color,
@@ -496,8 +647,9 @@ async fn main() -> Result<()> {
         &cli.command,
         Commands::Init { .. } | Commands::Refresh { .. }
     ) {
-        enzyme_core::config::EnzymeConfig::load(&vault_path)?;
+        commands::init::preflight_init_target(&vault_path)?;
     }
+    let _workspace_lock = foreground_workspace_lock(&cli.command, &vault_path)?;
 
     match cli.command {
         Commands::Init {
@@ -505,33 +657,14 @@ async fn main() -> Result<()> {
             quiet,
             json_progress,
             min_top_catalysts,
-            voice_ready,
-            voice_entities,
-            voice_min_catalysts,
-            voice_timeout_secs,
-            stream_partial_catalysts,
-            use_env_llm,
+            llm,
             stage,
             force,
+            lock_timeout: _,
         } => {
+            let llm = llm.mode();
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
-            } else if voice_ready {
-                let output = commands::init::run_init_voice_ready(
-                    &vault_path,
-                    voice_entities,
-                    voice_min_catalysts,
-                    std::time::Duration::from_secs(voice_timeout_secs),
-                    min_top_catalysts,
-                    use_env_llm,
-                )
-                .await?;
-
-                if quiet || json_progress {
-                    println!("{}", serde_json::to_string(&output)?);
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                }
             } else {
                 let init_result = commands::init::run_init(
                     &vault_path,
@@ -539,8 +672,7 @@ async fn main() -> Result<()> {
                     quiet,
                     json_progress,
                     min_top_catalysts,
-                    stream_partial_catalysts,
-                    use_env_llm,
+                    llm,
                     force,
                 )
                 .await?;
@@ -557,15 +689,16 @@ async fn main() -> Result<()> {
             detached,
             quiet,
             min_top_catalysts,
-            use_env_llm,
+            llm,
             full,
+            lock_timeout: _,
         } => {
             commands::init::run_refresh(
                 &vault_path,
                 detached,
                 quiet,
                 min_top_catalysts,
-                use_env_llm,
+                llm.mode(),
                 full,
             )
             .await?;
@@ -575,6 +708,7 @@ async fn main() -> Result<()> {
             limit,
             target,
             register,
+            json,
         } => {
             commands::catalyze::run_catalyze(
                 &vault_path,
@@ -582,8 +716,17 @@ async fn main() -> Result<()> {
                 limit,
                 target.as_deref(),
                 &register,
+                json,
             )
             .await?;
+        }
+        Commands::Search {
+            query,
+            limit,
+            phrase,
+            json,
+        } => {
+            commands::search::run_search(&vault_path, &query, limit, phrase.as_deref(), json)?;
         }
         Commands::Petri {
             top,
@@ -607,13 +750,13 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Status => {
-            commands::status::run_status(&vault_path).await?;
+        Commands::Status { json } => {
+            commands::status::run_status(&vault_path, json).await?;
         }
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;
         }
-        Commands::Scan {} => {
+        Commands::Scan { .. } => {
             commands::scan::run_scan(&vault_path)?;
         }
         Commands::Install { target, source } => {
@@ -649,6 +792,7 @@ async fn main() -> Result<()> {
         Commands::Mcp
         | Commands::Model { .. }
         | Commands::Spec { .. }
+        | Commands::Workspace { .. }
         | Commands::Compile { .. } => unreachable!(),
     }
 

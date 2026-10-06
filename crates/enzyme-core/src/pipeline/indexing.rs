@@ -16,6 +16,9 @@ use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
     representative_excerpt,
 };
+use crate::pipeline::entity_map::{
+    coverage_recency_score, coverage_recency_weight, is_recent_coverage_occurrence,
+};
 
 /// Orchestrates the full indexing pipeline:
 /// discover files -> process -> diff against DB -> upsert new/changed ->
@@ -63,6 +66,20 @@ pub struct IndexingStats {
     /// `frontmatter_link_fields` interpretation without rebuilding embeddings.
     pub entity_config_changed: bool,
     pub duration_ms: u64,
+}
+
+/// Read-only freshness of the Markdown sources against the index: what an
+/// incremental index run would pick up, judged by file presence and mtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MarkdownFreshness {
+    pub files_discovered: usize,
+    /// On disk but not in the index.
+    pub files_new: usize,
+    /// Modified on disk after the index last wrote them.
+    pub files_modified: usize,
+    /// In the index but no longer on disk (or now excluded).
+    pub files_deleted: usize,
+    pub stale: bool,
 }
 
 impl<'a> IndexingPipeline<'a> {
@@ -170,6 +187,54 @@ impl<'a> IndexingPipeline<'a> {
             None => !fields.is_empty(),
         };
         Ok((current, changed))
+    }
+
+    /// Compare the Markdown sources with the index without reading file
+    /// contents or writing anything (cheap enough for `status`). Uses file
+    /// mtime against the document's `indexed_at`, so an edit that preserves
+    /// an older mtime is not reported here; `refresh` still hashes every file.
+    pub fn freshness(&self) -> Result<MarkdownFreshness> {
+        let discovery = match &self.notes_roots {
+            Some(roots) => FileDiscovery::from_notes_roots(roots.clone()),
+            None => FileDiscovery::new(self.vault_path.clone()),
+        }
+        .with_excluded_folders(self.resolve_excluded_folders());
+        let files = discovery.discover_named()?;
+        let indexed: HashMap<String, i64> = self
+            .db
+            .query_read("SELECT source_ref, indexed_at FROM docs", vec![], |row| {
+                Ok((row.get::<String>(0)?, row.get::<i64>(1)?))
+            })?
+            .into_iter()
+            .filter(|(source_ref, _)| is_markdown_source_ref(source_ref))
+            .collect();
+        let mut freshness = MarkdownFreshness {
+            files_discovered: files.len(),
+            ..Default::default()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for file in &files {
+            seen.insert(file.source_ref.as_str());
+            let Some(indexed_at) = indexed.get(&file.source_ref) else {
+                freshness.files_new += 1;
+                continue;
+            };
+            let modified_ms = std::fs::metadata(file.root_path.join(&file.relative_path))
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|age| age.as_millis() as i64);
+            if modified_ms.is_some_and(|modified| modified > *indexed_at) {
+                freshness.files_modified += 1;
+            }
+        }
+        freshness.files_deleted = indexed
+            .keys()
+            .filter(|source_ref| !seen.contains(source_ref.as_str()))
+            .count();
+        freshness.stale =
+            freshness.files_new + freshness.files_modified + freshness.files_deleted > 0;
+        Ok(freshness)
     }
 
     /// Execute the indexing pipeline.
@@ -800,11 +865,10 @@ impl<'a> IndexingPipeline<'a> {
                 timeline_weights: HashMap::new(),
             });
 
-            // Exponential decay with a half-life of 30 days
-            let weight = crate::models::activity_decay(now_millis, effective_date);
+            let weight = coverage_recency_weight(age_days);
             acc.weighted_sum += weight * occurrence_weight;
 
-            if age_days <= 365.0 {
+            if is_recent_coverage_occurrence(age_days) {
                 acc.frequency_recent += 1;
             }
 
@@ -820,7 +884,6 @@ impl<'a> IndexingPipeline<'a> {
             .iter()
             .filter_map(|e| {
                 let entity_id = e.id?;
-                let frequency = e.ranking_weight.max(0.0);
 
                 let acc = accums.remove(&entity_id);
                 let (weighted_sum, frequency_recent, timeline_buckets, timeline_weights) = match acc
@@ -834,7 +897,7 @@ impl<'a> IndexingPipeline<'a> {
                     None => (0.0, 0, HashMap::new(), HashMap::new()),
                 };
 
-                let recency_score = weighted_sum * (1.0 + (1.0 + frequency).ln());
+                let recency_score = coverage_recency_score(weighted_sum, e.ranking_weight);
 
                 Some((
                     entity_id,

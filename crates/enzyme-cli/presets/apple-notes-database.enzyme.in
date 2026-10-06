@@ -1,0 +1,7 @@
+// Apple Notes preset. `apple-notes` is a built-in source kind with the query
+// and content filter shipped in Enzyme; this program reads the store below.
+workspace __WORKSPACE__ {
+  source apple-notes "notes" { database __SOURCE__ }
+
+  learn questions from source "notes"
+}

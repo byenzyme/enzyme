@@ -73,37 +73,6 @@ pub fn catalyst_json_schema(include_era_labels: bool) -> serde_json::Value {
     schema
 }
 
-/// JSON Schema for the self-contained per-catalyst record response type.
-pub fn catalyst_entries_json_schema(include_era_labels: bool) -> serde_json::Value {
-    let mut entry_properties = serde_json::json!({
-        "catalyst": { "type": "string" },
-        "topic": { "type": "string" }
-    });
-    let mut entry_required = vec![serde_json::json!("catalyst"), serde_json::json!("topic")];
-
-    if include_era_labels {
-        entry_properties["eraLabel"] = serde_json::json!({ "type": "string" });
-        entry_required.push(serde_json::json!("eraLabel"));
-    }
-
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "entries": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": entry_properties,
-                    "required": entry_required,
-                    "additionalProperties": false
-                }
-            }
-        },
-        "required": ["entries"],
-        "additionalProperties": false
-    })
-}
-
 // ---------------------------------------------------------------------------
 // System prompt (built once, cached across entities)
 // ---------------------------------------------------------------------------
@@ -766,91 +735,6 @@ fn build_from_entries(entries: Vec<CatalystEntry>) -> CatalystResponse {
     CatalystResponse { pairs, catalysts }
 }
 
-/// Parse any complete catalyst records from a partially streamed `entries` response.
-///
-/// This intentionally ignores incomplete objects at the tail of the buffer. It is
-/// used only for provisional writes; final parsing still validates the complete
-/// response with `parse_catalyst_response`.
-pub fn parse_partial_catalyst_entries(response: &str) -> Vec<ParsedCatalyst> {
-    let s = strip_code_fences(response);
-    let s = normalize_smart_quotes(s);
-    let s = strip_trailing_commas(&s);
-    let Some(entries_start) = s.find("\"entries\"") else {
-        return Vec::new();
-    };
-    let Some(array_offset) = s[entries_start..].find('[') else {
-        return Vec::new();
-    };
-    let array_start = entries_start + array_offset + 1;
-
-    let mut parsed = Vec::new();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let mut object_start: Option<usize> = None;
-
-    for (idx, ch) in s[array_start..].char_indices() {
-        let absolute = array_start + idx;
-
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => {
-                if depth == 0 {
-                    object_start = Some(absolute);
-                }
-                depth += 1;
-            }
-            '}' => {
-                if depth == 0 {
-                    continue;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(start) = object_start.take() {
-                        let end = absolute + ch.len_utf8();
-                        if let Ok(entry) = serde_json::from_str::<CatalystEntry>(&s[start..end]) {
-                            if !entry.catalyst.trim().is_empty() && !entry.topic.trim().is_empty() {
-                                parsed.push(ParsedCatalyst {
-                                    text: entry.catalyst,
-                                    topic: entry.topic,
-                                    era_label: entry.era_label,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            ']' if depth == 0 => break,
-            _ => {}
-        }
-    }
-
-    parsed
-}
-
-/// Add record-shaped output instructions for streaming partial parsing.
-pub fn streaming_entries_instruction(prompt: &str) -> String {
-    format!(
-        "{prompt}\n\n\
-         For this run, return JSON as {{\"entries\":[...]}}. Each entry must be \
-         self-contained with \"catalyst\", \"topic\", and when era labels are in \
-         scope, \"eraLabel\". Do not use separate catalysts/topicNames arrays."
-    )
-}
-
 /// Replace Unicode left/right double quotation marks with escaped ASCII quotes
 /// so they don't accidentally break JSON string boundaries.
 fn normalize_smart_quotes(s: &str) -> String {
@@ -1155,29 +1039,6 @@ mod tests {
         assert_eq!(resp.catalysts[0].text, "Where does X?");
         assert_eq!(resp.catalysts[0].topic, "topic a");
         assert_eq!(resp.catalysts[0].era_label.as_deref(), Some("spring"));
-    }
-
-    #[test]
-    fn test_parse_partial_entries_drops_incomplete_tail() {
-        let response = r#"{
-  "entries": [
-    {"catalyst":"Where does X?","topic":"topic a","eraLabel":"spring"},
-    {"catalyst":"What about"#;
-        let parsed = parse_partial_catalyst_entries(response);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].text, "Where does X?");
-        assert_eq!(parsed[0].topic, "topic a");
-        assert_eq!(parsed[0].era_label.as_deref(), Some("spring"));
-    }
-
-    #[test]
-    fn test_parse_partial_entries_handles_escaped_braces() {
-        let response =
-            r#"{"entries":[{"catalyst":"What does \"{x}\" cost?","topic":"quoted brace"},"#;
-        let parsed = parse_partial_catalyst_entries(response);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].text, "What does \"{x}\" cost?");
-        assert_eq!(parsed[0].topic, "quoted brace");
     }
 
     #[test]

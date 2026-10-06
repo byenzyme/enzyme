@@ -1,4 +1,4 @@
-// Parsing and compilation live in enzyme-spec (Rust).
+// Parsing and compilation live in enzyme-spec (Rust, github.com/byenzyme/enzyme-spec).
 const $ = id => document.getElementById(id);
 const editor = $('source');
 let compileVersion = 0;
@@ -8,7 +8,7 @@ let activeExample = 'vault';
 const escapeHtml = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const el = (name, text, className) => { const node = document.createElement(name); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; };
 function highlight() {
-  const pattern = /\/\/[^\n]*|"(?:\\.|[^"\\])*"|\b(?:profile|let|vault|learning|seek|notice|ask|learn|questions|from|folder|folders|tag|tags|log|link|links|matching|about|including|linked|pages|select|by|frequency|recency|up|to|sample|across|time|favor|recent|periods|question|budget|when|asked|retrieve|passages|through|learned|answer|with|sources|remember|in|append|observation|project|into|prepare|newest|first|leave|out|auto|monthly|quarterly)\b|\b\d+\b/g;
+  const pattern = /\/\/[^\n]*|"(?:\\.|[^"\\])*"|\b(?:profile|let|vault|learning|seek|notice|ask|learn|questions|automatically|from|folder|folders|tag|tags|log|link|links|matching|about|including|linked|pages|select|by|frequency|recency|up|to|sample|across|time|favor|recent|periods|question|budget|when|asked|retrieve|passages|through|learned|answer|with|sources|remember|in|append|observation|project|into|prepare|newest|first|leave|out|auto|monthly|quarterly)\b|\b\d+\b/g;
   let html = '', last = 0;
   for (const match of editor.value.matchAll(pattern)) {
     html += escapeHtml(editor.value.slice(last, match.index));

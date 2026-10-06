@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-api"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-cli"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atty",
@@ -1178,6 +1178,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "dirs",
  "enzyme-api",
  "enzyme-core",
  "enzyme-spec",
@@ -1245,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-search"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1264,13 +1265,15 @@ dependencies = [
 
 [[package]]
 name = "enzyme-spec"
-version = "0.11.1"
+version = "0.4.0"
+source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.4.0#244b5df398dfa099f081c796fac005048965aba7"
 dependencies = [
  "anyhow",
+ "fs2",
  "serde",
  "serde_json",
- "tempfile",
- "toml",
+ "sha2 0.10.9",
+ "similar",
 ]
 
 [[package]]
@@ -4025,6 +4028,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"

@@ -1331,13 +1331,15 @@ impl Database {
         )?)
     }
 
-    /// Retrieve every entity in the database.
+    /// Retrieve every entity in the database, in insertion (id) order, so
+    /// selection ties break the same way on every run.
     pub fn get_all_entities(&self) -> Result<Vec<Entity>> {
         let rows = self.query_read(
             "SELECT e.id, e.name, e.type, e.frequency,
                     CAST(COALESCE((SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id), e.frequency) AS REAL),
                     e.first_seen, e.last_seen, e.trends, e.metadata
-             FROM entities e",
+             FROM entities e
+             ORDER BY e.id",
             vec![],
             map_entity_row,
         )?;
@@ -1448,20 +1450,28 @@ impl Database {
             row.get::<String>(0)
         })?;
 
-        // Map: folder → set of doc stems
+        // Map: folder → set of direct-child doc stems. Folder identities can
+        // be source-qualified (for example `markdown_<hash>/people` in a
+        // multi-root workspace), so match the complete folder prefix rather
+        // than assuming the first source-ref segment is the folder name.
         let mut folder_stems: HashMap<String, HashSet<String>> = HashMap::new();
+        let normalized_folders = folders
+            .iter()
+            .map(|folder| {
+                let folder = folder.to_lowercase();
+                let prefix = format!("{folder}/");
+                (folder, prefix)
+            })
+            .collect::<Vec<_>>();
         for source_ref in &docs {
-            if let Some(slash) = source_ref.find('/') {
-                let folder = source_ref[..slash].to_lowercase();
-                if folders.contains(folder.as_str()) {
-                    let filename = &source_ref[slash + 1..];
-                    if !filename.contains('/') {
-                        let stem = filename
-                            .strip_suffix(".md")
-                            .unwrap_or(filename)
-                            .to_lowercase();
-                        folder_stems.entry(folder).or_default().insert(stem);
-                    }
+            let normalized_source_ref = source_ref.to_lowercase();
+            for (folder, prefix) in &normalized_folders {
+                let Some(filename) = normalized_source_ref.strip_prefix(prefix.as_str()) else {
+                    continue;
+                };
+                if !filename.is_empty() && !filename.contains('/') {
+                    let stem = filename.strip_suffix(".md").unwrap_or(filename).to_string();
+                    folder_stems.entry(folder.clone()).or_default().insert(stem);
                 }
             }
         }
@@ -2206,6 +2216,42 @@ impl Database {
     // -----------------------------------------------------------------------
     // Chunk operations
     // -----------------------------------------------------------------------
+
+    /// Find chunks containing a literal phrase, case-insensitively.
+    ///
+    /// This is deliberately a bounded verification path rather than a general
+    /// lexical ranker. It lets callers prove that indexed material remains
+    /// reachable even when the active catalyst surface is narrowly curated.
+    pub fn get_chunks_containing_phrase(
+        &self,
+        phrase: &str,
+        limit: usize,
+    ) -> Result<Vec<FileChunk>> {
+        let phrase = phrase.trim();
+        if phrase.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self.query_read(
+            "SELECT d.source_ref, c.chunk_index, c.content, c.entry_date
+             FROM chunks c
+             JOIN docs d ON d.id = c.doc_id
+             WHERE instr(lower(c.content), lower(?1)) > 0
+             ORDER BY d.modified_at DESC, d.source_ref, c.chunk_index
+             LIMIT ?2",
+            vec![
+                Value::Text(phrase.to_string()),
+                Value::Integer(limit as i64),
+            ],
+            |row| {
+                Ok(FileChunk {
+                    file_path: row.get::<String>(0)?,
+                    chunk_index: row.get::<i64>(1)? as u32,
+                    content: row.get::<String>(2)?,
+                    entry_date: row.get::<Option<i64>>(3)?,
+                })
+            },
+        )?)
+    }
 
     /// Get all chunks belonging to documents that have been embedded.
     pub fn get_all_chunks_with_embeddings(&self) -> Result<Vec<(String, i64, String)>> {

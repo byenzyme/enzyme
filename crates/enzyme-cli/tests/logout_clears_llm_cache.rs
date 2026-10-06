@@ -108,7 +108,7 @@ fn login_populate_cache_then_logout(
 ///
 /// After `enzyme logout`, the signed-out account's hosted LLM API key must not
 /// still be sitting in the free-config cache. In production that cache defaults
-/// to the hardcoded, world-readable `/tmp/enzyme-api-cache`.
+/// to `$ENZYME_HOME/api-cache` (formerly the shared `/tmp/enzyme-api-cache`).
 #[test]
 fn logout_invalidates_cached_hosted_llm_config() {
     let api = MockEnzymeApi::start();
@@ -129,8 +129,8 @@ fn logout_invalidates_cached_hosted_llm_config() {
          in the free-config cache at {}.\n\
          expected: the cache is invalidated (removed or rewritten without the key)\n\
          actual  : {:?}\n\
-         in production this path defaults to the hardcoded, world-readable \
-         /tmp/enzyme-api-cache.\n\
+         in production this path defaults to $ENZYME_HOME/api-cache \
+         (formerly /tmp/enzyme-api-cache).\n\
          --- logout stderr ---\n{logout_stderr}",
         fixture.api_cache_path().display(),
         cache_after_logout,

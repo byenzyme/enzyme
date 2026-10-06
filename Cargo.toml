@@ -4,7 +4,7 @@ exclude = ["scaffolding/ese-api-py"]
 resolver = "2"
 
 [workspace.package]
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 license = "BUSL-1.1"
 repository = "https://github.com/useenzyme/enzyme-rust"
@@ -37,6 +37,9 @@ ese = { path = "crates/enzyme-core/vendor/ese", features = ["dim-512", "rayon", 
 
 # HNSW
 instant-distance = "0.6"
+
+# Readable workspace language (public: github.com/byenzyme/enzyme-spec)
+enzyme-spec = { git = "https://github.com/byenzyme/enzyme-spec", tag = "v0.4.0" }
 
 # Document processing
 pulldown-cmark = "0.12"

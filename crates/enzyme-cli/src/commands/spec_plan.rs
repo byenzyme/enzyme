@@ -103,14 +103,22 @@ pub struct VaultPlan {
     pub reference: Reference,
     /// `hosted` or `local` prompt construction.
     pub prompts: &'static str,
-    /// `readings`, or `automatic` coverage selection when none are declared.
+    /// `readings`, `automatic` coverage selection when none are declared, or
+    /// `readings and automatic` (`learn questions automatically`).
     pub selection: &'static str,
     pub readings: Vec<ReadingPlan>,
-    /// Jobs no reading accounts for (automatic coverage selection).
+    /// How `learn questions automatically` split the automatic limit, and
+    /// what it picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automatic: Option<enzyme_core::pipeline::selection_steps::AutomaticDiagnostics>,
+    /// Jobs no reading accounts for: automatic selection's.
     pub other_jobs: Vec<PlannedJob>,
     pub other_skipped: Vec<PlannedSkip>,
     pub totals: Totals,
 }
+
+/// Names the `spec plan --json` shape; see docs/cli-json.md.
+pub const SPEC_PLAN_SCHEMA: &str = "enzyme.spec-plan.v1";
 
 pub fn run(options: PlanOptions<'_>) -> Result<()> {
     let plans = plan(&options)?;
@@ -118,7 +126,9 @@ pub fn run(options: PlanOptions<'_>) -> Result<()> {
         let vaults: Vec<&VaultPlan> = plans.iter().map(|(plan, _)| plan).collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "vaults": vaults }))?
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "schema": SPEC_PLAN_SCHEMA, "vaults": vaults })
+            )?
         );
     } else {
         for (i, (plan, _)) in plans.iter().enumerate() {
@@ -146,15 +156,24 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         .context("HOME missing")?;
     // A file inside the runtime configs directory shares its namespace (e.g.
     // profiles defined in profiles.enzyme), so resolve it with its siblings.
-    let mut programs = vec![ast.clone()];
+    // Another workspace's invalid file does not block planning this one.
+    let mut others = Vec::new();
     if let Some(directory) = runtime_configs_directory(file)? {
-        for (path, program) in enzyme_spec::source_files(&directory)? {
-            if !same_file(&path, file) {
-                programs.push(program);
+        for entry in std::fs::read_dir(&directory)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "enzyme")
+                && path.is_file()
+                && !same_file(&path, file)
+                && let Ok(program) = enzyme_spec::parse(&std::fs::read_to_string(&path)?)
+            {
+                others.push(program);
             }
         }
     }
-    let globals: Vec<Learning> = programs.iter().map(|p| p.learning.clone()).collect();
+    let globals: Vec<Learning> = std::iter::once(&ast)
+        .chain(&others)
+        .map(|p| p.learning.clone())
+        .collect();
     let raw_scopes: Vec<enzyme_spec::Vault> = ast
         .vaults
         .iter()
@@ -165,8 +184,10 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
                 .map(|workspace| workspace.unresolved_vault()),
         )
         .collect();
-    let mut resolved = enzyme_spec::resolve(programs, &user_home)?;
-    // `resolve` keeps program order, so this file's vaults/workspaces come first.
+    let environment =
+        enzyme_core::config::spec_environment(&user_home, &EnzymePaths::enzyme_home()?)?;
+    let mut resolved = enzyme_spec::resolve_with_in(others, ast.clone(), &environment)?.program;
+    // The candidate resolves first and fully, so its vaults/workspaces come first.
     resolved.vaults.truncate(raw_scopes.len());
     anyhow::ensure!(
         !resolved.vaults.is_empty(),
@@ -297,7 +318,6 @@ fn plan_vault(
         max_context_chars: limits.max_context_chars,
         max_samples: limits.max_samples,
         concurrency: None,
-        stream_partial_catalysts: false,
         force_regenerate: false,
         min_context_documents: limits.min_context_documents,
         min_context_tokens: limits.min_context_tokens,
@@ -342,12 +362,14 @@ fn plan_vault(
             },
         },
         prompts: if llm.is_local() { "local" } else { "hosted" },
-        selection: if config.has_curated_entities() {
-            "readings"
-        } else {
-            "automatic"
+        selection: match (&selection.diagnostics.automatic, spec.readings.is_empty()) {
+            (Some(_), false) => "readings and automatic",
+            (Some(_), true) => "automatic",
+            (None, _) if config.has_curated_entities() => "readings",
+            (None, _) => "automatic",
         },
         readings,
+        automatic: selection.diagnostics.automatic.clone(),
         other_jobs: jobs
             .jobs
             .iter()
@@ -707,8 +729,18 @@ fn render(plan: &VaultPlan) -> String {
         "  reference    {} ({})\n  prompts      {}\n",
         plan.reference.instant, plan.reference.source, plan.prompts
     ));
-    if plan.selection == "automatic" {
-        s.push_str("  selection    automatic (no readings declared)\n");
+    match &plan.automatic {
+        Some(a) => {
+            let up_to = a.up_to.map_or_else(String::new, |n| format!(", up to {n}"));
+            s.push_str(&format!(
+                "  selection    {} (learn questions automatically: {} declared of limit {}{up_to} → {} automatic slots)\n",
+                plan.selection, a.declared, a.limit, a.slots
+            ));
+        }
+        None if plan.selection == "automatic" => {
+            s.push_str("  selection    automatic (no readings declared)\n");
+        }
+        None => {}
     }
     for (i, r) in plan.readings.iter().enumerate() {
         s.push_str(&format!("\n{}. {}  about {}\n", i + 1, r.source, r.profile));
@@ -770,8 +802,26 @@ fn render(plan: &VaultPlan) -> String {
             s.push_str(&format!("   ! {note}\n"));
         }
     }
+    if let Some(a) = &plan.automatic {
+        s.push_str(&format!(
+            "\nautomatic selection  {} picked · {} linked pages of picked folders\n",
+            a.picked.len(),
+            a.expanded.len()
+        ));
+        for e in &a.picked {
+            s.push_str(&format!("   picked     {} {}\n", e.entity_type, e.name));
+        }
+        for e in &a.expanded {
+            s.push_str(&format!("   expanded   {} {}\n", e.entity_type, e.name));
+        }
+        if plan.other_jobs.is_empty() && plan.other_skipped.is_empty() {
+            s.push_str("   jobs       none\n");
+        }
+    }
     if !plan.other_jobs.is_empty() || !plan.other_skipped.is_empty() {
-        s.push_str("\nother selected entities\n");
+        if plan.automatic.is_none() {
+            s.push_str("\nother selected entities\n");
+        }
         s.push_str(&jobs_text(&plan.other_jobs));
         for skip in &plan.other_skipped {
             s.push_str(&format!(

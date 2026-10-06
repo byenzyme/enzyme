@@ -251,6 +251,12 @@ CREATE TABLE IF NOT EXISTS catalyst_epoch_embeddings_packed (
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
+/// Columns added to existing tables by migrations (see `migrations.rs`). A
+/// read-only reader checks them too, since a pre-migration index has the
+/// tables but would fail queries that select these columns.
+pub const MIGRATED_COLUMNS: &[(&str, &str)] =
+    &[("chunks", "entry_date"), ("entity_occurrences", "weight")];
+
 pub const EXPECTED_TABLES: &[&str] = &[
     "docs",
     "doc_tags",

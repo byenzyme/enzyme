@@ -276,7 +276,11 @@ async fn compile_generates_parseable_setup_and_preserves_existing_policies() {
         1
     );
     let saved_program = enzyme_spec::parse(&fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved_program.vaults.len(), 2);
+    // compile writes the generated Markdown vault as a `workspace` block,
+    // replaces it in place, and leaves the sibling `vault` block untouched.
+    assert_eq!(saved_program.vaults.len(), 1);
+    assert_eq!(saved_program.workspaces.len(), 1);
+    assert!(saved_program.workspaces[0].markdown_path().is_some());
     assert_eq!(saved_program.settings.updates, Some(false));
     assert!(saved_program.vaults.iter().any(|v| v.path == "/sibling"));
     fs::write(&file, "vault broken {").unwrap();

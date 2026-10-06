@@ -3,8 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use enzyme_core::kernel::Generator;
-use enzyme_core::llm::{ConfigProvider, GenerationParams, Message};
+use enzyme_core::llm::{ConfigProvider, GenerationParams, Generator, Message};
 use futures::StreamExt;
 
 fn env_lock() -> &'static Mutex<()> {
