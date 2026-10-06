@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
+use crate::models::EntityType;
 use crate::pipeline::exclusions::FolderExclusions;
 use crate::pipeline::selection_steps;
 
@@ -48,6 +49,17 @@ impl SelectionResult {
             }),
         }
     }
+}
+
+/// `leave out tags|links` as (lowercase name, type).
+fn left_out_names(config: &EnzymeConfig) -> HashSet<(String, EntityType)> {
+    config
+        .parse_preferences()
+        .excluded_names
+        .into_iter()
+        .filter(|e| e.entity_type != EntityType::Folder)
+        .map(|e| (e.name.to_lowercase(), e.entity_type))
+        .collect()
 }
 
 /// Selects entities for catalyst generation, either from user config or coverage selection.
@@ -100,7 +112,12 @@ impl<'a> SelectionPipeline<'a> {
         }
 
         info!("selecting entities from coverage-aware catalyst-candidate selection");
-        self.select_catalyst_candidates(&exclusions)
+        let left_out = config.map(left_out_names).unwrap_or_default();
+        self.select_catalyst_candidates(
+            &exclusions,
+            &left_out,
+            crate::config::enzyme_config::SelectionConfig::automatic_limit(config),
+        )
     }
 
     /// Select entities from user-curated config.
@@ -181,24 +198,20 @@ impl<'a> SelectionPipeline<'a> {
         materialized.diagnostics.missing = missing;
         materialized.diagnostics.left_out = left_out;
 
-        if let Some(automatic) = config
+        if let Some(spec) = config
             .reading_spec
             .as_ref()
-            .and_then(|spec| spec.automatic.as_ref())
+            .filter(|spec| spec.automatic.is_some())
         {
             // Readings plus automatic selection. Only readable programs can
             // ask for it, and init never writes their selection back.
-            let left_out = prefs
-                .excluded_names
-                .iter()
-                .map(|e| (e.name.to_lowercase(), e.entity_type.clone()))
-                .collect();
             selection_steps::add_automatic_selection(
                 self.db,
                 &mut materialized,
-                automatic.up_to,
+                spec,
+                crate::config::enzyme_config::SelectionConfig::automatic_limit(Some(config)),
                 exclusions,
-                &left_out,
+                &left_out_names(config),
             )?;
         }
 
@@ -212,11 +225,14 @@ impl<'a> SelectionPipeline<'a> {
     }
 
     /// Select entities using coverage-aware catalyst-candidate selection + deterministic profiles.
-    fn select_catalyst_candidates(&self, exclusions: &FolderExclusions) -> Result<SelectionResult> {
+    fn select_catalyst_candidates(
+        &self,
+        exclusions: &FolderExclusions,
+        left_out: &HashSet<(String, EntityType)>,
+        limit: usize,
+    ) -> Result<SelectionResult> {
         let materialized = selection_steps::build_catalyst_candidate_selection(
-            self.db,
-            selection_steps::AUTOMATIC_LIMIT,
-            exclusions,
+            self.db, limit, exclusions, left_out,
         )?;
 
         info!(

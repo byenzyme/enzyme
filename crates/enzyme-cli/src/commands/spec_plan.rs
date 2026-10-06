@@ -117,13 +117,18 @@ pub struct VaultPlan {
     pub totals: Totals,
 }
 
+/// Names the `spec plan --json` shape; see docs/cli-json.md.
+pub const SPEC_PLAN_SCHEMA: &str = "enzyme.spec-plan.v1";
+
 pub fn run(options: PlanOptions<'_>) -> Result<()> {
     let plans = plan(&options)?;
     if options.json {
         let vaults: Vec<&VaultPlan> = plans.iter().map(|(plan, _)| plan).collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "vaults": vaults }))?
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "schema": SPEC_PLAN_SCHEMA, "vaults": vaults })
+            )?
         );
     } else {
         for (i, (plan, _)) in plans.iter().enumerate() {

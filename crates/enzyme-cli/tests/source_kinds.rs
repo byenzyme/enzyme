@@ -448,3 +448,46 @@ FROM records WHERE feed = {source}"""
         .unwrap();
     assert_eq!(refs, ["sqlite:cal/t2", "sqlite:mail/t1"]);
 }
+
+/// In a query, `{source}` is the escaped key the engine requires refs to
+/// start with, so hand-named sources (spaces, non-ASCII) still index.
+#[test]
+fn source_placeholder_escapes_names_the_engine_would_reject() {
+    let homes = Homes::new();
+    let ledger = homes.enzyme.join("workspaces/meetings/ledger.db");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let db = Connection::open(&ledger).unwrap();
+    db.execute_batch(
+        "CREATE TABLE records (id TEXT PRIMARY KEY, at_ms INTEGER, body TEXT);
+         INSERT INTO records VALUES ('t1', 1700000000000, 'mail thread about the launch');",
+    )
+    .unwrap();
+    drop(db);
+    homes.config(
+        "kinds.enzyme",
+        r#"source kind ledger {
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT 'sqlite:' || {source} || '/' || id AS ref, id, at_ms, body FROM records"""
+  id "id"
+  document ref "ref"
+  when "at_ms" unit ms
+  what "body"
+}
+"#,
+    );
+    homes.config(
+        "meetings.enzyme",
+        "workspace \"meetings\" {\n  source ledger \"My Mail\" {}\n  source ledger \"Café\" {}\n}\n",
+    );
+    homes.index("meetings");
+    let db = Connection::open(homes.enzyme.join("workspaces/meetings/enzyme.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT source_ref FROM docs ORDER BY source_ref")
+        .unwrap();
+    let refs: Vec<String> = statement
+        .query_map((), |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(refs, ["sqlite:Caf%C3%A9/t1", "sqlite:My%20Mail/t1"]);
+}

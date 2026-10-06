@@ -1266,7 +1266,7 @@ dependencies = [
 [[package]]
 name = "enzyme-spec"
 version = "0.3.0"
-source = "git+https://github.com/byenzyme/enzyme-spec?rev=845f3e8cf2a132ee6f6465eec7a0b75008f8d6e8#845f3e8cf2a132ee6f6465eec7a0b75008f8d6e8"
+source = "git+https://github.com/byenzyme/enzyme-spec?rev=2b84b4b80b2f908a399a85eacbdf1831e8bd7ce0#2b84b4b80b2f908a399a85eacbdf1831e8bd7ce0"
 dependencies = [
  "anyhow",
  "fs2",

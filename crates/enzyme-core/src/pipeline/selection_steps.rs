@@ -67,7 +67,7 @@ pub struct SelectionDiagnostics {
 /// declared readings and automatic picks.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct AutomaticDiagnostics {
-    /// [`AUTOMATIC_LIMIT`].
+    /// The automatic limit: [`AUTOMATIC_LIMIT`] or `selection limit N`.
     pub limit: usize,
     /// Entities explicit readings selected (after leave-outs); each takes a slot.
     pub declared: usize,
@@ -166,13 +166,27 @@ fn scored(entities: &[Entity], stats: &HashMap<i64, EntitySelectionStats>) -> Ve
 /// `folder_exclusions` is the unified structural-exclusion set threaded from the
 /// config boundary (see `docs/design/entity-exclusions-refactor.md`); it is what
 /// makes the user's `config.excluded_folders` bite on the catalyst-candidate path.
+/// `left_out` holds `leave out tags|links` as (lowercase name, type); those are
+/// never picked or expanded into.
 pub fn build_catalyst_candidate_selection(
     db: &Database,
     limit: usize,
     folder_exclusions: &FolderExclusions,
+    left_out: &HashSet<(String, EntityType)>,
 ) -> Result<MaterializedSelection> {
-    let base_entities = EntityMap::select_catalyst_candidates(db, limit, folder_exclusions)?;
-    let expandable_folders = auto_expandable_folders(db, &base_entities)?;
+    let is_left_out = |e: &Entity| left_out.contains(&(e.name.to_lowercase(), e.entity_type.clone()));
+    let base_entities = EntityMap::select_catalyst_candidates_after(
+        db,
+        limit,
+        folder_exclusions,
+        &[],
+        &is_left_out,
+    )?;
+    let mut expandable_folders = auto_expandable_folders(db, &base_entities)?;
+    for children in expandable_folders.values_mut() {
+        children.retain(|child| !left_out.contains(&(child.to_lowercase(), EntityType::Link)));
+    }
+    expandable_folders.retain(|_, children| !children.is_empty());
     let final_entities = expand_with_folder_children(db, &base_entities, &expandable_folders)?;
     let entity_map = EntityMap::from_entities(db, &final_entities)?;
     let entity_profiles =
@@ -188,39 +202,100 @@ pub fn build_catalyst_candidate_selection(
     })
 }
 
+/// Entities a declared reading's own cap governs, so automatic selection must
+/// not add them: matches of a name pattern, linked pages of a folder a reading
+/// declares, and who links of a source read `including who links`.
+struct ReadingCaps {
+    patterns: Vec<(EntityType, String)>,
+    links: HashSet<String>,
+}
+
+impl ReadingCaps {
+    fn new(db: &Database, spec: &enzyme_spec::Vault, declared: &[Entity]) -> Result<Self> {
+        let patterns = spec
+            .readings
+            .iter()
+            .filter(|r| r.pattern)
+            .map(|r| {
+                let (kind, glob) = enzyme_spec::split_entity(&r.entity);
+                let entity_type = if kind == "tag" {
+                    EntityType::Tag
+                } else {
+                    EntityType::Link
+                };
+                (entity_type, glob.to_string())
+            })
+            .collect();
+        let folders: HashSet<&str> = declared
+            .iter()
+            .filter(|e| e.entity_type == EntityType::Folder)
+            .map(|e| e.name.as_str())
+            .collect();
+        let mut links: HashSet<String> = db
+            .get_folder_page_entity_candidates_grouped(&folders)?
+            .into_values()
+            .flatten()
+            .map(|e| e.name.to_lowercase())
+            .collect();
+        for reading in spec.readings.iter().filter(|r| r.include_who_links) {
+            let (_, name) = enzyme_spec::split_entity(&reading.entity);
+            links.extend(
+                db.get_sqlite_who_link_candidates(&format!("{name}/"))?
+                    .into_iter()
+                    .map(|e| e.name.to_lowercase()),
+            );
+        }
+        Ok(Self { patterns, links })
+    }
+
+    fn governs(&self, entity: &Entity) -> bool {
+        (entity.entity_type == EntityType::Link
+            && self.links.contains(&entity.name.to_lowercase()))
+            || self.patterns.iter().any(|(entity_type, glob)| {
+                *entity_type == entity.entity_type && enzyme_spec::glob_matches(glob, &entity.name)
+            })
+    }
+}
+
 /// Add automatic (coverage) selection to a readings selection
 /// (`learn questions automatically`). Explicit readings are automatic
-/// selection's first picks: each takes one of [`AUTOMATIC_LIMIT`]'s slots and
-/// its documents count as covered. The remaining slots (at most `up_to`) go
-/// to the same coverage algorithm used without readings, never to an entity
-/// already selected or left out; picked folders expand as they would
-/// automatically.
+/// selection's first picks: each takes one of the `limit` slots
+/// ([`AUTOMATIC_LIMIT`] unless `settings { selection limit N }`). Everything
+/// the readings selected counts as covered. The remaining slots (at most
+/// `up to N`) go to the same coverage algorithm used without readings, never
+/// to an entity already selected, left out, or governed by a reading's own
+/// cap (pattern matches, a declared folder's linked pages, a source's who
+/// links); picked folders expand as they would automatically.
 pub fn add_automatic_selection(
     db: &Database,
     selection: &mut MaterializedSelection,
-    up_to: Option<usize>,
+    spec: &enzyme_spec::Vault,
+    limit: usize,
     folder_exclusions: &FolderExclusions,
     left_out: &HashSet<(String, EntityType)>,
 ) -> Result<()> {
+    let up_to = spec.automatic.as_ref().and_then(|a| a.up_to);
     let key = |e: &Entity| (e.name.to_lowercase(), e.entity_type.clone());
+    let caps = ReadingCaps::new(db, spec, &selection.base_entities)?;
+    let excluded = |e: &Entity| left_out.contains(&key(e)) || caps.governs(e);
     let mut present: HashSet<(String, EntityType)> =
         selection.final_entities.iter().map(key).collect();
-    let skip = |e: &Entity| present.contains(&key(e)) || left_out.contains(&key(e));
+    let skip = |e: &Entity| present.contains(&key(e)) || excluded(e);
     let declared = selection.base_entities.len();
-    let slots = AUTOMATIC_LIMIT
+    let slots = limit
         .saturating_sub(declared)
         .min(up_to.unwrap_or(usize::MAX));
     let picked = EntityMap::select_catalyst_candidates_after(
         db,
         slots,
         folder_exclusions,
-        &selection.base_entities,
+        &selection.final_entities,
         &skip,
     )?;
     let folders = auto_expandable_folders(db, &picked)?;
     let mut added = Vec::new();
     for entity in expand_with_folder_children(db, &picked, &folders)? {
-        if !left_out.contains(&key(&entity)) && present.insert(key(&entity)) {
+        if !excluded(&entity) && present.insert(key(&entity)) {
             added.push(entity);
         }
     }
@@ -232,7 +307,7 @@ pub fn add_automatic_selection(
         "added automatic selection to readings"
     );
     let diagnostics = AutomaticDiagnostics {
-        limit: AUTOMATIC_LIMIT,
+        limit,
         declared,
         up_to,
         slots,

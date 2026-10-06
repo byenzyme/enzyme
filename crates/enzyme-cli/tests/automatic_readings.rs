@@ -336,3 +336,126 @@ fn init_reads_both_reports_both_and_writes_nothing_back() {
         "selection changed"
     );
 }
+
+fn plan_json(f: &VaultFixture, file: &std::path::Path) -> Value {
+    let out = f
+        .cli()
+        .args(["spec", "plan", "--json"])
+        .arg(file.to_string_lossy())
+        .run();
+    let plan = json(&out);
+    assert_eq!(plan["schema"], "enzyme.spec-plan.v1");
+    plan["vaults"][0].clone()
+}
+
+fn all_job_keys(v: &Value) -> Vec<(String, String)> {
+    let mut jobs: Vec<Value> = v["other_jobs"].as_array().unwrap().clone();
+    for reading in v["readings"].as_array().unwrap() {
+        jobs.extend(reading["jobs"].as_array().unwrap().iter().cloned());
+    }
+    keys(&jobs, "entity_name", "entity_type")
+}
+
+#[test]
+fn automatic_picks_respect_reading_caps() {
+    let f = fixture();
+    f.cli()
+        .args(["init", "--stage", "index", "--quiet"])
+        .run()
+        .assert_success();
+    let file = f.root().join("caps.enzyme");
+    fs::write(
+        &file,
+        format!(
+            r#"vault "{}" {{
+  learn questions from folder "people" including linked pages {{
+    select 1 by frequency
+  }}
+  learn questions from tags matching "*a*" {{
+    select 1 by frequency
+  }}
+  learn questions automatically
+  leave out tags {{ "draft" }}
+}}
+"#,
+            vault(&f)
+        ),
+    )
+    .unwrap();
+    let v = plan_json(&f, &file);
+    let jobs = all_job_keys(&v);
+    assert_unique(&jobs);
+    // Each capped reading keeps exactly one child; automatic adds no other.
+    let links: Vec<_> = jobs.iter().filter(|(t, _)| t == "link").collect();
+    assert_eq!(links.len(), 1, "{jobs:?}");
+    let tags: Vec<_> = jobs
+        .iter()
+        .filter(|(t, n)| t == "tag" && n.contains('a'))
+        .collect();
+    assert_eq!(tags.len(), 1, "{jobs:?}");
+    let picked = keys(v["automatic"]["picked"].as_array().unwrap(), "name", "entity_type");
+    assert!(!picked.is_empty(), "{v:#}");
+    assert!(
+        picked.iter().all(|(t, _)| t == "folder"),
+        "automatic picked a capped entity: {picked:?}"
+    );
+}
+
+#[test]
+fn plain_automatic_selection_honours_tag_leave_outs_and_the_selection_limit() {
+    let f = fixture();
+    let configs = f.enzyme_home().join("configs");
+    fs::create_dir_all(&configs).unwrap();
+    f.cli()
+        .args(["init", "--stage", "index", "--quiet"])
+        .run()
+        .assert_success();
+
+    // No readings: plain automatic selection, which used to pick `draft`.
+    let file = configs.join("plain.enzyme");
+    fs::write(
+        &file,
+        format!("vault \"{}\" {{\n  leave out tags {{ \"draft\" }}\n}}\n", vault(&f)),
+    )
+    .unwrap();
+    let v = plan_json(&f, &file);
+    assert_eq!(v["selection"], "automatic");
+    let jobs = all_job_keys(&v);
+    assert!(!jobs.is_empty());
+    assert!(
+        !jobs.contains(&("tag".into(), "draft".into())),
+        "left-out tag selected: {jobs:?}"
+    );
+    let status = readiness(&f);
+    assert!(
+        !keys(status["entities"].as_array().unwrap(), "name", "type")
+            .contains(&("tag".into(), "draft".into())),
+        "{status:#}"
+    );
+
+    // `selection limit` is the automatic budget; readings take slots first.
+    fs::write(
+        configs.join("settings.enzyme"),
+        "settings {\n  selection limit 3\n  selection tags 2\n}\n",
+    )
+    .unwrap();
+    fs::write(&file, program(&f, "learn questions automatically")).unwrap();
+    let out = f
+        .cli()
+        .args(["spec", "plan", "--json"])
+        .arg(file.to_string_lossy())
+        .run();
+    let v = json(&out)["vaults"][0].clone();
+    assert_eq!(v["automatic"]["limit"], 3, "{v:#}");
+    assert_eq!(v["automatic"]["slots"], 1, "{v:#}");
+    assert_eq!(v["automatic"]["picked"].as_array().unwrap().len(), 1);
+    // Commands log to the vault's enzyme.log (stderr when it is absent).
+    let status = f.cli().args(["status", "--json"]).run();
+    let log = fs::read_to_string(f.vault_enzyme_dir().join("enzyme.log")).unwrap_or_default();
+    assert!(
+        log.contains("`selection tags` is deprecated")
+            || status.combined().contains("`selection tags` is deprecated"),
+        "{}\n{log}",
+        status.combined()
+    );
+}
