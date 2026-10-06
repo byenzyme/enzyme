@@ -53,12 +53,14 @@ pub fn build_search_json(
     phrase: Option<&str>,
 ) -> Result<serde_json::Value> {
     let paths = EnzymePaths::new(vault_path)?;
-    let index = open_read_only(&paths.home, &paths.vault_db)?.with_context(|| {
-        format!(
-            "no index at {}; run `enzyme init` first",
-            paths.vault_db.display()
-        )
-    })?;
+    let index = open_read_only(&paths.home, &paths.vault_db)?
+        .with_context(|| {
+            format!(
+                "no index at {}; run `enzyme init` first",
+                paths.vault_db.display()
+            )
+        })
+        .map_err(super::exit::CliFailure::config)?;
 
     let (catalyst_hits, top_catalysts): (Vec<SearchHit>, Vec<TopCatalyst>) =
         if index.bridged == Bridged::Ready {

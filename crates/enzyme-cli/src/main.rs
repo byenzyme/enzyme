@@ -474,6 +474,15 @@ fn foreground_workspace_lock(
     commands::init::acquire_foreground_workspace_lock(vault_path, &paths).map(Some)
 }
 
+/// Fail with the usage exit code (2) unless `condition` holds.
+fn usage_ensure(condition: bool, message: &'static str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(commands::exit::CliFailure::usage(anyhow::anyhow!(message)))
+    }
+}
+
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     match vault {
         Some(p) => Ok(p),
@@ -500,10 +509,21 @@ async fn main() -> std::process::ExitCode {
             ..
         }
     );
+    // Commands whose failures still owe stdout a JSON summary.
+    let machine_output = json_progress
+        || matches!(
+            &cli.command,
+            Commands::Init { quiet: true, .. } | Commands::Catalyze { .. }
+        );
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             let kind = commands::exit::exit_kind(&error);
+            if machine_output
+                && let Some(summary) = commands::exit::failure_summary(&error)
+            {
+                println!("{summary}");
+            }
             if json_progress {
                 eprintln!(
                     "{}",
@@ -524,10 +544,10 @@ async fn run(cli: Cli) -> Result<()> {
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
         Commands::Spec { command } => {
-            anyhow::ensure!(
+            usage_ensure(
                 cli.collection.is_none(),
-                "spec commands take Markdown vault paths, not named workspaces"
-            );
+                "spec commands take Markdown vault paths, not named workspaces",
+            )?;
             return commands::spec::run(command, cli.vault.as_deref()).await;
         }
         Commands::Mcp => {
@@ -587,14 +607,15 @@ async fn run(cli: Cli) -> Result<()> {
     } = &cli.command
     {
         if let Some(preset) = preset {
-            anyhow::ensure!(
+            usage_ensure(
                 cli.vault.is_none(),
-                "preset compilation uses --workspace, not --vault"
-            );
+                "preset compilation uses --workspace, not --vault",
+            )?;
             let workspace_name = cli
                 .collection
                 .as_deref()
-                .context("preset compilation requires --workspace <name>")?;
+                .context("preset compilation requires --workspace <name>")
+                .map_err(commands::exit::CliFailure::usage)?;
             return commands::compile_preset::run(
                 *preset,
                 sources,
@@ -606,14 +627,14 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await;
         }
-        anyhow::ensure!(
+        usage_ensure(
             sources.is_empty(),
-            "source arguments require --preset arena or --preset apple-notes"
-        );
-        anyhow::ensure!(
+            "source arguments require --preset arena or --preset apple-notes",
+        )?;
+        usage_ensure(
             cli.collection.is_none(),
-            "compile supports Markdown vaults, not named workspaces"
-        );
+            "compile supports Markdown vaults, not named workspaces",
+        )?;
         return commands::compile::run(
             &vault_path,
             *color,

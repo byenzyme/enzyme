@@ -5,7 +5,7 @@
 //! SKEW AXIS: **CO-LOCATED CLI skew** (R3) — matrix cell 10.
 //!
 //! Two `enzyme` CLIs can share one machine's free-config cache
-//! (`ENZYME_API_CACHE_PATH`, default `/tmp/enzyme-api-cache`). A newer co-located
+//! (`ENZYME_API_CACHE_PATH`, default `$ENZYME_HOME/api-cache`). A newer co-located
 //! CLI writing that cache and an OLDER CLI reading it must stay compatible. The
 //! old CLI is the FIXED artifact driven here (`env!("CARGO_BIN_EXE_enzyme")`); a
 //! "newer CLI" is EMULATED by seeding the shared cache file with the exact shape

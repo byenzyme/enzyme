@@ -5,6 +5,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
+
+use super::exit::{ExitKind, FailureWithSummary};
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::search::context::{CatalyzeResponse, ContextSearch, TARGET_PROJECTION_NOT_READY};
@@ -19,14 +21,20 @@ pub async fn run_catalyze(
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
+    // No index yet: still answer with the JSON envelope (printed by `main`),
+    // but exit 3 so callers need not parse it to notice.
     if !paths.vault_db.exists() {
+        let message = "Vault not initialized. Run 'enzyme init' first.";
         let output = json!({
-            "error": "Vault not initialized. Run 'enzyme init' first.",
+            "error": message,
             "query": query,
             "results": []
         });
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
+        return Err(FailureWithSummary::new(
+            ExitKind::Config,
+            output,
+            message.to_string(),
+        ));
     }
 
     let db = Database::open(&paths.vault_db)?;

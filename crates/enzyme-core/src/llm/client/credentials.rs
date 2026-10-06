@@ -20,7 +20,9 @@ const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL: &str = "gpt-4o-mini";
 const FREE_CONFIG_URL: &str = "https://api.enzyme.garden/llm/free-config";
 const FREE_CONFIG_BOOTSTRAP_HEADER: &str = "X-Enzyme-Bootstrap-Id";
-const DEFAULT_API_CACHE_PATH: &str = "/tmp/enzyme-api-cache";
+/// Hosted lease cache file under `$ENZYME_HOME` (private to the user and to
+/// that home, unlike the former shared `/tmp/enzyme-api-cache`).
+const API_CACHE_FILE: &str = "api-cache";
 const FREE_CONFIG_CACHE_TTL_SECS: u64 = 300;
 /// Leave enough lease life for broker/request latency and modest clock skew.
 const FREE_CONFIG_EXPIRY_SAFETY_MARGIN_SECS: u64 = 30;
@@ -277,7 +279,11 @@ fn api_cache_path() -> std::path::PathBuf {
         .ok()
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_API_CACHE_PATH))
+        .unwrap_or_else(|| {
+            crate::config::paths::EnzymePaths::enzyme_home()
+                .map(|home| home.join(API_CACHE_FILE))
+                .unwrap_or_else(|_| std::env::temp_dir().join("enzyme-api-cache"))
+        })
 }
 
 fn configured_catalyst_mode() -> Result<CatalystMode> {

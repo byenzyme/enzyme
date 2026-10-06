@@ -8,6 +8,7 @@
 //! | 2 | Usage error: bad flags or arguments (clap), invalid workspace name |
 //! | 3 | Configuration or program error: unreadable/invalid config, undeclared workspace, missing source |
 //! | 4 | Workspace busy: another init/refresh held the workspace lock past `--lock-timeout` |
+//! | 5 | Catalysts failed: `init` built the index, but catalyst generation failed its quality gate |
 
 use std::fmt;
 
@@ -17,6 +18,7 @@ pub enum ExitKind {
     Usage = 2,
     Config = 3,
     Busy = 4,
+    CatalystsFailed = 5,
 }
 
 /// An error that selects a specific exit code. Wrap the underlying error with
@@ -56,12 +58,56 @@ impl fmt::Display for CliFailure {
 
 impl std::error::Error for CliFailure {}
 
+/// A classified failure that still produced a machine-readable summary (for
+/// example `init --quiet` whose catalysts failed after the index was built).
+/// `main` prints `summary` on stdout for quiet/JSON callers before exiting.
+#[derive(Debug)]
+pub struct FailureWithSummary {
+    pub kind: ExitKind,
+    pub summary: serde_json::Value,
+    message: String,
+}
+
+impl FailureWithSummary {
+    pub fn new(kind: ExitKind, summary: serde_json::Value, message: String) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            kind,
+            summary,
+            message,
+        })
+    }
+}
+
+impl fmt::Display for FailureWithSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FailureWithSummary {}
+
+/// The summary carried by a [`FailureWithSummary`] anywhere in the chain.
+pub fn failure_summary(error: &anyhow::Error) -> Option<&serde_json::Value> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FailureWithSummary>())
+        .map(|failure| &failure.summary)
+}
+
 /// The exit code for an error returned from `main`.
 pub fn exit_kind(error: &anyhow::Error) -> ExitKind {
     error
         .chain()
-        .find_map(|cause| cause.downcast_ref::<CliFailure>())
-        .map(|failure| failure.kind)
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<CliFailure>()
+                .map(|failure| failure.kind)
+                .or_else(|| {
+                    cause
+                        .downcast_ref::<FailureWithSummary>()
+                        .map(|failure| failure.kind)
+                })
+        })
         .unwrap_or(ExitKind::Runtime)
 }
 

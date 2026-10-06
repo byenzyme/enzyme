@@ -124,7 +124,8 @@ impl Database {
         })
     }
 
-    /// Confirm every table of the current schema exists without migrating.
+    /// Confirm every table of the current schema, and every column migrations
+    /// add, exists without migrating.
     ///
     /// Pair with [`Self::open_read_only`] when a reader must refuse an index
     /// built by an older binary with a clear error instead of a query failure.
@@ -144,6 +145,23 @@ impl Database {
             return Err(DbError::Migration(format!(
                 "search index schema is not compatible: missing table {missing}"
             )));
+        }
+        for (table, column) in super::schema::MIGRATED_COLUMNS {
+            let present = !self
+                .query_read(
+                    "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                    vec![
+                        libsql::Value::Text((*table).to_string()),
+                        libsql::Value::Text((*column).to_string()),
+                    ],
+                    |row| row.get::<i64>(0),
+                )?
+                .is_empty();
+            if !present {
+                return Err(DbError::Migration(format!(
+                    "search index schema is not compatible: missing column {table}.{column}"
+                )));
+            }
         }
         Ok(())
     }

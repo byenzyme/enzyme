@@ -41,15 +41,58 @@ struct SourceStatus {
     reachability_error: Option<String>,
 }
 
+/// The index as `status` sees it: never created, migrated, or written.
+enum StatusIndex {
+    Missing,
+    /// Built by an older binary; reading it would need a migration.
+    Outdated(String),
+    Ready(Database),
+}
+
+fn open_status_index(paths: &EnzymePaths) -> Result<StatusIndex> {
+    if !paths.vault_db.exists() {
+        return Ok(StatusIndex::Missing);
+    }
+    let db = Database::open_read_only(&paths.vault_db)?;
+    Ok(match db.validate_expected_schema() {
+        Ok(()) => StatusIndex::Ready(db),
+        Err(error) => StatusIndex::Outdated(error.to_string()),
+    })
+}
+
 /// Build structured JSON with vault status info.
 /// Returns None if the vault is not initialized.
 pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::Value>> {
+    Ok(build_status(vault_path)?.map(|(status, _)| status))
+}
+
+/// Status JSON plus the read-only index it was read from (`None` when the
+/// index schema is outdated and only the identity fields are reported).
+fn build_status(vault_path: &Path) -> Result<Option<(serde_json::Value, Option<Database>)>> {
     let paths = EnzymePaths::new(vault_path)?;
     let workspace = EnzymePaths::bound_workspace(vault_path)?;
 
-    if !paths.vault_db.exists() {
-        return Ok(None);
-    }
+    let db = match open_status_index(&paths)? {
+        StatusIndex::Missing => return Ok(None),
+        StatusIndex::Outdated(reason) => {
+            return Ok(Some((
+                json!({
+                    "workspace": workspace,
+                    "vault": vault_path.display().to_string(),
+                    "database": paths.vault_db.display().to_string(),
+                    "schema_outdated": true,
+                    "update": {
+                        "status": "schema_outdated",
+                        "regen_required": true,
+                        "reason": reason,
+                        "binary": { "current": BINARY_VERSION, "last_outcome": null },
+                    },
+                }),
+                None,
+            )));
+        }
+        StatusIndex::Ready(db) => db,
+    };
 
     // Status must stay read-only and offline: report provider intent from the
     // persisted mode rather than resolving hosted credentials over the network.
@@ -72,8 +115,6 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
 
     let model_path = enzyme_core::embedding::model_description(&paths.home);
 
-    let db = Database::open(&paths.vault_db)?;
-
     let doc_count = db.get_document_count()?;
     let entities = db.get_all_entities()?;
     let entity_count = entities.len();
@@ -85,6 +126,7 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
     let embedded_count = doc_count - awaiting_embedding;
     let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     let sources = build_source_statuses(&db, &config.sources)?;
+    let markdown = build_markdown_freshness(&db, vault_path, &config)?;
 
     // Terminal outcome of the most recent detached background epoch build
     // (see `refresh_outcome`). `null` when no background build has finished
@@ -114,10 +156,11 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "last_outcome": binary_update,
     });
 
-    Ok(Some(json!({
+    let status = json!({
         "workspace": workspace,
         "vault": vault_path.display().to_string(),
         "database": paths.vault_db.display().to_string(),
+        "schema_outdated": false,
         "documents": doc_count,
         "embedded": embedded_count,
         "awaiting_embedding": awaiting_embedding,
@@ -132,8 +175,27 @@ pub async fn build_status_json(vault_path: &Path) -> Result<Option<serde_json::V
         "api_access": api_access,
         "last_background_refresh": last_background_refresh,
         "sources": sources,
+        "markdown": markdown,
         "update": update,
-    })))
+    });
+    Ok(Some((status, Some(db))))
+}
+
+/// Markdown freshness for targets that read Markdown (`null` for a named
+/// workspace without a Markdown source).
+fn build_markdown_freshness(
+    db: &Database,
+    vault_path: &Path,
+    config: &EnzymeConfig,
+) -> Result<serde_json::Value> {
+    if EnzymePaths::bound_workspace(vault_path)?.is_some()
+        && config.notes_roots.is_empty()
+        && config.notes_path.is_none()
+    {
+        return Ok(serde_json::Value::Null);
+    }
+    let freshness = super::init::configured_indexing_pipeline(db, vault_path)?.freshness()?;
+    Ok(serde_json::to_value(freshness)?)
 }
 
 fn build_source_statuses(
@@ -185,6 +247,10 @@ fn build_source_statuses(
 
 pub const STATUS_SCHEMA: &str = "enzyme.status.v1";
 
+/// Most entities without catalysts that `status --json` builds a generation
+/// job for to explain readiness; the rest report `unchecked`.
+pub const STATUS_PLAN_LIMIT: usize = 16;
+
 /// Generation readiness of one selected entity.
 #[derive(Debug, Serialize)]
 struct EntityReadiness {
@@ -192,7 +258,8 @@ struct EntityReadiness {
     #[serde(rename = "type")]
     entity_type: String,
     /// `ready` (has catalysts), `skipped` (no generation job; see
-    /// `skip_reason`), or `pending` (has a job but no catalysts yet).
+    /// `skip_reason`), `pending` (has a job but no catalysts yet), or
+    /// `unchecked` (no catalysts; beyond `STATUS_PLAN_LIMIT`, not planned).
     state: &'static str,
     catalysts: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,12 +283,22 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
             .sum()
     };
 
-    let waiting: Vec<_> = selection
+    // Job construction gathers evidence and builds a prompt per entity, so
+    // status plans at most `STATUS_PLAN_LIMIT` entities without catalysts.
+    // Ready entities need no plan; on a fresh or `--llm none` index every
+    // selected entity is waiting, and the cap bounds that worst case.
+    let waiting_all: Vec<_> = selection
         .entities
         .iter()
         .filter(|entity| catalysts_for(&entity.name, entity.entity_type.as_str()) == 0)
         .cloned()
         .collect();
+    let planned: std::collections::HashSet<(String, String)> = waiting_all
+        .iter()
+        .take(STATUS_PLAN_LIMIT)
+        .map(|entity| (entity.name.clone(), entity.entity_type.as_str().to_string()))
+        .collect();
+    let waiting: Vec<_> = waiting_all.into_iter().take(STATUS_PLAN_LIMIT).collect();
     let mut skips = HashMap::new();
     if !waiting.is_empty() {
         let limits = EvidenceLimits::from_env();
@@ -264,6 +341,9 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
             let state = match (catalysts, &skip_reason) {
                 (n, _) if n > 0 => "ready",
                 (_, Some(_)) => "skipped",
+                _ if !planned.contains(&(entity.name.clone(), entity_type.clone())) => {
+                    "unchecked"
+                }
                 _ => "pending",
             };
             EntityReadiness {
@@ -281,6 +361,7 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
         "ready": count("ready"),
         "pending": count("pending"),
         "skipped": count("skipped"),
+        "unchecked": count("unchecked"),
         "entities": entities,
     }))
 }
@@ -314,7 +395,7 @@ fn build_index_manifest(db: &Database) -> Result<serde_json::Value> {
 /// index manifest, under a versioned schema. An uninitialized vault still
 /// answers, with `initialized: false`.
 pub async fn build_status_json_v1(vault_path: &Path) -> Result<serde_json::Value> {
-    let Some(mut status) = build_status_json(vault_path).await? else {
+    let Some((mut status, db)) = build_status(vault_path)? else {
         let paths = EnzymePaths::new(vault_path)?;
         return Ok(json!({
             "schema": STATUS_SCHEMA,
@@ -324,16 +405,16 @@ pub async fn build_status_json_v1(vault_path: &Path) -> Result<serde_json::Value
             "database": paths.vault_db.display().to_string(),
         }));
     };
-    let paths = EnzymePaths::new(vault_path)?;
-    let db = Database::open(&paths.vault_db)?;
     let object = status.as_object_mut().expect("status JSON is an object");
     object.insert("schema".into(), json!(STATUS_SCHEMA));
     object.insert("initialized".into(), json!(true));
-    object.insert(
-        "selection".into(),
-        build_selection_readiness(&db, vault_path)?,
-    );
-    object.insert("index".into(), build_index_manifest(&db)?);
+    if let Some(db) = db {
+        object.insert(
+            "selection".into(),
+            build_selection_readiness(&db, vault_path)?,
+        );
+        object.insert("index".into(), build_index_manifest(&db)?);
+    }
     Ok(status)
 }
 
@@ -384,6 +465,13 @@ pub async fn run_status(vault_path: &Path, json_output: bool) -> Result<()> {
             }
             println!("Database: {}", json["database"].as_str().unwrap_or(""));
             println!();
+            if json["schema_outdated"].as_bool().unwrap_or(false) {
+                println!(
+                    "⚠ Index schema is outdated ({}). The next `enzyme init` or agent refresh will rebuild it.",
+                    json["update"]["reason"].as_str().unwrap_or("built by an older binary")
+                );
+                return Ok(());
+            }
             if let Some(outcome) = &outcome {
                 if outcome.status == OutcomeStatus::Succeeded {
                     println!("Refreshed:  {}", format_finished_at(outcome.finished_at_ms));
@@ -439,6 +527,15 @@ pub async fn run_status(vault_path: &Path, json_output: bool) -> Result<()> {
                         println!("    Stale: no");
                     }
                 }
+            }
+            if json["markdown"]["stale"].as_bool().unwrap_or(false) {
+                println!();
+                println!(
+                    "Markdown: stale ({} new, {} modified, {} deleted since the last index)",
+                    json["markdown"]["files_new"],
+                    json["markdown"]["files_modified"],
+                    json["markdown"]["files_deleted"]
+                );
             }
             if json["update"]["regen_required"].as_bool().unwrap_or(false) {
                 println!();

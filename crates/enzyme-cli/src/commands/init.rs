@@ -32,7 +32,7 @@ use enzyme_core::pipeline::similarity::{
 use enzyme_core::pipeline::staleness::store_staleness_bookkeeping;
 use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
-use super::exit::CliFailure;
+use super::exit::{CliFailure, ExitKind, FailureWithSummary};
 use super::generator::LlmMode;
 use super::lock::{
     WorkspaceLock, acquire_projection_lock, acquire_refresh_lock, acquire_workspace_lock,
@@ -238,7 +238,7 @@ fn should_preserve_db_only_corpus(paths: &EnzymePaths, vault_path: &Path) -> Res
     Ok(db.get_document_count().unwrap_or(0) > 0)
 }
 
-fn configured_indexing_pipeline<'a>(
+pub(crate) fn configured_indexing_pipeline<'a>(
     db: &'a Database,
     vault_path: &Path,
 ) -> Result<IndexingPipeline<'a>> {
@@ -560,10 +560,11 @@ pub async fn run_init_voice_ready(
     let seed_entities = seed_entities.max(1);
     let seed_min_catalysts = seed_min_catalysts.max(1);
     let paths = EnzymePaths::new(vault_path)?;
-    anyhow::ensure!(
-        llm.generates(),
-        "--voice-ready waits for generated catalysts; it cannot run with --llm none"
-    );
+    if !llm.generates() {
+        return Err(CliFailure::usage(anyhow::anyhow!(
+            "--voice-ready waits for generated catalysts; it cannot run with --llm none"
+        )));
+    }
     if llm.may_use_hosted() {
         require_login_for_hosted_init_if_needed(vault_path, &paths)?;
     }
@@ -1449,11 +1450,30 @@ pub async fn run_init(
         eprintln!("  {message}");
     }
 
+    let result = InitResult {
+        status: completion_status,
+        files_discovered: idx_stats.files_discovered,
+        files_new: idx_stats.files_new,
+        files_updated: idx_stats.files_updated,
+        files_deleted: idx_stats.files_deleted,
+        catalysts_generated: cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
+        embeddings_documents: emb_stats.as_ref().map(|stats| stats.documents_embedded),
+        embeddings_pruned: emb_stats.as_ref().map(|stats| stats.documents_pruned),
+        semantic_search: emb_completed,
+        catalysts_available: cat_stats.is_some(),
+        cache_epoch,
+        warnings,
+        duration_ms,
+    };
+
+    // The index is built and searchable, but catalysts failed their quality
+    // gate: exit 5, still handing quiet/JSON callers the summary.
     if completion_status == CompletionStatus::Failed {
-        anyhow::bail!(
-            "{}",
-            completion_message.unwrap_or_else(|| "init failed quality checks".to_string())
-        );
+        return Err(FailureWithSummary::new(
+            ExitKind::CatalystsFailed,
+            result.to_json(vault_path)?,
+            completion_message.unwrap_or_else(|| "init failed quality checks".to_string()),
+        ));
     }
 
     // Show starter prompt on interactive init
@@ -1503,21 +1523,7 @@ pub async fn run_init(
     }
 
     if quiet || json_progress {
-        Ok(Some(InitResult {
-            status: completion_status,
-            files_discovered: idx_stats.files_discovered,
-            files_new: idx_stats.files_new,
-            files_updated: idx_stats.files_updated,
-            files_deleted: idx_stats.files_deleted,
-            catalysts_generated: cat_stats.as_ref().map_or(0, |s| s.catalysts_generated),
-            embeddings_documents: emb_stats.as_ref().map(|stats| stats.documents_embedded),
-            embeddings_pruned: emb_stats.as_ref().map(|stats| stats.documents_pruned),
-            semantic_search: emb_completed,
-            catalysts_available: cat_stats.is_some(),
-            cache_epoch,
-            warnings,
-            duration_ms,
-        }))
+        Ok(Some(result))
     } else {
         Ok(None)
     }
@@ -1637,9 +1643,10 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
         schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
     // The update check is spawned only after the local writes above, and its
     // worker records its outcome under `workspace.lock`, so it never opens the
-    // database read-write while this refresh is writing. `--llm none` promises
-    // no network, so it skips the check.
-    if llm.generates() {
+    // database read-write while this refresh is writing. An explicit
+    // `--llm env|local|none` promises no network beyond its own generator
+    // (`OPENAI_BASE_URL` for env), so only the default and hosted modes check.
+    if llm.may_use_hosted() {
         let _ = super::update::maybe_spawn_background(vault_path, &db);
     }
     let cache_epoch = maybe_bump_collection_cache_epoch(&db, collection_changed)?;
