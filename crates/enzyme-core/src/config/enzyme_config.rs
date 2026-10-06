@@ -364,6 +364,11 @@ pub struct EntityPreferences {
 struct GlobalTomlConfig {
     #[serde(skip)]
     readings: std::collections::BTreeMap<String, enzyme_spec::Vault>,
+    /// Program workspaces whose only source is one Markdown folder, by name.
+    /// The language lowers them path-keyed (into `readings`/`vaults`), so this
+    /// is what lets the same workspace be addressed by its name.
+    #[serde(skip)]
+    lone_markdown_workspaces: std::collections::BTreeMap<String, enzyme_spec::MarkdownSource>,
     #[serde(default)]
     defaults: DefaultsTomlSection,
     #[serde(default)]
@@ -647,7 +652,7 @@ impl EnzymeConfig {
             let global = load_global_toml(&config_path)?;
             let home = config_path.parent().unwrap_or_else(|| Path::new("."));
             if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {
-                return Ok(Some(Self::from_workspace_config(&name, &global)));
+                return Ok(Some(Self::from_named_workspace(&name, &global)));
             }
             return Ok(Some(Self::from_global_config(vault_path, &global)));
         }
@@ -681,7 +686,7 @@ impl EnzymeConfig {
     pub fn from_readable_program(vault_path: &Path, program: enzyme_spec::Program) -> Result<Self> {
         let global = overlay_program(serde_json::json!({}), Some(program))?;
         if let Some(name) = EnzymePaths::bound_workspace(vault_path)? {
-            Ok(Self::from_workspace_config(&name, &global))
+            Ok(Self::from_named_workspace(&name, &global))
         } else {
             Ok(Self::from_global_config(vault_path, &global))
         }
@@ -724,6 +729,81 @@ impl EnzymeConfig {
             Target::Named(name) => Self::from_workspace_config(&name, &global),
             Target::Path(path) => Self::from_global_config(Path::new(&path), &global),
         })
+    }
+
+    /// The runtime view of a workspace addressed by name (`--collection`).
+    ///
+    /// A program workspace whose only source is one Markdown folder lowers
+    /// path-keyed, so its settings live under that path; addressed by name it
+    /// indexes the same folder as its single notes root, with root-relative
+    /// document refs, while the index stays in the home-rooted store. A
+    /// program declaration takes precedence over a legacy `[workspaces.<name>]`
+    /// TOML section of the same name.
+    fn from_named_workspace(name: &str, global: &GlobalTomlConfig) -> Self {
+        let Some(source) = global.lone_markdown_workspaces.get(name) else {
+            return Self::from_workspace_config(name, global);
+        };
+        let path = PathBuf::from(&source.path);
+        let mut config = Self::from_global_config(&path, global);
+        config.notes_roots = vec![NotesRootConfig {
+            name: source.name.clone(),
+            path: path.clone(),
+            document_ref_prefix: None,
+            exclusions: Vec::new(),
+            writable: true,
+        }];
+        config.notes_path = Some(path);
+        config
+    }
+
+    /// Whether the target is a workspace or vault declared by a readable
+    /// program in `configs/`. Program declarations are read-only input: the
+    /// runtime never writes automatic selection back into them.
+    pub fn declared_by_program(vault_path: &Path) -> Result<bool> {
+        Self::declared_by_program_at(vault_path, &Self::config_path()?)
+    }
+
+    pub fn declared_by_program_at(vault_path: &Path, config_path: &Path) -> Result<bool> {
+        let home = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let user_home = dirs::home_dir().context("cannot resolve home directory")?;
+        let Some(program) = enzyme_spec::load_directory(&home.join("configs"), &user_home)? else {
+            return Ok(false);
+        };
+        if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {
+            return Ok(program.workspaces.iter().any(|w| w.name == name));
+        }
+        let key = canonical_vault_key(vault_path);
+        Ok(program.vaults.iter().any(|v| v.path == key))
+    }
+
+    /// Whether a workspace addressed by name is declared anywhere: by a
+    /// program in `configs/` or by a legacy `[workspaces.<name>]` section.
+    /// Path-addressed vaults are always usable and report `true`.
+    pub fn workspace_declared(vault_path: &Path) -> Result<bool> {
+        let config_path = Self::config_path()?;
+        let home = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? else {
+            return Ok(true);
+        };
+        let global = load_global_toml(&config_path)?;
+        Ok(global.workspaces.contains_key(&name)
+            || global.lone_markdown_workspaces.contains_key(&name))
+    }
+
+    /// Whether init may persist automatically selected entities for this
+    /// target. Only legacy TOML-configured targets keep that behavior; a
+    /// program-declared workspace or vault is never rewritten, and a home that
+    /// only has readable programs never gains a generated program file.
+    pub fn persists_auto_selection(vault_path: &Path) -> Result<bool> {
+        let config_path = Self::config_path()?;
+        if Self::declared_by_program_at(vault_path, &config_path)? {
+            return Ok(false);
+        }
+        let configs = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("configs");
+        Ok(config_path.exists() || enzyme_spec::source_files(&configs)?.is_empty())
     }
 
     fn from_global_config(vault_path: &Path, global: &GlobalTomlConfig) -> Self {
@@ -1128,7 +1208,11 @@ impl EnzymeConfig {
                 return Ok(true);
             }
         }
-        if !enzyme_spec::source_files(&directory)?.is_empty() && !config_path.exists() {
+        let config_home = config_path.parent().unwrap_or_else(|| Path::new("."));
+        if !enzyme_spec::source_files(&directory)?.is_empty()
+            && !config_path.exists()
+            && EnzymePaths::bound_workspace_with_home(vault_path, config_home)?.is_none()
+        {
             let mut vault = enzyme_spec::Vault {
                 path: key.clone(),
                 exclusions: self.excluded_folders.clone(),
@@ -1190,6 +1274,19 @@ impl EnzymeConfig {
     }
 
     fn save_at(&self, vault_path: &Path, config_path: &Path, header: &str) -> Result<()> {
+        let config_home = config_path.parent().unwrap_or_else(|| Path::new("."));
+        if EnzymePaths::bound_workspace_with_home(vault_path, config_home)?.is_some()
+            && Self::declared_by_program_at(vault_path, config_path)?
+        {
+            // A program-declared workspace is read-only input. Writing here
+            // would append a TOML copy that the program then shadows, or a
+            // stray program declaring the store directory as a vault.
+            debug!(
+                ?vault_path,
+                "not persisting config for a program-declared workspace"
+            );
+            return Ok(());
+        }
         if self.save_readable(vault_path, config_path)? {
             return Ok(());
         }
@@ -1210,7 +1307,6 @@ impl EnzymeConfig {
                 Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES);
         }
 
-        let config_home = config_path.parent().unwrap_or_else(|| Path::new("."));
         let workspace = EnzymePaths::bound_workspace_with_home(vault_path, config_home)?;
 
         if let Some(name) = workspace.clone() {
@@ -1461,6 +1557,16 @@ fn overlay_program(
     }
     let mut global: GlobalTomlConfig = serde_json::from_value(value)?;
     if let Some(program) = program {
+        global.lone_markdown_workspaces = program
+            .workspaces
+            .iter()
+            .filter_map(|workspace| match workspace.sources.as_slice() {
+                [enzyme_spec::Source::Markdown(source)] => {
+                    Some((workspace.name.clone(), source.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         global.readings = program
             .vaults
             .into_iter()

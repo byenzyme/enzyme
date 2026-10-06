@@ -37,11 +37,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # enzyme-api (a dependency of enzyme-cli) embeds ui/dist via rust-embed;
-      # a placeholder is enough for CLI checks and avoids the npm UI build.
-      - name: Stub UI assets
-        run: mkdir -p ui/dist && echo "release-checks placeholder" > ui/dist/index.html
-
       - name: Build enzyme-cli
         run: cargo build -p enzyme-cli --features local-llm
 

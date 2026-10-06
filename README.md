@@ -113,6 +113,11 @@ For Are.na, use `enzyme --collection <name> compile --preset arena <channel-url>
 and then `enzyme --collection <name> init`. Run `refresh` with the
 same `--collection` name to pick up later changes.
 
+Scripts and host apps can rely on defined exit codes (0 ok, 1 runtime failure,
+2 usage, 3 configuration, 4 workspace busy). Concurrent `init`/`refresh` calls
+on one workspace wait for each other, bounded by `--lock-timeout`. See
+[docs/cli-exit-codes.md](docs/cli-exit-codes.md).
+
 Enzyme was built for knowledge bases that grow rapidly:
 
 * Agent memory corpora

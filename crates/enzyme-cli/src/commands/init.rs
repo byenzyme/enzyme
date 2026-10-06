@@ -32,7 +32,10 @@ use enzyme_core::pipeline::similarity::{
 use enzyme_core::pipeline::staleness::store_staleness_bookkeeping;
 use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
-use super::lock::{acquire_projection_lock, acquire_refresh_lock, is_refresh_locked};
+use super::exit::CliFailure;
+use super::lock::{
+    acquire_projection_lock, acquire_refresh_lock, is_refresh_locked, wait_for_refresh_lock,
+};
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 use enzyme_core::config::auth::AuthToken;
@@ -217,6 +220,12 @@ fn reset_vault_database(paths: &EnzymePaths) -> Result<()> {
         fs::remove_file(&paths.vault_db)
             .with_context(|| format!("failed to reset {}", paths.vault_db.display()))?;
         debug!(path = %paths.vault_db.display(), "reset vault database for init");
+    }
+    // A leftover WAL from the deleted file must not be replayed into the new one.
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = paths.vault_db.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = fs::remove_file(sidecar);
     }
     Ok(())
 }
@@ -692,6 +701,49 @@ fn background_init_terminal_reason(log_path: Option<&Path>) -> Option<String> {
     None
 }
 
+/// Configuration checks for `init`/`refresh` that must fail before any stage
+/// mutates the index, each classified as a configuration error (exit 3).
+///
+/// Readable config must parse; a workspace addressed by name must be declared
+/// (by a program in `configs/` or a legacy `[workspaces.<name>]` section); and
+/// its Markdown folders and SQLite databases must exist. Without these, a
+/// named init indexed nothing and still reported success.
+pub fn preflight_init_target(vault_path: &Path) -> Result<()> {
+    let config = EnzymeConfig::load(vault_path).map_err(CliFailure::config)?;
+    let Some(name) = EnzymePaths::bound_workspace(vault_path)? else {
+        return Ok(());
+    };
+    if !EnzymeConfig::workspace_declared(vault_path).map_err(CliFailure::config)? {
+        let home = EnzymePaths::enzyme_home()?;
+        return Err(CliFailure::config(anyhow::anyhow!(
+            "workspace {name:?} is not declared: add `workspace \"{name}\" {{ … }}` to a program in {} (or a [workspaces.{name}] section to {})",
+            home.join("configs").display(),
+            home.join("config.toml").display()
+        )));
+    }
+    let config = config.unwrap_or_default();
+    for root in &config.notes_roots {
+        if !root.path.is_dir() {
+            return Err(CliFailure::config(anyhow::anyhow!(
+                "workspace {name:?}: Markdown source {:?} folder does not exist: {}",
+                root.name,
+                root.path.display()
+            )));
+        }
+    }
+    let mut sqlite: Vec<_> = config.sources.iter().collect();
+    sqlite.sort_by_key(|(source, _)| source.as_str());
+    for (source, sqlite) in sqlite {
+        if !sqlite.db.is_file() {
+            return Err(CliFailure::config(anyhow::anyhow!(
+                "workspace {name:?}: SQLite source {source:?} database does not exist: {}",
+                sqlite.db.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_init(
     vault_path: &Path,
     detached: bool,
@@ -713,15 +765,19 @@ pub async fn run_init(
         ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
-    let _detached_lock = if detached {
-        let enzyme_dir = paths
-            .vault_db
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| vault_path.join(".enzyme"));
-        Some(acquire_refresh_lock(&enzyme_dir)?)
+    // A detached worker refuses to start beside another; a foreground init
+    // waits for any detached init/catalyst worker so it never resets the
+    // database or rewrites catalysts underneath one. (Foreground callers are
+    // serialized among themselves by `workspace.lock`, taken in `main`.)
+    let enzyme_dir = paths
+        .vault_db
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| vault_path.join(".enzyme"));
+    let _worker_lock = if detached {
+        acquire_refresh_lock(&enzyme_dir)?
     } else {
-        None
+        wait_for_refresh_lock(&enzyme_dir)?
     };
 
     // A plain re-init reuses the existing database: indexing, embedding, and
@@ -837,16 +893,29 @@ pub async fn run_init(
             .get_or_insert(enzyme_core::pipeline::embedding::MAX_EMBEDDING_FILES);
     }
 
+    if named_workspace && db.get_document_count().unwrap_or(0) == 0 {
+        let name = EnzymePaths::bound_workspace(vault_path)?.unwrap_or_default();
+        let message = format!(
+            "workspace {name:?} indexed 0 documents: its sources are empty or every file is excluded"
+        );
+        // Reported in the summary (status `completed_with_warnings`), not as
+        // silent success.
+        warnings.push(message);
+    }
+
     // ── Step 2: Entity selection ──────────────────────────────────────────
     let selection = SelectionPipeline::new(&db, vault_path);
     let sel_result = selection.run()?;
-    // Only write entities to TOML on first init (shortlist). If the config
-    // already has entities, those take precedence and are not overwritten.
+    // Only legacy TOML-configured targets get automatic selection written
+    // back, and only on first init (shortlist); configured entities take
+    // precedence and are not overwritten. A program-declared workspace or
+    // vault is read-only input: selection simply runs again next time.
     let selected_from_coverage = matches!(
         sel_result.source,
         enzyme_core::pipeline::selection::SelectionSource::Coverage
     );
-    if selected_from_coverage {
+    let persist_selection = EnzymeConfig::persists_auto_selection(vault_path)?;
+    if selected_from_coverage && persist_selection {
         let expanded_children: std::collections::HashSet<String> = sel_result
             .expandable_folders
             .values()
@@ -860,7 +929,7 @@ pub async fn run_init(
             .map(selected_entity_ref)
             .collect();
         enzyme_config.set_auto_selected_entities(vault_path, selected_entity_refs)?;
-    } else if named_workspace {
+    } else if named_workspace && persist_selection {
         // Named workspace contracts contain only source decisions before init.
         // Persist deterministic/defaulted workspace fields even when entities
         // were already curated and selection therefore did not write config.
