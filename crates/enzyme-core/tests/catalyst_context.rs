@@ -537,3 +537,101 @@ async fn shared_document_link_entities_each_see_full_conversation() {
         );
     }
 }
+
+async fn mount_completion(server: &MockServer, content: serde_json::Value) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": content.to_string()}, "finish_reason": "stop"}]
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn run_focus_generation(
+    content: serde_json::Value,
+) -> (
+    tempfile::TempDir,
+    Database,
+    enzyme_core::pipeline::catalysts::CatalystStats,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    write_evidence(&vault, DEFAULT_MIN_CONTEXT_DOCUMENTS, false);
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    IndexingPipeline::new(&db, vault.clone())
+        .run(true, |_| {})
+        .unwrap();
+    let entity = focus_entity(&db);
+
+    let server = MockServer::start().await;
+    mount_completion(&server, content).await;
+    let llm = LlmClient::with_base_url("fixture-key", &server.uri());
+    let profiles = HashMap::new();
+    let config = CatalystConfig {
+        entity_profiles: &profiles,
+        catalysts_per_entity: 4,
+        model: "fixture-model",
+        min_context_documents: DEFAULT_MIN_CONTEXT_DOCUMENTS,
+        min_context_tokens: DEFAULT_MIN_CONTEXT_TOKENS,
+        ..Default::default()
+    };
+    let stats = CatalystPipeline::new(&db, &llm, None)
+        .run(&[entity], &config, |_| {})
+        .await
+        .expect("empty hypotheses must not abort generation");
+    (temp, db, stats)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_and_whitespace_hypotheses_are_dropped_and_the_rest_kept() {
+    let (_temp, db, stats) = run_focus_generation(serde_json::json!({
+        "catalysts": [
+            "",
+            "Which concrete migration tradeoff keeps source evidence auditable?",
+            "   \n\t ",
+            "Where does the product tradeoff outrun its evidence?"
+        ],
+        "topicNames": ["empty", "auditable migration tradeoff", "blank", "evidence gap"]
+    }))
+    .await;
+
+    assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+    assert_eq!(stats.catalysts_generated, 2);
+    let mut stored: Vec<(String, String)> = db
+        .get_all_catalysts()
+        .unwrap()
+        .into_iter()
+        .map(|c| {
+            let canonical = parse_catalyst_text(&c.text).unwrap();
+            (canonical.hypothesis, c.context)
+        })
+        .collect();
+    stored.sort();
+    assert_eq!(
+        stored,
+        vec![
+            (
+                "Where does the product tradeoff outrun its evidence?".to_string(),
+                "evidence gap".to_string()
+            ),
+            (
+                "Which concrete migration tradeoff keeps source evidence auditable?".to_string(),
+                "auditable migration tradeoff".to_string()
+            ),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_empty_hypotheses_fail_the_entity_without_panicking() {
+    let (_temp, db, stats) = run_focus_generation(serde_json::json!({
+        "catalysts": ["", "  "],
+        "topicNames": ["empty", "blank"]
+    }))
+    .await;
+
+    assert_eq!(stats.catalysts_generated, 0);
+    assert_eq!(stats.errors.len(), 1);
+    assert!(db.get_all_catalysts().unwrap().is_empty());
+}

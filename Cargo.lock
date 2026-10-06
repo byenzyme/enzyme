@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-api"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-cli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "atty",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "enzyme-search"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "axum",

@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tracing::debug;
 
 use super::catalyst_profiles::{
     CatalystFormat, CatalystProfile, DEFAULT_FORMAT_KEY, ENABLED_PROFILE_KEYS, full_guidance_lines,
@@ -671,26 +672,52 @@ pub fn parse_catalyst_response(response: &str) -> Result<CatalystResponse> {
 
     // Try the object format first
     if let Ok(payload) = serde_json::from_str::<CatalystPayload>(&s) {
-        return Ok(build_from_payload(payload));
+        return Ok(drop_empty_catalysts(build_from_payload(payload)));
     }
 
     if let Ok(payload) = serde_json::from_str::<CatalystEntriesPayload>(&s) {
-        return Ok(build_from_entries(payload.entries));
+        return Ok(drop_empty_catalysts(build_from_entries(payload.entries)));
     }
 
     // Fall back to legacy array format
     if let Ok(entries) = serde_json::from_str::<Vec<CatalystEntry>>(&s) {
-        return Ok(build_from_entries(entries));
+        return Ok(drop_empty_catalysts(build_from_entries(entries)));
     }
 
     // Partial recovery: salvage complete catalysts from a truncated response.
-    if let Some(recovered) = try_recover_partial(&s) {
+    if let Some(recovered) = try_recover_partial(&s).map(drop_empty_catalysts) {
         if !recovered.catalysts.is_empty() {
             return Ok(recovered);
         }
     }
 
     bail!("Failed to parse catalyst response as JSON")
+}
+
+/// Drop catalysts whose text is empty or whitespace-only.
+///
+/// Neither the JSON schema nor the local GBNF grammar can require a non-empty
+/// string, and small local models do emit `""`. Filtering after topics and era
+/// labels are paired keeps the remaining catalysts aligned with their metadata.
+fn drop_empty_catalysts(response: CatalystResponse) -> CatalystResponse {
+    let before = response.catalysts.len();
+    let catalysts: Vec<ParsedCatalyst> = response
+        .catalysts
+        .into_iter()
+        .filter(|c| !c.text.trim().is_empty())
+        .collect();
+    if catalysts.len() < before {
+        debug!(
+            dropped = before - catalysts.len(),
+            kept = catalysts.len(),
+            "dropped empty catalyst hypotheses from model response"
+        );
+    }
+    let pairs = catalysts
+        .iter()
+        .map(|c| (c.text.clone(), c.topic.clone()))
+        .collect();
+    CatalystResponse { pairs, catalysts }
 }
 
 fn build_from_payload(payload: CatalystPayload) -> CatalystResponse {
@@ -1239,5 +1266,33 @@ mod tests {
             r#"{"catalysts":["\u201CWhat does it cost?\u201D"],"topicNames":["cost framing"]}"#;
         let resp = parse_catalyst_response(response).unwrap();
         assert_eq!(resp.catalysts.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_drops_empty_and_whitespace_catalysts_keeping_alignment() {
+        let response = r#"{"catalysts":["", "What does X cost?", "  \n\t", "How does Y work?"],
+            "topicNames":["empty", "cost framing", "blank", "mechanism"],
+            "eraLabels":["a", "b", "c", "d"]}"#;
+        let resp = parse_catalyst_response(response).unwrap();
+        assert_eq!(resp.catalysts.len(), 2);
+        assert_eq!(resp.catalysts[0].text, "What does X cost?");
+        assert_eq!(resp.catalysts[0].topic, "cost framing");
+        assert_eq!(resp.catalysts[0].era_label.as_deref(), Some("b"));
+        assert_eq!(resp.catalysts[1].topic, "mechanism");
+        assert_eq!(resp.pairs.len(), 2);
+
+        let legacy = r#"[{"catalyst":" ","topic":"blank"},{"catalyst":"Why Z?","topic":"z"}]"#;
+        assert_eq!(parse_catalyst_response(legacy).unwrap().catalysts.len(), 1);
+
+        let all_empty = r#"{"catalysts":["", " "],"topicNames":["a","b"]}"#;
+        assert!(
+            parse_catalyst_response(all_empty)
+                .unwrap()
+                .catalysts
+                .is_empty()
+        );
+
+        let truncated_empty = r#"{"catalysts": ["", "  ", "Whe"#;
+        assert!(parse_catalyst_response(truncated_empty).is_err());
     }
 }

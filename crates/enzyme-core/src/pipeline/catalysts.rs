@@ -1292,7 +1292,7 @@ fn catalyst_from_parsed(
     parsed: ParsedCatalyst,
     available_sources: &[GenerationContextSource],
     era_labels: &[String],
-) -> Catalyst {
+) -> anyhow::Result<Catalyst> {
     let era = catalyst_era(&parsed, era_labels);
     let generated_at = Utc::now();
     let mut metadata = serde_json::json!({"era": era});
@@ -1305,21 +1305,18 @@ fn catalyst_from_parsed(
         .filter(|source| seen_sources.insert(source.source_ref.as_str()))
         .map(|source| source.source_ref.clone())
         .collect::<Vec<_>>();
-    let text = render_catalyst_text(&parsed.text, &source_refs)
-        .expect("catalyst must render portable context text");
-    let canonical = parse_catalyst_text(&text).expect("rendered catalyst context must parse");
-    assert!(
-        !canonical.source_refs.is_empty(),
-        "catalyst has no source references"
-    );
-    Catalyst {
+    // Model output is untrusted: an empty hypothesis or a job without sources
+    // is a reason to drop this catalyst, never to abort the whole run.
+    let text = render_catalyst_text(&parsed.text, &source_refs)?;
+    parse_catalyst_text(&text)?;
+    Ok(Catalyst {
         id: Uuid::new_v4().to_string(),
         text,
         entity: entity_name.to_string(),
         context: parsed.topic,
         generated_at,
         metadata,
-    }
+    })
 }
 
 impl<'a> CatalystPipeline<'a> {
@@ -2472,29 +2469,51 @@ impl<'a> CatalystPipeline<'a> {
                     }
 
                     if let Some(parsed_catalysts) = entity_result.catalysts {
+                        let mut catalyst_texts = Vec::with_capacity(parsed_catalysts.len());
+                        let mut topic_names = Vec::with_capacity(parsed_catalysts.len());
+                        let mut catalysts: Vec<Catalyst> =
+                            Vec::with_capacity(parsed_catalysts.len());
+                        for pc in parsed_catalysts {
+                            let (text, topic) = (pc.text.clone(), pc.topic.clone());
+                            match catalyst_from_parsed(
+                                &entity_result.entity_name,
+                                &entity_result.entity_type,
+                                pc,
+                                &entity_result.context_sources,
+                                &entity_result.era_labels,
+                            ) {
+                                Ok(catalyst) => {
+                                    catalyst_texts.push(text);
+                                    topic_names.push(topic);
+                                    catalysts.push(catalyst);
+                                }
+                                Err(e) => debug!(
+                                    entity_name = entity_result.entity_name.as_str(),
+                                    "dropping invalid catalyst: {e}"
+                                ),
+                            }
+                        }
+
+                        if catalysts.is_empty() {
+                            // Keep the previous catalysts and fingerprint so the
+                            // entity is retried on the next run.
+                            let error = "no valid catalysts in model response".to_string();
+                            on_event(CatalystEvent::EntityFailed {
+                                entity_name: entity_result.entity_name.clone(),
+                                entity_type: entity_result.entity_type.clone(),
+                                error: error.clone(),
+                                completed,
+                                total,
+                            });
+                            stats.errors.push((entity_result.entity_name, error));
+                            continue;
+                        }
+
                         // Delete old catalysts and insert new ones
                         self.db.delete_catalysts_for_entity(
                             &entity_result.entity_name,
                             &entity_result.entity_type,
                         )?;
-
-                        let catalyst_texts: Vec<String> =
-                            parsed_catalysts.iter().map(|c| c.text.clone()).collect();
-                        let topic_names: Vec<String> =
-                            parsed_catalysts.iter().map(|c| c.topic.clone()).collect();
-
-                        let catalysts: Vec<Catalyst> = parsed_catalysts
-                            .into_iter()
-                            .map(|pc| {
-                                catalyst_from_parsed(
-                                    &entity_result.entity_name,
-                                    &entity_result.entity_type,
-                                    pc,
-                                    &entity_result.context_sources,
-                                    &entity_result.era_labels,
-                                )
-                            })
-                            .collect();
 
                         let count = catalysts.len();
                         self.db.insert_catalysts(&catalysts)?;

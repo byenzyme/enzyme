@@ -343,7 +343,8 @@ fn embedding_assign(
             let sim: f32 = vec.iter().zip(centroid).map(|(a, b)| a * b).sum();
             (profile.as_str(), sim)
         })
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        // total_cmp: a NaN from the embedding model must not panic.
+        .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(profile, _)| profile.to_string())
 }
 
