@@ -19,7 +19,7 @@ struct Cli {
     #[arg(short = 'p', long, global = true)]
     vault: Option<PathBuf>,
 
-    /// Named workspace declared in $ENZYME_HOME (alias: --collection)
+    /// Named workspace declared in $ENZYME_HOME
     #[arg(
         long = "workspace",
         visible_alias = "collection",

@@ -147,17 +147,7 @@ pub async fn apply_update_policy(
                 reason,
                 "schema drift after binary update; regenerating index via full init"
             );
-            run_init(
-                vault_path,
-                false,
-                true,
-                false,
-                None,
-                false,
-                llm,
-                true,
-            )
-            .await?;
+            run_init(vault_path, false, true, false, None, false, llm, true).await?;
             Ok(UpdateOutcome::RegenPerformed { reason })
         }
     }
@@ -767,9 +757,11 @@ pub async fn run_init(
     // installed model, and ENZYME_LOCAL_ENGINE opt-out) without consulting
     // hosted credentials.
     let local_preload = match llm.credential_mode() {
-        Some(mode @ (LlmCredentialMode::Auto | LlmCredentialMode::Local)) => Some(
-            tokio::task::spawn_blocking(move || preload_llm_client_for_mode(mode)),
-        ),
+        Some(mode @ (LlmCredentialMode::Auto | LlmCredentialMode::Local)) => {
+            Some(tokio::task::spawn_blocking(move || {
+                preload_llm_client_for_mode(mode)
+            }))
+        }
         _ => None,
     };
 

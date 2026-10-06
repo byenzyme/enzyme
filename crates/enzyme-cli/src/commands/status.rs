@@ -230,7 +230,10 @@ fn build_selection_readiness(db: &Database, vault_path: &Path) -> Result<serde_j
             entity_profiles: &selection.entity_profiles,
             catalysts_per_entity: 7,
             default_profile: DEFAULT_PROFILE_KEY,
-            format_key: config.catalyst_format.as_deref().unwrap_or(DEFAULT_FORMAT_KEY),
+            format_key: config
+                .catalyst_format
+                .as_deref()
+                .unwrap_or(DEFAULT_FORMAT_KEY),
             prompt_context: None,
             model: "status",
             per_entity_allocations: None,
@@ -323,9 +326,7 @@ pub async fn build_status_json_v1(vault_path: &Path) -> Result<serde_json::Value
     };
     let paths = EnzymePaths::new(vault_path)?;
     let db = Database::open(&paths.vault_db)?;
-    let object = status
-        .as_object_mut()
-        .expect("status JSON is an object");
+    let object = status.as_object_mut().expect("status JSON is an object");
     object.insert("schema".into(), json!(STATUS_SCHEMA));
     object.insert("initialized".into(), json!(true));
     object.insert(

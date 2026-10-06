@@ -890,7 +890,7 @@ pub async fn resolve_api_config_for_mode(mode: LlmCredentialMode) -> Result<Reso
         LlmCredentialMode::Env => resolved_env_config(env_value)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "No env LLM config found. Set OPENAI_API_KEY, or omit \
-                 `--use-env-llm` to use Enzyme hosted credits."
+                 `--llm env` to use the configured default."
             )
         }),
     }
