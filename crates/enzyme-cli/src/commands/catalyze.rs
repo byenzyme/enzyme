@@ -15,6 +15,7 @@ pub async fn run_catalyze(
     limit: usize,
     target: Option<&Path>,
     _register_str: &str,
+    json_output: bool,
 ) -> Result<()> {
     let paths = EnzymePaths::new(vault_path)?;
 
@@ -69,7 +70,7 @@ pub async fn run_catalyze(
         obj.insert("total_results".into(), json!(response.results.len()));
     }
 
-    if atty::is(atty::Stream::Stdout) {
+    if !json_output && atty::is(atty::Stream::Stdout) {
         print_catalyze_tree(query, &response, processing_time);
     } else {
         println!("{}", serde_json::to_string(&output)?);

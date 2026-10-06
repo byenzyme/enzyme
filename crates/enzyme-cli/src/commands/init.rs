@@ -411,7 +411,7 @@ fn evaluate_catalyst_quality(stats: &CatalystStats, total_entities: usize) -> Ca
 // should be invalidated, not when user-visible collection content is versioned.
 const COLLECTION_CACHE_EPOCH_CONFIG_KEY: &str = "collection.index_generation";
 
-fn read_collection_cache_epoch(db: &Database) -> Result<u64> {
+pub(super) fn read_collection_cache_epoch(db: &Database) -> Result<u64> {
     Ok(db
         .get_config(COLLECTION_CACHE_EPOCH_CONFIG_KEY)?
         .and_then(|value| value.parse::<u64>().ok())

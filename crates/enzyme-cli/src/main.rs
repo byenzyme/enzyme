@@ -150,6 +150,28 @@ enum Commands {
         /// Deprecated no-op: presentation is controlled by installed agent instructions
         #[arg(long, default_value = "explore", hide = true)]
         register: String,
+
+        /// Always emit the JSON envelope, even when stdout is a terminal
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search the index: catalyst, direct, and exact-phrase hits (read-only)
+    Search {
+        /// Search query
+        query: String,
+
+        /// Maximum results per search mode
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
+
+        /// Literal phrase for exact-phrase hits (defaults to the query)
+        #[arg(long)]
+        phrase: Option<String>,
+
+        /// Emit the versioned `enzyme.search.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show the current petri (top catalysts and entities)
@@ -168,7 +190,11 @@ enum Commands {
     },
 
     /// Show vault status and configuration
-    Status,
+    Status {
+        /// Emit the versioned `enzyme.status.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Check for and install Enzyme binary updates
     Update {
@@ -295,7 +321,11 @@ enum ModelCommands {
     },
 
     /// List installed and available models
-    List,
+    List {
+        /// Emit the versioned `enzyme.models.v1` JSON envelope
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Select an installed model and require local catalyst generation
     Use {
@@ -411,7 +441,7 @@ async fn main() -> Result<()> {
                 ModelCommands::Install { name, url, sha256 } => {
                     commands::model::run_install(name.clone(), url.clone(), sha256.clone()).await
                 }
-                ModelCommands::List => commands::model::run_list(),
+                ModelCommands::List { json } => commands::model::run_list(*json),
                 ModelCommands::Use { name } => commands::model::run_use(name),
                 ModelCommands::Auto => commands::model::run_auto(),
                 ModelCommands::Disable => commands::model::run_disable(),
@@ -574,6 +604,7 @@ async fn main() -> Result<()> {
             limit,
             target,
             register,
+            json,
         } => {
             commands::catalyze::run_catalyze(
                 &vault_path,
@@ -581,8 +612,17 @@ async fn main() -> Result<()> {
                 limit,
                 target.as_deref(),
                 &register,
+                json,
             )
             .await?;
+        }
+        Commands::Search {
+            query,
+            limit,
+            phrase,
+            json,
+        } => {
+            commands::search::run_search(&vault_path, &query, limit, phrase.as_deref(), json)?;
         }
         Commands::Petri {
             top,
@@ -606,8 +646,8 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Commands::Status => {
-            commands::status::run_status(&vault_path).await?;
+        Commands::Status { json } => {
+            commands::status::run_status(&vault_path, json).await?;
         }
         Commands::Update { check, background } => {
             commands::update::run_update(&vault_path, check, background).await?;

@@ -17,6 +17,7 @@ pub mod model;
 pub mod petri;
 pub mod refresh_outcome;
 pub mod scan;
+pub mod search;
 pub mod serve;
 pub mod status;
 pub mod target;
