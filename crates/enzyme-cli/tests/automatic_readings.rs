@@ -402,7 +402,7 @@ fn automatic_picks_respect_reading_caps() {
 }
 
 #[test]
-fn plain_automatic_selection_honours_tag_leave_outs_and_the_selection_limit() {
+fn plain_automatic_selection_honours_tag_leave_outs_and_ignores_selection_settings() {
     let f = fixture();
     let configs = f.enzyme_home().join("configs");
     fs::create_dir_all(&configs).unwrap();
@@ -433,10 +433,16 @@ fn plain_automatic_selection_honours_tag_leave_outs_and_the_selection_limit() {
         "{status:#}"
     );
 
-    // `selection limit` is the automatic budget; readings take slots first.
+    // A v0.10-migrated program carries the legacy selection settings: they
+    // load silently and leave the automatic budget at 20.
+    let log_path = f.vault_enzyme_dir().join("enzyme.log");
+    let deprecation = |out: &CliOutput| {
+        let log = fs::read_to_string(&log_path).unwrap_or_default();
+        format!("{log}{}", out.combined()).contains("has no effect")
+    };
     fs::write(
         configs.join("settings.enzyme"),
-        "settings {\n  selection limit 3\n  selection tags 2\n}\n",
+        "settings {\n  updates disabled\n  selection tags 8\n  selection links 6\n  selection folders 6\n  selection limit 30\n}\n",
     )
     .unwrap();
     fs::write(&file, program(&f, "learn questions automatically")).unwrap();
@@ -446,16 +452,23 @@ fn plain_automatic_selection_honours_tag_leave_outs_and_the_selection_limit() {
         .arg(file.to_string_lossy())
         .run();
     let v = json(&out)["vaults"][0].clone();
-    assert_eq!(v["automatic"]["limit"], 3, "{v:#}");
-    assert_eq!(v["automatic"]["slots"], 1, "{v:#}");
-    assert_eq!(v["automatic"]["picked"].as_array().unwrap().len(), 1);
-    // Commands log to the vault's enzyme.log (stderr when it is absent).
+    assert_eq!(v["automatic"]["limit"], 20, "{v:#}");
+    assert_eq!(v["automatic"]["slots"], 18, "{v:#}");
     let status = f.cli().args(["status", "--json"]).run();
-    let log = fs::read_to_string(f.vault_enzyme_dir().join("enzyme.log")).unwrap_or_default();
-    assert!(
-        log.contains("`selection tags` is deprecated")
-            || status.combined().contains("`selection tags` is deprecated"),
-        "{}\n{log}",
-        status.combined()
-    );
+    assert!(!deprecation(&status), "migrated defaults warned");
+
+    // Any other value warns that it has no effect and changes nothing.
+    fs::write(
+        configs.join("settings.enzyme"),
+        "settings {\n  selection limit 3\n}\n",
+    )
+    .unwrap();
+    let out = f
+        .cli()
+        .args(["spec", "plan", "--json"])
+        .arg(file.to_string_lossy())
+        .run();
+    assert_eq!(json(&out)["vaults"][0]["automatic"]["slots"], 18);
+    let status = f.cli().args(["status", "--json"]).run();
+    assert!(deprecation(&status), "{}", status.combined());
 }

@@ -67,7 +67,7 @@ pub struct SelectionDiagnostics {
 /// declared readings and automatic picks.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct AutomaticDiagnostics {
-    /// The automatic limit: [`AUTOMATIC_LIMIT`] or `selection limit N`.
+    /// [`AUTOMATIC_LIMIT`].
     pub limit: usize,
     /// Entities explicit readings selected (after leave-outs); each takes a slot.
     pub declared: usize,
@@ -260,7 +260,7 @@ impl ReadingCaps {
 /// Add automatic (coverage) selection to a readings selection
 /// (`learn questions automatically`). Explicit readings are automatic
 /// selection's first picks: each takes one of the `limit` slots
-/// ([`AUTOMATIC_LIMIT`] unless `settings { selection limit N }`). Everything
+/// ([`AUTOMATIC_LIMIT`]). Everything
 /// the readings selected counts as covered. The remaining slots (at most
 /// `up to N`) go to the same coverage algorithm used without readings, never
 /// to an entity already selected, left out, or governed by a reading's own

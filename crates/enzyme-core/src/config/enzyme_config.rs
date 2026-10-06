@@ -320,22 +320,6 @@ pub struct SelectionConfig {
     pub total_limit: usize,
     #[serde(default)]
     pub min_top_catalysts: Option<usize>,
-    /// Base entities automatic selection picks: `settings { selection limit
-    /// N }` in a readable program; `None` keeps
-    /// [`crate::pipeline::selection_steps::AUTOMATIC_LIMIT`]. The legacy
-    /// `[defaults] total_limit`, which init always wrote, stays inert.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub automatic_limit: Option<usize>,
-}
-
-impl SelectionConfig {
-    /// The automatic selection budget.
-    pub fn automatic_limit(config: Option<&EnzymeConfig>) -> usize {
-        config
-            .and_then(|c| c.trending.as_ref())
-            .and_then(|t| t.automatic_limit)
-            .unwrap_or(crate::pipeline::selection_steps::AUTOMATIC_LIMIT)
-    }
 }
 
 fn default_min_tags() -> usize {
@@ -359,7 +343,6 @@ impl Default for SelectionConfig {
             minimum_folders: default_min_folders(),
             total_limit: default_total_limit(),
             min_top_catalysts: None,
-            automatic_limit: None,
         }
     }
 }
@@ -386,9 +369,6 @@ struct GlobalTomlConfig {
     /// is what lets the same workspace be addressed by its name.
     #[serde(skip)]
     lone_markdown_workspaces: std::collections::BTreeMap<String, enzyme_spec::MarkdownSource>,
-    /// `settings { selection limit N }` from a readable program.
-    #[serde(skip)]
-    automatic_limit: Option<usize>,
     #[serde(default)]
     defaults: DefaultsTomlSection,
     #[serde(default)]
@@ -841,7 +821,6 @@ impl EnzymeConfig {
             minimum_folders: global.defaults.minimum_folders,
             total_limit: global.defaults.total_limit,
             min_top_catalysts: vault.and_then(|v| v.min_top_catalysts),
-            automatic_limit: global.automatic_limit,
         };
 
         Self {
@@ -903,7 +882,6 @@ impl EnzymeConfig {
             minimum_folders: global.defaults.minimum_folders,
             total_limit: global.defaults.total_limit,
             min_top_catalysts: workspace.and_then(|w| w.min_top_catalysts),
-            automatic_limit: global.automatic_limit,
         };
 
         let mut notes_roots: Vec<NotesRootConfig> = workspace
@@ -1716,16 +1694,18 @@ fn overlay_program(
     }
     let mut global: GlobalTomlConfig = serde_json::from_value(value)?;
     if let Some(program) = program {
-        global.automatic_limit = program.settings.total_limit;
-        for (setting, value) in [
-            ("tags", program.settings.minimum_tags),
-            ("links", program.settings.minimum_links),
-            ("folders", program.settings.minimum_folders),
+        // v0.10 migration wrote the legacy defaults into every program;
+        // only a value someone chose deserves a warning.
+        for (setting, value, migrated) in [
+            ("tags", program.settings.minimum_tags, default_min_tags()),
+            ("links", program.settings.minimum_links, default_min_links()),
+            ("folders", program.settings.minimum_folders, default_min_folders()),
+            ("limit", program.settings.total_limit, default_total_limit()),
         ] {
-            if value.is_some() {
+            if let Some(value) = value.filter(|value| *value != migrated) {
                 warn_once(format!(
-                    "settings: `selection {setting}` is deprecated and has no effect; \
-                     use `selection limit N` to change how many entities automatic selection picks"
+                    "settings: `selection {setting} {value}` has no effect; \
+                     cap automatic selection with `learn questions automatically up to N`"
                 ));
             }
         }
@@ -2572,8 +2552,7 @@ local_model = "catalyst-135m-v3"
                 minimum_folders: 5,
                 total_limit: 21,
                 min_top_catalysts: Some(13),
-                automatic_limit: None,
-            }),
+                }),
             catalyst_format: Some("question".to_string()),
             excluded_tags: vec!["todo".to_string()],
             excluded_links: vec!["Template".to_string()],
@@ -2725,8 +2704,7 @@ pub fn migrate_readable_configs(
             updates: Some(global.update.auto),
             embedding_limit: global.defaults.max_embedding_files,
             // The legacy selection minimums and total limit never affected
-            // selection; carrying them over would turn `total_limit` into
-            // the readable `selection limit`, which does.
+            // selection, so they are not carried over.
             minimum_tags: None,
             minimum_links: None,
             minimum_folders: None,

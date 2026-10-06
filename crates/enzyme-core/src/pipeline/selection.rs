@@ -116,7 +116,7 @@ impl<'a> SelectionPipeline<'a> {
         self.select_catalyst_candidates(
             &exclusions,
             &left_out,
-            crate::config::enzyme_config::SelectionConfig::automatic_limit(config),
+            selection_steps::AUTOMATIC_LIMIT,
         )
     }
 
@@ -209,7 +209,7 @@ impl<'a> SelectionPipeline<'a> {
                 self.db,
                 &mut materialized,
                 spec,
-                crate::config::enzyme_config::SelectionConfig::automatic_limit(Some(config)),
+                selection_steps::AUTOMATIC_LIMIT,
                 exclusions,
                 &left_out_names(config),
             )?;
