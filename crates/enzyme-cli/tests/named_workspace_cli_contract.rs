@@ -591,3 +591,92 @@ fn workspaces_in_one_home_do_not_fail_together() {
         .unwrap();
     assert_code(&plan, 0);
 }
+
+fn entity_hashes(db: &Path) -> Vec<(String, String, String)> {
+    let db = rusqlite::Connection::open(db).unwrap();
+    let mut statement = db
+        .prepare(
+            "SELECT entity, entity_type, context_hash FROM catalyst_entity_hashes ORDER BY 1, 2",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A second init over unchanged Markdown and SQLite data generates nothing:
+/// catalyst prompts are built from the same embedded chunks every time.
+#[test]
+fn init_over_unchanged_data_is_idempotent_from_the_second_run() {
+    let h = Home::new();
+    let notes = h.notes("notes", 3);
+    let ledger = h.root.path().join("ledger.db");
+    let connection = rusqlite::Connection::open(&ledger).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, sent_ms INTEGER, sender TEXT, body TEXT);",
+        )
+        .unwrap();
+    for i in 0..6 {
+        connection
+            .execute(
+                "INSERT INTO messages VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    i,
+                    1_700_000_000_000_i64 + i * 86_400_000,
+                    if i % 2 == 0 { "ada@example.com" } else { "lin@example.com" },
+                    format!(
+                        "Message {i}: {}",
+                        "The reversible migration keeps auditable evidence for review. ".repeat(12)
+                    ),
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    h.program(
+        "mixed.enzyme",
+        &format!(
+            r#"settings {{ updates disabled }}
+workspace "mixed" {{
+  source markdown "notes" {{ path "{notes}" }}
+  source sqlite "mail" {{
+    database "{ledger}"
+    query "SELECT id, sent_ms, sender, body FROM messages"
+    id "id"
+    who "sender"
+    when "sent_ms" unit ms
+    what "body"
+  }}
+  learn questions from tag "focus"
+  learn questions from source "mail" including who links
+}}
+"#,
+            notes = notes.display(),
+            ledger = ledger.display(),
+        ),
+    );
+    let db = h.store("mixed").join("enzyme.db");
+    let init = || {
+        let output = h.run(&["--workspace", "mixed", "init", "--quiet", "--use-env-llm"]);
+        assert_code(&output, 0);
+        summary(&output)
+    };
+
+    let first = init();
+    assert!(
+        first["catalysts_generated"].as_u64().unwrap() > 0,
+        "{first}"
+    );
+    let hashes = entity_hashes(&db);
+    assert!(hashes.len() >= 3, "expected tag, link and source entities: {hashes:?}");
+    let requests = h.llm.request_count();
+    for run in 2..=3 {
+        let again = init();
+        assert_eq!(again["catalysts_generated"], 0, "run {run}: {again}");
+        assert_eq!(entity_hashes(&db), hashes, "run {run} changed entity hashes");
+    }
+    assert_eq!(h.llm.request_count(), requests, "unchanged data called the LLM");
+}

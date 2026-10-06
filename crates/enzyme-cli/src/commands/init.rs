@@ -1097,6 +1097,20 @@ pub async fn run_init(
         None
     };
 
+    // Catalyst prompts select chunk evidence by embedding. Generating while
+    // embedding still runs builds prompts from un-chunked text, and the next
+    // init rebuilds them from chunks and regenerates every such entity once.
+    // So wait for embeddings first, except in the voice-ready worker
+    // (streamed catalysts), whose contract is early catalysts with embeddings
+    // still running; the init after it regenerates once.
+    let mut embedding_handle = embedding_handle;
+    let mut embedding_outcome = None;
+    if api_config.is_some() && !stream_partial_catalysts {
+        if let Some(handle) = embedding_handle.take() {
+            embedding_outcome = Some(handle.await.context("embedding task panicked")?);
+        }
+    }
+
     // ── Step 5: Catalyst generation in foreground ─────────────────────────
     // Persist --min-top-catalysts to config so refreshes respect it
     if let Some(mtc) = min_top_catalysts {
@@ -1311,18 +1325,18 @@ pub async fn run_init(
     // ── Step 6: Wait for background embedding ─────────────────────────────
     // EmbeddingComplete was already sent from inside the spawn_blocking task,
     // so we just collect the stats here.
-    let emb_stats = if let Some(handle) = embedding_handle {
-        match handle.await.context("embedding task panicked")? {
-            Ok(stats) => Some(stats),
-            Err(e) => {
-                let msg = format!("Embedding failed: {}", e);
-                tx.send(DisplayEvent::EmbeddingFailed(msg.clone())).ok();
-                warnings.push(msg);
-                None
-            }
+    if let Some(handle) = embedding_handle {
+        embedding_outcome = Some(handle.await.context("embedding task panicked")?);
+    }
+    let emb_stats = match embedding_outcome {
+        Some(Ok(stats)) => Some(stats),
+        Some(Err(e)) => {
+            let msg = format!("Embedding failed: {}", e);
+            tx.send(DisplayEvent::EmbeddingFailed(msg.clone())).ok();
+            warnings.push(msg);
+            None
         }
-    } else {
-        None
+        None => None,
     };
     let emb_completed = emb_stats.is_some();
 
