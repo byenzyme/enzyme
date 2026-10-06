@@ -300,3 +300,37 @@ fn invalid_requests_fail_without_writing() {
 fn sha256(text: &str) -> String {
     enzyme_spec::plan::sha256(text.as_bytes())
 }
+
+#[test]
+fn an_unrecoverable_apply_names_its_journal_and_recover_discard_clears_it() {
+    let home = Home::new();
+    let notes = home.root.join("notes");
+    let current = program(&notes, "");
+    fs::write(home.configs().join("practice.enzyme"), &current).unwrap();
+    let (_, plan) = home.plan(
+        "practice",
+        &program(&notes, "  leave out folders { \"a\" }\n"),
+        "x",
+    );
+    let store = enzyme_spec::plan::ConfigStore::new(home.configs(), &home.root);
+    store
+        .prepare(&serde_json::from_value(plan).unwrap())
+        .unwrap();
+    let hand = program(&notes, "  leave out folders { \"hand\" }\n");
+    fs::write(home.configs().join("practice.enzyme"), &hand).unwrap();
+
+    let (ok, error) = home.json(&["workspace", "recover", "--json"]);
+    assert!(!ok);
+    assert_eq!(error["error"]["kind"], "unrecoverable");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("journals/practice.enzyme.json"),
+        "{message}"
+    );
+
+    let (ok, out) = home.json(&["workspace", "recover", "--discard", "--json"]);
+    assert!(ok, "{out}");
+    assert_eq!(out["discarded"].as_array().unwrap().len(), 1);
+    assert_eq!(home.program("practice.enzyme").unwrap(), hand);
+    home.plan("practice", &current, "after");
+}

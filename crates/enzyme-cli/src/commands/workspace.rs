@@ -1,10 +1,11 @@
-//! `enzyme workspace plan|apply`: reviewed changes to a workspace program.
+//! `enzyme workspace plan|apply|recover`: reviewed changes to a workspace program.
 //!
 //! The program for workspace `<name>` is the one `$ENZYME_HOME/configs/*.enzyme`
 //! file that declares it; a new workspace is written to `<name>.enzyme`.
 //! Planning and applying are `enzyme_spec::plan`; this module only reads
 //! inputs and prints. Unlike `enzyme spec plan`, which previews catalyst
 //! generation for a program, these commands change the program file itself.
+//! Moving a workspace between files, renaming, or removing it is out of scope.
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -15,11 +16,13 @@ use enzyme_spec::plan::{Action, ApplyError, ConfigStore, Plan, Receipt};
 
 #[derive(Subcommand)]
 pub enum WorkspaceCommand {
-    /// Plan replacing a workspace's program with a desired program (writes nothing)
+    /// Plan replacing a workspace's program with a desired program
     ///
     /// The plan records the program file's current revision, the desired
     /// text and its digest, a unified diff, and a summary of changed
     /// statements. Save it with --json or --out and pass it to `apply`.
+    /// Planning never changes the program it plans, but it creates
+    /// `configs/.enzyme-apply/` and first completes any interrupted apply.
     Plan {
         /// Workspace name, as declared by `workspace "<name>"`
         name: String,
@@ -42,11 +45,22 @@ pub enum WorkspaceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Complete interrupted applies; --discard drops journals that cannot be completed
+    Recover {
+        /// Remove journals whose program was edited mid-apply, leaving the program as is
+        #[arg(long)]
+        discard: bool,
+        /// Print the outcome as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run(command: &WorkspaceCommand) -> Result<()> {
     let json = match command {
-        WorkspaceCommand::Plan { json, .. } | WorkspaceCommand::Apply { json, .. } => *json,
+        WorkspaceCommand::Plan { json, .. }
+        | WorkspaceCommand::Apply { json, .. }
+        | WorkspaceCommand::Recover { json, .. } => *json,
     };
     let result = match command {
         WorkspaceCommand::Plan {
@@ -56,6 +70,7 @@ pub fn run(command: &WorkspaceCommand) -> Result<()> {
             out,
         } => run_plan(name, desired, *json, out.as_deref()),
         WorkspaceCommand::Apply { plan, json } => run_apply(plan, *json),
+        WorkspaceCommand::Recover { discard, json } => run_recover(*discard, *json),
     };
     if json {
         if let Err(error) = &result {
@@ -146,6 +161,37 @@ fn run_apply(plan: &Path, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&receipt)?);
     } else {
         print_receipt(&receipt);
+    }
+    Ok(())
+}
+
+fn run_recover(discard: bool, json: bool) -> Result<()> {
+    let store = store()?;
+    let (completed, discarded) = if discard {
+        store.discard_unrecoverable()?
+    } else {
+        (store.recover()?, Vec::new())
+    };
+    if json {
+        let body =
+            serde_json::json!({ "ok": true, "completed": completed, "discarded": discarded });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+    for receipt in &completed {
+        println!(
+            "Completed interrupted apply of plan {} to configs/{}.",
+            receipt.plan_id, receipt.target
+        );
+    }
+    for path in &discarded {
+        println!(
+            "Discarded {}; its program was left as it is.",
+            path.display()
+        );
+    }
+    if completed.is_empty() && discarded.is_empty() {
+        println!("Nothing to recover.");
     }
     Ok(())
 }
