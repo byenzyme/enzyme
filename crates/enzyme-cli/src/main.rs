@@ -145,9 +145,10 @@ enum Commands {
         full: bool,
 
         /// Seconds to wait for another init/refresh of this workspace before
-        /// exiting busy (exit code 4); 0 fails immediately
-        #[arg(long, value_name = "SECS", default_value_t = commands::lock::DEFAULT_LOCK_TIMEOUT_SECS)]
-        lock_timeout: u64,
+        /// exiting busy (exit code 4); 0 fails immediately. Default 1800, or 5
+        /// with --quiet
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
     },
 
     /// Search using catalyst-based approximate matching
@@ -417,14 +418,18 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
 
 /// Foreground `init` and `refresh` hold `workspace.lock` beside the index for
 /// their whole run, so concurrent callers on one workspace wait (announced on
-/// stderr) instead of racing. Detached workers coordinate through
+/// stderr) instead of racing. `run_init` takes the same lock re-entrantly, so
+/// MCP init is covered too. Detached workers coordinate through
 /// `refresh.lock` instead. A quiet refresh of a never-initialized vault does
 /// nothing, so it takes no lock and creates no `.enzyme` directory.
 fn foreground_workspace_lock(
     command: &Commands,
     vault_path: &Path,
-) -> Result<Option<commands::lock::RefreshLock>> {
-    use commands::lock::{WaitNotice, configure_lock_wait};
+) -> Result<Option<commands::lock::WorkspaceLock>> {
+    use commands::lock::{
+        DEFAULT_LOCK_TIMEOUT_SECS, QUIET_REFRESH_LOCK_TIMEOUT_SECS, WaitNotice,
+        configure_lock_wait,
+    };
     let (timeout, notice) = match command {
         Commands::Init {
             detached: false,
@@ -433,7 +438,7 @@ fn foreground_workspace_lock(
             lock_timeout,
             ..
         } => (
-            lock_timeout,
+            *lock_timeout,
             if *json_progress {
                 WaitNotice::JsonProgress
             } else if *quiet {
@@ -448,7 +453,11 @@ fn foreground_workspace_lock(
             lock_timeout,
             ..
         } => (
-            lock_timeout,
+            lock_timeout.unwrap_or(if *quiet {
+                QUIET_REFRESH_LOCK_TIMEOUT_SECS
+            } else {
+                DEFAULT_LOCK_TIMEOUT_SECS
+            }),
             if *quiet {
                 WaitNotice::Silent
             } else {
@@ -457,19 +466,12 @@ fn foreground_workspace_lock(
         ),
         _ => return Ok(None),
     };
-    configure_lock_wait(std::time::Duration::from_secs(*timeout), notice);
+    configure_lock_wait(std::time::Duration::from_secs(timeout), notice);
     let paths = enzyme_core::config::paths::EnzymePaths::new(vault_path)?;
-    let Some(store) = paths.vault_db.parent() else {
-        return Ok(None);
-    };
     if matches!(command, Commands::Refresh { quiet: true, .. }) && !paths.vault_db.exists() {
         return Ok(None);
     }
-    let label = match enzyme_core::config::paths::EnzymePaths::bound_workspace(vault_path)? {
-        Some(name) => format!("workspace {name:?}"),
-        None => format!("vault {}", vault_path.display()),
-    };
-    commands::lock::acquire_workspace_lock(store, &label).map(Some)
+    commands::init::acquire_foreground_workspace_lock(vault_path, &paths).map(Some)
 }
 
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {

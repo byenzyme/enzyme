@@ -230,6 +230,23 @@ fn persist_outcome(vault_path: &Path, outcome: &BinaryUpdateOutcome) -> Result<(
     if !paths.vault_db.exists() {
         return Ok(());
     }
+    // Give way to a foreground init/refresh: wait briefly for `workspace.lock`
+    // (the refresh that spawned this worker releases it as it exits) and hold
+    // it while writing, so the open below never races their writes. Still
+    // held after the wait → skip; the next refresh re-checks.
+    let store = paths
+        .vault_db
+        .parent()
+        .context("vault DB has no parent")?;
+    let Some(_workspace_lock) = super::lock::try_workspace_lock_within(
+        store,
+        std::time::Duration::from_millis(outcome_lock_wait_ms()),
+    )?
+    else {
+        return Err(super::exit::CliFailure::busy(anyhow::anyhow!(
+            "workspace busy; update outcome not recorded"
+        )));
+    };
     let _sync_guard = paths.sync_on_drop();
     let db = Database::open_with_busy_timeout(&paths.vault_db, OUTCOME_BUSY_TIMEOUT_MS)
         .context("open vault DB to record update outcome")?;
@@ -237,6 +254,15 @@ fn persist_outcome(vault_path: &Path, outcome: &BinaryUpdateOutcome) -> Result<(
     // general 30-second busy timeout with an outer retry loop while holding
     // update.lock; one short attempt is enough and failures are logged.
     record_outcome(&db, outcome)
+}
+
+/// How long the update worker waits for `workspace.lock` before skipping its
+/// bookkeeping (`ENZYME_UPDATE_OUTCOME_LOCK_WAIT_MS` overrides, for tests).
+fn outcome_lock_wait_ms() -> u64 {
+    std::env::var("ENZYME_UPDATE_OUTCOME_LOCK_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5_000)
 }
 
 fn record_outcome(db: &Database, outcome: &BinaryUpdateOutcome) -> Result<()> {

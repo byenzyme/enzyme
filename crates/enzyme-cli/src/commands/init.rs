@@ -35,7 +35,8 @@ use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlit
 use super::exit::CliFailure;
 use super::generator::LlmMode;
 use super::lock::{
-    acquire_projection_lock, acquire_refresh_lock, is_refresh_locked, wait_for_refresh_lock,
+    WorkspaceLock, acquire_projection_lock, acquire_refresh_lock, acquire_workspace_lock,
+    is_refresh_locked, wait_for_refresh_lock,
 };
 use super::vault_summary;
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
@@ -730,6 +731,23 @@ pub fn preflight_init_target(vault_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Take `workspace.lock` for a foreground init/refresh of this vault or named
+/// workspace, waiting per the process lock policy (see `lock::configure_lock_wait`).
+pub fn acquire_foreground_workspace_lock(
+    vault_path: &Path,
+    paths: &EnzymePaths,
+) -> Result<WorkspaceLock> {
+    let store = paths
+        .vault_db
+        .parent()
+        .context("vault database has no parent directory")?;
+    let label = match EnzymePaths::bound_workspace(vault_path)? {
+        Some(name) => format!("workspace {name:?}"),
+        None => format!("vault {}", vault_path.display()),
+    };
+    acquire_workspace_lock(store, &label)
+}
+
 pub async fn run_init(
     vault_path: &Path,
     detached: bool,
@@ -751,10 +769,17 @@ pub async fn run_init(
         ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
+    // Foreground callers (CLI and MCP) are serialized among themselves by
+    // `workspace.lock`; the CLI already holds it, so this is re-entrant there.
+    let _workspace_lock = if detached {
+        None
+    } else {
+        Some(acquire_foreground_workspace_lock(vault_path, &paths)?)
+    };
+
     // A detached worker refuses to start beside another; a foreground init
     // waits for any detached init/catalyst worker so it never resets the
-    // database or rewrites catalysts underneath one. (Foreground callers are
-    // serialized among themselves by `workspace.lock`, taken in `main`.)
+    // database or rewrites catalysts underneath one.
     let enzyme_dir = paths
         .vault_db
         .parent()
@@ -1604,13 +1629,19 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
     // request start. A fast-failing detached check must not race this JSON from
     // `null` to `failed` halfway through the refresh.
     let binary_update_outcome = super::update::load_outcome(&db);
-    let _ = super::update::maybe_spawn_background(vault_path, &db);
     let _sync_guard = paths.sync_on_drop();
     let local = run_local_refresh_work(&db, vault_path, &paths).await?;
     let collection_changed = local.collection_changed();
     let collection_change_reasons = local.change_reasons();
     let (schedule, background_spawned) =
         schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
+    // The update check is spawned only after the local writes above, and its
+    // worker records its outcome under `workspace.lock`, so it never opens the
+    // database read-write while this refresh is writing. `--llm none` promises
+    // no network, so it skips the check.
+    if llm.generates() {
+        let _ = super::update::maybe_spawn_background(vault_path, &db);
+    }
     let cache_epoch = maybe_bump_collection_cache_epoch(&db, collection_changed)?;
 
     // ── Step 5: Output JSON ─────────────────────────────────────────────

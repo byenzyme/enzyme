@@ -860,3 +860,69 @@ fn refresh_reports_action_required_for_pending_homebrew_update() {
     );
     assert!(json["update"].get("binary").is_none());
 }
+
+/// Review regression (refresh --quiet "database is locked"): the update worker
+/// records its outcome only under `workspace.lock`, so it never opens the vault
+/// DB read-write while a foreground init/refresh is writing. While the lock is
+/// held it gives up after a bounded wait and leaves the DB untouched.
+#[test]
+fn background_update_bookkeeping_waits_for_workspace_lock() {
+    let _serial = serial_test();
+    let fixture = VaultFixture::empty();
+    create_vault_db(&fixture);
+    let installed = InstalledBinary::copy_from_test_binary(&fixture);
+    let server = MockReleaseServer::start(CURRENT_VERSION, false);
+
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(fixture.vault_enzyme_dir().join("workspace.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let output = fixture
+        .cli()
+        .executable(&installed.path)
+        .env("HOME", installed.os_home.display().to_string())
+        .env("ENZYME_UPDATE_API_BASE", server.base_url())
+        .env("ENZYME_UPDATE_RELEASE_BASE", server.base_url())
+        .env("ENZYME_UPDATE_OUTCOME_LOCK_WAIT_MS", "200")
+        .args(["update", "--background"])
+        .run();
+    output.assert_success();
+    assert!(
+        vault_db(&fixture)
+            .get_config(LAST_OUTCOME_KEY)
+            .unwrap()
+            .is_none(),
+        "outcome must not be written while workspace.lock is held"
+    );
+    let log = fs::read_to_string(fixture.enzyme_home().join("update.log")).unwrap();
+    assert!(log.contains("workspace busy"));
+
+    fs2::FileExt::unlock(&lock).unwrap();
+    run_installed(&fixture, &installed, &server, &["update", "--background"]).assert_success();
+    assert_eq!(outcome(&fixture)["status"], "up_to_date");
+    installed.assert_unchanged();
+}
+
+/// `--llm none` promises no network: a quiet refresh must not spawn the
+/// update check even when the throttle would allow one.
+#[test]
+fn refresh_with_llm_none_spawns_no_update_check() {
+    let _serial = serial_test();
+    let (fixture, _llm) = init_vault();
+    let server = MockReleaseServer::start(&newer_patch(), false);
+
+    let output = fixture
+        .cli()
+        .args(["refresh", "--quiet", "--llm", "none"])
+        .env("ENZYME_UPDATE_API_BASE", server.base_url())
+        .env("ENZYME_UPDATE_RELEASE_BASE", server.base_url())
+        .run();
+    output.assert_success();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(server.request_count(), 0, "--llm none must not check for updates");
+    assert!(vault_db(&fixture).get_config(LAST_OUTCOME_KEY).unwrap().is_none());
+}

@@ -5,6 +5,8 @@ use clap::{Args, ValueEnum};
 
 use enzyme_core::llm::{LlmCredentialMode, resolve_api_config_for_mode};
 
+use super::exit::CliFailure;
+
 /// Catalyst generator chosen for one call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum LlmMode {
@@ -87,7 +89,8 @@ impl LlmMode {
         }
     }
 
-    /// Fail an explicit `env` or `local` choice before any work starts.
+    /// Fail an explicit `env` or `local` choice before any work starts, as a
+    /// configuration error (exit 3).
     ///
     /// Local checks only: neither mode makes a network call here, and `local`
     /// only confirms the model file is installed.
@@ -96,11 +99,13 @@ impl LlmMode {
             Self::Env => resolve_api_config_for_mode(LlmCredentialMode::Env)
                 .await
                 .map(drop)
-                .context("--llm env needs OPENAI_API_KEY in the environment"),
+                .context("--llm env needs OPENAI_API_KEY in the environment")
+                .map_err(CliFailure::config),
             Self::Local => resolve_api_config_for_mode(LlmCredentialMode::Local)
                 .await
                 .map(drop)
-                .context("--llm local needs an installed local model in $ENZYME_HOME/models"),
+                .context("--llm local needs an installed local model in $ENZYME_HOME/models")
+                .map_err(CliFailure::config),
             Self::Auto | Self::Hosted | Self::None => Ok(()),
         }
     }

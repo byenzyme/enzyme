@@ -319,6 +319,12 @@ pub async fn run_mcp(vault: Option<PathBuf>) -> Result<()> {
     let vault_path = vault
         .or_else(|| std::env::var("ENZYME_VAULT_PATH").ok().map(PathBuf::from))
         .unwrap_or(std::env::current_dir().unwrap_or_default());
+    // An MCP `init` call waits only briefly for a CLI init/refresh or a
+    // background catalyst worker on the same workspace, then fails busy.
+    super::lock::configure_lock_wait(
+        std::time::Duration::from_secs(super::lock::MCP_LOCK_TIMEOUT_SECS),
+        super::lock::WaitNotice::Silent,
+    );
     let server = EnzymeMcp::new(vault_path);
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
