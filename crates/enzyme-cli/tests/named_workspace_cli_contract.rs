@@ -338,7 +338,12 @@ workspace "empty" {{ source markdown "notes" {{ path "{empty}" }} }}
     let bad_flag = h.run(&["init", "--no-such-flag"]);
     assert_code(&bad_flag, 2);
 
+    // Another workspace's invalid program does not fail this one…
     h.program("broken.enzyme", "workspace oops");
+    let neighbour = h.run(&["--collection", "real", "init", "--stage", "index", "--quiet"]);
+    assert_code(&neighbour, 0);
+    // …but its own does.
+    h.program("ws.enzyme", "workspace oops");
     let broken = h.run(&["--collection", "real", "init", "--quiet"]);
     assert_code(&broken, 3);
 
@@ -484,5 +489,302 @@ fn three_concurrent_forced_inits_serialize_and_all_succeed() {
     assert_eq!(
         document_refs(&h.store("lone").join("enzyme.db")),
         vec!["note-0.md", "note-1.md", "note-2.md"]
+    );
+}
+
+/// One home, many workspaces: two workspaces may read one notes folder, and a
+/// workspace whose program is invalid fails only when it is addressed.
+#[test]
+fn workspaces_in_one_home_do_not_fail_together() {
+    let h = Home::new();
+    let notes = h.notes("shared", 3);
+    h.program("settings.enzyme", "settings { updates disabled }\n");
+    for (name, reading) in [
+        ("meetings", r#"learn questions from tag "focus""#),
+        ("people", r#"learn questions from tag "focus" about relationships"#),
+    ] {
+        h.program(
+            &format!("{name}.enzyme"),
+            &format!(
+                "workspace \"{name}\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  {reading}\n}}\n",
+                notes.display()
+            ),
+        );
+    }
+    // One program resolves to nothing usable; another does not parse.
+    h.program(
+        "broken.enzyme",
+        "workspace \"broken\" {\n  source markdown \"notes\" { path \"relative/notes\" }\n}\n",
+    );
+    h.program("typo.enzyme", "workspace \"typo\" {\n  learn questions from\n");
+    let before = h.config_snapshot();
+
+    for name in ["meetings", "people"] {
+        let init = h.run(&["--workspace", name, "init", "--quiet", "--use-env-llm"]);
+        assert_code(&init, 0);
+        let result = summary(&init);
+        assert_eq!(result["indexing"]["files_discovered"], 3, "{}", text(&init));
+        assert!(result["catalysts_generated"].as_u64().unwrap() > 0);
+        let db = h.store(name).join("enzyme.db");
+        assert_eq!(
+            document_refs(&db),
+            vec!["note-0.md", "note-1.md", "note-2.md"]
+        );
+    }
+    assert!(!notes.join(".enzyme").exists());
+    assert_eq!(h.config_snapshot(), before, "init rewrote configuration");
+
+    // Each workspace keeps its own readings although they share a folder.
+    let inspect = |name: &str| {
+        let output = h
+            .command(&["spec", "inspect"])
+            .arg(h.store(name))
+            .output()
+            .unwrap();
+        assert_code(&output, 0);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    // `relationships` resolves to the built-in `relational` profile.
+    assert!(!inspect("meetings").contains("relational"));
+    assert!(inspect("people").contains("about relational"));
+
+    // The invalid programs fail when addressed, with their own errors.
+    let broken = h.run(&["--workspace", "broken", "init", "--quiet"]);
+    assert_code(&broken, 3);
+    assert!(text(&broken).contains("must be absolute"), "{}", text(&broken));
+    let typo = h.run(&["--workspace", "typo", "init", "--quiet"]);
+    assert_code(&typo, 3);
+    assert!(
+        text(&typo).contains("invalid reading config"),
+        "{}",
+        text(&typo)
+    );
+
+    // By path, the shared folder does not say which workspace is meant.
+    let by_path = h
+        .command(&["init", "--stage", "index", "--quiet"])
+        .arg("-p")
+        .arg(&notes)
+        .output()
+        .unwrap();
+    assert_ne!(by_path.status.code(), Some(0), "{}", text(&by_path));
+    assert!(
+        text(&by_path).contains("address one of them with --workspace"),
+        "{}",
+        text(&by_path)
+    );
+
+    // It stays ambiguous while one of the workspaces sharing it is invalid.
+    h.program(
+        "people.enzyme",
+        &format!(
+            "workspace \"people\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  learn questions from tag \"focus\" about no-such-profile\n}}\n",
+            notes.display()
+        ),
+    );
+    let by_path = h
+        .command(&["init", "--stage", "index", "--quiet"])
+        .arg("-p")
+        .arg(&notes)
+        .output()
+        .unwrap();
+    assert!(
+        text(&by_path).contains("address one of them with --workspace"),
+        "{}",
+        text(&by_path)
+    );
+
+    // Planning one workspace is not blocked by the others' invalid files.
+    let desired = h.root.path().join("desired.enzyme");
+    fs::write(
+        &desired,
+        format!(
+            "workspace \"meetings\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n  learn questions from tag \"focus\" about decisions\n}}\n",
+            notes.display()
+        ),
+    )
+    .unwrap();
+    let plan = h
+        .command(&["workspace", "plan", "meetings", "--json", "--desired"])
+        .arg(&desired)
+        .output()
+        .unwrap();
+    assert_code(&plan, 0);
+}
+
+fn entity_hashes(db: &Path) -> Vec<(String, String, String)> {
+    let db = rusqlite::Connection::open(db).unwrap();
+    let mut statement = db
+        .prepare(
+            "SELECT entity, entity_type, context_hash FROM catalyst_entity_hashes ORDER BY 1, 2",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A second init over unchanged Markdown and SQLite data generates nothing:
+/// catalyst prompts are built from the same embedded chunks every time.
+#[test]
+fn init_over_unchanged_data_is_idempotent_from_the_second_run() {
+    let h = Home::new();
+    let notes = h.notes("notes", 3);
+    let ledger = h.root.path().join("ledger.db");
+    let connection = rusqlite::Connection::open(&ledger).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, sent_ms INTEGER, sender TEXT, body TEXT);",
+        )
+        .unwrap();
+    for i in 0..6 {
+        connection
+            .execute(
+                "INSERT INTO messages VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    i,
+                    1_700_000_000_000_i64 + i * 86_400_000,
+                    if i % 2 == 0 { "ada@example.com" } else { "lin@example.com" },
+                    format!(
+                        "Message {i}: {}",
+                        "The reversible migration keeps auditable evidence for review. ".repeat(12)
+                    ),
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+    h.program(
+        "mixed.enzyme",
+        &format!(
+            r#"settings {{ updates disabled }}
+workspace "mixed" {{
+  source markdown "notes" {{ path "{notes}" }}
+  source sqlite "mail" {{
+    database "{ledger}"
+    query "SELECT id, sent_ms, sender, body FROM messages"
+    id "id"
+    who "sender"
+    when "sent_ms" unit ms
+    what "body"
+  }}
+  learn questions from tag "focus"
+  learn questions from source "mail" including who links
+}}
+"#,
+            notes = notes.display(),
+            ledger = ledger.display(),
+        ),
+    );
+    let db = h.store("mixed").join("enzyme.db");
+    let init = || {
+        let output = h.run(&["--workspace", "mixed", "init", "--quiet", "--use-env-llm"]);
+        assert_code(&output, 0);
+        summary(&output)
+    };
+
+    let first = init();
+    assert!(
+        first["catalysts_generated"].as_u64().unwrap() > 0,
+        "{first}"
+    );
+    let hashes = entity_hashes(&db);
+    assert!(hashes.len() >= 3, "expected tag, link and source entities: {hashes:?}");
+    let requests = h.llm.request_count();
+    for run in 2..=3 {
+        let again = init();
+        assert_eq!(again["catalysts_generated"], 0, "run {run}: {again}");
+        assert_eq!(entity_hashes(&db), hashes, "run {run} changed entity hashes");
+    }
+    assert_eq!(h.llm.request_count(), requests, "unchanged data called the LLM");
+}
+
+fn count(db: &Path, sql: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+}
+
+/// SQLite sources index before embedding, renaming or removing a source in
+/// the program reconciles its documents, and a supplied document ref is kept
+/// as given even when it looks like a Markdown path. (Ported from the
+/// retired embedder kernel's tests.)
+#[test]
+fn sqlite_source_documents_follow_the_program() {
+    let h = Home::new();
+    let notes = h.notes("notes", 1);
+    let source = h.root.path().join("messages.db");
+    rusqlite::Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, sent_at INTEGER, body TEXT, ref TEXT);
+             INSERT INTO messages VALUES
+               (1, 1700000000000, 'source row about migration evidence', 'sqlite:{name}/thread-9.md');",
+        )
+        .unwrap();
+    let program = |source_block: &str| {
+        h.program(
+            "ws.enzyme",
+            &format!(
+                "settings {{ updates disabled }}\nworkspace \"ws\" {{\n  source markdown \"notes\" {{ path \"{}\" }}\n{source_block}}}\n",
+                notes.display()
+            ),
+        )
+    };
+    let sqlite = |name: &str, document_ref: bool| {
+        let (query, role) = if document_ref {
+            (
+                format!("SELECT id, sent_at, body, replace(ref, '{{name}}', '{name}') AS ref FROM messages"),
+                "  document ref \"ref\"\n",
+            )
+        } else {
+            ("SELECT id, sent_at, body FROM messages".to_string(), "")
+        };
+        format!(
+            "  source sqlite \"{name}\" {{\n    database \"{}\"\n    query \"{query}\"\n    id \"id\"\n{role}    when \"sent_at\" unit ms\n    what \"body\"\n  }}\n",
+            source.display()
+        )
+    };
+    let db = h.store("ws").join("enzyme.db");
+    let index = || assert_code(&h.run(&["--workspace", "ws", "init", "--llm", "none", "--quiet"]), 0);
+    let in_source = |name: &str| {
+        count(
+            &db,
+            &format!("SELECT COUNT(*) FROM docs WHERE source_ref LIKE 'sqlite:{name}/%'"),
+        )
+    };
+
+    program(&sqlite("messages", false));
+    index();
+    assert_eq!(in_source("messages"), 1);
+    assert!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE file_path LIKE 'sqlite:messages/%'"
+        ) > 0,
+        "SQLite documents must reach embedding"
+    );
+
+    program(&sqlite("renamed", false));
+    index();
+    assert_eq!(in_source("messages"), 0);
+    assert_eq!(in_source("renamed"), 1);
+
+    program("");
+    index();
+    assert_eq!(in_source("renamed"), 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM docs"), 1);
+
+    program(&sqlite("mail-stable", true));
+    index();
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM docs WHERE source_ref = 'sqlite:mail-stable/thread-9.md'"
+        ),
+        1
     );
 }

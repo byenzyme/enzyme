@@ -8,9 +8,8 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 use chrono::Utc;
-use futures::StreamExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -19,12 +18,11 @@ use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CUSTOM_READING_QUESTION_INSTRUCTION, CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL,
-    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient, Message,
+    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient,
     ParsedCatalyst, QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
     build_custom_reading_user_prompt, build_local_user_prompt, build_system_prompt,
-    build_user_prompt, catalyst_entries_json_schema, catalyst_json_schema, get_profile, hardware,
-    is_synthetic_body_cluster, parse_catalyst_response, parse_partial_catalyst_entries,
-    streaming_entries_instruction,
+    build_user_prompt, catalyst_json_schema, get_profile, hardware, is_synthetic_body_cluster,
+    parse_catalyst_response,
 };
 use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
@@ -1025,9 +1023,6 @@ pub struct CatalystConfig<'a> {
     pub max_samples: usize,
     /// LLM concurrency override. If set, overrides the auto-detected value.
     pub concurrency: Option<usize>,
-    /// Stream self-contained catalyst records and write complete records before
-    /// the full entity response finishes.
-    pub stream_partial_catalysts: bool,
     /// Regenerate every entity even when its stored context fingerprint still
     /// matches (`--force`).
     pub force_regenerate: bool,
@@ -1058,7 +1053,6 @@ impl<'a> Default for CatalystConfig<'a> {
             max_context_chars: None,
             max_samples: DEFAULT_MAX_CONTEXT_SAMPLES,
             concurrency: None,
-            stream_partial_catalysts: false,
             force_regenerate: false,
             min_context_documents: DEFAULT_MIN_CONTEXT_DOCUMENTS,
             min_context_tokens: DEFAULT_MIN_CONTEXT_TOKENS,
@@ -1276,15 +1270,6 @@ struct EntityResult {
     era_labels: Vec<String>,
 }
 
-struct PartialCatalystEvent {
-    entity_name: String,
-    entity_type: String,
-    index: usize,
-    catalyst: ParsedCatalyst,
-    context_sources: Vec<GenerationContextSource>,
-    era_labels: Vec<String>,
-}
-
 fn catalyst_era(parsed: &ParsedCatalyst, era_labels: &[String]) -> String {
     if let Some(label) = parsed
         .era_label
@@ -1307,15 +1292,10 @@ fn catalyst_from_parsed(
     parsed: ParsedCatalyst,
     available_sources: &[GenerationContextSource],
     era_labels: &[String],
-    provisional: bool,
 ) -> Catalyst {
     let era = catalyst_era(&parsed, era_labels);
     let generated_at = Utc::now();
-    let mut metadata = if provisional {
-        serde_json::json!({"era": era, "generation_phase": "stream"})
-    } else {
-        serde_json::json!({"era": era})
-    };
+    let mut metadata = serde_json::json!({"era": era});
     // Catalyst attributes use the existing row and metadata contract. The
     // portable text carries only the unique sources included in this request.
     metadata["entity_type"] = serde_json::json!(entity_type);
@@ -2263,20 +2243,12 @@ impl<'a> CatalystPipeline<'a> {
         // SmolLM2 checkpoints were trained before eraLabels were stable, so do
         // not require that field for local inference yet.
         let structured_output = self.llm.structured_output_support();
-        let response_format = if config.stream_partial_catalysts {
-            structured_output.build_response_format(
-                "catalyst_entries_response",
-                catalyst_entries_json_schema(!local_model),
-            )
-        } else {
-            structured_output
-                .build_response_format("catalyst_response", catalyst_json_schema(!local_model))
-        };
+        let response_format = structured_output
+            .build_response_format("catalyst_response", catalyst_json_schema(!local_model));
 
         let llm = Arc::new(self.llm.clone());
         let system_prompt = Arc::new(system_prompt);
         let mut join_set: JoinSet<EntityResult> = JoinSet::new();
-        let (partial_tx, mut partial_rx) = mpsc::unbounded_channel::<PartialCatalystEvent>();
         // Tripped by any task that sees a 402 / insufficient-credits error.
         // Other in-flight tasks short-circuit, and the main loop aborts the rest.
         let credits_exhausted = Arc::new(AtomicBool::new(false));
@@ -2294,8 +2266,6 @@ impl<'a> CatalystPipeline<'a> {
             let response_format = response_format.clone();
             let local_model = local_model;
             let credits_exhausted = Arc::clone(&credits_exhausted);
-            let stream_partial_catalysts = config.stream_partial_catalysts;
-            let partial_tx = partial_tx.clone();
             join_set.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let entity_name = job.entity_name.clone();
@@ -2343,69 +2313,14 @@ impl<'a> CatalystPipeline<'a> {
                         }
                     };
                     for attempt in 0..max_attempts {
-                        let result = if stream_partial_catalysts {
-                            let user_prompt = streaming_entries_instruction(&job.user_prompt);
-                            let messages = if llm.is_openrouter() {
-                                vec![Message::cached("user", system_prompt.as_str(), user_prompt)]
-                            } else {
-                                vec![
-                                    Message::text("system", system_prompt.as_str()),
-                                    Message::text("user", user_prompt),
-                                ]
-                            };
-                            match llm
-                                .chat_completion_streaming(&model, messages, params.clone())
-                                .await
-                            {
-                                Ok(stream) => {
-                                    let mut stream = std::pin::pin!(stream);
-                                    let mut response = String::new();
-                                    let mut sent = 0usize;
-                                    let mut stream_error: Option<anyhow::Error> = None;
-
-                                    while let Some(delta) = stream.next().await {
-                                        match delta {
-                                            Ok(text) => {
-                                                response.push_str(&text);
-                                                let parsed =
-                                                    parse_partial_catalyst_entries(&response);
-                                                for (index, catalyst) in
-                                                    parsed.into_iter().enumerate().skip(sent)
-                                                {
-                                                    sent = index + 1;
-                                                    let _ = partial_tx.send(PartialCatalystEvent {
-                                                        entity_name: entity_name.clone(),
-                                                        entity_type: entity_type.clone(),
-                                                        index,
-                                                        catalyst,
-                                                        context_sources: context_sources.clone(),
-                                                        era_labels: era_labels.clone(),
-                                                    });
-                                                }
-                                            }
-                                            Err(e) => {
-                                                stream_error = Some(e);
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    match stream_error {
-                                        Some(e) => Err(e),
-                                        None => Ok(response),
-                                    }
-                                }
-                                Err(e) => Err(e),
-                            }
-                        } else {
-                            llm.chat_completion_cached(
+                        let result = llm
+                            .chat_completion_cached(
                                 &model,
                                 &system_prompt,
                                 &job.user_prompt,
                                 params.clone(),
                             )
-                            .await
-                        };
+                            .await;
 
                         let response_text = match result {
                             Ok(text) => text,
@@ -2504,48 +2419,11 @@ impl<'a> CatalystPipeline<'a> {
             });
         }
 
-        drop(partial_tx);
-
-        // Phase 3: Collect results as tasks complete, while applying streamed
-        // provisional catalysts on the DB writer thread.
+        // Phase 3: Collect results as tasks complete.
         let mut completed = skipped.len() + stats.entities_unchanged;
-        // Keyed by (name, type): entity names are not unique across types.
-        let mut partial_started_entities: HashSet<(String, String)> = HashSet::new();
-        let mut partial_inserted_counts: HashMap<(String, String), usize> = HashMap::new();
 
         while !join_set.is_empty() {
-            let result = tokio::select! {
-                partial = partial_rx.recv() => {
-                    if let Some(partial) = partial {
-                        let entity_key =
-                            (partial.entity_name.clone(), partial.entity_type.clone());
-                        let inserted = partial_inserted_counts
-                            .entry(entity_key.clone())
-                            .or_insert(0);
-                        if partial.index < *inserted {
-                            continue;
-                        }
-                        if partial_started_entities.insert(entity_key) {
-                            self.db.delete_catalysts_for_entity(
-                                &partial.entity_name,
-                                &partial.entity_type,
-                            )?;
-                        }
-                        let catalyst = catalyst_from_parsed(
-                            &partial.entity_name,
-                            &partial.entity_type,
-                            partial.catalyst,
-                            &partial.context_sources,
-                            &partial.era_labels,
-                            true,
-                        );
-                        self.db.insert_catalysts(&[catalyst])?;
-                        *inserted = partial.index + 1;
-                    }
-                    continue;
-                }
-                result = join_set.join_next() => result,
-            };
+            let result = join_set.join_next().await;
 
             let Some(result) = result else {
                 continue;
@@ -2614,7 +2492,6 @@ impl<'a> CatalystPipeline<'a> {
                                     pc,
                                     &entity_result.context_sources,
                                     &entity_result.era_labels,
-                                    false,
                                 )
                             })
                             .collect();

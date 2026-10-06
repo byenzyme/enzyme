@@ -169,7 +169,6 @@ impl EnzymeMcp {
                 true,
                 false,
                 None,
-                false,
                 super::generator::LlmMode::Auto,
                 false,
             ))

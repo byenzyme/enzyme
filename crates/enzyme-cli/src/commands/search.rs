@@ -8,7 +8,7 @@ use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
-use enzyme_core::kernel::{Bridged, Hit};
+use enzyme_core::search::index::{Bridged, Hit};
 use enzyme_core::search::TopCatalyst;
 use enzyme_core::search::index::open_read_only;
 

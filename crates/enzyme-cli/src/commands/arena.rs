@@ -630,8 +630,11 @@ pub async fn index_configured_source(vault_path: &Path) -> Result<()> {
         }
         let source =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let program =
-            enzyme_spec::parse(&source).with_context(|| format!("parse {}", path.display()))?;
+        // Loading the workspace's config already failed if its own file
+        // does not parse; another workspace's file must not fail this one.
+        let Ok(program) = enzyme_spec::parse(&source) else {
+            continue;
+        };
         let matches = program.workspaces.iter().any(|workspace| {
             workspace.name == workspace_name
                 && workspace
