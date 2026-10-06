@@ -702,6 +702,7 @@ struct LlmState {
     replies: ReplyQueue,
     requests: Vec<String>,
     auth_headers: Vec<String>,
+    delay: Option<std::time::Duration>,
 }
 
 /// Fake OpenAI-compatible chat-completions server.
@@ -734,7 +735,11 @@ impl Respond for LlmResponder {
                 .unwrap_or_default()
                 .to_string(),
         );
-        template(&state.replies.next())
+        let reply = template(&state.replies.next());
+        match state.delay {
+            Some(delay) => reply.set_delay(delay),
+            None => reply,
+        }
     }
 }
 
@@ -746,6 +751,7 @@ impl MockLlm {
             replies: ReplyQueue::new(Reply::ok_json(Self::completion_body("{}"))),
             requests: Vec::new(),
             auth_headers: Vec::new(),
+            delay: None,
         }));
         let calls = Arc::new(AtomicUsize::new(0));
 
@@ -802,6 +808,12 @@ impl MockLlm {
     /// Answer requests from this queue in order; the last entry repeats.
     pub fn set_response_sequence(&self, replies: Vec<Reply>) {
         self.state.lock().unwrap().replies.set(replies);
+    }
+
+    /// Delay every response, e.g. to keep a run inside its lock long enough
+    /// for concurrent callers to contend.
+    pub fn set_delay(&self, delay: std::time::Duration) {
+        self.state.lock().unwrap().delay = Some(delay);
     }
 
     /// Answer every request with a 200 completion whose message content is `content`.

@@ -111,6 +111,11 @@ enum Commands {
         /// Discard the existing index and regenerate every entity's catalysts
         #[arg(long, visible_alias = "regenerate")]
         force: bool,
+
+        /// Seconds to wait for another init/refresh of this workspace before
+        /// exiting busy (exit code 4); 0 fails immediately
+        #[arg(long, value_name = "SECS", default_value_t = commands::lock::DEFAULT_LOCK_TIMEOUT_SECS)]
+        lock_timeout: u64,
     },
 
     /// Incrementally refresh the vault index
@@ -134,6 +139,11 @@ enum Commands {
         /// Force a complete catalyst rebase epoch now (still built detached).
         #[arg(long, visible_alias = "force")]
         full: bool,
+
+        /// Seconds to wait for another init/refresh of this workspace before
+        /// exiting busy (exit code 4); 0 fails immediately
+        #[arg(long, value_name = "SECS", default_value_t = commands::lock::DEFAULT_LOCK_TIMEOUT_SECS)]
+        lock_timeout: u64,
     },
 
     /// Search using catalyst-based approximate matching
@@ -367,6 +377,63 @@ fn init_tracing(verbose: u8, vault_path: Option<&Path>) {
         .init();
 }
 
+/// Foreground `init` and `refresh` hold `workspace.lock` beside the index for
+/// their whole run, so concurrent callers on one workspace wait (announced on
+/// stderr) instead of racing. Detached workers coordinate through
+/// `refresh.lock` instead. A quiet refresh of a never-initialized vault does
+/// nothing, so it takes no lock and creates no `.enzyme` directory.
+fn foreground_workspace_lock(
+    command: &Commands,
+    vault_path: &Path,
+) -> Result<Option<commands::lock::RefreshLock>> {
+    use commands::lock::{WaitNotice, configure_lock_wait};
+    let (timeout, notice) = match command {
+        Commands::Init {
+            detached: false,
+            quiet,
+            json_progress,
+            lock_timeout,
+            ..
+        } => (
+            lock_timeout,
+            if *json_progress {
+                WaitNotice::JsonProgress
+            } else if *quiet {
+                WaitNotice::Silent
+            } else {
+                WaitNotice::Text
+            },
+        ),
+        Commands::Refresh {
+            detached: false,
+            quiet,
+            lock_timeout,
+            ..
+        } => (
+            lock_timeout,
+            if *quiet {
+                WaitNotice::Silent
+            } else {
+                WaitNotice::Text
+            },
+        ),
+        _ => return Ok(None),
+    };
+    configure_lock_wait(std::time::Duration::from_secs(*timeout), notice);
+    let paths = enzyme_core::config::paths::EnzymePaths::new(vault_path)?;
+    let Some(store) = paths.vault_db.parent() else {
+        return Ok(None);
+    };
+    if matches!(command, Commands::Refresh { quiet: true, .. }) && !paths.vault_db.exists() {
+        return Ok(None);
+    }
+    let label = match enzyme_core::config::paths::EnzymePaths::bound_workspace(vault_path)? {
+        Some(name) => format!("workspace {name:?}"),
+        None => format!("vault {}", vault_path.display()),
+    };
+    commands::lock::acquire_workspace_lock(store, &label).map(Some)
+}
+
 fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     match vault {
         Some(p) => Ok(p),
@@ -382,10 +449,38 @@ fn resolve_vault_path(vault: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Exit codes are defined in `commands::exit` and `docs/cli-exit-codes.md`.
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    let json_progress = matches!(
+        &cli.command,
+        Commands::Init {
+            json_progress: true,
+            ..
+        }
+    );
+    match run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            let kind = commands::exit::exit_kind(&error);
+            if json_progress {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "stage": "error",
+                        "exit_code": kind as u8,
+                        "message": format!("{error:#}"),
+                    })
+                );
+            }
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::from(kind as u8)
+        }
+    }
+}
 
+async fn run(cli: Cli) -> Result<()> {
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
         Commands::Spec { command } => {
@@ -427,7 +522,8 @@ async fn main() -> Result<()> {
 
     let collection_name = cli.collection.clone();
     let vault_path = if let Some(ref collection_id) = collection_name {
-        enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)?
+        enzyme_core::config::paths::EnzymePaths::workspace_root(collection_id)
+            .map_err(commands::exit::CliFailure::usage)?
     } else {
         resolve_vault_path(cli.vault.clone())?
     };
@@ -496,8 +592,9 @@ async fn main() -> Result<()> {
         &cli.command,
         Commands::Init { .. } | Commands::Refresh { .. }
     ) {
-        enzyme_core::config::EnzymeConfig::load(&vault_path)?;
+        commands::init::preflight_init_target(&vault_path)?;
     }
+    let _workspace_lock = foreground_workspace_lock(&cli.command, &vault_path)?;
 
     match cli.command {
         Commands::Init {
@@ -513,6 +610,7 @@ async fn main() -> Result<()> {
             use_env_llm,
             stage,
             force,
+            lock_timeout: _,
         } => {
             if stage.as_deref() == Some("index") {
                 commands::init::run_init_index_only(&vault_path, quiet).await?;
@@ -559,6 +657,7 @@ async fn main() -> Result<()> {
             min_top_catalysts,
             use_env_llm,
             full,
+            lock_timeout: _,
         } => {
             commands::init::run_refresh(
                 &vault_path,
