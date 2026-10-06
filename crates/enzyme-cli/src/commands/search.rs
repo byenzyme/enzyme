@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use enzyme_core::config::paths::EnzymePaths;
+use enzyme_core::db::Database;
 use enzyme_core::kernel::{Bridged, Hit};
 use enzyme_core::search::TopCatalyst;
 use enzyme_core::search::index::open_read_only;
@@ -53,6 +54,19 @@ pub fn build_search_json(
     phrase: Option<&str>,
 ) -> Result<serde_json::Value> {
     let paths = EnzymePaths::new(vault_path)?;
+    // An index built by an older binary is not migrated here; like a missing
+    // index (and `status`'s `schema_outdated`), it needs `init`/`refresh`: exit 3.
+    if paths.vault_db.exists() {
+        Database::open_read_only(&paths.vault_db)?
+            .validate_expected_schema()
+            .with_context(|| {
+                format!(
+                    "index at {} was built by an older enzyme; run `enzyme refresh` or `enzyme init` to rebuild it",
+                    paths.vault_db.display()
+                )
+            })
+            .map_err(super::exit::CliFailure::config)?;
+    }
     let index = open_read_only(&paths.home, &paths.vault_db)?
         .with_context(|| {
             format!(

@@ -470,6 +470,12 @@ fn status_json_reports_outdated_schema_without_migrating() {
         )
         .unwrap();
     assert_eq!(restored, 0, "status recreated a dropped table");
+    drop(db);
+
+    let search = fixture.cli().args(["search", "antenna", "--json"]).run();
+    assert_eq!(search.code, Some(3), "{}", search.combined());
+    search.assert_contains("older enzyme");
+    assert_eq!(file_digest(&db_path), before, "search must not migrate the index");
 }
 
 #[test]

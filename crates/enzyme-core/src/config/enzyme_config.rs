@@ -569,7 +569,21 @@ impl EnzymeConfig {
     pub fn configured_vault_keys_at(config_path: &Path) -> Result<Vec<String>> {
         let global = load_global_toml(&config_path)?;
         let mut keys: Vec<_> = global.workspaces.keys().cloned().collect();
-        keys.extend(global.vaults.keys().cloned());
+        // A lone-Markdown program workspace lowers path-keyed into `vaults`,
+        // but is addressed (and keyed by `vault_key`) by its name.
+        let lone_paths: std::collections::HashSet<&str> = global
+            .lone_markdown_workspaces
+            .values()
+            .map(|source| source.path.as_str())
+            .collect();
+        keys.extend(global.lone_markdown_workspaces.keys().cloned());
+        keys.extend(
+            global
+                .vaults
+                .keys()
+                .filter(|key| !lone_paths.contains(key.as_str()))
+                .cloned(),
+        );
         keys.sort();
         keys.dedup();
         Ok(keys)
@@ -766,7 +780,9 @@ impl EnzymeConfig {
     pub fn declared_by_program_at(vault_path: &Path, config_path: &Path) -> Result<bool> {
         let home = config_path.parent().unwrap_or_else(|| Path::new("."));
         let user_home = dirs::home_dir().context("cannot resolve home directory")?;
-        let Some(program) = enzyme_spec::load_directory(&home.join("configs"), &user_home)? else {
+        let environment = super::spec_environment(&user_home, home)?;
+        let Some(program) = enzyme_spec::load_directory_in(&home.join("configs"), &environment)?
+        else {
             return Ok(false);
         };
         if let Some(name) = EnzymePaths::bound_workspace_with_home(vault_path, home)? {

@@ -47,8 +47,8 @@ Workers that `init`/`refresh` spawn in the background inherit the chosen mode.
 
 Opens the index read-only (never creates, migrates, or writes it). Runs three searches
 and returns each list separately so the host decides how to merge them. A missing
-index is an error (exit 3) that tells the caller to run `enzyme init`; an index
-built by an older binary is an error (exit 1) until `init` or `refresh` rebuilds it.
+index is an error (exit 3) that tells the caller to run `enzyme init`; so is an index
+built by an older binary (exit 3), until `init` or `refresh` rebuilds it.
 
 ```json
 {
