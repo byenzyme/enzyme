@@ -402,3 +402,49 @@ workspace __WORKSPACE__ {
     assert!(!unknown.status.success());
     assert!(stderr(&unknown).contains("unknown preset \"nope\""));
 }
+
+/// `{source}` lets a kind build readable document refs for its rows without
+/// knowing the name each declaration gives it.
+#[test]
+fn source_placeholder_builds_readable_document_refs() {
+    let homes = Homes::new();
+    let ledger = homes.enzyme.join("workspaces/meetings/ledger.db");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    let db = Connection::open(&ledger).unwrap();
+    db.execute_batch(
+        "CREATE TABLE records (id TEXT PRIMARY KEY, feed TEXT, at_ms INTEGER, body TEXT);
+         INSERT INTO records VALUES
+           ('t1', 'mail', 1700000000000, 'mail thread about the launch'),
+           ('t2', 'cal', 1700000000001, 'calendar event for the launch review');",
+    )
+    .unwrap();
+    drop(db);
+    homes.config(
+        "kinds.enzyme",
+        r#"source kind ledger {
+  database "{home}/workspaces/{workspace}/ledger.db"
+  query """SELECT 'sqlite:' || {source} || '/' || id AS ref, id, at_ms, body
+FROM records WHERE feed = {source}"""
+  id "id"
+  document ref "ref"
+  when "at_ms" unit ms
+  what "body"
+}
+"#,
+    );
+    homes.config(
+        "meetings.enzyme",
+        "workspace \"meetings\" {\n  source ledger \"mail\" {}\n  source ledger \"cal\" {}\n}\n",
+    );
+    homes.index("meetings");
+    let db = Connection::open(homes.enzyme.join("workspaces/meetings/enzyme.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT source_ref FROM docs ORDER BY source_ref")
+        .unwrap();
+    let refs: Vec<String> = statement
+        .query_map((), |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(refs, ["sqlite:cal/t2", "sqlite:mail/t1"]);
+}
