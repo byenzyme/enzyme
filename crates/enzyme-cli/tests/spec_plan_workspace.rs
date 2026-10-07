@@ -188,6 +188,9 @@ fn plans_a_named_workspace_read_only_with_origins_and_reason_codes() {
 
     let v = plan(&h.run(&["--workspace", "work", "spec", "plan", "--json"]));
     assert_eq!(h.snapshot(), before, "spec plan wrote to the home");
+    // `--workspace` is global: after the subcommand it plans the same.
+    let after = plan(&h.run(&["spec", "plan", "--json", "--workspace", "work"]));
+    assert_eq!(after["entities"], v["entities"]);
     assert_eq!(v["workspace"], "work");
     assert_eq!(v["selection"], "readings");
 
@@ -308,6 +311,31 @@ fn a_desired_file_previews_against_the_workspace_index() {
 }
 
 #[test]
+fn an_older_index_exits_3_and_a_locked_one_exits_4() {
+    let h = indexed_workspace();
+    let db = h.db("work");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+        // A held write lock makes a rollback-journal reader see SQLITE_BUSY.
+        conn.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        let start = std::time::Instant::now();
+        let out = h.run(&["--workspace", "work", "spec", "plan", "--json"]);
+        assert_code(&out, 4);
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        conn.execute_batch("ROLLBACK;").unwrap();
+    }
+    // An index from an older enzyme lacks a table this binary expects.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch("DROP TABLE source_refreshes;")
+        .unwrap();
+    let out = h.run(&["--workspace", "work", "spec", "plan", "--json"]);
+    assert_code(&out, 3);
+    assert!(text(&out).contains("enzyme refresh"), "{}", text(&out));
+}
+
+#[test]
 fn failures_use_the_exit_code_contract() {
     let h = Home::new();
     let notes = h.notes();
@@ -327,6 +355,17 @@ fn failures_use_the_exit_code_contract() {
         text(&out)
     );
     assert!(out.stdout.is_empty());
+    // A missing program file is a configuration error too.
+    assert_code(
+        &h.run(&[
+            "--workspace",
+            "fresh",
+            "spec",
+            "plan",
+            "/nonexistent/x.enzyme",
+        ]),
+        3,
+    );
     // Not declared anywhere.
     assert_code(
         &h.run(&["--workspace", "nope", "spec", "plan", "--json"]),

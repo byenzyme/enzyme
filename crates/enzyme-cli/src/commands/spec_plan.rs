@@ -91,7 +91,8 @@ pub struct EntityPlan {
     /// `folder`, `tag`, `link`, `log`, or `collection`.
     pub kind: String,
     pub name: String,
-    /// `reading`, `pattern`, `who_link`, `expanded`, or `automatic`.
+    /// `reading`, `pattern`, `who_link`, `expanded`, `automatic`, or
+    /// `unattributed` (selected by configuration no reading accounts for).
     pub origin: &'static str,
     /// Index into `readings` of the reading that selected it, if any.
     pub reading: Option<usize>,
@@ -228,9 +229,24 @@ pub struct VaultPlan {
     /// Everything left out, with reason codes; see docs/cli-json.md.
     pub skipped: Vec<Skip>,
     pub counts: Counts,
-    /// Present only when `--limit` shortened `entities` or `skipped`.
+    /// Present only when `--limit` shortened any entity list: `entities`,
+    /// `skipped`, or a job list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<Truncated>,
+}
+
+/// How long a plan waits on a locked index before exiting busy (4): a
+/// status view should answer quickly, not stall behind a writer.
+const PLAN_BUSY_TIMEOUT_MS: u64 = 1_000;
+
+/// SQLite busy/locked errors anywhere in planning become exit 4.
+fn busy_as_exit(error: anyhow::Error) -> anyhow::Error {
+    let text = format!("{error:#}");
+    if text.contains("database is locked") || text.contains("SQLITE_BUSY") {
+        super::exit::CliFailure::busy(error.context("the index is busy; retry shortly"))
+    } else {
+        error
+    }
 }
 
 /// Names the `spec plan --json` shape; see docs/cli-json.md.
@@ -302,8 +318,9 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
             )));
         }
     };
-    let source =
-        std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    let source = std::fs::read_to_string(file)
+        .with_context(|| format!("read {}", file.display()))
+        .map_err(super::exit::CliFailure::config)?;
     let ast = enzyme_spec::parse(&source)
         .with_context(|| format!("parse {}", file.display()))
         .map_err(super::exit::CliFailure::config)?;
@@ -420,16 +437,19 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         }
         program.vaults = vec![vault];
         let raw = &raw_scopes[index];
-        plans.push(plan_vault(
-            &vault_path,
-            declared,
-            workspace,
-            program,
-            raw,
-            &globals,
-            options.local,
-            options.limit,
-        )?);
+        plans.push(
+            plan_vault(
+                &vault_path,
+                declared,
+                workspace,
+                program,
+                raw,
+                &globals,
+                options.local,
+                options.limit,
+            )
+            .map_err(busy_as_exit)?,
+        );
     }
     Ok(plans)
 }
@@ -476,12 +496,16 @@ fn plan_vault(
             paths.vault_db.display(),
         )));
     }
-    let db = Database::open_read_only(&paths.vault_db).with_context(|| {
-        format!(
-            "open {} read-only (an index from an older enzyme may need `enzyme refresh`)",
-            paths.vault_db.display()
-        )
-    })?;
+    let db = Database::open_read_only_with_busy_timeout(&paths.vault_db, PLAN_BUSY_TIMEOUT_MS)
+        .with_context(|| format!("open {} read-only", paths.vault_db.display()))?;
+    db.validate_expected_schema()
+        .with_context(|| {
+            format!(
+                "{} was built by an older enzyme; run `enzyme refresh` first",
+                paths.vault_db.display()
+            )
+        })
+        .map_err(super::exit::CliFailure::config)?;
     let config = EnzymeConfig::from_readable_program(vault_path, program)?;
     let spec = config
         .reading_spec
@@ -530,7 +554,7 @@ fn plan_vault(
     let readings = attribute(&spec, raw, globals, &selection, &jobs);
     let reference_date = match &spec.learning.as_of {
         None => None,
-        Some(_) => Some(rfc3339(jobs.reference_ms)[..10].to_string()),
+        Some(_) => rfc3339(jobs.reference_ms).get(..10).map(str::to_string),
     };
     let (entities, skipped) = explain(&readings, &selection, &jobs, reference_date.as_deref());
     let counts = count(&entities, &skipped);
@@ -620,7 +644,9 @@ fn attribute(
     let diagnostics = &selection.diagnostics;
     let mut patterns = diagnostics.patterns.iter();
     let as_of_declared = spec.learning.as_of.is_some();
-    let date = as_of_declared.then(|| rfc3339(jobs.reference_ms)[..10].to_string());
+    let date = as_of_declared
+        .then(|| rfc3339(jobs.reference_ms).get(..10).map(str::to_string))
+        .flatten();
     let date = date.as_deref();
     spec.readings
         .iter()
@@ -1060,7 +1086,7 @@ fn explain(
                 match (selection.is_automatic(&entity.name, entity_type), parent) {
                     (true, Some(parent)) => ("expanded", None, Some(parent)),
                     (true, None) => ("automatic", None, None),
-                    (false, _) => ("reading", None, None),
+                    (false, _) => ("unattributed", None, None),
                 }
             });
             let (status, questions, skip) = match (planned.get(&k), skipped.get(&k)) {

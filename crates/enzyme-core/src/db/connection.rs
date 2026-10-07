@@ -97,6 +97,15 @@ impl Database {
     /// A schema older than this binary surfaces as a query error rather than
     /// being upgraded in place.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, DbError> {
+        Self::open_read_only_with_busy_timeout(path, 30_000)
+    }
+
+    /// [`Self::open_read_only`] with a caller-chosen busy timeout, for quick
+    /// read-only views that should report a busy index rather than wait.
+    pub fn open_read_only_with_busy_timeout(
+        path: impl AsRef<Path>,
+        busy_timeout_ms: u64,
+    ) -> Result<Self, DbError> {
         initialize_sqlite_runtime()?;
         let path = path.as_ref().to_owned();
         if !path.is_file() {
@@ -116,8 +125,11 @@ impl Database {
                 .await
                 .map_err(DbError::Libsql)?;
             let conn = db.connect().map_err(DbError::Libsql)?;
-            for sql in ["PRAGMA busy_timeout = 30000", "PRAGMA query_only = ON"] {
-                let mut rows = conn.query(sql, ()).await.map_err(DbError::Libsql)?;
+            for sql in [
+                format!("PRAGMA busy_timeout = {busy_timeout_ms}"),
+                "PRAGMA query_only = ON".to_string(),
+            ] {
+                let mut rows = conn.query(&sql, ()).await.map_err(DbError::Libsql)?;
                 while rows.next().await.map_err(DbError::Libsql)?.is_some() {}
             }
             Ok(Self { _db: db, conn })

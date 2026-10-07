@@ -237,7 +237,9 @@ vault or workspace the file declares, without model calls or writes.
 declaration of that workspace against the same index. Like the path form it opens
 the index read-only and makes no model calls, embeddings or writes (SQLite may
 create its empty `-wal`/`-shm` reader files beside the index). A workspace no
-program declares, or one not yet indexed, exits 3; see `docs/cli-exit-codes.md`.
+program declares, one not yet indexed, an unreadable FILE, or an index built by an
+older enzyme (run `enzyme refresh`) exits 3. A plan waits at most 1 s on a locked
+index, then exits 4 (busy). See `docs/cli-exit-codes.md`.
 
 Every plan, by workspace or by file, carries the explain view. Indexes in `entities`
 and `skipped` point into `readings`.
@@ -275,7 +277,8 @@ and `skipped` point into `readings`.
   `link`, `log` or `collection`. `origin` is `reading` (a declared reading names it),
   `pattern` (a `tags|links matching` reading matched it), `who_link` (an
   `including who links` expansion), `expanded` (a linked page of the folder in
-  `expanded_from`), or `automatic`. `reading` is null for automatic picks and their
+  `expanded_from`), `automatic`, or `unattributed` (selected by configuration that
+  no reading accounts for, such as legacy TOML entities; not expected from programs). `reading` is null for automatic picks and their
   expansions. `status` is `planned` (gets a generation job asking `questions`) or
   `skipped`, with `skip.code` and `skip.reason`.
 - `skipped[]`: what the program names or could reach but will not learn about,
