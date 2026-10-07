@@ -26,9 +26,14 @@ use enzyme_spec::{AsOf, Learning, Program, Reading, SelectionAmount, SelectionMo
 use super::init::EvidenceLimits;
 
 pub struct PlanOptions<'a> {
-    pub file: &'a Path,
+    /// Optional with `workspace`: the workspace's own program file.
+    pub file: Option<&'a Path>,
     pub vault: Option<&'a Path>,
+    /// A named workspace: plan its declaration against its home-store index.
+    pub workspace: Option<&'a str>,
     pub json: bool,
+    /// Most entities and skips listed in `entities`/`skipped`.
+    pub limit: Option<usize>,
     pub prompts: Option<&'a Path>,
     pub local: bool,
 }
@@ -75,6 +80,106 @@ pub struct ReadingPlan {
     pub skipped: Vec<PlannedSkip>,
     /// Why this reading produced fewer jobs than it names, in plain words.
     pub notes: Vec<String>,
+    /// The same reasons as codes, for the top-level `skipped` list.
+    #[serde(skip)]
+    pub skips: Vec<Skip>,
+}
+
+/// One selected entity: where it came from and whether it gets a job.
+#[derive(Debug, Serialize)]
+pub struct EntityPlan {
+    /// `folder`, `tag`, `link`, `log`, or `collection`.
+    pub kind: String,
+    pub name: String,
+    /// `reading`, `pattern`, `who_link`, `expanded`, or `automatic`.
+    pub origin: &'static str,
+    /// Index into `readings` of the reading that selected it, if any.
+    pub reading: Option<usize>,
+    /// For `expanded`: the folder whose linked page this is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expanded_from: Option<String>,
+    /// `planned` (gets a generation job) or `skipped` (see `skip`).
+    pub status: &'static str,
+    /// Questions its job asks for; 0 when skipped.
+    pub questions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip: Option<SkipCode>,
+}
+
+/// A machine reason code and a short human reason.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkipCode {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+/// A reading, candidate group, or selected entity that yields no job.
+#[derive(Debug, Clone, Serialize)]
+pub struct Skip {
+    /// `entity` (selected, but no job), `reading` (the declared entity
+    /// itself), `candidates` (`count` unselected matches or linked pages),
+    /// or `automatic`.
+    pub scope: &'static str,
+    #[serde(flatten)]
+    pub code: SkipCode,
+    pub reading: Option<usize>,
+    /// The entity, for `entity` and `reading` scopes.
+    pub kind: Option<String>,
+    pub name: Option<String>,
+    pub count: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct Counts {
+    /// Selected entities (the length of the untruncated `entities`).
+    pub selected: usize,
+    /// Selected entities with a generation job.
+    pub planned: usize,
+    /// Selected entities without one.
+    pub skipped: usize,
+    /// Selected entities per `origin`.
+    pub by_origin: std::collections::BTreeMap<&'static str, usize>,
+    /// Unselected candidates and readings, summed over non-`entity` skips.
+    pub candidates_skipped: usize,
+}
+
+/// How many entries `--limit` left out of each kind of list.
+#[derive(Debug, Default, Serialize)]
+pub struct Truncated {
+    pub limit: usize,
+    pub entities: usize,
+    pub skipped: usize,
+    /// Summed over `readings[].jobs` and `other_jobs`.
+    pub jobs: usize,
+    /// Summed over `readings[].skipped` and `other_skipped`.
+    pub job_skips: usize,
+}
+
+fn cut<T>(list: &mut Vec<T>, n: usize) -> usize {
+    let omitted = list.len().saturating_sub(n);
+    list.truncate(n);
+    omitted
+}
+
+impl VaultPlan {
+    /// Bound every entity list to `n` entries; `counts` and `totals` keep
+    /// describing the whole plan.
+    fn truncate(&mut self, n: usize) {
+        let mut t = Truncated {
+            limit: n,
+            entities: cut(&mut self.entities, n),
+            skipped: cut(&mut self.skipped, n),
+            jobs: cut(&mut self.other_jobs, n),
+            job_skips: cut(&mut self.other_skipped, n),
+        };
+        for r in &mut self.readings {
+            t.jobs += cut(&mut r.jobs, n);
+            t.job_skips += cut(&mut r.skipped, n);
+        }
+        if t.entities + t.skipped + t.jobs + t.job_skips > 0 {
+            self.truncated = Some(t);
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +200,9 @@ pub struct Totals {
 
 #[derive(Debug, Serialize)]
 pub struct VaultPlan {
+    /// The named workspace planned with `--workspace`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     pub vault: String,
     /// The path the program declares, when planned against another vault.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +223,14 @@ pub struct VaultPlan {
     pub other_jobs: Vec<PlannedJob>,
     pub other_skipped: Vec<PlannedSkip>,
     pub totals: Totals,
+    /// Every selected entity with its origin and status.
+    pub entities: Vec<EntityPlan>,
+    /// Everything left out, with reason codes; see docs/cli-json.md.
+    pub skipped: Vec<Skip>,
+    pub counts: Counts,
+    /// Present only when `--limit` shortened `entities` or `skipped`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<Truncated>,
 }
 
 /// Names the `spec plan --json` shape; see docs/cli-json.md.
@@ -145,26 +261,81 @@ pub fn run(options: PlanOptions<'_>) -> Result<()> {
     Ok(())
 }
 
+/// The program file that declares `workspace` in `$ENZYME_HOME/configs`.
+fn workspace_program_file(workspace: &str) -> Result<PathBuf> {
+    let configs = EnzymePaths::enzyme_home()?.join("configs");
+    let user_home = dirs::home_dir().context("cannot resolve home directory")?;
+    let (target, _) = enzyme_spec::plan::ConfigStore::new(&configs, user_home)
+        .locate(workspace)
+        .map_err(super::exit::CliFailure::config)?;
+    let file = configs.join(target);
+    if !file.is_file() {
+        return Err(super::exit::CliFailure::config(anyhow::anyhow!(
+            "no program in {} declares workspace {workspace:?}",
+            configs.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn declares_workspace(program: &Program, workspace: &str) -> bool {
+    program.workspaces.iter().any(|w| w.name == workspace)
+}
+
 /// Resolve the file like the runtime would and plan each selected vault.
 fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
-    let file = options.file;
+    let workspace = options.workspace;
+    let workspace_root = workspace
+        .map(EnzymePaths::workspace_root)
+        .transpose()
+        .map_err(super::exit::CliFailure::usage)?;
+    let located;
+    let file = match (options.file, workspace) {
+        (Some(file), _) => file,
+        (None, Some(name)) => {
+            located = workspace_program_file(name)?;
+            located.as_path()
+        }
+        (None, None) => {
+            return Err(super::exit::CliFailure::usage(anyhow::anyhow!(
+                "spec plan needs a program file or --workspace <name>"
+            )));
+        }
+    };
     let source =
         std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-    let ast = enzyme_spec::parse(&source).with_context(|| format!("parse {}", file.display()))?;
+    let ast = enzyme_spec::parse(&source)
+        .with_context(|| format!("parse {}", file.display()))
+        .map_err(super::exit::CliFailure::config)?;
+    if let Some(name) = workspace
+        && !declares_workspace(&ast, name)
+    {
+        return Err(super::exit::CliFailure::config(anyhow::anyhow!(
+            "{} does not declare workspace {name:?}",
+            file.display()
+        )));
+    }
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME missing")?;
     // A file inside the runtime configs directory shares its namespace (e.g.
     // profiles defined in profiles.enzyme), so resolve it with its siblings.
+    // Planning a named workspace always resolves against the namespace; the
+    // candidate replaces the file that declares the workspace today.
     // Another workspace's invalid file does not block planning this one.
     let mut others = Vec::new();
-    if let Some(directory) = runtime_configs_directory(file)? {
+    let directory = match workspace {
+        Some(_) => Some(EnzymePaths::enzyme_home()?.join("configs")).filter(|d| d.is_dir()),
+        None => runtime_configs_directory(file)?,
+    };
+    if let Some(directory) = directory {
         for entry in std::fs::read_dir(&directory)? {
             let path = entry?.path();
             if path.extension().is_some_and(|e| e == "enzyme")
                 && path.is_file()
                 && !same_file(&path, file)
                 && let Ok(program) = enzyme_spec::parse(&std::fs::read_to_string(&path)?)
+                && !workspace.is_some_and(|name| declares_workspace(&program, name))
             {
                 others.push(program);
             }
@@ -196,8 +367,18 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
     );
 
     let mut targets = Vec::new();
-    match options.vault {
-        Some(vault) => {
+    match (workspace, options.vault) {
+        (Some(name), _) => {
+            let index = resolved
+                .vaults
+                .iter()
+                .position(|v| v.workspace.as_deref() == Some(name))
+                .with_context(|| format!("{} does not declare workspace {name:?}", file.display()))
+                .map_err(super::exit::CliFailure::config)?;
+            let root = workspace_root.clone().expect("workspace root resolved");
+            targets.push((index, root, None));
+        }
+        (None, Some(vault)) => {
             let canonical = vault
                 .canonicalize()
                 .with_context(|| format!("vault {} not found", vault.display()))?;
@@ -221,7 +402,7 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
                 );
             }
         }
-        None => {
+        (None, None) => {
             for (i, v) in resolved.vaults.iter().enumerate() {
                 targets.push((i, PathBuf::from(&v.path), None));
             }
@@ -232,7 +413,9 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
     for (index, vault_path, declared) in targets {
         let mut program = resolved.clone();
         let mut vault = program.vaults.swap_remove(index);
-        if !vault.path.starts_with("workspace:") {
+        // A named workspace keeps its declared sources; its index is the
+        // home store, which `EnzymeConfig` finds from `vault_path`.
+        if workspace.is_none() && !vault.path.starts_with("workspace:") {
             vault.path = vault_path.to_string_lossy().to_string();
         }
         program.vaults = vec![vault];
@@ -240,10 +423,12 @@ fn plan(options: &PlanOptions<'_>) -> Result<Vec<(VaultPlan, JobsPlan)>> {
         plans.push(plan_vault(
             &vault_path,
             declared,
+            workspace,
             program,
             raw,
             &globals,
             options.local,
+            options.limit,
         )?);
     }
     Ok(plans)
@@ -265,22 +450,32 @@ fn same_file(a: &Path, b: &Path) -> bool {
     matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_vault(
     vault_path: &Path,
     declared_vault: Option<String>,
+    workspace: Option<&str>,
     program: Program,
     raw: &enzyme_spec::Vault,
     globals: &[Learning],
     local: bool,
+    limit: Option<usize>,
 ) -> Result<(VaultPlan, JobsPlan)> {
     let paths = EnzymePaths::new(vault_path)?;
-    anyhow::ensure!(
-        paths.vault_db.is_file(),
-        "{} is not indexed (no {}); run `enzyme -p {} init --stage index` first",
-        vault_path.display(),
-        paths.vault_db.display(),
-        vault_path.display()
-    );
+    if !paths.vault_db.is_file() {
+        let target = match workspace {
+            Some(name) => format!("--workspace {name}"),
+            None => format!("-p {}", vault_path.display()),
+        };
+        return Err(super::exit::CliFailure::config(anyhow::anyhow!(
+            "{} is not indexed (no {}); run `enzyme {target} init --stage index` first",
+            workspace.map_or_else(
+                || vault_path.display().to_string(),
+                |n| format!("workspace {n:?}")
+            ),
+            paths.vault_db.display(),
+        )));
+    }
     let db = Database::open_read_only(&paths.vault_db).with_context(|| {
         format!(
             "open {} read-only (an index from an older enzyme may need `enzyme refresh`)",
@@ -333,6 +528,12 @@ fn plan_vault(
         CatalystPipeline::new(&db, &llm, None).plan_jobs(&selection.entities, &cat_config)?;
 
     let readings = attribute(&spec, raw, globals, &selection, &jobs);
+    let reference_date = match &spec.learning.as_of {
+        None => None,
+        Some(_) => Some(rfc3339(jobs.reference_ms)[..10].to_string()),
+    };
+    let (entities, skipped) = explain(&readings, &selection, &jobs, reference_date.as_deref());
+    let counts = count(&entities, &skipped);
     let mut claimed = HashSet::new();
     for r in &readings {
         claimed.extend(r.jobs.iter().map(|j| key(&j.entity_type, &j.entity_name)));
@@ -349,6 +550,7 @@ fn plan_vault(
         skipped: jobs.skipped.len(),
     };
     let plan = VaultPlan {
+        workspace: workspace.map(str::to_string),
         vault: vault_path.to_string_lossy().to_string(),
         declared_vault,
         database: paths.vault_db.to_string_lossy().to_string(),
@@ -383,7 +585,15 @@ fn plan_vault(
             .cloned()
             .collect(),
         totals,
+        entities,
+        skipped,
+        counts,
+        truncated: None,
     };
+    let mut plan = plan;
+    if let Some(n) = limit {
+        plan.truncate(n);
+    }
     Ok((plan, jobs))
 }
 
@@ -410,6 +620,8 @@ fn attribute(
     let diagnostics = &selection.diagnostics;
     let mut patterns = diagnostics.patterns.iter();
     let as_of_declared = spec.learning.as_of.is_some();
+    let date = as_of_declared.then(|| rfc3339(jobs.reference_ms)[..10].to_string());
+    let date = date.as_deref();
     spec.readings
         .iter()
         .enumerate()
@@ -439,6 +651,7 @@ fn attribute(
                 jobs: Vec::new(),
                 skipped: Vec::new(),
                 notes: Vec::new(),
+                skips: Vec::new(),
             };
             let mut members: Vec<(String, String)> = Vec::new();
             if reading.pattern {
@@ -446,15 +659,35 @@ fn attribute(
                 if let Some(d) = &found {
                     members.extend(d.selected.iter().map(|e| key(&e.entity_type, &e.name)));
                     pattern_notes(&mut plan.notes, d, kind, as_of_declared);
+                    pattern_skips(&mut plan.skips, d, kind, name, i, date);
                 }
                 plan.matches = found;
             } else {
                 let selector = enzyme_spec::entity_selector(kind, name);
+                let declared = |code, reason: &str| Skip {
+                    scope: "reading",
+                    code: SkipCode {
+                        code,
+                        reason: reason.to_string(),
+                    },
+                    reading: Some(i),
+                    kind: Some(kind.to_string()),
+                    name: Some(name.to_string()),
+                    count: 1,
+                };
                 if diagnostics.missing.contains(&selector) {
                     plan.notes.push(format!("{selector} is not in the index"));
+                    plan.skips.push(declared(
+                        "not_indexed",
+                        "not indexed yet: no indexed note has it",
+                    ));
                 } else if diagnostics.left_out.contains(&selector) {
                     plan.notes.push(format!(
                         "{selector} is excluded by `leave out` or a built-in folder exclusion"
+                    ));
+                    plan.skips.push(declared(
+                        "left_out",
+                        "left out by `leave out` or a built-in exclusion",
                     ));
                 }
                 members.push(key(entity_type, name));
@@ -466,6 +699,7 @@ fn attribute(
                         .cloned();
                     if let Some(d) = &expansion {
                         members.extend(d.selected.iter().map(|e| key(&e.entity_type, &e.name)));
+                        pattern_skips(&mut plan.skips, d, "who link", name, i, date);
                         if d.matched == 0 {
                             plan.notes.push("source has no indexed who links".into());
                         } else if d.explicit > 0 {
@@ -490,6 +724,12 @@ fn attribute(
                         .filter(|c| spec.reading(c, "link").is_some())
                         .collect();
                     if !explicit.is_empty() {
+                        plan.skips.push(candidates(
+                            i,
+                            "own_reading",
+                            format!("{} linked page(s) have their own reading", explicit.len()),
+                            explicit.len(),
+                        ));
                         plan.notes.push(format!(
                             "{} linked page(s) have their own reading, which takes precedence: {}",
                             explicit.len(),
@@ -508,6 +748,7 @@ fn attribute(
                     );
                     if let Some(e) = &expansion {
                         folder_notes(&mut plan.notes, e, reading, as_of_declared);
+                        folder_skips(&mut plan.skips, e, reading, name, i, date);
                     }
                     plan.expansion = expansion;
                 }
@@ -536,6 +777,376 @@ fn attribute(
             plan
         })
         .collect()
+}
+
+fn candidates(reading: usize, code: &'static str, reason: String, count: usize) -> Skip {
+    Skip {
+        scope: "candidates",
+        code: SkipCode { code, reason },
+        reading: Some(reading),
+        kind: None,
+        name: None,
+        count,
+    }
+}
+
+/// "on or before 2024-10-01" for a declared `as of`, else "before today".
+fn before(date: Option<&str>) -> String {
+    date.map_or_else(|| "before today".into(), |d| format!("on or before {d}"))
+}
+
+/// Linked pages a folder reading did not expand into, by gate. Silent for a
+/// plain folder reading whose pages were never candidates.
+fn folder_skips(
+    skips: &mut Vec<Skip>,
+    e: &FolderExpansion,
+    r: &Reading,
+    folder: &str,
+    i: usize,
+    date: Option<&str>,
+) {
+    if e.linked_pages == 0 {
+        if r.include_linked_pages {
+            skips.push(Skip {
+                scope: "reading",
+                code: SkipCode {
+                    code: "no_linked_pages",
+                    reason: "no page in this folder is linked from your notes".into(),
+                },
+                reading: Some(i),
+                kind: Some("folder".into()),
+                name: Some(folder.to_string()),
+                count: 1,
+            });
+        }
+        return;
+    }
+    // A plain folder reading only expands when dense enough; its pages'
+    // frequency and activity gates are not the user's concern.
+    let expanding = r.include_linked_pages;
+    if expanding && e.below_frequency > 0 {
+        skips.push(candidates(
+            i,
+            "below_link_frequency",
+            format!(
+                "{} linked page(s) are linked fewer than {} times",
+                e.below_frequency,
+                enzyme_core::db::repository::PAGE_LINK_MIN_FREQUENCY
+            ),
+            e.below_frequency,
+        ));
+    }
+    if expanding && e.inactive > 0 {
+        let year = date.map_or_else(
+            || "the past year".into(),
+            |d| format!("the year before {d}"),
+        );
+        skips.push(candidates(
+            i,
+            "inactive",
+            format!("{} linked page(s) have no activity in {year}", e.inactive),
+            e.inactive,
+        ));
+    }
+    if e.below_density {
+        skips.push(candidates(
+            i,
+            "below_density_gate",
+            format!(
+                "{} linked page(s) not expanded: too few for the folder's size; add `including linked pages`",
+                e.eligible
+            ),
+            e.eligible,
+        ));
+    } else if e.eligible > e.selected.len() {
+        let n = e.eligible - e.selected.len();
+        skips.push(candidates(
+            i,
+            "cap_reached",
+            format!("{n} more linked page(s) qualified, but the reading's limit was reached"),
+            n,
+        ));
+    }
+}
+
+/// Matches a `tags|links matching` or `including who links` reading did not
+/// select.
+fn pattern_skips(
+    skips: &mut Vec<Skip>,
+    d: &PatternDiagnostics,
+    kind: &str,
+    name: &str,
+    i: usize,
+    date: Option<&str>,
+) {
+    if d.matched == 0 {
+        skips.push(Skip {
+            scope: "reading",
+            code: SkipCode {
+                code: "no_matches",
+                reason: format!("no indexed {kind} matches {name:?}"),
+            },
+            reading: Some(i),
+            kind: Some(kind.replace(' ', "_")),
+            name: Some(name.to_string()),
+            count: 1,
+        });
+        return;
+    }
+    if d.left_out > 0 {
+        skips.push(candidates(
+            i,
+            "left_out",
+            format!("{} match(es) left out by `leave out`", d.left_out),
+            d.left_out,
+        ));
+    }
+    if d.explicit > 0 {
+        skips.push(candidates(
+            i,
+            "own_reading",
+            format!("{} match(es) have their own reading", d.explicit),
+            d.explicit,
+        ));
+    }
+    if d.undated > 0 {
+        skips.push(candidates(
+            i,
+            "no_dated_evidence",
+            format!(
+                "{} match(es) have no notes dated {}",
+                d.undated,
+                before(date)
+            ),
+            d.undated,
+        ));
+    }
+    if d.eligible > d.selected.len() {
+        let n = d.eligible - d.selected.len();
+        skips.push(candidates(
+            i,
+            "cap_reached",
+            format!("{n} more match(es) qualified, but the reading's limit was reached"),
+            n,
+        ));
+    }
+}
+
+/// Why a selected entity gets no generation job, as a code and in brief.
+fn skip_code(reason: &SkipReason, date: Option<&str>) -> SkipCode {
+    let (code, reason) = match reason {
+        SkipReason::NoOccurrences => (
+            "no_occurrences",
+            "not mentioned in any indexed note".to_string(),
+        ),
+        SkipReason::NoEvidenceBeforeReference { occurrences } => (
+            "no_dated_evidence",
+            format!(
+                "too few dated notes: none dated {} ({occurrences} later)",
+                before(date)
+            ),
+        ),
+        SkipReason::NoUsableEvidence { occurrences } => (
+            "no_usable_evidence",
+            format!("its {occurrences} mention(s) gave no usable excerpt"),
+        ),
+        SkipReason::ThinContext {
+            documents,
+            tokens,
+            min_documents,
+            min_tokens,
+        } => (
+            "thin_context",
+            format!(
+                "too little material: {documents} note(s), {tokens} tokens; needs at least {min_documents} and {min_tokens}"
+            ),
+        ),
+    };
+    SkipCode { code, reason }
+}
+
+fn entity_type_of(kind: &str) -> &str {
+    if kind == "log" { "append_log" } else { kind }
+}
+
+fn kind_of(entity_type: &str) -> &str {
+    if entity_type == "append_log" {
+        "log"
+    } else {
+        entity_type
+    }
+}
+
+/// Every selected entity with its origin and status, and every skip with
+/// its reason code. Origins resolve in precedence order: a declared reading,
+/// then a reading's matches or expansion, then automatic selection.
+fn explain(
+    readings: &[ReadingPlan],
+    selection: &SelectionResult,
+    jobs: &JobsPlan,
+    date: Option<&str>,
+) -> (Vec<EntityPlan>, Vec<Skip>) {
+    type Origin = (&'static str, Option<usize>, Option<String>);
+    let mut origins: std::collections::HashMap<(String, String), Origin> = Default::default();
+    let mut claim = |k: (String, String), origin: Origin| {
+        origins.entry(k).or_insert(origin);
+    };
+    for (i, r) in readings.iter().enumerate() {
+        if !r.pattern {
+            claim(
+                key(entity_type_of(&r.kind), &r.name),
+                ("reading", Some(i), None),
+            );
+        }
+    }
+    let parent_of = |name: &str| {
+        let name = name.to_lowercase();
+        selection
+            .expandable_folders
+            .iter()
+            .filter(|(_, children)| children.iter().any(|c| c.to_lowercase() == name))
+            .map(|(folder, _)| folder.clone())
+            .min()
+    };
+    for (i, r) in readings.iter().enumerate() {
+        for e in r.matches.iter().flat_map(|d| &d.selected) {
+            claim(key(&e.entity_type, &e.name), ("pattern", Some(i), None));
+        }
+        for e in r.who_links.iter().flat_map(|d| &d.selected) {
+            claim(key(&e.entity_type, &e.name), ("who_link", Some(i), None));
+        }
+        if r.kind == "folder" && !r.pattern {
+            let folder = r.name.to_lowercase();
+            for child in selection
+                .expandable_folders
+                .get(&folder)
+                .into_iter()
+                .flatten()
+            {
+                claim(
+                    key("link", child),
+                    ("expanded", Some(i), Some(r.name.clone())),
+                );
+            }
+        }
+    }
+
+    let planned: std::collections::HashMap<_, _> = jobs
+        .jobs
+        .iter()
+        .map(|j| {
+            (
+                key(&j.entity_type, &j.entity_name),
+                j.shape.requested_questions,
+            )
+        })
+        .collect();
+    let skipped: std::collections::HashMap<_, _> = jobs
+        .skipped
+        .iter()
+        .map(|j| (key(&j.entity_type, &j.entity_name), &j.reason))
+        .collect();
+    let mut skips: Vec<Skip> = Vec::new();
+    let entities: Vec<EntityPlan> = selection
+        .entities
+        .iter()
+        .map(|entity| {
+            let entity_type = entity.entity_type.as_str();
+            let k = key(entity_type, &entity.name);
+            let (origin, reading, expanded_from) = origins.get(&k).cloned().unwrap_or_else(|| {
+                let parent = (entity_type == "link")
+                    .then(|| parent_of(&entity.name))
+                    .flatten();
+                match (selection.is_automatic(&entity.name, entity_type), parent) {
+                    (true, Some(parent)) => ("expanded", None, Some(parent)),
+                    (true, None) => ("automatic", None, None),
+                    (false, _) => ("reading", None, None),
+                }
+            });
+            let (status, questions, skip) = match (planned.get(&k), skipped.get(&k)) {
+                (Some(&questions), _) => ("planned", questions, None),
+                (None, Some(reason)) => ("skipped", 0, Some(skip_code(reason, date))),
+                (None, None) => (
+                    "skipped",
+                    0,
+                    Some(SkipCode {
+                        code: "no_job",
+                        reason: "no generation job was built".into(),
+                    }),
+                ),
+            };
+            if let Some(code) = &skip {
+                skips.push(Skip {
+                    scope: "entity",
+                    code: code.clone(),
+                    reading,
+                    kind: Some(kind_of(entity_type).to_string()),
+                    name: Some(entity.name.clone()),
+                    count: 1,
+                });
+            }
+            EntityPlan {
+                kind: kind_of(entity_type).to_string(),
+                name: entity.name.clone(),
+                origin,
+                reading,
+                expanded_from,
+                status,
+                questions,
+                skip,
+            }
+        })
+        .collect();
+
+    let mut all: Vec<Skip> = readings
+        .iter()
+        .flat_map(|r| r.skips.iter().cloned())
+        .collect();
+    all.extend(skips);
+    if let Some(a) = &selection.diagnostics.automatic
+        && a.slots == 0
+    {
+        all.push(Skip {
+            scope: "automatic",
+            code: SkipCode {
+                code: "cap_reached",
+                reason: format!(
+                    "your readings fill all {} slots, so nothing is picked automatically",
+                    a.limit
+                ),
+            },
+            reading: None,
+            kind: None,
+            name: None,
+            count: 0,
+        });
+    }
+    let rank = |s: &Skip| match s.scope {
+        "reading" => 0,
+        "entity" => 1,
+        "candidates" => 2,
+        _ => 3,
+    };
+    all.sort_by_key(rank);
+    (entities, all)
+}
+
+fn count(entities: &[EntityPlan], skipped: &[Skip]) -> Counts {
+    let mut counts = Counts {
+        selected: entities.len(),
+        planned: entities.iter().filter(|e| e.status == "planned").count(),
+        ..Default::default()
+    };
+    counts.skipped = counts.selected - counts.planned;
+    for e in entities {
+        *counts.by_origin.entry(e.origin).or_default() += 1;
+    }
+    counts.candidates_skipped = skipped
+        .iter()
+        .filter(|s| s.scope != "entity")
+        .map(|s| s.count)
+        .sum();
+    counts
 }
 
 fn source_text(r: &Reading) -> String {
@@ -832,8 +1443,22 @@ fn render(plan: &VaultPlan) -> String {
             ));
         }
     }
+    let c = &plan.counts;
+    let origins: Vec<String> = c
+        .by_origin
+        .iter()
+        .map(|(origin, n)| format!("{n} {origin}"))
+        .collect();
     s.push_str(&format!(
-        "\ntotal  {} jobs · {} requested questions · {} excerpts · {} skipped\n",
+        "\nentities  {} selected ({}) → {} planned, {} skipped · {} other candidates skipped\n",
+        c.selected,
+        origins.join(" · "),
+        c.planned,
+        c.skipped,
+        c.candidates_skipped
+    ));
+    s.push_str(&format!(
+        "total  {} jobs · {} requested questions · {} excerpts · {} skipped\n",
         plan.totals.jobs,
         plan.totals.requested_questions,
         plan.totals.excerpts,
@@ -1046,6 +1671,135 @@ vault "/notes" {
                 false
             )
             .contains("consider `as of`")
+        );
+    }
+
+    #[test]
+    fn skip_codes_name_each_gate_with_a_human_reason() {
+        let (_, resolved) = program(
+            r#"vault "/notes" {
+  learn questions from folder "people" including linked pages
+  learn questions from folder "daily"
+}"#,
+        );
+        let [including, plain] = &resolved.vaults[0].readings[..] else {
+            panic!()
+        };
+        let gated = FolderExpansion {
+            linked_pages: 9,
+            below_frequency: 4,
+            inactive: 2,
+            eligible: 3,
+            ..Default::default()
+        };
+        let mut skips = Vec::new();
+        folder_skips(
+            &mut skips,
+            &gated,
+            including,
+            "people",
+            0,
+            Some("2024-10-01"),
+        );
+        let codes: Vec<_> = skips.iter().map(|s| (s.code.code, s.count)).collect();
+        assert_eq!(
+            codes,
+            [
+                ("below_link_frequency", 4),
+                ("inactive", 2),
+                ("cap_reached", 3)
+            ]
+        );
+        assert!(skips[1].code.reason.contains("2024-10-01"));
+        assert!(
+            skips
+                .iter()
+                .all(|s| s.scope == "candidates" && s.reading == Some(0))
+        );
+
+        // A plain folder reading reports only the density gate it can act on.
+        skips.clear();
+        let sparse = FolderExpansion {
+            below_density: true,
+            ..gated.clone()
+        };
+        folder_skips(&mut skips, &sparse, plain, "daily", 1, None);
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].code.code, "below_density_gate");
+        assert!(skips[0].code.reason.contains("including linked pages"));
+        skips.clear();
+        folder_skips(
+            &mut skips,
+            &FolderExpansion::default(),
+            including,
+            "people",
+            0,
+            None,
+        );
+        assert_eq!(
+            (skips[0].scope, skips[0].code.code),
+            ("reading", "no_linked_pages")
+        );
+
+        skips.clear();
+        pattern_skips(
+            &mut skips,
+            &PatternDiagnostics::default(),
+            "tag",
+            "zz-*",
+            2,
+            None,
+        );
+        assert_eq!(skips[0].code.code, "no_matches");
+        assert_eq!(skips[0].name.as_deref(), Some("zz-*"));
+        skips.clear();
+        let d = PatternDiagnostics {
+            matched: 6,
+            left_out: 1,
+            explicit: 1,
+            undated: 2,
+            eligible: 2,
+            ..Default::default()
+        };
+        pattern_skips(&mut skips, &d, "tag", "a*", 0, None);
+        let codes: Vec<_> = skips.iter().map(|s| s.code.code).collect();
+        assert_eq!(
+            codes,
+            [
+                "left_out",
+                "own_reading",
+                "no_dated_evidence",
+                "cap_reached"
+            ]
+        );
+        assert!(skips[2].code.reason.contains("before today"));
+
+        let thin = skip_code(
+            &SkipReason::ThinContext {
+                documents: 1,
+                tokens: 30,
+                min_documents: 2,
+                min_tokens: 32,
+            },
+            None,
+        );
+        assert_eq!(thin.code, "thin_context");
+        assert!(
+            thin.reason.contains("needs at least 2 and 32"),
+            "{}",
+            thin.reason
+        );
+        assert_eq!(
+            skip_code(&SkipReason::NoOccurrences, None).code,
+            "no_occurrences"
+        );
+        assert_eq!(
+            skip_code(
+                &SkipReason::NoEvidenceBeforeReference { occurrences: 3 },
+                Some("2024-01-01")
+            )
+            .code,
+            "no_dated_evidence"
         );
     }
 

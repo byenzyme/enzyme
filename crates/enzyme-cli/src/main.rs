@@ -530,11 +530,8 @@ async fn run(cli: Cli) -> Result<()> {
     // These commands don't need a vault path — log to stderr.
     match &cli.command {
         Commands::Spec { command } => {
-            usage_ensure(
-                cli.collection.is_none(),
-                "spec commands take Markdown vault paths, not named workspaces",
-            )?;
-            return commands::spec::run(command, cli.vault.as_deref()).await;
+            return commands::spec::run(command, cli.vault.as_deref(), cli.collection.as_deref())
+                .await;
         }
         Commands::Workspace { command } => {
             anyhow::ensure!(

@@ -16,7 +16,7 @@ accepted alias.
 | `enzyme search <query> --json` | `enzyme.search.v1` |
 | `enzyme status --json` | `enzyme.status.v1` |
 | `enzyme spec profiles --json` | `enzyme.profiles.v1` |
-| `enzyme spec plan <file> --json` | `enzyme.spec-plan.v1` |
+| `enzyme spec plan [<file>] --json` | `enzyme.spec-plan.v1` |
 | `enzyme model list --json` | `enzyme.models.v1` |
 | `enzyme scan [--json]` | `scan.v2` (in `schema_version`, see below) |
 | `enzyme catalyze <query> --json` | unversioned legacy envelope (see below) |
@@ -228,6 +228,88 @@ vault or workspace the file declares, without model calls or writes.
 - Jobs under a reading came from that reading; `other_jobs`/`other_skipped` are
   automatic selection's. The language reference (`tools/reading-spec/README.md`)
   describes every field.
+
+### Named workspaces and the explain view
+
+`enzyme --workspace <name> spec plan --json` plans a named workspace's program (the
+`$ENZYME_HOME/configs/*.enzyme` file that declares it) against its index in
+`$ENZYME_HOME/workspaces/<name>/`. Pass a file as well to preview a desired program's
+declaration of that workspace against the same index. Like the path form it opens
+the index read-only and makes no model calls, embeddings or writes (SQLite may
+create its empty `-wal`/`-shm` reader files beside the index). A workspace no
+program declares, or one not yet indexed, exits 3; see `docs/cli-exit-codes.md`.
+
+Every plan, by workspace or by file, carries the explain view. Indexes in `entities`
+and `skipped` point into `readings`.
+
+```json
+{
+  "workspace": "work",
+  "entities": [
+    { "kind": "tag", "name": "focus", "origin": "reading", "reading": 0,
+      "status": "planned", "questions": 3 },
+    { "kind": "link", "name": "alice", "origin": "expanded", "reading": 1,
+      "expanded_from": "people", "status": "planned", "questions": 3 },
+    { "kind": "tag", "name": "projects", "origin": "pattern", "reading": 2,
+      "status": "skipped", "questions": 0,
+      "skip": { "code": "thin_context",
+                "reason": "too little material: 1 note(s), 30 tokens; needs at least 1 and 32" } }
+  ],
+  "skipped": [
+    { "scope": "reading", "code": "not_indexed", "reason": "not indexed yet: no indexed note has it",
+      "reading": 3, "kind": "tag", "name": "absent", "count": 1 },
+    { "scope": "entity", "code": "thin_context", "reason": "…", "reading": 2,
+      "kind": "tag", "name": "projects", "count": 1 },
+    { "scope": "candidates", "code": "below_link_frequency",
+      "reason": "4 linked page(s) are linked fewer than 3 times",
+      "reading": 1, "kind": null, "name": null, "count": 4 }
+  ],
+  "counts": { "selected": 3, "planned": 2, "skipped": 1,
+              "by_origin": { "expanded": 1, "pattern": 1, "reading": 1 },
+              "candidates_skipped": 5 },
+  "truncated": { "limit": 20, "entities": 13, "skipped": 0, "jobs": 9, "job_skips": 0 }
+}
+```
+
+- `entities[]`: every selected entity, in selection order. `kind` is `folder`, `tag`,
+  `link`, `log` or `collection`. `origin` is `reading` (a declared reading names it),
+  `pattern` (a `tags|links matching` reading matched it), `who_link` (an
+  `including who links` expansion), `expanded` (a linked page of the folder in
+  `expanded_from`), or `automatic`. `reading` is null for automatic picks and their
+  expansions. `status` is `planned` (gets a generation job asking `questions`) or
+  `skipped`, with `skip.code` and `skip.reason`.
+- `skipped[]`: what the program names or could reach but will not learn about,
+  ordered by `scope`: `reading` (the declared entity itself), `entity` (selected, but
+  no job; repeats `entities[].skip`), `candidates` (`count` unselected matches or
+  linked pages, unnamed), and `automatic`. `reason` is a short sentence for people;
+  match on `code`:
+
+  | `code` | Scope | Meaning |
+  |---|---|---|
+  | `not_indexed` | reading | No indexed note has the entity yet |
+  | `left_out` | reading, candidates | Removed by `leave out` or a built-in exclusion |
+  | `no_linked_pages` | reading | `including linked pages`, but no page in the folder is linked |
+  | `no_matches` | reading | A pattern or who-link expansion matched nothing |
+  | `below_link_frequency` | candidates | Linked pages linked fewer than 3 times |
+  | `inactive` | candidates | Linked pages with no activity in the year before the reference date |
+  | `below_density_gate` | candidates | A plain folder reading did not expand: too few linked pages for its size |
+  | `own_reading` | candidates | Covered by their own reading instead |
+  | `cap_reached` | candidates, automatic | More qualified than the reading's limit, or readings fill every automatic slot |
+  | `no_dated_evidence` | candidates, entity | No notes dated at or before the reference instant |
+  | `no_occurrences` | entity | Not mentioned in any indexed note |
+  | `no_usable_evidence` | entity | Mentions yielded no usable excerpt |
+  | `thin_context` | entity | Too few notes or tokens to ask good questions |
+
+  New codes may appear; treat an unknown code by showing `reason`.
+- `counts`: always describes the whole plan. `planned` equals `totals.jobs`;
+  `candidates_skipped` sums `count` over non-`entity` skips.
+- `--limit N` (bounded mode) lists at most N entries in each entity list: `entities`,
+  `skipped`, `other_jobs`, `other_skipped`, and each reading's `jobs` and `skipped`.
+  `counts` and `totals` stay complete, and `truncated` (present only when something
+  was cut) says how many entries each kind of list lost. Selection itself is bounded
+  (at most 20 automatic picks, plus each expanded folder's limit), so the work grows
+  with evidence per selected entity rather than entity count: a full plan took about
+  0.9 s warm (1.5 s cold) on a 7,151-document index.
 
 ## `enzyme.profiles.v1`
 

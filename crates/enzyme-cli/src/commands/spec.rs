@@ -37,12 +37,17 @@ pub enum SpecCommand {
     /// Shows, per reading, the resolved entities, generation jobs, evidence
     /// periods with excerpt and question allocation, and why readings are empty.
     /// Pass the vault with the global `-p/--vault`; without it every vault the
-    /// file declares is planned.
+    /// file declares is planned. With `--workspace <name>` the file is optional:
+    /// the workspace's own program in `$ENZYME_HOME/configs` is planned against
+    /// its index, or FILE's declaration of that workspace when given.
     Plan {
-        file: PathBuf,
+        file: Option<PathBuf>,
         /// Emit the plan as structured JSON
         #[arg(long)]
         json: bool,
+        /// List at most N entities and N skips (counts stay complete)
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
         /// Also write each job's rendered system and user prompt into this directory
         #[arg(long)]
         prompts: Option<PathBuf>,
@@ -58,7 +63,16 @@ pub enum SpecCommand {
         port: u16,
     },
 }
-pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Result<()> {
+pub async fn run(
+    command: &SpecCommand,
+    vault: Option<&std::path::Path>,
+    workspace: Option<&str>,
+) -> Result<()> {
+    if workspace.is_some() && !matches!(command, SpecCommand::Plan { .. }) {
+        return Err(super::exit::CliFailure::usage(anyhow::anyhow!(
+            "only `spec plan` takes --workspace; other spec commands take Markdown vault paths"
+        )));
+    }
     match command {
         SpecCommand::Compile {
             file,
@@ -128,12 +142,15 @@ pub async fn run(command: &SpecCommand, vault: Option<&std::path::Path>) -> Resu
         SpecCommand::Plan {
             file,
             json,
+            limit,
             prompts,
             local,
         } => super::spec_plan::run(super::spec_plan::PlanOptions {
-            file,
+            file: file.as_deref(),
             vault,
+            workspace,
             json: *json,
+            limit: *limit,
             prompts: prompts.as_deref(),
             local: *local,
         })?,
