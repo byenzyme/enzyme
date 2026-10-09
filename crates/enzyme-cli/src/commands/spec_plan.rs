@@ -1311,7 +1311,7 @@ fn learning_plan(
         sampling: Sourced {
             value: l
                 .sampling_mode()
-                .map_or("legacy selector".into(), |m| format!("by {m}")),
+                .map_or("by recency".into(), |m| format!("by {m}")),
             from: from(&|l| l.sample.is_some() || l.favor.is_some()),
         },
         periods: Sourced {
@@ -1382,21 +1382,11 @@ fn render(plan: &VaultPlan) -> String {
     for (i, r) in plan.readings.iter().enumerate() {
         s.push_str(&format!("\n{}. {}  about {}\n", i + 1, r.source, r.profile));
         let l = &r.learning;
-        let sampling = if l.sampling.value == "legacy selector" {
-            format!("legacy sampling ({})", l.sampling.from)
-        } else {
-            format!("sample {} ({})", l.sampling.value, l.sampling.from)
-        };
         let mut policy = vec![
-            sampling,
+            format!("sample {} ({})", l.sampling.value, l.sampling.from),
+            format!("periods {} ({})", l.periods.value, l.periods.from),
             format!("budget {} ({})", l.budget.value, l.budget.from),
         ];
-        if l.sampling.value != "legacy selector" {
-            policy.insert(
-                1,
-                format!("periods {} ({})", l.periods.value, l.periods.from),
-            );
-        }
         if l.select.value != "n/a" {
             policy.push(format!("select {} ({})", l.select.value, l.select.from));
         }

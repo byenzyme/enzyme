@@ -1120,8 +1120,7 @@ struct SkippedEntity {
 pub struct JobShape {
     /// Questions requested from the model.
     pub requested_questions: usize,
-    /// `time` or `recency` under explicit temporal sampling; `None` is the
-    /// legacy selector.
+    /// `time` or `recency`; readings that declare no policy sample by recency.
     pub sampling: Option<String>,
     /// Declared period granularity (`auto` when sampling without one).
     pub period_granularity: Option<String>,
@@ -2023,13 +2022,20 @@ impl<'a> CatalystPipeline<'a> {
                 max_samples,
                 max_context_chars,
             );
+            // Accept the period labels the prompt offered. Temporal sampling
+            // builds its own periods, so the clustered eras would reject them
+            // and every catalyst would fall back to the first era.
+            let era_labels = match &selected_context.era_context {
+                Some(context) => context.eras.iter().map(|era| era.label.clone()).collect(),
+                None => eras.into_iter().map(|era| era.label).collect(),
+            };
             jobs.push(EntityJob {
                 entity_name: entity_name.clone(),
                 entity_type,
                 user_prompt,
                 context_hash,
                 context_sources: selected_context.context_sources,
-                era_labels: eras.into_iter().map(|era| era.label).collect(),
+                era_labels,
                 shape,
             });
         }

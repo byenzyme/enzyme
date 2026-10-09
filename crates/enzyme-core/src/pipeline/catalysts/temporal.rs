@@ -1,5 +1,8 @@
-//! Explicit within-entity temporal evidence selection. The legacy selectors
-//! remain the default when no sample/favor policy is configured.
+//! Within-entity temporal evidence selection. Readings that declare no
+//! sample/favor policy sample by recency: every represented period keeps
+//! evidence, recent periods get more, and the per-period question allocation
+//! reaches the prompt. The legacy newest-first folder selector left one excerpt
+//! per older period and let the model pile era labels onto the newest quarter.
 use super::*;
 use chrono::Datelike;
 
@@ -10,10 +13,9 @@ pub(super) enum Preference {
 }
 impl Preference {
     pub(super) fn from_learning(policy: Option<&enzyme_spec::Learning>) -> Option<Self> {
-        let policy = policy?;
-        if policy.sample.as_deref() != Some("across_time") && policy.favor.is_none() {
-            return None;
-        }
+        let Some(policy) = policy.filter(|p| p.sample.is_some() || p.favor.is_some()) else {
+            return Some(Self::Recent);
+        };
         Some(if policy.favor.as_deref() == Some("recent") {
             Self::Recent
         } else {
@@ -890,6 +892,16 @@ mod tests {
             monthly.user_prompt
         );
         assert_eq!(monthly.user_prompt.matches(": 1 questions\n").count(), 10);
+        // Catalyst era labels are validated against the periods the prompt offered.
+        assert_eq!(monthly.era_labels.len(), 10);
+        for label in &monthly.era_labels {
+            assert!(
+                monthly
+                    .user_prompt
+                    .contains(&format!("- {label}: 1 questions")),
+                "{label}"
+            );
+        }
         // Reading-level clause overrides the vault; auto is today's rule.
         let auto = job(&format!(r#"vault "/notes" {{ sample by time {reading} }}"#));
         assert!(
@@ -906,20 +918,34 @@ mod tests {
         // A declared granularity changes the hash; absence keeps the old one.
         assert_ne!(overridden.context_hash, auto.context_hash);
         assert_ne!(monthly.context_hash, auto.context_hash);
-        // Without temporal sampling the clause is inert for the prompt.
-        let legacy = job(&format!(r#"vault "/notes" {{ {reading} }}"#));
-        let inert = job(&format!(
+        // Without a declared policy, readings sample by recency, so a
+        // granularity clause alone still shapes the periods.
+        let default = job(&format!(r#"vault "/notes" {{ {reading} }}"#));
+        let recency = job(&format!(
+            r#"vault "/notes" {{ sample by recency {reading} }}"#
+        ));
+        assert_eq!(default.user_prompt, recency.user_prompt);
+        assert!(
+            default
+                .user_prompt
+                .contains("Temporal evidence: 4 represented periods")
+        );
+        assert!(default.user_prompt.contains("Recent priority"));
+        let monthly_default = job(&format!(
             r#"vault "/notes" {{ periods monthly {reading} }}"#
         ));
-        assert_eq!(inert.user_prompt, legacy.user_prompt);
-        assert!(!inert.user_prompt.contains("Temporal evidence"));
+        assert!(
+            monthly_default
+                .user_prompt
+                .contains("Temporal evidence: 10 represented periods")
+        );
     }
     #[test]
-    fn omitted_temporal_settings_keep_legacy_path() {
-        assert_eq!(Preference::from_learning(None), None);
+    fn omitted_temporal_settings_sample_by_recency() {
+        assert_eq!(Preference::from_learning(None), Some(Preference::Recent));
         assert_eq!(
             Preference::from_learning(Some(&enzyme_spec::Learning::default())),
-            None
+            Some(Preference::Recent)
         );
         assert_eq!(
             Preference::from_learning(Some(&enzyme_spec::Learning {
