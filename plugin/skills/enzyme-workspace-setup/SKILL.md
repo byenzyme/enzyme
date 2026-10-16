@@ -89,18 +89,20 @@ to install or update those instructions. Existing `.enzyme/`, `AGENTS.md`,
 `CLAUDE.md`, or installed skills are evidence to inspect, not proof of health.
 
 Record configured mode, effective mode, selected model, and network requirement
-from `model status`. Preserve the configured mode when no preference was given.
-`auto` uses the selected local model when installed and hosted generation otherwise.
+from `model status`. Use hosted generation unless the user asks for local: it
+prepares much better questions than the local model. `auto` uses an installed
+local model, so do not assume it means hosted.
 
 - Hosted generation sends selected excerpts to Enzyme's service; the index,
-  embeddings, and search remain local.
-- Local generation needs no network once its model is installed. Use `model list`
-  to show the current download size if offering installation. Downloading a model
-  or switching modes requires explicit consent; preserve `auto` unless asked to
-  force a mode. Do not download or switch as a fallback after a hosted failure.
-- When the user asks for hosted generation, run `"$ENZYME_BIN" model disable`.
-  It writes `configs/settings.enzyme` in Enzyme home; include that file in the
-  recovery record. `auto` uses an installed local model, so do not assume hosted.
+  embeddings, and search remain local. If the effective mode is not hosted and
+  the user has not asked for local, run `"$ENZYME_BIN" model disable` once
+  generation is authorized. It writes `configs/settings.enzyme` in Enzyme home;
+  include that file in the recovery record.
+- Use local generation only when the user asks for it, for example to keep notes
+  off the network. It needs no network once its model is installed. Use
+  `model list` to show the current download size if offering installation.
+  Downloading a model requires explicit consent. Do not download or switch to
+  local as a fallback after a hosted failure; report the failure.
 - Use `--use-env-llm` on `init` and `refresh` only when the user explicitly requests
   their own configured provider and its required environment is present. Inspect
   variable names only for that request, never secret values. Never print keys or
