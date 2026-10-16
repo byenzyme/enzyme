@@ -465,7 +465,7 @@ SQL
 
 Replace `messages` with the configured source name. For a source without `roles.where`, `source_documents` must match the number of rows returned by the saved source query. For a source with `roles.where` (log mode), `source_documents` is the bucket count — one document per thread-month — so it will be far smaller than the row count; compare it with the row and bucket counts that `status` reports for the source instead. In a standalone workspace, `source_documents` should also match total `documents`. In a mixed Markdown workspace, total `documents` includes both sources, so do not compare that combined number directly with the source's own counts.
 
-The default is `max_embedding_files = 1024`, so one run embeds at most the newest 1024 documents. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Do not author or change `max_embedding_files` in this skill, and do not run `init` again to finish an embedding backlog.
+By default one run embeds at most the newest 2048 documents, or more (up to 8192) when that many are dated within the last two years. With `--quiet`, a large source can therefore look finished while older documents still have no embeddings. Require `embedded = documents` and `awaiting_embedding = 0`. If they do not match, run `refresh` and check again until they do. Do not author or change `max_embedding_files` in this skill, and do not run `init` again to finish an embedding backlog.
 
 Catalysts are generated selectively and may finish in the background, so not every collection is expected to receive one. Use this pass bar:
 
