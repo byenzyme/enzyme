@@ -99,6 +99,37 @@ impl GeneratedSetup {
         }))
     }
 }
+
+/// Every top-level folder that would be indexed, however small, so leave-outs
+/// never depend on a bounded ranking. Root-level notes count under "".
+fn folder_inventory(docs: &[ProcessedDocument]) -> Vec<serde_json::Value> {
+    let now = Utc::now().timestamp_millis();
+    let mut folders: std::collections::BTreeMap<&str, (usize, usize, Option<i64>)> =
+        Default::default();
+    for doc in docs {
+        let folder = doc
+            .source_ref
+            .split_once('/')
+            .map_or("", |(folder, _)| folder);
+        let entry = folders.entry(folder).or_default();
+        entry.0 += 1;
+        if let Some((date, _)) = evidence_date(doc, now) {
+            entry.1 += 1;
+            entry.2 = entry.2.max(Some(date));
+        }
+    }
+    folders
+        .into_iter()
+        .map(|(folder, (notes, dated, latest))| {
+            serde_json::json!({
+                "folder": folder,
+                "notes": notes,
+                "dated_notes": dated,
+                "latest_note_date": latest.and_then(millis_to_rfc3339),
+            })
+        })
+        .collect()
+}
 pub(super) async fn generate_jev_setup(
     vault_path: &Path,
     temporal: bool,
@@ -123,6 +154,7 @@ pub(super) async fn generate_jev_setup(
 pub(super) struct PreparedSetup {
     suggestion: ScanSuggestion,
     pub candidates: Vec<SelectionCandidate>,
+    folders: Vec<serde_json::Value>,
     scan_ms: u128,
 }
 impl PreparedSetup {
@@ -136,7 +168,7 @@ impl PreparedSetup {
             "files": self.suggestion.files,
             "summary": serde_json::to_value(&self.suggestion.summary)?,
             "excluded_folders": self.suggestion.excluded_folders,
-            "top_folders": serde_json::to_value(&self.suggestion.top_folders)?,
+            "folders": self.folders,
             "top_tags": serde_json::to_value(&self.suggestion.top_tags)?,
             "top_links": serde_json::to_value(&self.suggestion.top_links)?,
             "scan_ms": self.scan_ms,
@@ -152,6 +184,7 @@ pub(super) fn prepare_jev_setup(vault_path: &Path) -> Result<PreparedSetup> {
     Ok(PreparedSetup {
         suggestion,
         candidates,
+        folders: folder_inventory(&docs),
         scan_ms: start.elapsed().as_millis(),
     })
 }

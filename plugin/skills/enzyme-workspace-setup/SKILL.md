@@ -130,12 +130,20 @@ The packet is large; query it with `jq` rather than reading it whole. It holds:
 - `evidence`: the vault-wide inventory.
 
 Before answering, read the user's own map: `AGENTS.md`, `CLAUDE.md`, and any
-router or index note they point to. It says what is current and what is archive,
+note they import or link as the place to start. A router note is one the user
+wrote to describe where things live or what matters; generated guides and
+Enzyme's own output are not. If none exists, the packet alone decides. It says what is current and what is archive,
 where each kind of note lives, and which pages are running logs; candidate
 counts only say what is numerous. Where they disagree, the user's map wins for
 what matters and the packet wins for what exists. Open notes when two excerpts
-cannot settle a question. Leave out large archives or imports the map treats as
-inactive. A candidate you skip is not an exclusion.
+cannot settle a question. Check `evidence.folders` for everything that will be
+indexed and leave out archives, imports, demos, or generated material the map
+treats as inactive. A candidate you skip is not an exclusion.
+
+Aim for roughly 8 to 15 readings. Prefer broad folders and the tags the user's
+map names over many narrow tags; a narrow tag earns its own reading only when
+the map calls it out. A log reading is for a page the user keeps appending to,
+not a single dated note.
 
 Before writing, keep a bounded recovery record in a unique `mktemp` directory:
 the original file at `save_to` if it exists, any legacy `config.toml`, and
@@ -168,6 +176,9 @@ Keep three facts distinct:
 - Folder exclusions remove material from discovery/search; tag/link exclusions
   affect entity selection, not whole-note discovery. The packet covers Markdown
   candidates, not every non-Markdown file.
+
+When no user is present to review, treat the checked draft as accepted, and
+record the choices you would have raised in the final receipt.
 
 Describe pre-init search coverage as planned, not already available. If nothing
 needs reorganizing, say “You can keep your notes where they are.”
