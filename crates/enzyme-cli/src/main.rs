@@ -59,6 +59,10 @@ enum Commands {
         /// Emit the program and the inventory it was selected from as JSON
         #[arg(long)]
         json: bool,
+        /// Print the selection questions and evidence as JSON for an agent to
+        /// answer itself; local only, saves nothing
+        #[arg(long, conflicts_with_all = ["preset", "output", "dry_run", "json"])]
+        packet: bool,
         /// Alternate Are.na API root for integration tests
         #[arg(long, hide = true, default_value = "https://api.are.na/v3/")]
         arena_api_base: String,
@@ -594,9 +598,13 @@ async fn run(cli: Cli) -> Result<()> {
         output,
         dry_run,
         json,
+        packet,
         arena_api_base,
     } = &cli.command
     {
+        if *packet {
+            return commands::compile::run_packet(&vault_path);
+        }
         if let Some(preset) = preset {
             usage_ensure(
                 cli.vault.is_none(),

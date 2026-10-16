@@ -103,22 +103,56 @@ pub(super) async fn generate_jev_setup(
     vault_path: &Path,
     temporal: bool,
 ) -> Result<GeneratedSetup> {
-    let start = std::time::Instant::now();
-    let docs = process_docs(vault_path)?;
-    let suggestion = build_scan_suggestion(vault_path, &docs)?;
-    let candidates = jev_candidates(&docs, &suggestion);
-    let candidate_specs: Vec<String> = candidates.iter().map(|c| c.spec.clone()).collect();
-    let scan_ms = start.elapsed().as_millis();
+    let prepared = prepare_jev_setup(vault_path)?;
+    let candidate_specs: Vec<String> = prepared.candidates.iter().map(|c| c.spec.clone()).collect();
 
     // Finish deterministic preparation before requesting hosted access. This
     // keeps local preparation failures local and makes scan_ms purely local work.
     let client = JevClient::resolve().await?;
-    let proposal = JevSelectionPipeline::run_with_temporal(&client, &candidates, temporal).await?;
+    let proposal =
+        JevSelectionPipeline::run_with_temporal(&client, &prepared.candidates, temporal).await?;
     Ok(GeneratedSetup {
-        suggestion,
+        suggestion: prepared.suggestion,
         proposal,
         candidates: candidate_specs,
-        scan_ms,
+        scan_ms: prepared.scan_ms,
+    })
+}
+
+/// Everything selection is given, prepared locally: no index, login, or model.
+pub(super) struct PreparedSetup {
+    suggestion: ScanSuggestion,
+    pub candidates: Vec<SelectionCandidate>,
+    scan_ms: u128,
+}
+impl PreparedSetup {
+    pub fn excluded_folders(&self) -> &[String] {
+        &self.suggestion.excluded_folders
+    }
+
+    /// The vault-wide inventory the candidates were drawn from.
+    pub fn evidence(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "files": self.suggestion.files,
+            "summary": serde_json::to_value(&self.suggestion.summary)?,
+            "excluded_folders": self.suggestion.excluded_folders,
+            "top_folders": serde_json::to_value(&self.suggestion.top_folders)?,
+            "top_tags": serde_json::to_value(&self.suggestion.top_tags)?,
+            "top_links": serde_json::to_value(&self.suggestion.top_links)?,
+            "scan_ms": self.scan_ms,
+        }))
+    }
+}
+
+pub(super) fn prepare_jev_setup(vault_path: &Path) -> Result<PreparedSetup> {
+    let start = std::time::Instant::now();
+    let docs = process_docs(vault_path)?;
+    let suggestion = build_scan_suggestion(vault_path, &docs)?;
+    let candidates = jev_candidates(&docs, &suggestion);
+    Ok(PreparedSetup {
+        suggestion,
+        candidates,
+        scan_ms: start.elapsed().as_millis(),
     })
 }
 

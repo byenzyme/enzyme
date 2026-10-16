@@ -134,6 +134,103 @@ pub async fn run(
     Ok(())
 }
 
+/// How a setup agent turns its answers into a program.
+const PACKET_WRITING: &str = "Answer `questions` for every candidate yourself, as the selection model would (in a question, `candidates[0]` stands for each candidate in turn and `state` means `guidance`): apply `guidance` to each candidate's evidence, and also use what you can read directly, especially the user's AGENTS.md, CLAUDE.md, or router notes and the notes themselves. For each candidate you include, add its `statement` inside the skeleton's workspace block. Append `about <profile>` when you chose a profile, then `{ sample by time }` or `{ sample by recency }` when you chose a temporal policy, e.g. `learn questions from folder \"People\" including linked pages about relational { sample by time }`. Add leave-outs or readings the candidates miss when the user's own notes justify them. Write the program to `save_to`; if that file exists, replace only the workspace for this vault and keep everything else. Then check it with `enzyme spec compile <save_to>`.";
+
+/// Print what selection would be asked, so a setup agent can answer it itself.
+/// Local only: no index, login, or model call, and nothing is saved.
+pub fn run_packet(path: &Path) -> Result<()> {
+    let path = path.canonicalize().context("resolve vault directory")?;
+    ensure!(path.is_dir(), "vault must be a directory");
+    let mut config = EnzymeConfig::load(&path)?.unwrap_or_default();
+    ensure!(
+        config.sources.is_empty() && config.notes_path.is_none() && config.notes_roots.is_empty(),
+        "compile supports a single Markdown vault; structured sources must keep their existing configuration"
+    );
+    let directory = EnzymePaths::enzyme_home()?.join("configs");
+    let namespace = enzyme_spec::source_files(&directory)?;
+    let prepared = super::scan::prepare_jev_setup(&path)?;
+    ensure!(
+        !prepared.candidates.is_empty(),
+        "no Markdown candidates found; no packet generated"
+    );
+    for folder in prepared.excluded_folders() {
+        if !config.excluded_folders.contains(folder) {
+            config.excluded_folders.push(folder.clone());
+        }
+    }
+    config.catalyzed_entities.clear();
+    let mut skeleton = structured_setup(&path, config, &Default::default())?;
+    let home = std::env::var_os("HOME").context("HOME missing")?;
+    let location = locate(&path, &namespace, Path::new(&home));
+    // Keep the names an existing declaration uses, as saving a proposal does.
+    if let Some((file, true, position)) = location {
+        let existing = &namespace[file].1.workspaces[position];
+        let workspace = &mut skeleton.workspaces[0];
+        workspace.name = existing.name.clone();
+        if let (Some(Source::Markdown(old)), Some(Source::Markdown(new))) =
+            (existing.sources.first(), workspace.sources.first_mut())
+        {
+            new.name = old.name.clone();
+        }
+    }
+    let save_to = match location {
+        Some((file, _, _)) => namespace[file].0.clone(),
+        None => new_setup_file(&path, &directory),
+    };
+    let mut packet =
+        enzyme_core::pipeline::jev_selection::JevSelectionPipeline::packet(&prepared.candidates, true)?;
+    for candidate in packet["candidates"].as_array_mut().into_iter().flatten() {
+        let spec = candidate["spec"].as_str().unwrap_or_default().to_owned();
+        let expandable = candidate["expandable"].as_bool().unwrap_or(false);
+        candidate["statement"] =
+            reading_statement(&skeleton.workspaces[0], &spec, expandable)?.into();
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": "compile-packet.v1",
+            "vault_path": path.to_string_lossy(),
+            "save_to": save_to.display().to_string(),
+            "save_to_exists": save_to.exists(),
+            "writing": PACKET_WRITING,
+            "skeleton": render(&skeleton),
+            "guidance": packet["guidance"].take(),
+            "questions": packet["questions"].take(),
+            "candidates": packet["candidates"].take(),
+            "unevaluated_entities": packet["unevaluated_entities"].take(),
+            "evidence": prepared.evidence()?,
+        }))?
+    );
+    Ok(())
+}
+
+/// The canonical statement reading one candidate, rendered by the spec itself.
+fn reading_statement(workspace: &Workspace, spec: &str, expandable: bool) -> Result<String> {
+    let mut single = workspace.clone();
+    single.readings = vec![Reading {
+        entity: spec.to_owned(),
+        profile: "auto".into(),
+        definition: None,
+        learning: Learning::default(),
+        include_linked_pages: expandable,
+        include_who_links: false,
+        pattern: false,
+    }];
+    // The renderer continues a reading on deeper-indented lines; join them.
+    let rendered = enzyme_spec::render_workspace(&single);
+    let mut lines = rendered.lines().skip_while(|l| !l.trim_start().starts_with("learn questions"));
+    let first = lines
+        .next()
+        .with_context(|| format!("render a reading for {spec}"))?;
+    let mut statement = first.trim().to_owned();
+    for line in lines.take_while(|l| l.starts_with("    ")) {
+        statement.push(' ');
+        statement.push_str(line.trim());
+    }
+    Ok(statement)
+}
+
 fn render(program: &Program) -> String {
     let source = enzyme_spec::render_program(program)
         .strip_prefix("// Enzyme reading configuration\n\n")
@@ -194,36 +291,9 @@ fn save_setup(
     mut namespace: Vec<(PathBuf, Program)>,
     snapshots: Vec<(PathBuf, String)>,
 ) -> Result<PathBuf> {
-    use sha2::{Digest, Sha256};
     let home = std::env::var_os("HOME").context("HOME missing")?;
     let user_home = Path::new(&home);
-    let location = namespace
-        .iter()
-        .enumerate()
-        .find_map(|(file_index, (_, program))| {
-            let matches_path = |raw: &str| {
-                let expanded = if raw == "~" {
-                    user_home.to_path_buf()
-                } else if let Some(p) = raw.strip_prefix("~/") {
-                    user_home.join(p)
-                } else {
-                    PathBuf::from(raw)
-                };
-                expanded.canonicalize().unwrap_or(expanded) == path
-            };
-            program
-                .workspaces
-                .iter()
-                .position(|workspace| workspace.markdown_path().is_some_and(matches_path))
-                .map(|index| (file_index, true, index))
-                .or_else(|| {
-                    program
-                        .vaults
-                        .iter()
-                        .position(|vault| matches_path(&vault.path))
-                        .map(|index| (file_index, false, index))
-                })
-        });
+    let location = locate(path, &namespace, user_home);
     let index = if let Some((index, is_workspace, position)) = location {
         if is_workspace {
             let existing = &namespace[index].1.workspaces[position];
@@ -248,21 +318,7 @@ fn save_setup(
             .extend(generated.profiles.clone());
         index
     } else {
-        let name: String = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        let digest = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
-        let file = directory.join(format!("{name}-{}.enzyme", &digest[..8]));
+        let file = new_setup_file(path, directory);
         ensure!(
             !file.exists(),
             "destination already exists: {}",
@@ -288,6 +344,60 @@ fn save_setup(
     let (file, program) = &namespace[index];
     enzyme_spec::atomic_write(file, &render(program))?;
     Ok(file.clone())
+}
+
+/// The file and position already declaring this vault: (file, is workspace, index).
+fn locate(
+    path: &Path,
+    namespace: &[(PathBuf, Program)],
+    user_home: &Path,
+) -> Option<(usize, bool, usize)> {
+    namespace
+        .iter()
+        .enumerate()
+        .find_map(|(file_index, (_, program))| {
+            let matches_path = |raw: &str| {
+                let expanded = if raw == "~" {
+                    user_home.to_path_buf()
+                } else if let Some(p) = raw.strip_prefix("~/") {
+                    user_home.join(p)
+                } else {
+                    PathBuf::from(raw)
+                };
+                expanded.canonicalize().unwrap_or(expanded) == path
+            };
+            program
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.markdown_path().is_some_and(matches_path))
+                .map(|index| (file_index, true, index))
+                .or_else(|| {
+                    program
+                        .vaults
+                        .iter()
+                        .position(|vault| matches_path(&vault.path))
+                        .map(|index| (file_index, false, index))
+                })
+        })
+}
+
+fn new_setup_file(path: &Path, directory: &Path) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let name: String = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let digest = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
+    directory.join(format!("{name}-{}.enzyme", &digest[..8]))
 }
 
 /// Preserve explicit workspace policies; fill unspecified temporal choices from

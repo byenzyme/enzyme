@@ -330,6 +330,47 @@ impl JevSelectionPipeline {
         }
     }
 
+    /// What Jev would be asked, without a client, so a setup agent can answer
+    /// it itself. Candidates are bounded exactly as `run_with_temporal` batches
+    /// them; guidance and the per-candidate questions, identical in every
+    /// batch, are given once.
+    pub fn packet(candidates: &[SelectionCandidate], temporal: bool) -> Result<Value> {
+        ensure!(
+            !candidates.is_empty(),
+            "No Markdown candidates to evaluate with Jev"
+        );
+        let evaluated = &candidates[..candidates.len().min(MAX_CANDIDATES)];
+        let mut unevaluated: Vec<String> = candidates[evaluated.len()..]
+            .iter()
+            .map(|c| c.spec.clone())
+            .collect();
+        let mut guidance = Value::Null;
+        let mut questions = BTreeMap::new();
+        let mut included = Vec::new();
+        for batch in evaluated.chunks(CANDIDATES_PER_REQUEST) {
+            let (mut request, count) = Self::request_with_options(batch, "", temporal, false)?;
+            unevaluated.extend(batch[count..].iter().map(|c| c.spec.clone()));
+            if let Value::Array(batch_candidates) = request.state["candidates"].take() {
+                included.extend(batch_candidates);
+            }
+            if guidance.is_null() {
+                request.state.as_object_mut().unwrap().remove("candidates");
+                guidance = request.state;
+                for (id, question) in request.questions {
+                    if let Some(kind) = id.strip_suffix("_0") {
+                        questions.insert(kind.to_owned(), question);
+                    }
+                }
+            }
+        }
+        Ok(json!({
+            "guidance": guidance,
+            "questions": questions,
+            "candidates": included,
+            "unevaluated_entities": unevaluated,
+        }))
+    }
+
     #[cfg(test)]
     fn request(candidates: &[SelectionCandidate], model: &str) -> Result<(JevRequest, usize)> {
         Self::request_with_temporal(candidates, model, false)
@@ -944,6 +985,34 @@ mod tests {
         assert!(text.contains("expandable = true"));
         assert!(!text.contains("profile"));
         assert!(!text.contains("alice"));
+    }
+
+    #[test]
+    fn packet_carries_every_bounded_candidate_and_one_copy_of_each_question() {
+        let candidates: Vec<_> = (0..MAX_CANDIDATES + 3)
+            .map(|i| SelectionCandidate {
+                spec: format!("folder:{i}"),
+                file_count: 3,
+                scan_selected: false,
+                expandable: false,
+                page_entities: vec![],
+                context: SelectionContext::default(),
+                samples: vec![],
+            })
+            .collect();
+        let packet = JevSelectionPipeline::packet(&candidates, true).unwrap();
+        assert_eq!(
+            packet["candidates"].as_array().unwrap().len(),
+            MAX_CANDIDATES
+        );
+        assert_eq!(packet["unevaluated_entities"].as_array().unwrap().len(), 3);
+        let questions = packet["questions"].as_object().unwrap();
+        assert_eq!(
+            questions.keys().collect::<Vec<_>>(),
+            ["profile", "select", "temporal"]
+        );
+        assert!(packet["guidance"]["profile_catalog"].is_object());
+        assert!(packet["guidance"].get("candidates").is_none());
     }
 
     #[test]

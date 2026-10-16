@@ -1,6 +1,6 @@
 ---
 name: enzyme-workspace-setup
-description: Set up or check Enzyme in a Markdown workspace. Use for first setup, re-setup, diagnosis, or requested cleanup; existing Enzyme files do not prove setup is complete. Review the compiled settings, demonstrate an answer from real notes, and repair only an evidenced problem with permission. Never rewrite existing note bodies. Not for routine retrieval in a healthy workspace.
+description: Set up or check Enzyme in a Markdown workspace. Use for first setup, re-setup, diagnosis, or requested cleanup; existing Enzyme files do not prove setup is complete. Write settings from the user's own map of their notes, review them with the user, demonstrate an answer from real notes, and repair only an evidenced problem with permission. Never rewrite existing note bodies. Not for routine retrieval in a healthy workspace.
 allowed-tools: Read, Glob, Grep, Bash, Write, Edit
 ---
 
@@ -14,14 +14,16 @@ When delivered through MCP, that reference is appended inline.
 ## The job
 
 Help the user answer something they care about using the notes they already have.
-`compile` proposes the settings. Review that proposal, prepare search, demonstrate
-one answer, and fix a problem only if the evidence warrants it. A working setup
+You write the settings: `compile --packet` gives you the evidence Enzyme's
+selection would use, and the user's AGENTS.md, CLAUDE.md, or router notes say
+what matters and where it lives. Review the draft with the user, prepare search,
+demonstrate one answer, and fix a problem only if the evidence warrants it. A working setup
 with no note changes is a complete success. Tidiness is not a retrieval goal.
 
 Keep the sequence explicit:
 
-1. Check the workspace and provider; obtain permission for hosted selection.
-2. Run `compile --json` once; review its saved settings with the user.
+1. Check the workspace and provider.
+2. Run `compile --packet`, read the user's own map, write the settings, and review them with the user.
 3. With setup and generation authorized, run `init`, check `doctor`, and prove an answer.
 4. Offer an optional repair only for a demonstrated problem; finish with what the user can do next.
 
@@ -64,7 +66,7 @@ to execute real commands is not missing permission inside the fictional dialogue
 Use the supplied workspace path, or the current workspace if none was supplied.
 Verify that Markdown notes live there. If it is empty, scratch, or points somewhere
 else, ask for the notes folder before creating state. For SQLite sources, hand off
-to `enzyme-sqlite-source`; this compile workflow supports one Markdown folder
+to `enzyme-sqlite-source`; this workflow supports one Markdown folder
 and writes a `workspace` program with a Markdown source. Existing `vault`
 programs remain readable.
 
@@ -89,7 +91,6 @@ to install or update those instructions. Existing `.enzyme/`, `AGENTS.md`,
 Record configured mode, effective mode, selected model, and network requirement
 from `model status`. Preserve the configured mode when no preference was given.
 `auto` uses the selected local model when installed and hosted generation otherwise.
-Local generation does **not** make hosted selection local.
 
 - Hosted generation sends selected excerpts to Enzyme's service; the index,
   embeddings, and search remain local.
@@ -103,93 +104,84 @@ Local generation does **not** make hosted selection local.
   change the user's shell environment/settings to make a command succeed.
 
 For an already initialized workspace, start diagnosis with `doctor` and current
-settings. Do not recompile merely to check health. If new selection is needed,
-explain the proposed replacement and follow the compile step below.
+settings. Do not redraft merely to check health. If new selection is needed,
+explain the proposed replacement and follow the drafting step below.
 
-## Compile one proposal
+## Draft the settings
 
-`compile` is a settings mutation and an online selection call, even when generation
-will be local. Unlike init, it automatically uses inherited provider credentials
-when present. For accepted Enzyme-hosted selection, use the isolated subprocess
-below so an unrelated shell key cannot redirect excerpts. This leaves the parent
-shell and saved provider settings alone. If the user requests their own provider
-for selection, verify a compatible Decisions endpoint and use the normal command
-with that explicit authorization; a chat endpoint alone is insufficient.
-Before running selection, briefly explain the online setup step and the settings
-it saves. Its online requirement does not depend on a local model; explain local
-versus hosted preparation when reviewing settings, if relevant to the user's
-choice. Keep internal routing and connection-state details out of routine copy.
-
-> Enzyme will use its online service to suggest settings from your notes and save
-> them on this machine. Your notes won't be edited. Shall I go ahead?
-
-For re-setup, also explain that existing settings for this workspace can be
-replaced. Selection permission does not authorize later generation or note edits.
-There is no offline selection fallback. If unavailable, stop and report the actual
-state rather than claiming nothing changed.
-
-Before the call, keep a bounded recovery record in a unique `mktemp` directory:
-workspace file hashes and mtimes, original files under the resolved Enzyme home's
-`configs/`, legacy `config.toml`, and existing `.enzyme/` state. Record installed
-model inventory and auth file existence/metadata without reading secrets. Default
-Enzyme home is `~/.enzyme`; respect an explicit `ENZYME_HOME` in test environments.
-Retain original settings bytes and mtimes so re-setup can restore them.
+`compile --packet` is local and read-only: no index, login, model call, or saved
+file. It prints what Enzyme's own selection would be asked, so you can answer it
+yourself with more context than that selection ever has.
 
 ```bash
-env -u OPENAI_API_KEY -u OPENAI_BASE_URL -u OPENAI_MODEL \
-  "$ENZYME_BIN" -p "<vault path>" compile --json
+PACKET="$(mktemp -d)/packet.json"
+"$ENZYME_BIN" -p "<vault path>" compile --packet > "$PACKET"
 ```
 
-Read the returned `program`, `saved_to`, and complete bounded `evidence`. Inspect
-the file at `saved_to` too: it can contain merged settings for other workspaces.
-Keep that payload and the saved file as the record of this selection. Do not re-run compile to display or edit
-its result: another call can select different settings.
+The packet is large; query it with `jq` rather than reading it whole. It holds:
 
-Check changes against the recovery record. Expected writes are the saved program
-and, on first hosted use, `bootstrap.json` in Enzyme home (a reusable anonymous
-machine identifier). Hosted access may also create or update a temporary credential
-cache; inspect metadata only, never its secret contents. Existing program files can also be changed when compile
-replaces an earlier workspace definition. Notes, index, legacy config, models,
-and auth metadata must remain unchanged. Investigate any unexpected change.
-Do not describe this as a read-only scan or promise “no settings changed.”
+- `writing`: how answers become a program. Follow it.
+- `guidance` and `questions`: the selection, profile, and temporal questions
+  asked of every candidate, and the definitions they refer to.
+- `candidates`: each with excerpts, dates, counts, recent activity, related tags,
+  and the exact `statement` that reads it.
+- `skeleton`: a valid program with the source and default leave-outs.
+- `save_to` and `save_to_exists`: where the settings belong.
+- `evidence`: the vault-wide inventory.
 
-If the user declines the proposal, restore only settings changed by this run from
-the saved originals; remove only newly created proposal files. Check for subsequent
-edits before restoring, and stop on a conflict. Leave shared `bootstrap.json`
-and service credential caches alone; mention residual service state when explaining
-what was restored. Never delete
-`~/.enzyme/auth.json` or run logout without explicit confirmation.
+Before answering, read the user's own map: `AGENTS.md`, `CLAUDE.md`, and any
+router or index note they point to. It says what is current and what is archive,
+where each kind of note lives, and which pages are running logs; candidate
+counts only say what is numerous. Where they disagree, the user's map wins for
+what matters and the packet wins for what exists. Open notes when two excerpts
+cannot settle a question. Leave out large archives or imports the map treats as
+inactive. A candidate you skip is not an exclusion.
 
-## Review what was selected
+Before writing, keep a bounded recovery record in a unique `mktemp` directory:
+the original file at `save_to` if it exists, any legacy `config.toml`, and
+existing `.enzyme/` state, with their mtimes. Default Enzyme home is `~/.enzyme`;
+respect an explicit `ENZYME_HOME` in test environments.
 
-Use `evidence.candidate_entities` to compare the proposal with what selection
-considered. Do not scan the vault again to reconstruct the same inventory. Read
-representative supplied excerpts; inspect a specific source only when needed to
-verify a consequential interpretation. Counts and folder names alone do not prove
-what the user cares about.
+Write the program to `save_to` as `writing` describes. If the file exists,
+replace only this vault's workspace and keep every other declaration. Check it:
+
+```bash
+"$ENZYME_BIN" spec compile "<save_to>"
+```
+
+Fix any error and check again. Notes, index, models, and auth must remain
+unchanged; investigate anything else that changed.
+
+## Review with the user
+
+Show the settings link, two or three readings in terms of the questions they may
+help answer, any consequential leave-out, where the user's map and the packet
+disagreed, and one realistic question to test. Invite a specific correction. Do
+not enumerate every candidate or force a four-tier report.
 
 Keep three facts distinct:
 
-- Selected readings supply questions Enzyme uses to find related passages.
-- An unselected candidate has no reading of its own; its notes may still be
+- Readings supply questions Enzyme uses to find related passages.
+- An unread candidate has no reading of its own; its notes may still be
   searchable or contribute through another reading. It is not an exclusion or
-  a defect merely because it was not selected.
+  a defect merely because it was not read.
 - Folder exclusions remove material from discovery/search; tag/link exclusions
-  affect entity selection, not whole-note discovery. The compile evidence
-  is about Markdown candidates, not a complete audit of every non-Markdown file.
+  affect entity selection, not whole-note discovery. The packet covers Markdown
+  candidates, not every non-Markdown file.
 
-Show the settings link, two or three useful choices, any consequential exclusion
-or questionable interpretation, and one realistic question to test. Invite a
-specific correction. Do not enumerate every candidate or force a four-tier report.
 Describe pre-init search coverage as planned, not already available. If nothing
 needs reorganizing, say “You can keep your notes where they are.”
 
-Confirm the saved settings and the effective generation path before `init`.
-Explain that this builds a local search database from the notes. For hosted
-generation, say excerpts will be sent again to prepare questions for search.
-For a local download, name its size. This is a separate effect from selection;
-do not ask again if the conversation already authorized it.
-Apply only accepted settings edits to the saved file, without recompiling.
+If the user declines, restore the file at `save_to` from the recovery record or
+remove it if this run created it; check for later edits first and stop on a
+conflict. Never delete `~/.enzyme/auth.json` or run logout without explicit
+confirmation.
+
+Confirm the settings and the effective generation path before `init`. Explain
+that this builds a local search database from the notes. For hosted generation,
+say excerpts will be sent to prepare questions for search. For a local download,
+name its size. Do not ask again if the conversation already authorized it.
+Apply accepted corrections to the file at `save_to` and check it again.
 
 ## Prepare and demonstrate
 
