@@ -969,10 +969,28 @@ pub async fn run_doctor(vault_path: &Path, json: bool) -> Result<()> {
 
     // Load config to get effective embedding window (read-only).
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
-    let window_size: Option<usize> = enzyme_config.effective_max_embedding_files();
 
     // Open DB strictly read-only.
     let conn = open_read_only_conn(&paths.vault_db).await?;
+    // The same limit init embeds with: configured, or adaptive to dated notes.
+    let window_size: Option<usize> = match enzyme_config.max_embedding_files {
+        None => {
+            use enzyme_core::pipeline::embedding::{ADAPTIVE_EMBEDDING_WINDOW_MS, adaptive_limit_for};
+            let now = chrono::Utc::now().timestamp_millis();
+            let recent: Vec<i64> = query_all(
+                &conn,
+                &format!(
+                    "SELECT COUNT(*) FROM docs WHERE created_source != 'filesystem' \
+                     AND created_at >= {} AND created_at <= {now}",
+                    now - ADAPTIVE_EMBEDDING_WINDOW_MS
+                ),
+                |row| row.get(0).map_err(|e| anyhow::anyhow!("{e}")),
+            )
+            .await?;
+            Some(adaptive_limit_for(recent.first().copied().unwrap_or(0) as usize))
+        }
+        _ => enzyme_config.effective_max_embedding_files(),
+    };
 
     // --- DB queries ---
 

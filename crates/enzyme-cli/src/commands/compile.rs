@@ -135,7 +135,7 @@ pub async fn run(
 }
 
 /// How a setup agent turns its answers into a program.
-const PACKET_WRITING: &str = "Answer `questions` for every candidate yourself, as the selection model would (in a question, `candidates[0]` stands for each candidate in turn and `state` means `guidance`): apply `guidance` to each candidate's evidence, and also use what you can read directly, especially the user's AGENTS.md, CLAUDE.md, or router notes and the notes themselves. For each candidate you include, add its `statement` inside the skeleton's workspace block. After the statement, optionally add `about <profile>`, then optionally one `{ ... }` block holding any settings, e.g. `learn questions from folder \"People\" including linked pages about relational { select 20 by recency  sample by time }`. Settings: `sample by time` (optionally `periods quarterly` or `periods monthly`), and, only for a folder read including linked pages, `select N by recency` or `select N by frequency` to cap how many linked pages it reads. Sampling by recency is the default, so write `sample by time` only when history deserves equal weight. A folder read including linked pages also reads its most-linked pages as their own entities. Names match case-insensitively. Check `evidence.folders`, which lists every top-level folder that will be indexed, and add `leave out folders [...]` entries for archives, imports, demos, or generated material that should not be indexed. Write the program to `save_to`; if that file exists, replace only the workspace for this vault and keep everything else. Then check it with `enzyme spec compile <save_to>`.";
+const PACKET_WRITING: &str = "Answer `questions` for every candidate yourself, as the selection model would (in a question, `candidates[0]` stands for each candidate in turn and `state` means `guidance`): apply `guidance` to each candidate's evidence, and also use what you can read directly, especially the user's AGENTS.md, CLAUDE.md, or router notes and the notes themselves. For each candidate you include, start from its `statement` inside the skeleton's workspace block; statements are starting points, so drop `including linked pages` when a folder's linked pages are noise such as date notes. After the statement, optionally add `about <profile>` (a key of `guidance.profile_catalog`), then optionally one `{ ... }` block holding any settings, e.g. `learn questions from folder \"People\" including linked pages about relational { select 20 by recency  sample by time }`. For the temporal answer: `time` means `sample by time` (optionally with `periods quarterly` or `periods monthly`); `recency` is the default, so write nothing (`sample by recency` is equivalent); `default` or `uncertain` means write nothing. For a folder read including linked pages, `select N by recency` or `select N by frequency` caps how many linked pages it reads; that folder's most-linked pages become their own entities. Names match case-insensitively. `evidence.folders` lists every top-level folder found, with `left_out` marking those the skeleton already leaves out; add `leave out folders [...]` entries for archives, imports, demos, or generated material that should not be indexed. Material to search through the user's lens rather than learn questions from, such as reading highlights or imports, can be left out and declared with `project questions into \"<absolute path>\"`; `enzyme catalyze --target <path>` then searches it. Write the program to `save_to`; if that file exists, replace only the workspace for this vault and keep everything else. Then check it with `enzyme spec compile <save_to>`.";
 
 /// Print what selection would be asked, so a setup agent can answer it itself.
 /// Local only: no index, login, or model call, and nothing is saved.
@@ -178,6 +178,12 @@ pub fn run_packet(path: &Path) -> Result<()> {
         Some((file, _, _)) => namespace[file].0.clone(),
         None => new_setup_file(&path, &directory),
     };
+    let left_out = &skeleton.workspaces[0].exclusions;
+    let mut evidence = prepared.evidence()?;
+    for folder in evidence["folders"].as_array_mut().into_iter().flatten() {
+        let name = folder["folder"].as_str().unwrap_or_default();
+        folder["left_out"] = left_out.iter().any(|x| x == name).into();
+    }
     let mut packet =
         enzyme_core::pipeline::jev_selection::JevSelectionPipeline::packet(&prepared.candidates, true)?;
     for candidate in packet["candidates"].as_array_mut().into_iter().flatten() {
@@ -199,7 +205,7 @@ pub fn run_packet(path: &Path) -> Result<()> {
             "questions": packet["questions"].take(),
             "candidates": packet["candidates"].take(),
             "unevaluated_entities": packet["unevaluated_entities"].take(),
-            "evidence": prepared.evidence()?,
+            "evidence": evidence,
         }))?
     );
     Ok(())

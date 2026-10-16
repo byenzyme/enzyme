@@ -331,7 +331,8 @@ fn failed_catalyst_attempt_does_not_gate_source_reexecution() {
     );
     let config = std::fs::read_to_string(config_path).unwrap();
     assert!(config.contains("catalyst_format = \"question\""));
-    assert!(config.contains("max_embedding_files = 1024"));
+    // The embedding limit stays implicit so the adaptive default applies.
+    assert!(!config.contains("max_embedding_files = 1024"));
     assert!(config.contains("folder:Thread A"));
 }
 

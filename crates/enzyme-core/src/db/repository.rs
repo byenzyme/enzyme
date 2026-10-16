@@ -468,6 +468,18 @@ impl Database {
     }
 
     /// Count documents whose embeddings are stale or missing.
+    /// Documents dated by their own content or metadata (not filesystem time)
+    /// within `[since_ms, now_ms]`.
+    pub fn count_dated_documents_since(&self, since_ms: i64, now_ms: i64) -> Result<usize> {
+        let rows = self.query_read(
+            "SELECT COUNT(*) FROM docs
+             WHERE created_source != 'filesystem' AND created_at >= ?1 AND created_at <= ?2",
+            vec![Value::Integer(since_ms), Value::Integer(now_ms)],
+            |row| row.get::<i64>(0),
+        )?;
+        Ok(rows.first().copied().unwrap_or(0) as usize)
+    }
+
     pub fn count_documents_needing_embedding(&self, indexed_since: Option<i64>) -> Result<usize> {
         let sql = "SELECT COUNT(*) FROM docs
              WHERE (embedded_content_hash IS NULL

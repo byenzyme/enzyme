@@ -778,9 +778,6 @@ pub async fn run_init(
         enzyme_config
             .catalyst_format
             .get_or_insert_with(|| DEFAULT_FORMAT_KEY.to_string());
-        enzyme_config
-            .max_embedding_files
-            .get_or_insert(enzyme_core::pipeline::embedding::MAX_EMBEDDING_FILES);
     }
 
     if named_workspace && db.get_document_count().unwrap_or(0) == 0 {
@@ -939,10 +936,11 @@ pub async fn run_init(
     };
 
     // ── Step 4: Launch doc embedding in background ────────────────────────
+    // Indexing is done, so the adaptive default can see the vault's dates.
+    let max_embed = enzyme_config.embedding_limit(&db, now_ms())?;
     let embedding_handle = if let Some(svc) = service {
         let db_path = paths.vault_db.clone();
         let tx_emb = tx.clone();
-        let max_embed = enzyme_config.effective_max_embedding_files();
         tx.send(DisplayEvent::EmbeddingStart).ok();
         Some(tokio::task::spawn_blocking(
             move || -> anyhow::Result<EmbeddingStats> {
@@ -1332,7 +1330,7 @@ pub async fn run_init(
             emb_stats
                 .as_ref()
                 .map_or(0, |stats| stats.documents_skipped),
-            enzyme_config.effective_max_embedding_files(),
+            max_embed,
         )
     {
         eprintln!("  {message}");
@@ -1833,7 +1831,10 @@ fn refresh_changed_doc_embeddings(
         // which made the window doctor reports meaningless and the cost of a
         // no-op refresh unpredictable.
         EmbeddingRefreshPlan::Backlog => pipeline.run_with_limit(
-            Some(enzyme_core::pipeline::embedding::MAX_EMBEDDING_FILES),
+            Some(enzyme_core::pipeline::embedding::adaptive_embedding_limit(
+                db,
+                now_ms(),
+            )?),
             |_| {},
         ),
         EmbeddingRefreshPlan::SinceIndexStart => {
@@ -2504,7 +2505,7 @@ async fn run_refresh_interactive(
     let enzyme_config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
     if let Some(message) = embedding_backlog_message(
         local.embedding.documents_skipped,
-        enzyme_config.effective_max_embedding_files(),
+        enzyme_config.embedding_limit(&db, now_ms())?,
     ) {
         eprintln!("{message}");
     }

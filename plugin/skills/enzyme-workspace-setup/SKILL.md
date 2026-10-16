@@ -98,6 +98,9 @@ from `model status`. Preserve the configured mode when no preference was given.
   to show the current download size if offering installation. Downloading a model
   or switching modes requires explicit consent; preserve `auto` unless asked to
   force a mode. Do not download or switch as a fallback after a hosted failure.
+- When the user asks for hosted generation, run `"$ENZYME_BIN" model disable`.
+  It writes `configs/settings.enzyme` in Enzyme home; include that file in the
+  recovery record. `auto` uses an installed local model, so do not assume hosted.
 - Use `--use-env-llm` on `init` and `refresh` only when the user explicitly requests
   their own configured provider and its required environment is present. Inspect
   variable names only for that request, never secret values. Never print keys or
@@ -144,6 +147,11 @@ Aim for roughly 8 to 15 readings. Prefer broad folders and the tags the user's
 map names over many narrow tags; a narrow tag earns its own reading only when
 the map calls it out. A log reading is for a page the user keeps appending to,
 not a single dated note.
+
+When the map treats material as something to search through the user's lens
+rather than learn from, such as reading highlights or imports, leave it out and
+add `project questions into "<absolute path>"`; `catalyze --target` then searches
+it with the vault's questions.
 
 Before writing, keep a bounded recovery record in a unique `mktemp` directory:
 the original file at `save_to` if it exists, any legacy `config.toml`, and

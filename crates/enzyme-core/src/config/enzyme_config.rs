@@ -116,7 +116,8 @@ pub struct EnzymeConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes_roots: Vec<NotesRootConfig>,
     /// Maximum number of documents to embed per run.
-    /// `None` uses the built-in default (1024). `Some(0)` means unlimited.
+    /// `None` uses the adaptive default (2048, raised to cover notes dated in
+    /// the last two years, up to 8192). `Some(0)` means unlimited.
     #[serde(default)]
     pub max_embedding_files: Option<usize>,
 }
@@ -441,7 +442,8 @@ struct DefaultsTomlSection {
     minimum_folders: usize,
     #[serde(default = "default_total_limit")]
     total_limit: usize,
-    /// Maximum documents to embed per run. `0` = unlimited. Omitted = 1024.
+    /// Maximum documents to embed per run. `0` = unlimited. Omitted = adaptive
+    /// default (2048 up to 8192, by notes dated in the last two years).
     #[serde(default)]
     max_embedding_files: Option<usize>,
 }
@@ -844,9 +846,11 @@ impl EnzymeConfig {
             sources: vault.map(|v| v.sources.clone()).unwrap_or_default(),
             notes_path: None,
             notes_roots: Vec::new(),
-            max_embedding_files: vault
-                .and_then(|v| v.max_embedding_files)
-                .or(global.defaults.max_embedding_files),
+            max_embedding_files: configured_embedding_limit(
+                vault
+                    .and_then(|v| v.max_embedding_files)
+                    .or(global.defaults.max_embedding_files),
+            ),
         }
     }
 
@@ -947,9 +951,11 @@ impl EnzymeConfig {
             sources,
             notes_path,
             notes_roots,
-            max_embedding_files: workspace
-                .and_then(|w| w.max_embedding_files)
-                .or(global.defaults.max_embedding_files),
+            max_embedding_files: configured_embedding_limit(
+                workspace
+                    .and_then(|w| w.max_embedding_files)
+                    .or(global.defaults.max_embedding_files),
+            ),
         }
     }
 
@@ -1062,7 +1068,8 @@ impl EnzymeConfig {
 
     /// Resolve the effective max-embedding-files limit.
     ///
-    /// - `None` in config → `Some(DEFAULT)` (built-in 1024)
+    /// - `None` in config → `Some(DEFAULT)` (built-in 2048; see `embedding_limit`
+    ///   for the vault-aware default)
     /// - `Some(0)` in config → `None` (unlimited)
     /// - `Some(n)` in config → `Some(n)`
     pub fn effective_max_embedding_files(&self) -> Option<usize> {
@@ -1072,6 +1079,16 @@ impl EnzymeConfig {
             Some(0) => None,
             Some(n) => Some(n),
         }
+    }
+
+    /// The limit to embed with: a configured one, or the adaptive default that
+    /// covers the vault's notes dated within the last two years.
+    pub fn embedding_limit(&self, db: &crate::db::Database, now_ms: i64) -> Result<Option<usize>> {
+        Ok(match self.max_embedding_files {
+            None => Some(crate::pipeline::embedding::adaptive_embedding_limit(db, now_ms)?),
+            Some(0) => None,
+            Some(n) => Some(n),
+        })
     }
 
     pub fn has_curated_entities(&self) -> bool {
@@ -1320,10 +1337,6 @@ impl EnzymeConfig {
             global.defaults.minimum_links = trending.minimum_links;
             global.defaults.minimum_folders = trending.minimum_folders;
             global.defaults.total_limit = trending.total_limit;
-        }
-        if global.defaults.max_embedding_files.is_none() {
-            global.defaults.max_embedding_files =
-                Some(crate::pipeline::embedding::MAX_EMBEDDING_FILES);
         }
 
         let workspace = EnzymePaths::bound_workspace_with_home(vault_path, config_home)?;
@@ -1893,6 +1906,12 @@ fn parse_entity_ref(raw: &str) -> Option<ParsedEntity> {
     }
 }
 
+/// Older versions wrote their default limit into configs; it was never a
+/// choice, so it loads as unset and the current default applies.
+fn configured_embedding_limit(limit: Option<usize>) -> Option<usize> {
+    limit.filter(|&n| n != crate::pipeline::embedding::LEGACY_DEFAULT_EMBEDDING_FILES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2194,6 +2213,19 @@ workspace "mail" {{
         assert!(parse_entity_ref("[[]]").is_none());
         assert!(parse_entity_ref("folder:").is_none());
         assert!(parse_entity_ref("random text").is_none());
+    }
+
+    #[test]
+    fn embedding_limit_adapts_to_recent_dated_notes_and_ignores_legacy_default() {
+        use crate::pipeline::embedding::{
+            MAX_ADAPTIVE_EMBEDDING_FILES, MAX_EMBEDDING_FILES, adaptive_limit_for,
+        };
+        assert_eq!(adaptive_limit_for(10), MAX_EMBEDDING_FILES);
+        assert_eq!(adaptive_limit_for(3000), 3000);
+        assert_eq!(adaptive_limit_for(50_000), MAX_ADAPTIVE_EMBEDDING_FILES);
+        assert_eq!(configured_embedding_limit(Some(1024)), None);
+        assert_eq!(configured_embedding_limit(Some(512)), Some(512));
+        assert_eq!(configured_embedding_limit(Some(0)), Some(0));
     }
 
     #[test]
@@ -2596,7 +2628,12 @@ local_model = "catalyst-135m-v3"
         assert!(raw.contains("[defaults]"));
         assert!(raw.contains("[llm]"));
         assert!(raw.contains("mode = \"local\""));
-        assert!(raw.contains("max_embedding_files = 1024"));
+        // The default limit stays implicit so the adaptive default can apply.
+        assert!(
+            !raw
+                .lines()
+                .any(|line| line.trim_start().starts_with("max_embedding_files"))
+        );
 
         let mut loaded = EnzymeConfig::load(&vault).unwrap().unwrap();
         assert_eq!(loaded.catalyst_format.as_deref(), Some("question"));
