@@ -12,6 +12,7 @@ use crate::models::DateSource;
 use super::DiscoveredFile;
 use super::appendlog::{
     AppendLog, MIN_LOG_ENTRIES, chunk_append_log_dated, detect_append_log, entries_with_body,
+    segment_declared_log,
 };
 use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
@@ -61,22 +62,18 @@ pub struct ProcessedDocument {
     pub frontmatter: Option<Frontmatter>,
     /// True when this document is a single-file append-only log (topology B):
     /// an internal timeline of dated entries under one document date. Drives
-    /// chronological chunking and recency-biased context. Declared via a
-    /// `type:` frontmatter marker, else auto-detected structurally.
+    /// chronological chunking and recency-biased context. Declared by a config
+    /// `log "name"` line naming this document, else auto-detected structurally.
     pub is_log: bool,
     /// The resolved log structure when `is_log` is true — detection runs
     /// exactly once, at process time, and every downstream consumer (chunking
     /// here, the indexing pipeline's recency context) reads this field so all
     /// of them agree on the same entry boundaries. Never re-detect downstream.
     ///
-    /// `is_log == true` with `append_log == None` is the declared-but-
-    /// undetectable case: the note carries `type: log` but the detector found
-    /// no parseable dated entries. Chosen semantics: the flag is honoured for
-    /// classification, but with no entry boundaries the document degrades
-    /// gracefully — generic paragraph chunking and *no* most-recent-entry
-    /// excerpt — rather than silently pretending entry-aligned handling took
-    /// place. When `is_log` is false this is always `None`, even if the body
-    /// structurally parsed (e.g. a `type: note` override).
+    /// `is_log == true` with `append_log == None` happens only for a declared
+    /// log with an empty body; [`segment_declared_log`] otherwise always finds
+    /// entries, down to paragraphs. When `is_log` is false this is always
+    /// `None`.
     pub append_log: Option<AppendLog>,
 }
 
@@ -86,6 +83,7 @@ pub struct DocumentProcessor {
     vault_path: PathBuf,
     chunk_size: usize,
     frontmatter_link_fields: HashSet<String>,
+    declared_logs: HashSet<String>,
 }
 
 impl DocumentProcessor {
@@ -95,6 +93,7 @@ impl DocumentProcessor {
             vault_path,
             chunk_size: DEFAULT_CHUNK_SIZE_CHARS,
             frontmatter_link_fields: HashSet::new(),
+            declared_logs: HashSet::new(),
         }
     }
 
@@ -115,6 +114,15 @@ impl DocumentProcessor {
             .map(|field| field.trim().to_lowercase())
             .filter(|field| !field.is_empty())
             .collect();
+        self
+    }
+
+    /// Treat documents whose log entity name (see [`log_entity_name`]) is in
+    /// `names` as declared logs: always flagged, and segmented structurally
+    /// when their dates don't auto-detect. Names are config `log` names,
+    /// already lowercased.
+    pub fn with_declared_logs(mut self, names: &HashSet<String>) -> Self {
+        self.declared_logs = names.clone();
         self
     }
 
@@ -184,27 +192,30 @@ impl DocumentProcessor {
 
         // Append-only-log detection (topology B), computed exactly once here
         // and threaded downstream via `ProcessedDocument::append_log`. A
-        // declared `type:` marker is the source of truth for the flag;
-        // otherwise auto-detect structurally, requiring MIN_LOG_ENTRIES
-        // entries with real bodies plus a modest word floor so stub notes
-        // that merely list dated lines never flag.
+        // config-declared log is always a log: strict date detection first,
+        // then structural segmentation. Otherwise auto-detect strictly,
+        // requiring MIN_LOG_ENTRIES entries with real bodies plus a modest
+        // word floor so stub notes that merely list dated lines never flag.
+        let declared = !self.declared_logs.is_empty()
+            && log_name(title.as_deref(), &source_ref)
+                .is_some_and(|name| self.declared_logs.contains(&name));
         let detected = detect_append_log(body);
-        let is_log = match log_type_override(&frontmatter) {
-            Some(declared) => declared,
-            None => detected.as_ref().is_some_and(|log| {
+        let (is_log, append_log) = if declared {
+            (true, detected.or_else(|| segment_declared_log(body)))
+        } else {
+            let is_log = detected.as_ref().is_some_and(|log| {
                 entries_with_body(body, log) >= MIN_LOG_ENTRIES
                     && word_count >= LOG_AUTODETECT_MIN_WORDS
-            }),
+            });
+            (is_log, if is_log { detected } else { None })
         };
-        // Resolved structure, aligned with the resolved flag (see the field's
-        // doc comment for the forced-on-but-undetectable semantics).
-        let append_log = if is_log { detected } else { None };
 
         // Chunks — Readwise highlights and append-only logs get structure-aware
         // chunking; everything else uses the generic paragraph chunker. Log
         // chunks carry their entry's date so downstream era logic can see the
-        // file's internal timeline instead of one document date.
-        let (chunks, chunk_entry_dates) = if is_readwise {
+        // file's internal timeline instead of one document date. A declared
+        // log wins over Readwise highlight grouping: the user asked for entries.
+        let (chunks, chunk_entry_dates) = if is_readwise && !declared {
             let highlights = extract_highlights(body);
             let chunks = if highlights.is_empty() {
                 chunk_document(body, self.chunk_size)
@@ -265,18 +276,28 @@ impl DocumentProcessor {
     pub fn process_all_discovered_with_link_fields(
         files: &[DiscoveredFile],
         fields: &[String],
+        declared_logs: &HashSet<String>,
     ) -> Vec<Result<ProcessedDocument>> {
         files
             .par_iter()
-            .map(|file| Self::process_discovered_with_link_fields(file, fields.iter().cloned()))
+            .map(|file| {
+                Self::process_discovered_with_link_fields(
+                    file,
+                    fields.iter().cloned(),
+                    declared_logs,
+                )
+            })
             .collect()
     }
 
     /// Process a file returned by named-root discovery. The configured root
     /// name becomes the leading textual folder only when source refs are
     /// namespaced (multi-root mode); single-root behavior stays byte-compatible.
-    pub fn process_discovered(file: &DiscoveredFile) -> Result<ProcessedDocument> {
-        Self::process_discovered_with_link_fields(file, std::iter::empty::<String>())
+    pub fn process_discovered(
+        file: &DiscoveredFile,
+        declared_logs: &HashSet<String>,
+    ) -> Result<ProcessedDocument> {
+        Self::process_discovered_with_link_fields(file, std::iter::empty::<String>(), declared_logs)
     }
 
     /// Process a discovered file using configured plain frontmatter link
@@ -284,9 +305,11 @@ impl DocumentProcessor {
     pub fn process_discovered_with_link_fields(
         file: &DiscoveredFile,
         fields: impl IntoIterator<Item = String>,
+        declared_logs: &HashSet<String>,
     ) -> Result<ProcessedDocument> {
         let mut document = Self::new(file.root_path.clone())
             .with_frontmatter_link_fields(fields)
+            .with_declared_logs(declared_logs)
             .process_file(&file.relative_path)?;
         let relative = file.relative_path.to_string_lossy().replace('\\', "/");
         if document.source_ref != file.source_ref {
@@ -316,38 +339,21 @@ impl DocumentProcessor {
 /// lowercased. Both the config `log:` grammar and scan's write-back use this,
 /// so a `log:` entry always matches what indexing would promote.
 pub fn log_entity_name(doc: &ProcessedDocument) -> Option<String> {
-    let name = doc
-        .title
-        .clone()
+    log_name(doc.title.as_deref(), &doc.source_ref)
+}
+
+fn log_name(title: Option<&str>, source_ref: &str) -> Option<String> {
+    let name = title
         .filter(|t| !t.trim().is_empty())
+        .map(str::to_string)
         .or_else(|| {
-            std::path::Path::new(&doc.source_ref)
+            std::path::Path::new(source_ref)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .map(str::to_string)
         })?;
     let normalized = name.trim().to_lowercase();
     (!normalized.is_empty()).then_some(normalized)
-}
-
-/// Read an explicit note-type declaration from frontmatter, if present.
-///
-/// `type: log | journal | diary | daily` → `Some(true)` (force log handling);
-/// `type: note | essay | page | reference` → `Some(false)` (force off, e.g. to
-/// override a structural false positive); anything else → `None` (defer to
-/// auto-detection). This is the per-note surface the workspace-setup skill can
-/// stamp — a body-preserving mutation — since it cannot split the file itself.
-///
-/// A forced-on declaration whose body the detector cannot parse still flips
-/// `is_log`, but yields no entry structure — see
-/// [`ProcessedDocument::append_log`] for the degradation semantics.
-fn log_type_override(frontmatter: &Option<Frontmatter>) -> Option<bool> {
-    let value = frontmatter.as_ref()?.extra.get("type")?.as_str()?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "log" | "journal" | "diary" | "daily" => Some(true),
-        "note" | "essay" | "page" | "reference" => Some(false),
-        _ => None,
-    }
 }
 
 /// Resolve the created-at timestamp.
@@ -654,11 +660,14 @@ Second paragraph here.
         let results = DocumentProcessor::process_all_discovered_with_link_fields(
             &discovered,
             &["people".to_string()],
+            &HashSet::new(),
         );
         let docs: Vec<_> = results.into_iter().collect::<Result<_>>().unwrap();
 
         assert_eq!(
-            docs.iter().map(|doc| doc.source_ref.as_str()).collect::<Vec<_>>(),
+            docs.iter()
+                .map(|doc| doc.source_ref.as_str())
+                .collect::<Vec<_>>(),
             vec!["b.md", "a.md"]
         );
         assert_eq!(docs[0].links, vec!["grace"]);
@@ -789,7 +798,8 @@ Another highlight [[2024-01-15]]
     #[test]
     fn test_autodetects_log_with_prose_entries() {
         let (_dir, vault) = create_test_vault();
-        let filler = "word ".repeat(40); // 3 x 40 = 120 words, past the floor
+        // Past the word floor, and each entry past MIN_LOG_CHUNK_CHARS.
+        let filler = "word ".repeat(220);
         let content = ["2026-07-25", "2026-07-26", "2026-07-27"]
             .iter()
             .map(|d| format!("## {d}\n{filler}\n"))
@@ -871,15 +881,17 @@ Another highlight [[2024-01-15]]
         assert!(doc.append_log.is_none());
     }
 
+    fn declared(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
     #[test]
-    fn test_type_log_override_on_detectable_body_bypasses_floor() {
-        // A declared log is honoured even below the auto-detect word floor,
-        // and the structure is threaded through for entry-aligned chunking.
+    fn test_declared_log_on_detectable_body_bypasses_floor() {
+        // A config-declared log is honoured even below the auto-detect word
+        // floor, and the structure is threaded through for entry-aligned
+        // chunking.
         let (_dir, vault) = create_test_vault();
         let content = "\
----
-type: log
----
 ## 2026-07-25
 short one
 
@@ -892,16 +904,140 @@ short three
         fs::write(vault.join("tiny-log.md"), content).unwrap();
 
         let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared(&["tiny-log"]))
             .process_file(Path::new("tiny-log.md"))
             .unwrap();
         assert!(doc.is_log);
         assert_eq!(doc.append_log.as_ref().unwrap().entries.len(), 3);
-        assert_eq!(doc.chunks.len(), 3);
-        assert_eq!(doc.chunk_entry_dates.len(), 3);
-        assert!(
-            doc.chunk_entry_dates.iter().all(Option::is_some),
-            "log chunks must carry their entry dates"
+        // Short entries accumulate into one chunk dated by the newest entry.
+        assert_eq!(doc.chunks.len(), 1);
+        assert_eq!(
+            doc.chunk_entry_dates[0],
+            Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 7, 27)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_millis()
+            )
         );
+    }
+
+    #[test]
+    fn test_frontmatter_type_no_longer_declares_a_log() {
+        let (_dir, vault) = create_test_vault();
+        let content = "---\ntype: log\n---\n## 2026-07-25\nshort one\n\n## 2026-07-26\nshort two\n\n## 2026-07-27\nshort three\n";
+        fs::write(vault.join("tiny-log.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("tiny-log.md"))
+            .unwrap();
+        assert!(!doc.is_log, "only config declarations bypass auto-detect");
+    }
+
+    #[test]
+    fn test_declared_yymmdd_journal_segments_with_dates() {
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+# Journal 2026
+
+261010 slow morning, wrote about the move.
+
+261011 long walk, thinking about reflection as a habit.
+
+261012 call with mom.
+";
+        fs::write(vault.join("journal-2026.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared(&["journal-2026"]))
+            .process_file(Path::new("journal-2026.md"))
+            .unwrap();
+        assert!(doc.is_log);
+        let log = doc.append_log.as_ref().expect("segmented");
+        assert_eq!(log.entries.len(), 3);
+        assert_eq!(log.dated_entries(), 3);
+        assert_eq!(
+            log.entries[2].date,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 12)
+        );
+        assert_eq!(doc.chunks.len(), 1);
+        assert!(
+            !doc.chunks[0].contains("# Journal"),
+            "title preamble is dropped"
+        );
+    }
+
+    #[test]
+    fn test_declared_nested_heading_journal_segments_by_day() {
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+# 25
+## 12
+### 30
+end of year.
+### 31
+new year's eve.
+# 26
+## 1
+### 1
+first day.
+### 2
+second day.
+";
+        fs::write(vault.join("journal-2024.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared(&["journal-2024"]))
+            .process_file(Path::new("journal-2024.md"))
+            .unwrap();
+        let log = doc.append_log.as_ref().expect("segmented");
+        let dates: Vec<_> = log
+            .entries
+            .iter()
+            .map(|e| e.date.unwrap().to_string())
+            .collect();
+        assert_eq!(
+            dates,
+            ["2025-12-30", "2025-12-31", "2026-01-01", "2026-01-02"]
+        );
+    }
+
+    #[test]
+    fn test_declared_readwise_export_segments_by_highlight() {
+        let (_dir, vault) = create_test_vault();
+        let content = "\
+# Some Book
+
+![rw-book-cover](https://example.com/cover.jpg)
+>[!note]- Readwise Information
+>Title:: Some Book
+>Readwise-Source:: #Readwise/source/kindle
+
+## Highlights
+- First highlight. [Location 1](https://readwise.io/x?location=1) [[2023-02-21]]
+  
+  **Note**: my first note ^rw480419750
+
+- Second highlight. [Location 2](https://readwise.io/x?location=2) [[2023-02-22]]
+   ^rw480419751
+
+- Third highlight, undated.
+   ^rw480419752
+";
+        fs::write(vault.join("Some Book Highlights.md"), content).unwrap();
+
+        let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared(&["some book highlights"]))
+            .process_file(Path::new("Some Book Highlights.md"))
+            .unwrap();
+        let log = doc.append_log.as_ref().expect("segmented");
+        assert_eq!(log.entries.len(), 3);
+        assert_eq!(log.dated_entries(), 2);
+        assert!(log.entries[2].date_inferred, "undated entry borrows a date");
+        assert!(doc.chunks[0].contains("**Note**: my first note"));
+        assert_eq!(doc.chunk_entry_dates.len(), doc.chunks.len());
     }
 
     #[test]
@@ -919,16 +1055,11 @@ short three
     }
 
     #[test]
-    fn test_type_log_on_undetectable_body_degrades_gracefully() {
-        // Forced on, but the detector finds no dated entries: the flag is
-        // honoured while structure-dependent behavior degrades — paragraph
-        // chunking, `append_log: None` (so downstream stores no recency
-        // excerpt) — instead of silently pretending entries exist.
+    fn test_declared_log_without_structure_uses_paragraphs() {
+        // Declared, but no headings, list items or dates repeat: paragraphs
+        // become undated entries, accumulated into one chunk.
         let (_dir, vault) = create_test_vault();
         let content = "\
----
-type: log
----
 Monday — planning session, long discussion.
 
 Wednesday — shipped the thing.
@@ -938,33 +1069,15 @@ Friday — retro notes without any parseable dates.
         fs::write(vault.join("undated-log.md"), content).unwrap();
 
         let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared(&["undated-log"]))
             .process_file(Path::new("undated-log.md"))
             .unwrap();
         assert!(doc.is_log, "the declared flag is honoured");
-        assert!(doc.append_log.is_none(), "no fabricated structure");
-        // Paragraph chunking of a small body → one generic chunk.
+        let log = doc.append_log.as_ref().expect("paragraph entries");
+        assert_eq!(log.entries.len(), 3);
+        assert_eq!(log.dated_entries(), 0);
         assert_eq!(doc.chunks.len(), 1);
-    }
-
-    #[test]
-    fn test_type_note_override_suppresses_structure() {
-        let (_dir, vault) = create_test_vault();
-        let filler = "word ".repeat(40);
-        let entries = ["2026-07-25", "2026-07-26", "2026-07-27"]
-            .iter()
-            .map(|d| format!("## {d}\n{filler}\n"))
-            .collect::<String>();
-        let content = format!("---\ntype: note\n---\n{entries}");
-        fs::write(vault.join("essay.md"), &content).unwrap();
-
-        let doc = DocumentProcessor::new(vault)
-            .process_file(Path::new("essay.md"))
-            .unwrap();
-        assert!(!doc.is_log);
-        assert!(
-            doc.append_log.is_none(),
-            "forced-off notes carry no log structure downstream"
-        );
+        assert_eq!(doc.chunk_entry_dates, vec![None]);
     }
 
     #[test]

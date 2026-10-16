@@ -526,19 +526,24 @@ fn process_docs(vault_path: &Path) -> Result<Vec<ProcessedDocument>> {
     // Honor `exclude` so scan metrics/suggestions never count excluded folders.
     let discovery = FileDiscovery::from_notes_roots(roots)
         .with_excluded_folders(EnzymeConfig::excluded_folders_at(vault_path));
-    let frontmatter_link_fields = EnzymeConfig::load(vault_path)?
-        .unwrap_or_default()
-        .frontmatter_link_fields;
-    let files = discovery.discover_named()?;
-    Ok(
-        DocumentProcessor::process_all_discovered_with_link_fields(
-            &files,
-            &frontmatter_link_fields,
-        )
+    let config = EnzymeConfig::load(vault_path)?.unwrap_or_default();
+    let declared_logs: HashSet<String> = config
+        .parse_preferences()
+        .entities
         .into_iter()
-        .flatten()
-        .collect(),
+        .filter(|entity| entity.entity_type == enzyme_core::models::EntityType::AppendLog)
+        .map(|entity| entity.name)
+        .collect();
+    let frontmatter_link_fields = config.frontmatter_link_fields;
+    let files = discovery.discover_named()?;
+    Ok(DocumentProcessor::process_all_discovered_with_link_fields(
+        &files,
+        &frontmatter_link_fields,
+        &declared_logs,
     )
+    .into_iter()
+    .flatten()
+    .collect())
 }
 
 fn build_scan_suggestion(vault_path: &Path, docs: &[ProcessedDocument]) -> Result<ScanSuggestion> {

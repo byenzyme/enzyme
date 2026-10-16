@@ -371,12 +371,14 @@ impl<'a> IndexingPipeline<'a> {
             &paths_to_process
         };
         on_progress(&format!("Processing {} files...", entity_paths.len()));
+        let configured_logs = self.resolve_configured_logs();
         let results: Vec<_> = entity_paths
             .par_iter()
             .map(|file| {
                 DocumentProcessor::process_discovered_with_link_fields(
                     file,
                     frontmatter_link_fields.iter().cloned(),
+                    &configured_logs,
                 )
             })
             .collect();
@@ -430,7 +432,7 @@ impl<'a> IndexingPipeline<'a> {
         // Step 8b: Reconcile config-declared `log:` entities (replace
         // semantics, promotion of newly declared logs, removal of undeclared).
         on_progress("Reconciling log entities...");
-        self.reconcile_log_entities(&processed_docs, &all_files)?;
+        self.reconcile_log_entities(&processed_docs, &all_files, &on_progress)?;
 
         // Step 8c: Drop entities whose last occurrence is gone (their notes
         // were deleted, or an edit removed the tag/link). They have no
@@ -632,6 +634,9 @@ impl<'a> IndexingPipeline<'a> {
     /// let the era machinery see the file's internal timeline, and frequency
     /// (= entry count, set by the replace call) makes a busy log rank by its
     /// real activity.
+    ///
+    /// An entry without a date (a declared log where nothing parsed) falls
+    /// back to the document's own date.
     fn log_occurrences_for_doc(doc: &ProcessedDocument) -> Option<(String, Vec<EntityOccurrence>)> {
         let log = doc.append_log.as_ref()?;
         let name = crate::document::log_entity_name(doc)?;
@@ -662,8 +667,12 @@ impl<'a> IndexingPipeline<'a> {
                 file_path: doc.source_ref.clone(),
                 context: Some(representative_excerpt(&text)),
                 created_at: now,
-                effective_date: Some(entry_date),
-                date_source: "content".to_string(),
+                effective_date: Some(entry_date.unwrap_or(doc.created_at)),
+                date_source: if entry_date.is_some() {
+                    "content".to_string()
+                } else {
+                    doc.created_source.as_str().to_string()
+                },
                 weight: 1.0,
             })
             .collect();
@@ -680,6 +689,7 @@ impl<'a> IndexingPipeline<'a> {
         &self,
         processed_docs: &[ProcessedDocument],
         all_paths: &[DiscoveredFile],
+        on_progress: &impl Fn(&str),
     ) -> Result<()> {
         let configured = self.resolve_configured_logs();
         let removed = self.db.delete_append_log_entities_not_in(&configured)?;
@@ -694,6 +704,7 @@ impl<'a> IndexingPipeline<'a> {
         for doc in processed_docs {
             if let Some((name, occurrences)) = Self::log_occurrences_for_doc(doc) {
                 if configured.contains(&name) {
+                    Self::report_log(doc, &name, on_progress);
                     self.db.replace_append_log_entity(&name, &occurrences)?;
                     handled.insert(name);
                 }
@@ -728,10 +739,11 @@ impl<'a> IndexingPipeline<'a> {
                 );
                 continue;
             };
-            match DocumentProcessor::process_discovered(path) {
+            match DocumentProcessor::process_discovered(path, &configured) {
                 Ok(doc) => {
                     if let Some((doc_name, occurrences)) = Self::log_occurrences_for_doc(&doc) {
                         if doc_name == *name {
+                            Self::report_log(&doc, name, on_progress);
                             self.db.replace_append_log_entity(name, &occurrences)?;
                         } else {
                             warn!(
@@ -741,10 +753,11 @@ impl<'a> IndexingPipeline<'a> {
                             );
                         }
                     } else {
-                        warn!(
-                            log = name.as_str(),
-                            "configured log has no parseable dated entries; leaving unpromoted"
+                        let message = format!(
+                            "Log \"{name}\": the file has no text to split into entries; leaving unpromoted"
                         );
+                        warn!(log = name.as_str(), "{message}");
+                        on_progress(&message);
                     }
                 }
                 Err(e) => {
@@ -753,6 +766,26 @@ impl<'a> IndexingPipeline<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Say how a declared log was read, so a low dated count is visible
+    /// instead of silently flattening the file's timeline.
+    fn report_log(doc: &ProcessedDocument, name: &str, on_progress: &impl Fn(&str)) {
+        let Some(log) = doc.append_log.as_ref() else {
+            return;
+        };
+        let message = format!(
+            "Log \"{name}\": {} entries, {} dated",
+            log.entries.len(),
+            log.dated_entries()
+        );
+        info!(
+            log = name,
+            entries = log.entries.len(),
+            dated = log.dated_entries(),
+            "{message}"
+        );
+        on_progress(&message);
     }
 
     /// Config-declared `log:` entity names, lowercased. Any config-load error

@@ -25,6 +25,10 @@ use super::datepath::{month_from_token, parse_day_comma_year, parse_leading_year
 /// [`entries_with_body`] and the processor's auto-flag gate).
 pub const MIN_LOG_ENTRIES: usize = 3;
 
+/// Size a log chunk accumulates whole entries up to before it is cut (~250
+/// tokens). See [`chunk_append_log_dated`].
+pub const MIN_LOG_CHUNK_CHARS: usize = 1000;
+
 /// Fraction of adjacent entry-pairs that must agree on a direction for the body
 /// to count as append-only (rather than scattered incidental dates).
 const MONOTONIC_THRESHOLD: f64 = 0.8;
@@ -38,11 +42,19 @@ pub enum LogDirection {
     NewestFirst,
 }
 
-/// One dated entry within an append-only log body.
+/// One entry within an append-only log body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
-    pub date: NaiveDate,
-    /// Byte offset of the entry's header line within the body.
+    /// Entry date. Always `Some` for auto-detected logs. In a declared log
+    /// (see [`segment_declared_log`]) it is borrowed from the nearest dated
+    /// neighbour when the entry has none of its own, and `None` only when no
+    /// entry in the file carried a parseable date.
+    pub date: Option<NaiveDate>,
+    /// True when `date` was borrowed from a neighbour rather than parsed from
+    /// this entry.
+    pub date_inferred: bool,
+    /// Byte offset of the entry's header line within the body. An entry runs
+    /// to the next entry's start (or the end of the body).
     pub start: usize,
 }
 
@@ -52,6 +64,16 @@ pub struct AppendLog {
     pub direction: LogDirection,
     /// Entries in file order (not necessarily chronological — see `direction`).
     pub entries: Vec<LogEntry>,
+}
+
+impl AppendLog {
+    /// Entries whose date was parsed from the entry itself (not borrowed).
+    pub fn dated_entries(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.date.is_some() && !e.date_inferred)
+            .count()
+    }
 }
 
 /// Parse a leading date from a header-ish line, after stripping Markdown
@@ -85,8 +107,20 @@ fn parse_header_date(line: &str) -> Option<NaiveDate> {
 /// a date from counting as the line's leading token.
 fn strip_weekday_prefix(s: &str) -> &str {
     const WEEKDAYS: [&str; 14] = [
-        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "mon",
-        "tue", "wed", "thu", "fri", "sat", "sun",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
     ];
     let token_end = s
         .find(|c: char| !c.is_ascii_alphabetic())
@@ -176,7 +210,8 @@ pub fn detect_append_log(body: &str) -> Option<AppendLog> {
     for line in body.split_inclusive('\n') {
         if let Some(date) = parse_header_date(line) {
             entries.push(LogEntry {
-                date,
+                date: Some(date),
+                date_inferred: false,
                 start: offset,
             });
         }
@@ -211,14 +246,268 @@ pub fn detect_append_log(body: &str) -> Option<AppendLog> {
     Some(AppendLog { direction, entries })
 }
 
+/// ATX heading level (1–6) of a line, or `None` when it is not a heading.
+/// `#tag` lines are not headings: the hashes must be followed by whitespace or
+/// end the line.
+fn heading_level(line: &str) -> Option<usize> {
+    let level = line.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = &line[level..];
+    (rest.is_empty() || rest.starts_with([' ', '\t', '\n', '\r'])).then_some(level)
+}
+
+/// A top-level (unindented) Markdown list item: `- `, `* `, `+ `, `1. `, `1) `.
+fn is_top_level_item(line: &str) -> bool {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return true;
+    }
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && line[digits..].starts_with(['.', ')']) && line[digits + 1..].starts_with(' ')
+}
+
+/// `YYYYMMDD` or `YYMMDD` (read year-first, two-digit years as 20YY) as an
+/// exact leading digit run.
+fn parse_compact_date(s: &str) -> Option<NaiveDate> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (year, rest) = match end {
+        8 => (s[..4].parse::<i32>().ok()?, &s[4..8]),
+        6 => (2000 + s[..2].parse::<i32>().ok()?, &s[2..6]),
+        _ => return None,
+    };
+    if !(1900..=2100).contains(&year) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(year, rest[..2].parse().ok()?, rest[2..].parse().ok()?)
+}
+
+/// Date for a declared-log entry line. Dates in declared logs are
+/// unpredictable, so this is looser than [`parse_header_date`]: the leading
+/// token may also be compact (`261012`, `20261012`), and failing that the
+/// first full date anywhere on the line counts (`… [[2023-02-21]]`). Compact
+/// forms only count as the leading token, never mid-line, where six-digit
+/// runs are usually IDs.
+fn parse_declared_date(line: &str) -> Option<NaiveDate> {
+    if let Some(date) = parse_header_date(line) {
+        return Some(date);
+    }
+    let lead = line
+        .trim_start()
+        .trim_start_matches(|c| matches!(c, '#' | '-' | '*' | '+' | '>' | '[' | '_' | ' ' | '\t'));
+    if let Some(date) = parse_compact_date(lead) {
+        return Some(date);
+    }
+    let mut prev_alnum = false;
+    for (i, c) in line.char_indices() {
+        if c.is_alphanumeric() && !prev_alnum {
+            let s = &line[i..];
+            let date = parse_iso_header(s)
+                .or_else(|| parse_numeric_mdy(s))
+                .or_else(|| parse_month_name_header(s))
+                .or_else(|| parse_day_month_year(s));
+            if date.is_some() {
+                return date;
+            }
+        }
+        prev_alnum = c.is_alphanumeric();
+    }
+    None
+}
+
+/// One date component carried by a heading whose text is just a number or a
+/// month name (`# 26`, `## 10`, `## October`, `### 12 rainy`).
+fn heading_component(text: &str) -> Option<(u32, bool)> {
+    let text = text.trim();
+    let token_end = text
+        .find(|c: char| !c.is_alphanumeric())
+        .unwrap_or(text.len());
+    let token = &text[..token_end];
+    if let Some(month) = month_from_token(token) {
+        return Some((month, true));
+    }
+    (1..=4)
+        .contains(&token.len())
+        .then(|| token.parse().ok())
+        .flatten()
+        .map(|n| (n, false))
+}
+
+/// Date spread over nested headings: year, month and day as the last three
+/// headings on the path (`# 26` / `## 10` / `### 12`, `# 2026` / `## October`
+/// / `### 12`).
+fn compose_heading_date(path: &[&str]) -> Option<NaiveDate> {
+    let [y, m, d] = path.get(path.len().checked_sub(3)?..)? else {
+        return None;
+    };
+    let (year, year_is_name) = heading_component(y)?;
+    let (month, _) = heading_component(m)?;
+    let (day, day_is_name) = heading_component(d)?;
+    if year_is_name || day_is_name {
+        return None;
+    }
+    let year = match year {
+        0..=99 => 2000 + year as i32,
+        1900..=2100 => year as i32,
+        _ => return None,
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// Segment a log the user declared (config `log "name"`), where dates are
+/// unpredictable and structure is only a heuristic.
+///
+/// Boundaries come from repetition, not dates. Candidates are each heading
+/// level, top-level list items, and lines that lead with a date; each needs at
+/// least [`MIN_LOG_ENTRIES`] entries. The candidate with the most dated
+/// entries wins (ties: more entries, then headings before date lines before
+/// list items). With no repeating structure, paragraphs are the entries.
+/// Entries are dated where possible — a heading's own text or its nested
+/// year/month/day path, otherwise the first date on the entry's first line —
+/// and undated entries borrow the nearest dated neighbour's date. Direction
+/// comes from the parsed dates, defaulting to newest-last when there are none.
+///
+/// There is no ordering threshold: the user's declaration, not structure, is
+/// what makes this a log. Returns `None` only for an empty body.
+pub fn segment_declared_log(body: &str) -> Option<AppendLog> {
+    struct Line<'a> {
+        start: usize,
+        text: &'a str,
+        heading: Option<usize>,
+        item: bool,
+        blank: bool,
+        indented: bool,
+    }
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+    let mut in_fence = false;
+    for raw in body.split_inclusive('\n') {
+        let text = raw.trim_end_matches(['\n', '\r']);
+        let fence = text.trim_start().starts_with("```") || text.trim_start().starts_with("~~~");
+        let structural = !in_fence && !fence;
+        lines.push(Line {
+            start: offset,
+            text,
+            heading: if structural {
+                heading_level(text)
+            } else {
+                None
+            },
+            item: structural && is_top_level_item(text),
+            blank: text.trim().is_empty(),
+            indented: text.starts_with([' ', '\t']) || !structural,
+        });
+        if fence {
+            in_fence = !in_fence;
+        }
+        offset += raw.len();
+    }
+
+    // Each heading's date: its own text, else its nested heading path.
+    let mut path: Vec<(usize, &str)> = Vec::new();
+    let heading_dates: Vec<Option<NaiveDate>> = lines
+        .iter()
+        .map(|line| {
+            let level = line.heading?;
+            path.retain(|&(l, _)| l < level);
+            let text = line.text[level..].trim();
+            path.push((level, text));
+            parse_declared_date(text).or_else(|| {
+                let texts: Vec<&str> = path.iter().map(|&(_, t)| t).collect();
+                compose_heading_date(&texts)
+            })
+        })
+        .collect();
+    let entries_at =
+        |starts: Vec<usize>, date: &dyn Fn(usize) -> Option<NaiveDate>| -> Vec<LogEntry> {
+            starts
+                .into_iter()
+                .map(|i| LogEntry {
+                    date: date(i),
+                    date_inferred: false,
+                    start: lines[i].start,
+                })
+                .collect()
+        };
+    let line_date = |i: usize| parse_declared_date(lines[i].text);
+    let starts = |keep: &dyn Fn(usize) -> bool| -> Vec<usize> {
+        (0..lines.len()).filter(|&i| keep(i)).collect()
+    };
+
+    // (priority, entries) per candidate; lower priority wins ties.
+    let mut candidates: Vec<(u8, Vec<LogEntry>)> = (1..=6)
+        .map(|level| {
+            let idx = starts(&|i| lines[i].heading == Some(level));
+            (0, entries_at(idx, &|i| heading_dates[i]))
+        })
+        .collect();
+    let date_led = starts(&|i| {
+        let line = &lines[i];
+        line.heading.is_none()
+            && !line.indented
+            && (parse_header_date(line.text).is_some()
+                || parse_compact_date(line.text.trim_start_matches(['-', '*', '+', '>', ' ']))
+                    .is_some())
+    });
+    candidates.push((1, entries_at(date_led, &line_date)));
+    candidates.push((2, entries_at(starts(&|i| lines[i].item), &line_date)));
+
+    let best = candidates
+        .into_iter()
+        .filter(|(_, e)| e.len() >= MIN_LOG_ENTRIES)
+        .min_by_key(|(priority, e)| {
+            let dated = e.iter().filter(|x| x.date.is_some()).count();
+            (
+                std::cmp::Reverse(dated),
+                std::cmp::Reverse(e.len()),
+                *priority,
+            )
+        })
+        .map(|(_, e)| e);
+    let mut entries = best.unwrap_or_else(|| {
+        let paragraphs = starts(&|i| !lines[i].blank && (i == 0 || lines[i - 1].blank));
+        entries_at(paragraphs, &line_date)
+    });
+    if entries.is_empty() {
+        return None;
+    }
+
+    let dated: Vec<(usize, NaiveDate)> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| e.date.map(|d| (i, d)))
+        .collect();
+    let (mut inc, mut dec) = (0usize, 0usize);
+    for w in dated.windows(2) {
+        if w[1].1 > w[0].1 {
+            inc += 1;
+        } else if w[1].1 < w[0].1 {
+            dec += 1;
+        }
+    }
+    let direction = if dec > inc {
+        LogDirection::NewestFirst
+    } else {
+        LogDirection::OldestFirst
+    };
+    for (i, entry) in entries.iter_mut().enumerate() {
+        if entry.date.is_some() {
+            continue;
+        }
+        // Nearest dated neighbour by position; the earlier one on a tie.
+        entry.date = dated
+            .iter()
+            .min_by_key(|&&(j, _)| (j.abs_diff(i), j > i))
+            .map(|&(_, d)| d);
+        entry.date_inferred = entry.date.is_some();
+    }
+    Some(AppendLog { direction, entries })
+}
+
 /// Byte range `[start, end)` of the entry at file-order index `i`.
 fn entry_span(body: &str, log: &AppendLog, i: usize) -> (usize, usize) {
     let start = log.entries[i].start;
-    let end = log
-        .entries
-        .get(i + 1)
-        .map(|e| e.start)
-        .unwrap_or(body.len());
+    let end = log.entries.get(i + 1).map_or(body.len(), |next| next.start);
     (start, end)
 }
 
@@ -244,7 +533,7 @@ pub fn entries_with_body(body: &str, log: &AppendLog) -> usize {
 }
 
 /// A chunk carrying the date of the log entry it was cut from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatedChunk {
     /// Entry date in milliseconds since epoch (midnight UTC), `None` when the
     /// chunk came from the generic fallback rather than a dated entry.
@@ -261,35 +550,53 @@ fn date_millis(date: NaiveDate) -> i64 {
 
 /// Chunk an append-only log into chronological, entry-aligned chunks.
 ///
-/// Each dated entry becomes a chunk (preserving file order in `chunk_index`, so
-/// recency maps to chunk position via [`AppendLog::direction`]) and carries its
-/// entry's date. Oversized entries are split further with the generic chunker,
-/// every piece keeping the entry's date; the pre-header preamble is dropped
-/// (typically a title). Falls back to the generic chunker — undated chunks —
-/// if nothing usable is produced.
+/// Whole entries accumulate, in file order, until a chunk reaches
+/// [`MIN_LOG_CHUNK_CHARS`], never exceeding `chunk_size`; an entry larger than
+/// that is first split with the generic chunker and its pieces accumulate the
+/// same way. Short
+/// entries (a line a day, a single highlight) would otherwise make chunks too
+/// small to carry meaning, and catalyst sampling takes a fixed number of
+/// chunks, so tiny chunks mean less evidence per job. Each chunk carries the
+/// newest date among its entries; a short tail merges into the previous chunk.
+/// The pre-entry preamble (typically a title) is dropped. Falls back to the
+/// generic chunker — undated chunks — if nothing usable is produced.
 pub fn chunk_append_log_dated(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<DatedChunk> {
-    let mut chunks = Vec::new();
-    for i in 0..log.entries.len() {
-        let (start, end) = entry_span(body, log, i);
-        let entry = body[start..end].trim();
-        if entry.is_empty() {
-            continue;
+    let min_chars = MIN_LOG_CHUNK_CHARS.min(chunk_size);
+    let mut chunks: Vec<DatedChunk> = Vec::new();
+    let mut buf = DatedChunk::default();
+    let flush = |buf: &mut DatedChunk, chunks: &mut Vec<DatedChunk>| {
+        if !buf.content.is_empty() {
+            chunks.push(std::mem::take(buf));
         }
-        let entry_date = Some(date_millis(log.entries[i].date));
-        if entry.len() > chunk_size {
-            chunks.extend(
-                chunk_document(entry, chunk_size)
-                    .into_iter()
-                    .map(|content| DatedChunk {
-                        entry_date,
-                        content,
-                    }),
-            );
+    };
+    for (date, text) in log_entries(body, log) {
+        let pieces = if text.len() > chunk_size {
+            chunk_document(&text, chunk_size)
         } else {
-            chunks.push(DatedChunk {
-                entry_date,
-                content: entry.to_string(),
-            });
+            vec![text]
+        };
+        for piece in pieces {
+            if !buf.content.is_empty() && buf.content.len() + 2 + piece.len() > chunk_size {
+                flush(&mut buf, &mut chunks);
+            }
+            if !buf.content.is_empty() {
+                buf.content.push_str("\n\n");
+            }
+            buf.content.push_str(&piece);
+            buf.entry_date = buf.entry_date.max(date);
+            if buf.content.len() >= min_chars {
+                flush(&mut buf, &mut chunks);
+            }
+        }
+    }
+    if !buf.content.is_empty() {
+        match chunks.last_mut() {
+            Some(last) if last.content.len() + 2 + buf.content.len() <= chunk_size => {
+                last.content.push_str("\n\n");
+                last.content.push_str(&buf.content);
+                last.entry_date = last.entry_date.max(buf.entry_date);
+            }
+            _ => chunks.push(buf),
         }
     }
     if chunks.is_empty() {
@@ -313,10 +620,11 @@ pub fn chunk_append_log(body: &str, log: &AppendLog, chunk_size: usize) -> Vec<S
         .collect()
 }
 
-/// Every dated entry's `(date_millis, text)` in file order. Empty entries
-/// (a dated header with nothing under it) are skipped. This is the
-/// per-entry view used to emit one entity occurrence per log entry.
-pub fn log_entries(body: &str, log: &AppendLog) -> Vec<(i64, String)> {
+/// Every entry's `(date_millis, text)` in file order. Empty entries (a header
+/// with nothing under it) are skipped. The date is `None` only for a declared
+/// log with no parseable dates anywhere. This is the per-entry view used to
+/// emit one entity occurrence per log entry.
+pub fn log_entries(body: &str, log: &AppendLog) -> Vec<(Option<i64>, String)> {
     (0..log.entries.len())
         .filter_map(|i| {
             let (start, end) = entry_span(body, log, i);
@@ -324,7 +632,7 @@ pub fn log_entries(body: &str, log: &AppendLog) -> Vec<(i64, String)> {
             if text.is_empty() {
                 return None;
             }
-            Some((date_millis(log.entries[i].date), text.to_string()))
+            Some((log.entries[i].date.map(date_millis), text.to_string()))
         })
         .collect()
 }
@@ -368,30 +676,29 @@ mod tests {
         .collect::<String>();
         let log = detect_append_log(&body).expect("weekday-prefixed log should detect");
         assert_eq!(log.entries.len(), 3);
-        assert_eq!(
-            log.entries[0].date,
-            NaiveDate::from_ymd_opt(2026, 2, 16).unwrap()
-        );
-        assert_eq!(
-            log.entries[2].date,
-            NaiveDate::from_ymd_opt(2026, 2, 21).unwrap()
-        );
+        assert_eq!(log.entries[0].date, NaiveDate::from_ymd_opt(2026, 2, 16));
+        assert_eq!(log.entries[2].date, NaiveDate::from_ymd_opt(2026, 2, 21));
     }
 
     #[test]
     fn non_weekday_leading_word_still_blocks() {
         // A date cited after an arbitrary word is not a header date.
         let filler = "word ".repeat(30);
-        let body = ["Deadline 2026-02-16", "Deadline 2026-02-17", "Deadline 2026-02-21"]
-            .iter()
-            .map(|d| format!("### {d}\n{filler}\n"))
-            .collect::<String>();
+        let body = [
+            "Deadline 2026-02-16",
+            "Deadline 2026-02-17",
+            "Deadline 2026-02-21",
+        ]
+        .iter()
+        .map(|d| format!("### {d}\n{filler}\n"))
+        .collect::<String>();
         assert!(detect_append_log(&body).is_none());
     }
 
     #[test]
     fn dated_chunks_carry_entry_dates() {
-        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 20);
+        // Entries past MIN_LOG_CHUNK_CHARS each fill their own chunk.
+        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 220);
         let log = detect_append_log(&body).expect("should detect a log");
         let chunks = chunk_append_log_dated(&body, &log, 2048);
         assert_eq!(chunks.len(), 3);
@@ -623,12 +930,44 @@ mod tests {
 
     #[test]
     fn chunks_align_to_entries_in_order() {
-        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 20);
+        let body = log_body(&["2026-01-01", "2026-02-01", "2026-03-01"], 220);
         let log = detect_append_log(&body).unwrap();
         let chunks = chunk_append_log(&body, &log, 2048);
         assert_eq!(chunks.len(), 3);
         assert!(chunks[0].contains("2026-01-01"));
         assert!(chunks[2].contains("2026-03-01"));
+    }
+
+    #[test]
+    fn short_entries_accumulate_to_the_minimum() {
+        // A line a day: 60 entries of ~60 chars accumulate into chunks of at
+        // least MIN_LOG_CHUNK_CHARS (bar a short tail merged back), each
+        // dated by its newest entry, never splitting an entry.
+        let body: String = (1..=60)
+            .map(|d| {
+                let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap() + chrono::Days::new(d);
+                format!("{date} walked, read, wrote a little about the day\n")
+            })
+            .collect();
+        let log = detect_append_log(&body).unwrap();
+        let chunks = chunk_append_log_dated(&body, &log, 2048);
+        assert!(
+            chunks.len() > 1 && chunks.len() < 6,
+            "{} chunks",
+            chunks.len()
+        );
+        for chunk in &chunks {
+            assert!(chunk.content.len() >= MIN_LOG_CHUNK_CHARS);
+            assert!(chunk.content.len() <= 2048);
+            let newest = chunk.content.lines().last().unwrap()[..10].to_string();
+            let want = date_millis(NaiveDate::parse_from_str(&newest, "%Y-%m-%d").unwrap());
+            assert_eq!(chunk.entry_date, Some(want), "dated by newest entry");
+        }
+        let rejoined: Vec<&str> = chunks
+            .iter()
+            .flat_map(|c| c.content.split("\n\n"))
+            .collect();
+        assert_eq!(rejoined.len(), 60, "entries stay whole and in order");
     }
 
     #[test]

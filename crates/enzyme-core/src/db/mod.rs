@@ -1261,13 +1261,16 @@ mod tests {
         let path = dir.path().join("test.db");
         let now = 1_700_000_000_000i64;
 
-        let filler = "word ".repeat(40);
+        // Entries past MIN_LOG_CHUNK_CHARS, so each is its own chunk and the
+        // legacy single-chunk index no longer lines up.
+        let filler = "word ".repeat(220);
         let body = ["2026-01-01", "2026-02-01", "2026-03-01"]
             .iter()
             .map(|d| format!("## {d}\n{filler}\n"))
             .collect::<String>();
         let log = detect_append_log(&body).expect("fixture must detect");
         let derived = chunk_append_log_dated(&body, &log, DEFAULT_CHUNK_SIZE_CHARS);
+        assert_eq!(derived.len(), 3);
 
         {
             let db = Database::open(&path).unwrap();
