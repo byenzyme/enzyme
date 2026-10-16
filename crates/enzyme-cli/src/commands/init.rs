@@ -162,24 +162,49 @@ fn loginless_hosted_init_allowed_for_keys(current_key: &str, configured_keys: &[
         || (configured_keys.len() == 1 && configured_keys.first().is_some_and(|k| k == current_key))
 }
 
+/// Whether a configured vault key already holds generated catalysts. Path keys
+/// keep their index in the vault's `.enzyme/`; named workspaces keep it under
+/// `<home>/workspaces/<name>/`. An index alone does not count: settings saved by
+/// `compile`, and the local index a login-blocked init builds, are both free.
+fn configured_vault_has_catalysts(key: &str, home: &Path) -> bool {
+    let db = if Path::new(key).is_absolute() {
+        Path::new(key).join(".enzyme").join("enzyme.db")
+    } else {
+        home.join("workspaces").join(key).join("enzyme.db")
+    };
+    db.is_file()
+        && Database::open_read_only(&db)
+            .ok()
+            .and_then(|db| db.get_catalyst_counts_by_entity().ok())
+            .is_some_and(|counts| !counts.is_empty())
+}
+
 /// Enzyme's first hosted init should be frictionless: a user can scan/configure
-/// one vault and run `enzyme init` without signing in. Once this machine has
-/// global config for multiple vaults, or the user is using refresh, we require a
-/// real login so hosted usage is tied to an account.
+/// one vault and run `enzyme init` without signing in. Once another vault on
+/// this machine has generated catalysts, or the user is using refresh, we
+/// require a real login so hosted usage is tied to an account.
 fn require_login_for_hosted_init_if_needed(vault_path: &Path, paths: &EnzymePaths) -> Result<()> {
     if AuthToken::load(&paths.auth_token()).is_ok() {
         return Ok(());
     }
 
     let current_key = EnzymeConfig::vault_key(vault_path);
-    let configured_keys = EnzymeConfig::configured_vault_keys()?;
-    if loginless_hosted_init_allowed_for_keys(&current_key, &configured_keys) {
+    let generated_keys: Vec<String> = EnzymeConfig::configured_vault_keys()?
+        .into_iter()
+        .filter(|key| key == &current_key || configured_vault_has_catalysts(key, &paths.home))
+        .collect();
+    if loginless_hosted_init_allowed_for_keys(&current_key, &generated_keys) {
         return Ok(());
     }
 
+    let others: Vec<&str> = generated_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|key| *key != current_key)
+        .collect();
     anyhow::bail!(
-        "Login required before initializing another vault on this machine. First init can run without login, but this Enzyme home already has {} configured vault(s). Run `enzyme login` and retry.",
-        configured_keys.len()
+        "Login required before initializing another vault on this machine. First init can run without login, but Enzyme has already prepared another vault here: {}. Run `enzyme login` and retry.",
+        others.join(", ")
     )
 }
 
@@ -2666,6 +2691,54 @@ mod tests {
             "/vault/a",
             &["/vault/a".to_string(), "/vault/b".to_string()]
         ));
+    }
+
+    #[test]
+    fn only_vaults_with_catalysts_count_toward_login_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let compiled = tempfile::tempdir().unwrap();
+        let indexed = tempfile::tempdir().unwrap();
+        let generated = tempfile::tempdir().unwrap();
+        for dir in [
+            indexed.path().join(".enzyme"),
+            generated.path().join(".enzyme"),
+            home.path().join("workspaces/imessage"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        Database::open(indexed.path().join(".enzyme/enzyme.db")).unwrap();
+        let catalyst = |entity: &str| enzyme_core::models::Catalyst {
+            id: format!("{entity}-1"),
+            text: "What keeps pulling against this?".into(),
+            entity: entity.into(),
+            context: "default".into(),
+            generated_at: chrono::Utc::now(),
+            metadata: json!({}),
+        };
+        Database::open(generated.path().join(".enzyme/enzyme.db"))
+            .unwrap()
+            .insert_catalysts(&[catalyst("#craft")])
+            .unwrap();
+        Database::open(home.path().join("workspaces/imessage/enzyme.db"))
+            .unwrap()
+            .insert_catalysts(&[catalyst("who:alice")])
+            .unwrap();
+
+        let key = |p: &Path| p.to_string_lossy().into_owned();
+        assert!(!configured_vault_has_catalysts(
+            &key(compiled.path()),
+            home.path()
+        ));
+        assert!(!configured_vault_has_catalysts(
+            &key(indexed.path()),
+            home.path()
+        ));
+        assert!(configured_vault_has_catalysts(
+            &key(generated.path()),
+            home.path()
+        ));
+        assert!(configured_vault_has_catalysts("imessage", home.path()));
+        assert!(!configured_vault_has_catalysts("arena", home.path()));
     }
 
     #[test]
