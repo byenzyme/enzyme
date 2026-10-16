@@ -145,15 +145,16 @@ cannot settle a question. Check `evidence.folders` for everything that will be
 indexed and leave out archives, imports, demos, or generated material the map
 treats as inactive. A candidate you skip is not an exclusion.
 
-Aim for roughly 8 to 15 readings. Prefer broad folders and the tags the user's
-map names over many narrow tags; a narrow tag earns its own reading only when
-the map calls it out. A log reading is for a page the user keeps appending to,
+Aim for roughly 8 to 15 readings, up to about 20 when the user's map names more
+folders or tags that matter. Prefer broad folders and the tags the map names
+over many narrow tags; a narrow tag earns its own reading only when the map
+calls it out. A log reading is for a page the user keeps appending to,
 not a single dated note.
 
 When the map treats material as something to search through the user's lens
 rather than learn from, such as reading highlights or imports, leave it out and
-add `project questions into "<absolute path>"`; `catalyze --target` then searches
-it with the vault's questions.
+add `project questions into "<absolute path>"`; `catalyze --target <absolute path>`
+then searches it with the vault's questions.
 
 Before writing, keep a bounded recovery record in a unique `mktemp` directory:
 the original file at `save_to` if it exists, any legacy `config.toml`, and
