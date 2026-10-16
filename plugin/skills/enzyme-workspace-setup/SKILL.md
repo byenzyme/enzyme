@@ -44,10 +44,10 @@ repair, say “I'll add `date: 2026-08-26` above your writing. This edits the fi
 date information; your writing stays unchanged.” Explain the backup as restoring
 the file and its original date, not as frontmatter, byte identity, or checksums.
 
-Keep routine messages small: roughly 80 words for selection consent, 150 for the
-settings preview, and a two-to-four-sentence answer with a short receipt. Repairs
-may need more detail for exact scope. Link settings and technical evidence instead
-of narrating their contents. Numbers earn a place only when they affect a choice.
+Keep routine messages small: roughly 80 words for generation consent, 150 for the
+settings preview (not counting the settings themselves), and a two-to-four-sentence
+answer with a short receipt. Repairs may need more detail for exact scope. Link
+technical evidence instead of narrating its contents. Numbers earn a place only when they affect a choice.
 
 The user should be able to explain what happens next and what they are agreeing
 to. Enzyme's service has a no-retention policy. Keep the normal setup conversation
@@ -173,8 +173,10 @@ unchanged; investigate anything else that changed.
 
 ## Review with the user
 
-Show the settings link, two or three readings in terms of the questions they may
-help answer, any consequential leave-out, where the user's map and the packet
+Show the complete settings in a fenced `enzyme` code block, exactly as saved, with
+the settings link: they are written to be read, and seeing them lets the user
+correct or reuse them. Then describe two or three readings in terms of the
+questions they may help answer, any consequential leave-out, where the user's map and the packet
 disagreed, and one realistic question to test. Invite a specific correction. Do
 not enumerate every candidate or force a four-tier report.
 
@@ -326,7 +328,8 @@ it must refresh, use query-aware petri and catalyze, cite sources, report insuff
 evidence, and remain read-only unless writing is separately authorized. Otherwise
 leave a reusable question, not a claim that scheduling occurred.
 
-Put the operational receipt last: what was prepared, what changed, any incomplete
+Put the operational receipt last, including the final settings in a fenced
+`enzyme` code block if they changed after review: what was prepared, what changed, any incomplete
 work or retrieval limitation, and the settings/backup links needed to inspect or
 undo it. Distinguish undoing settings from deleting the index or removing service
 state; do not promise a return to the original machine state by deleting two files.
