@@ -126,7 +126,7 @@ The packet is large; query it with `jq` rather than reading it whole. It holds:
 - `writing`: how answers become a program. Follow it.
 - `guidance` and `questions`: the selection, profile, and temporal questions
   asked of every candidate, and the definitions they refer to.
-- `candidates`: each with excerpts, dates, counts, recent activity, related tags,
+- `candidates`: each with `samples` (excerpts with dates), counts, recent activity, related tags,
   and the exact `statement` that reads it.
 - `skeleton`: a valid program with the source and default leave-outs.
 - `save_to` and `save_to_exists`: where the settings belong.
