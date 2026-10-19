@@ -1,7 +1,7 @@
 {
   "name": "enzyme",
-  "description": "Connect Enzyme's durable agent skills to a local knowledge vault",
-  "version": "0.12.3",
+  "description": "Retired: install Enzyme with its command-line installer instead. Connects Enzyme's agent skills to a local knowledge vault",
+  "version": "0.12.4",
   "author": {
     "name": "Joshua Pham",
     "url": "https://github.com/useenzyme"
@@ -13,7 +13,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Enzyme",
-    "shortDescription": "Connect Enzyme to your vault",
+    "shortDescription": "Retired: use the Enzyme CLI installer",
     "longDescription": "Adds Enzyme's durable runtime and setup skills to a local Markdown or Obsidian vault, then hands setup to the vault-local guidance.",
     "developerName": "Joshua Pham",
     "category": "Productivity",
