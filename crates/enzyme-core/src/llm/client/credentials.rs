@@ -44,6 +44,8 @@ pub struct ResolvedConfig {
     pub model: String,
     pub provider: ConfigProvider,
     pub expires_at: Option<i64>,
+    /// OpenRouter reasoning effort the hosted broker asks for, if any.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Which LLM credentials the caller explicitly wants to use.
@@ -104,6 +106,8 @@ struct FreeConfigResponse {
     model: String,
     #[serde(default)]
     expires_at: Option<i64>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -116,6 +120,8 @@ struct CachedFreeConfig {
     #[serde(default)]
     cached_at: u64,
     profile: String,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -362,6 +368,7 @@ fn local_model_config_inner() -> Option<ResolvedConfig> {
         model: name,
         provider: ConfigProvider::Local,
         expires_at: None,
+        reasoning_effort: None,
     })
 }
 
@@ -379,6 +386,7 @@ fn local_model_config_inner_at(models_dir: &Path, config_path: &Path) -> Option<
         model: name,
         provider: ConfigProvider::Local,
         expires_at: None,
+        reasoning_effort: None,
     })
 }
 
@@ -428,6 +436,7 @@ impl LlmClient {
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
             hosted_state: None,
+            reasoning_effort: config.reasoning_effort.clone(),
             backend: local_backend(&config.base_url)?,
         })
     }
@@ -437,6 +446,7 @@ impl LlmClient {
             api_key: config.api_key.clone(),
             base_url: config.base_url.clone(),
             hosted_state: None,
+            reasoning_effort: config.reasoning_effort.clone(),
             backend: local_backend_in(&config.base_url, models_dir)?,
         })
     }
@@ -464,6 +474,7 @@ fn write_free_config_cache(path: &Path, cfg: &ResolvedConfig, profile: &str) -> 
         expires_at: cfg.expires_at,
         cached_at: now_secs,
         profile: profile.to_string(),
+        reasoning_effort: cfg.reasoning_effort.clone(),
     };
     let json = serde_json::to_vec(&cached).context("failed to serialize hosted config cache")?;
     atomic_write_secret(path, &json)
@@ -682,6 +693,7 @@ async fn fetch_free_config_from(
             model: resp.model,
             provider: ConfigProvider::ServerFallback,
             expires_at: resp.expires_at,
+            reasoning_effort: resp.reasoning_effort,
         },
         identity,
     ))
@@ -712,6 +724,7 @@ fn resolved_env_config(get_env: impl Fn(&str) -> Option<String>) -> Result<Optio
             model,
             provider: ConfigProvider::Env,
             expires_at: None,
+            reasoning_effort: None,
         }));
     }
 
@@ -784,6 +797,7 @@ async fn resolve_hosted_api_config_with_from(
                         model: cached.model,
                         provider: ConfigProvider::ServerFallback,
                         expires_at: cached.expires_at,
+                        reasoning_effort: cached.reasoning_effort,
                     });
                 }
                 if expired {
@@ -1105,6 +1119,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expiring.expires_at, Some(1_800_000_000));
+        assert_eq!(expiring.reasoning_effort, None);
+
+        let reasoning: FreeConfigResponse = serde_json::from_str(
+            r#"{"api_key":"leased","base_url":"https://openrouter.ai/api/v1","model":"fixture","reasoning_effort":"medium"}"#,
+        )
+        .unwrap();
+        assert_eq!(reasoning.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(FREE_CONFIG_URL, "https://api.enzyme.garden/llm/free-config");
         assert_eq!(FREE_CONFIG_BOOTSTRAP_HEADER, "X-Enzyme-Bootstrap-Id");
     }
@@ -1170,6 +1191,7 @@ mod tests {
             expires_at,
             cached_at,
             profile: "fixture-profile".to_string(),
+            reasoning_effort: None,
         }
     }
 
@@ -1180,6 +1202,7 @@ mod tests {
             model: "fixture-model".to_string(),
             provider: ConfigProvider::ServerFallback,
             expires_at,
+            reasoning_effort: None,
         }
     }
 

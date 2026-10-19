@@ -272,6 +272,8 @@ pub struct LlmClient {
     /// Shared per-client hosted configuration and singleflight refresh state.
     /// Explicit/BYOK/local clients never carry this context.
     hosted_state: Option<Arc<credentials::HostedClientState>>,
+    /// Reasoning effort from the resolved config, for clients without hosted state.
+    reasoning_effort: Option<String>,
     /// Only read on the `local-llm` paths; always `Http` otherwise.
     #[cfg_attr(not(feature = "local-llm"), allow(dead_code))]
     backend: Backend,
@@ -281,6 +283,7 @@ struct CompletionConfigSnapshot {
     api_key: String,
     base_url: String,
     model: String,
+    reasoning_effort: Option<String>,
     hosted: Option<credentials::HostedConfigSnapshot>,
 }
 
@@ -290,6 +293,7 @@ impl CompletionConfigSnapshot {
             api_key: snapshot.config.api_key.clone(),
             base_url: snapshot.config.base_url.clone(),
             model: snapshot.config.model.clone(),
+            reasoning_effort: snapshot.config.reasoning_effort.clone(),
             hosted: Some(snapshot),
         }
     }
@@ -311,6 +315,14 @@ struct ChatCompletionRequest {
     response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningConfig>,
+}
+
+/// OpenRouter's unified `reasoning` parameter.
+#[derive(Serialize)]
+struct ReasoningConfig {
+    effort: String,
 }
 
 impl ChatCompletionRequest {
@@ -511,6 +523,17 @@ fn requires_max_completion_tokens(base_url: &str, model: &str) -> bool {
             || model.starts_with("o4"))
 }
 
+/// Only OpenRouter understands the unified `reasoning` parameter.
+fn reasoning_config(active: &CompletionConfigSnapshot) -> Option<ReasoningConfig> {
+    let effort = active.reasoning_effort.as_deref()?.trim();
+    if effort.is_empty() || ProviderKind::detect(&active.base_url) != ProviderKind::OpenRouter {
+        return None;
+    }
+    Some(ReasoningConfig {
+        effort: effort.to_string(),
+    })
+}
+
 fn chat_completion_request(
     base_url: &str,
     model: &str,
@@ -536,6 +559,7 @@ fn chat_completion_request(
         top_k: provider.supports_top_k().then_some(params.top_k).flatten(),
         response_format,
         stream,
+        reasoning: None,
     };
 
     // A previous request in this process observed a sampling-parameter
@@ -610,6 +634,7 @@ impl LlmClient {
             api_key: api_key.to_string(),
             base_url: DEFAULT_BASE_URL.to_string(),
             hosted_state: None,
+            reasoning_effort: None,
             backend: Backend::Http,
         }
     }
@@ -620,6 +645,7 @@ impl LlmClient {
             api_key: api_key.to_string(),
             base_url: base_url.to_string(),
             hosted_state: None,
+            reasoning_effort: None,
             backend: Backend::Http,
         }
     }
@@ -631,6 +657,7 @@ impl LlmClient {
                 api_key: self.api_key.clone(),
                 base_url: self.base_url.clone(),
                 model: requested_model.to_string(),
+                reasoning_effort: self.reasoning_effort.clone(),
                 hosted: None,
             },
         }
@@ -801,6 +828,7 @@ impl LlmClient {
                 params.clone(),
                 None,
             );
+            request_body.reasoning = reasoning_config(&active);
             if retried_without_sampling {
                 request_body.strip_sampling_parameters();
             }
@@ -880,6 +908,7 @@ impl LlmClient {
                 params.clone(),
                 Some(true),
             );
+            request_body.reasoning = reasoning_config(&active);
             if retried_without_sampling {
                 request_body.strip_sampling_parameters();
             }
@@ -1044,6 +1073,48 @@ mod tests {
         assert_eq!(
             chat_completions_url("https://example.test/proxy/openai?debug=1#frag").unwrap(),
             "https://example.test/proxy/openai/chat/completions"
+        );
+    }
+
+    fn snapshot_with_effort(base_url: &str, effort: Option<&str>) -> CompletionConfigSnapshot {
+        CompletionConfigSnapshot {
+            api_key: "key".to_string(),
+            base_url: base_url.to_string(),
+            model: "anthropic/claude-haiku-5.5".to_string(),
+            reasoning_effort: effort.map(str::to_string),
+            hosted: None,
+        }
+    }
+
+    #[test]
+    fn hosted_reasoning_effort_is_sent_only_to_openrouter() {
+        let mut request = chat_completion_request(
+            DEFAULT_BASE_URL,
+            "anthropic/claude-haiku-5.5",
+            vec![Message::text("user", "hello")],
+            GenerationParams::default(),
+            None,
+        );
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("reasoning")
+                .is_none()
+        );
+
+        request.reasoning =
+            reasoning_config(&snapshot_with_effort(DEFAULT_BASE_URL, Some("medium")));
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "medium");
+
+        assert!(reasoning_config(&snapshot_with_effort(DEFAULT_BASE_URL, None)).is_none());
+        assert!(reasoning_config(&snapshot_with_effort(DEFAULT_BASE_URL, Some(" "))).is_none());
+        assert!(
+            reasoning_config(&snapshot_with_effort(
+                OPENAI_DEFAULT_BASE_URL,
+                Some("medium")
+            ))
+            .is_none()
         );
     }
 
