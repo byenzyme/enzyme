@@ -3,8 +3,8 @@
 
 Enzyme owns the operational setup skill. Its bundled knowledge-practice review
 reference is intentionally command-free and may be composed into other product
-adapters. The marketplace plugin carries only a small bootstrap that installs
-the canonical skills into a vault. Margins mirrors the neutral reference and
+adapters. The retired marketplace plugin carries only a small bootstrap that
+installs the canonical skills into a vault and points users off the plugin. Margins mirrors the neutral reference and
 keeps its own commands, state model, and mutation policy.
 """
 
@@ -144,6 +144,9 @@ BOOTSTRAP_ANCHORS = [
     'install claude --source local',
     "does not edit your notes",
     "Do not run `init`, `refresh`",
+    "plugin is retired",
+    "byenzyme/enzyme/main/install.sh",
+    "claude plugin uninstall enzyme@enzyme",
 ]
 
 BOOTSTRAP_BANNED_TOKENS = [

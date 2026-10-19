@@ -1,6 +1,6 @@
 {
   "name": "enzyme",
-  "description": "Connect Enzyme's durable agent skills to a local knowledge vault",
+  "description": "Retired: install Enzyme with its command-line installer instead. Connects Enzyme's agent skills to a local knowledge vault",
   "version": "0.5.15",
   "author": {
     "name": "Joshua Pham",

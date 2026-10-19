@@ -48,7 +48,9 @@ impl UpdateChannel {
     pub fn advisory_action(self) -> &'static str {
         match self {
             Self::CurlInstaller => "update automatically",
-            Self::Plugin => "update Enzyme via the plugin marketplace",
+            Self::Plugin => {
+                "the Enzyme plugin is retired; install Enzyme with `curl -fsSL https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh | bash`"
+            }
             Self::Homebrew => "brew upgrade enzyme",
             Self::Unmanaged => "install the latest Enzyme release with your package manager",
         }
