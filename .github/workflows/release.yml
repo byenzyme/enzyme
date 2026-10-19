@@ -510,17 +510,15 @@ jobs:
               <<~EOS
                 Enzyme installed successfully!
 
-                Install agent instructions from your vault:
-                  cd /path/to/your/vault
-                  enzyme install codex      # Codex / Pi / generic .agents
+                Install agent instructions from your notes folder:
+                  cd /path/to/your/notes
                   enzyme install claude     # Claude Code
-                  enzyme install hermes     # Hermes
-                  enzyme install openclaw   # OpenClaw
+                  enzyme install codex      # Codex / Pi / generic .agents
+                  enzyme install hermes     # Hermes (experimental)
+                  enzyme install openclaw   # OpenClaw (experimental)
 
-                Then ask your agent: Use Enzyme to inspect and initialize this vault.
-                Terminal-only setup: enzyme scan --write-config && enzyme init
-
-                Setup guide: https://memory.enzyme.garden/setup
+                Then paste the setup prompt from https://byenzyme.com/setup into your agent.
+                It follows the installed enzyme-workspace-setup skill.
               EOS
             end
 
