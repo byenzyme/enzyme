@@ -1,11 +1,10 @@
 /// Catalyst profile definitions — reusable retrieval lenses.
 ///
-/// Core Theory: Catalysts probe tensions obliquely — not asking about them directly,
-/// but creating conditions for insight. A tension might be:
-///   - An edge (knowing ↔ not-knowing)
-///   - A held contradiction (both things true)
-///   - An aspiration (current self ↔ desired self)
-///   - A resistance (wanting to engage ↔ wanting to avoid)
+/// Core Theory: Catalysts ask plainly, in the user's own first-person voice, about
+/// what the material marks as decided, changed, or still open: a choice, plan,
+/// position, ask, or follow-up. Blind comparisons on a real vault (2026-10-20)
+/// ranked this voice above oblique "what does X cost" probing for readability,
+/// fit, and usefulness.
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -38,13 +37,14 @@ pub struct CatalystFormat {
 // ---------------------------------------------------------------------------
 
 pub const CORE_CATALYST_GUIDANCE: &[&str] = &[
-    "Treat catalysts as semantic retrieval handles: each question should name a latent axis that can retrieve evidence the user may not know to search for.",
-    "Obliqueness is useful only when it improves retrieval coverage. Prefer concrete latent axes over repeated generic templates.",
-    "Probe tensions obliquely—create conditions for insight rather than asking directly about the tension.",
-    "Tensions manifest as: edges (knowing/not-knowing), held contradictions, aspirations (current/desired), resistances (engage/avoid).",
-    "Quote or reference concrete language from the source material whenever possible.",
-    "Return probing catalysts only—no exercises, imperatives, or statements passed off as answers.",
-    "Each catalyst must require reasoning to answer—not answerable by grep, timestamp lookup, or metadata scan. It must demand synthesis: connecting dots, recognizing patterns, or reasoning about a trajectory.",
+    "Treat catalysts as handles the user would want to read: each question points at something real in the excerpts that they may want to find again.",
+    "Ask about what was decided, what changed and what moved it, or what is still open: a choice, plan, position, ask, or follow-up the excerpts actually mark, not an abstract tension they don't raise.",
+    "Write in the user's own voice: first person (I, my, we), plain words, under about 18 words, one question per sentence.",
+    "Keep the real names of people, projects, places, and options. Use at most one time anchor, in plain words (\"last spring\", \"after the move\"), never a date stamp or period label.",
+    "Ask about the thing itself, not the document: avoid words like note, entry, excerpt, or reflection.",
+    "Do not presume an outcome the excerpts don't state.",
+    "Return questions only—no exercises, imperatives, or statements passed off as answers.",
+    "Prefer questions worth answering: ones that need more than a single line or a date lookup, each leading somewhere different.",
 ];
 
 // ---------------------------------------------------------------------------
@@ -61,22 +61,22 @@ pub const DEFAULT_FORMAT_KEY: &str = "question";
 pub const FORMAT_QUESTION: CatalystFormat = CatalystFormat {
     key: "question",
     display_name: "Questions",
-    description: "Probing questions that require reasoning and surface resonant passages.",
-    format_prompt: "Generate catalysts as single sentence questions. Avoid second-person \
-framing and use vocabulary drawn from the excerpts.",
+    description: "Plain first-person questions about what was decided, what changed, and what is still open.",
+    format_prompt: "Generate catalysts as single sentence questions in the user's own first-person \
+voice (never \"you\" or \"the writer\"), using vocabulary drawn from the excerpts.",
     surface_guidance: &[
-        "What shifted between attempts, iterations, or time periods",
-        "The patterns that refuse to disappear",
-        "What was decided and what alternatives were left behind",
-        "What recurring need or constraint shaped the approach",
-        "What trajectory connects earlier thinking to later thinking",
+        "What was decided, and what alternatives were left behind",
+        "What changed between attempts or seasons, and what moved it",
+        "What is still open: a follow-up, an ask, an unsettled choice",
+        "What keeps coming back, in the user's own words",
+        "Who was involved, and what they asked for or offered",
     ],
     examples: &[
-        "What does the commitment to craft cost when speed keeps winning?",
-        "What blocker on this project isn't actually about time or resources?",
-        "What shifted in the approach after the first attempt didn't land — and what got left behind?",
-        "How did the setup evolve from simple to complex, and what need was driving that?",
-        "What sits uneasily beside the decision to prioritize X over Y?",
+        "Why did I pick the smaller launch over the full rewrite?",
+        "Did I ever follow up with Maya after the pricing call?",
+        "How did my plan for the studio change after the first client left?",
+        "What did I decide about moving, and has it held?",
+        "Which of my reasons for leaving the job still feel true?",
     ],
 };
 
@@ -169,16 +169,16 @@ pub const PROFILE_TENSION_TRACE: CatalystProfile = CatalystProfile {
 frictions. This lens is useful for personal reflection, technical uncertainty, design disagreement, strategy, \
 and any material where the important retrieval target is the unresolved pressure rather than the surface topic.",
     guidance_lines: &[
-        "Use cost, assumption, contradiction, and friction when those axes are present in the excerpts.",
-        "Make both poles vivid and concrete before probing the middle ground.",
-        "Avoid applying the same 'what does X cost' grammar to every entity; vary the retrieval axis.",
-        "Notice when the user has been circling a tension and may need synthesis, action, or closure.",
+        "Look for choices or positions still pulled in two directions, and name both sides in the user's words.",
+        "Ask whether it was settled, how, or what keeps reopening it.",
+        "Avoid applying one template to every entity; vary what each question asks.",
+        "Notice when the user has been circling something and may be ready to decide or let it go.",
     ],
     sample_prompts: &[
-        "What does the commitment to {{position_a}} cost when {{position_b}} keeps surfacing?",
-        "Where does {{framework_a}} pull against {{framework_b}} in ways the author hasn't reconciled?",
-        "What sits uneasily beside the conclusion about {{concept}} — what did settling it foreclose?",
-        "What would have to be given up to resolve the tension between {{position_a}} and {{position_b}}?",
+        "Am I still torn between {{position_a}} and {{position_b}}, or did I settle it?",
+        "What keeps pulling me back to {{concept}} after I set it aside?",
+        "What would I have to give up to commit to {{position_a}}?",
+        "Did I ever decide between {{framework_a}} and {{framework_b}} for {{project}}?",
     ],
     footer: Some(
         "Consider whether the user has been circling this entity repeatedly and might benefit from synthesis, action, or closure instead of more discovery.",
@@ -198,19 +198,19 @@ pub const PROFILE_RESONANCE_TRACE: CatalystProfile = CatalystProfile {
     display_name: "Resonance Trace",
     user_description: "Read saved material through its connection to active work: what repeatedly draws attention, challenges settled thinking, or gives language to an unfinished thread.",
     description: "You create retrieval handles for reference material that keeps connecting to the user's own \
-thinking. Imported highlights, saved articles, research notes, design references, and inspiration boards are \
-valuable because they reveal what repeatedly draws attention and where it resonates with active work.",
+thinking. Imported highlights, saved articles, research notes, design references, and inspiration boards matter \
+because they show what repeatedly draws attention and where it feeds active work.",
     guidance_lines: &[
-        "Connect imported content to the user's own writing and reflections—surface the resonance.",
-        "Probe for retrieval implication: not just 'this is interesting' but 'where else does this keep mattering?'",
-        "Notice when a highlight challenges something the user has written elsewhere.",
-        "Surface patterns across sources—what themes keep appearing in what they choose to save?",
+        "Connect saved highlights to the user's own plans and writing, in their words.",
+        "Ask where an idea was taken up, or was meant to be and wasn't.",
+        "Notice when a highlight pushes against something the user believes.",
+        "Name the author and the idea plainly.",
     ],
     sample_prompts: &[
-        "What does saving this passage from {{author}} say about what's unresolved in the thinking on {{topic}}?",
-        "Where does {{author}}'s claim unsettle something the user had settled about {{concept}}?",
-        "What passage from {{entity}} speaks to the unfinished thinking on {{thread}}?",
-        "What keeps drawing attention to {{theme}} across saved sources — what need is it serving?",
+        "Which of my plans did {{author}}'s idea about {{concept}} feed into?",
+        "Did I ever use what I saved about {{topic}} the way I meant to?",
+        "What did {{author}} say that pushes against my view of {{concept}}?",
+        "Why do I keep saving ideas about {{theme}}?",
     ],
     footer: Some(
         "The goal is personal resonance, not comprehensive synthesis. One genuine connection beats cataloging everything.",
@@ -228,21 +228,20 @@ pub const PROFILE_RELATIONAL: CatalystProfile = CatalystProfile {
     key: "relational",
     display_name: "Relational",
     user_description: "Read people notes for the meaning and movement of relationships: what each connection gives or asks, which dynamics repeat, and what could move it forward.",
-    description: "You surface the value in relationships and what might move them forward. Not just \
-tracking contacts, but understanding what each relationship means, what patterns show up \
-across relationships, and where there's energy for the next meaningful step. You help \
-users reflect on who matters and why.",
+    description: "You create retrieval handles for what passes between the user and the people in their \
+notes: what was said, offered, or asked, how each relationship changed, and which follow-ups \
+were planned. Ask plainly, by name, in the user's own words.",
     guidance_lines: &[
-        "Probe the value: what does this relationship give, what does it ask?",
-        "Surface patterns across relationships—where does this dynamic show up elsewhere?",
-        "Notice what would move things forward vs. what's being avoided.",
-        "Connect people to projects and ideas—relationships don't exist in isolation.",
+        "Ask what was said, offered, or asked between the user and the person, by name.",
+        "Ask how the relationship, or what was on the table, changed and what moved it.",
+        "Notice follow-ups that were planned, and whether a later excerpt shows them happening.",
+        "Connect people to the projects, places, and communities where they show up.",
     ],
     sample_prompts: &[
-        "What does the dynamic with {{person}} cost that neither side names?",
-        "What exchange with {{person}} about {{topic}} carries more weight than its surface?",
-        "Where does {{person}} connect to {{project}} in ways not yet made explicit?",
-        "What would shift if what goes unsaid with {{person}} were said?",
+        "What did {{person}} and I decide about {{topic}}?",
+        "How did things with {{person}} change after {{event}}?",
+        "Did I follow up with {{person}} after {{conversation}}?",
+        "Where does {{person}} show up in my work on {{project}}?",
     ],
     footer: Some(
         "Some relationships need tending, some need honest evaluation, some need release. Surface which this might be.",
@@ -265,16 +264,16 @@ accumulate notes but lose clarity. Meetings happen but actions slip. Your cataly
 through the pile to find what's unresolved, what's blocking progress, and what the user \
 might be avoiding.",
     guidance_lines: &[
-        "Surface what's stuck—the thing that's been sitting there, unresolved.",
-        "Probe for what's being avoided vs. what's genuinely blocked.",
-        "Notice patterns: what keeps showing up in meeting notes but never gets resolved?",
-        "Connect operational details to larger purpose—why does this project matter?",
+        "Ask what is stuck and who owns it, in plain words.",
+        "Separate what is genuinely blocked from what is being put off.",
+        "Notice what keeps coming up in meetings without a resolution.",
+        "Connect the task to why the project matters.",
     ],
     sample_prompts: &[
-        "What blocker on {{project}} isn't actually about time or resources?",
-        "What keeps getting raised about {{topic}} without anyone owning the resolution?",
-        "Where does {{project}} depend on a decision that everyone treats as already made but nobody explicitly chose?",
-        "What pattern in the meeting notes suggests the real constraint on {{project}} isn't the one being discussed?",
+        "What is really blocking {{project}}, if it isn't time?",
+        "Who owns the open question about {{topic}}?",
+        "Did anyone actually decide {{assumption}} for {{project}}?",
+        "What keeps coming up about {{topic}} that we never resolve?",
     ],
     footer: Some(
         "Operational clarity often comes from naming what's stuck, not adding more tasks.",
@@ -296,16 +295,16 @@ pub const PROFILE_DECISION_TRACE: CatalystProfile = CatalystProfile {
 constraints, and evidence thresholds. This lens works across technical decisions, product strategy, canvas \
 design choices, agent traces, architecture logs, and any domain where the artifact records why one path won.",
     guidance_lines: &[
-        "Make trade-offs explicit—what does choosing A foreclose about B?",
-        "Probe for what evidence would actually tip the decision.",
-        "Notice when information-gathering has become decision-avoidance.",
-        "Retrieve rejected alternatives, constraints, reversals, and decision criteria, not just the final choice.",
+        "Name the options that were on the table and which one won, in the user's words.",
+        "Ask what tipped the choice, or what evidence would reopen it.",
+        "Notice when more research has become a way of not deciding.",
+        "Retrieve rejected alternatives, constraints, and reversals, not just the final choice.",
     ],
     sample_prompts: &[
-        "What trade-off between {{option_a}} and {{option_b}} remains unnamed in {{decision}}?",
-        "What evidence about {{factor}} would tip {{decision}} one way?",
-        "Where does the analysis of {{decision}} gather information that delays rather than clarifies?",
-        "What constraint from {{stakeholder}} forecloses options not yet acknowledged?",
+        "Why did I pick {{option_a}} over {{option_b}} for {{decision}}?",
+        "What would make me reopen {{decision}}?",
+        "Am I still gathering information on {{decision}} instead of choosing?",
+        "Which options did {{stakeholder}} rule out for {{decision}}?",
     ],
     footer: Some("Decision clarity often comes from naming the trade-off, not from more analysis."),
     detection_patterns: &[
@@ -327,16 +326,16 @@ thinking. Creative work develops over time. Your catalysts notice patterns acros
 entries, probe what keeps coming back, and sense when something is ready to become \
 something else—a piece of writing, a decision, a conversation.",
     guidance_lines: &[
-        "Notice what keeps coming back across entries—themes, questions, preoccupations.",
-        "Probe for what's ready to become something else vs. what needs more time.",
-        "Surface the gap between what's being written privately and what might be shared.",
-        "Honor the difference between processing and producing—not everything needs to ship.",
+        "Notice what keeps coming back across entries, and ask about it in the user's words.",
+        "Ask whether a feeling or intention became a decision, a conversation, or a piece of work.",
+        "Ask how a stance shifted between seasons and what moved it.",
+        "Not everything needs to ship; leave room for questions about what is still forming.",
     ],
     sample_prompts: &[
-        "What does the writing on {{topic}} keep circling without directly naming?",
-        "What would change if the thing being processed in recent entries were said plainly?",
-        "What is the writing on {{experience}} protecting by not saying it directly?",
-        "Where does the entry on {{moment}} contain raw material that speaks to {{thread}}?",
+        "What keeps coming back when I write about {{topic}}?",
+        "Did my intention about {{practice}} hold, or did I drop it?",
+        "How did my thinking about {{experience}} shift after {{event}}?",
+        "Is {{thread}} ready to become something I share?",
     ],
     footer: Some(
         "Reflective work moves at its own pace. Surface what's ready, don't force production.",
@@ -449,7 +448,7 @@ mod tests {
             CORE_CATALYST_GUIDANCE.len() + PROFILE_TENSION_TRACE.guidance_lines.len()
         );
         // First lines should be core guidance
-        assert!(lines[0].starts_with("Treat catalysts as semantic retrieval handles"));
+        assert!(lines[0].starts_with("Treat catalysts as handles the user would want to read"));
         // Last lines should be profile-specific
         assert!(
             lines

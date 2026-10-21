@@ -47,8 +47,8 @@ excluded_folders=["templates"]
     fs::write(
         &file,
         source.replace(
-            "You surface the value in relationships",
-            "READABLE_PROFILE_EDIT: You surface the value in relationships",
+            "You create retrieval handles for what passes between the user",
+            "READABLE_PROFILE_EDIT: You create retrieval handles for what passes between the user",
         ),
     )
     .unwrap();

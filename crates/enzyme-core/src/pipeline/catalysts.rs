@@ -18,8 +18,8 @@ use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CUSTOM_READING_QUESTION_INSTRUCTION, CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL,
-    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient,
-    ParsedCatalyst, QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
+    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient, ParsedCatalyst,
+    QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
     build_custom_reading_user_prompt, build_local_user_prompt, build_system_prompt,
     build_user_prompt, catalyst_json_schema, get_profile, hardware, is_synthetic_body_cluster,
     parse_catalyst_response,
@@ -3486,7 +3486,9 @@ mod readable_profile_tests {
         };
         for original in [
             "SELECTED PROFILE: old\n\n<vault_context>actual evidence</vault_context>\n<entity>x</entity>\nReturn JSON",
-            "SELECTED PROFILE: old\nOld local guidance\n<vault_context era=\"2026\">actual evidence</vault_context>\nThen probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.\nGenerate 3 questions",
+            &format!(
+                "SELECTED PROFILE: old\nOld local guidance\n<vault_context era=\"2026\">actual evidence</vault_context>\n{QUESTION_PERIPHERY_INSTRUCTION}\nGenerate 3 questions"
+            ),
         ] {
             let applied = apply_reading_profile(original, "mine", &profile);
             assert!(!applied.contains("SELECTED PROFILE: old"));

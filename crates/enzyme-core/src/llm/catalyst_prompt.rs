@@ -115,8 +115,8 @@ pub fn build_system_prompt(format_key: Option<&str>, prompt_context: Option<&str
     };
 
     let base = format!(
-        "You receive what a living archive is already wondering about. Your catalysts aren't \
-extractions—they're ways of staying with what's knocking at the door.\n\n\
+        "You write the questions a person would want to find in their own notes: what they \
+decided, what changed, and what is still open.\n\n\
 {}\n\n\
 Catalysts should surface:\n\
 {}{}\n\n\
@@ -610,7 +610,7 @@ pub fn build_local_user_prompt(
 
 /// Default semantic instruction for question-form catalysts. Custom readable
 /// profiles replace this clause while retaining the question output contract.
-pub const QUESTION_PERIPHERY_INSTRUCTION: &str = "Then probe AROUND the grounded meaning, not about it directly. Ask about what it costs, what it forecloses, what it's in friction with, or what it quietly assumes. Name what's at stake rather than describing the concept.";
+pub const QUESTION_PERIPHERY_INSTRUCTION: &str = "Then ask about what the user decided, changed, or left open there, in their own first-person words: under about 18 words, one question per sentence, real names kept, no date stamps and no document words like note or entry.";
 
 /// Question-form replacement for [`QUESTION_PERIPHERY_INSTRUCTION`] when a
 /// custom readable profile owns the semantic aim.
@@ -1130,7 +1130,8 @@ mod tests {
         assert!(prompt.contains("SELECTED PROFILE: Tension Trace"));
         assert!(prompt.contains("<vault_context>"));
         assert!(prompt.contains("Focus entity: enzyme"));
-        assert!(prompt.contains("probe AROUND the grounded meaning"));
+        assert!(prompt.contains(QUESTION_PERIPHERY_INSTRUCTION));
+        assert!(!prompt.contains("probe AROUND"));
         assert!(prompt.contains("\"catalysts\""));
     }
 
@@ -1185,9 +1186,15 @@ mod tests {
             None,
             reference,
         );
-        for kept in CUSTOM_READING_STEERING {
+        // The built-in question instruction no longer probes around costs; the
+        // practice shape and engagement steering stay in the built-in prompt.
+        for kept in CUSTOM_READING_STEERING
+            .iter()
+            .filter(|s| !matches!(**s, "probe AROUND" | "what it costs"))
+        {
             assert!(prompt.contains(kept), "{kept:?} missing from {prompt}");
         }
+        assert!(prompt.contains(QUESTION_PERIPHERY_INSTRUCTION));
     }
 
     #[test]
