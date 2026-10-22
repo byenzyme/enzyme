@@ -27,7 +27,22 @@ echo "Installing enzyme ${VERSION} (${TARGET})..."
 # Download and extract
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/enzyme-${TARGET}.tar.gz" | tar xz -C "$tmpdir"
+archive="enzyme-${TARGET}.tar.gz"
+archive_url="https://github.com/${REPO}/releases/download/${VERSION}/${archive}"
+curl -fsSL -o "$tmpdir/$archive" "$archive_url"
+
+# Verify against the checksum published with the release before extracting.
+expected="$(curl -fsSL "${archive_url}.sha256" | awk '{print $1}')"
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmpdir/$archive" | awk '{print $1}')"
+else
+    actual="$(shasum -a 256 "$tmpdir/$archive" | awk '{print $1}')"
+fi
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    echo "Checksum verification failed for ${archive}; not installing." >&2
+    exit 1
+fi
+tar xzf "$tmpdir/$archive" -C "$tmpdir"
 
 # Install
 mkdir -p "$INSTALL_DIR"

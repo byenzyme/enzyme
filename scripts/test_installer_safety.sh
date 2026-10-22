@@ -32,8 +32,21 @@ esac
 EOF
     cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
-case " $* " in
-    *"releases/latest"*) printf '%s' 'https://github.com/byenzyme/enzyme/releases/tag/v-test' ;;
+out=""
+url=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) shift; out="$1" ;;
+        -w|-H|-d|-X) shift ;;
+        -*) ;;
+        *) url="$1" ;;
+    esac
+    shift
+done
+case "$url" in
+    *releases/latest) printf '%s' 'https://github.com/byenzyme/enzyme/releases/tag/v-test' ;;
+    *.tar.gz) printf 'fake-tarball\n' > "$out" ;;
+    *.tar.gz.sha256) printf '%s  archive.tar.gz\n' "$FAKE_ARCHIVE_SHA256" ;;
 esac
 exit 0
 EOF
@@ -52,7 +65,8 @@ exit 1
 EOF
     chmod +x "$fake_bin/uname" "$fake_bin/curl" "$fake_bin/tar"
 
-    HOME="$home" PATH="$fake_bin:/usr/bin:/bin" bash "$installer" >/dev/null
+    FAKE_ARCHIVE_SHA256="$(printf 'fake-tarball\n' | sha256sum | awk '{print $1}')" \
+        HOME="$home" PATH="$fake_bin:/usr/bin:/bin" bash "$installer" >/dev/null
 
     test -x "$home/.local/bin/enzyme"
     grep -qx 'auth-sentinel' "$home/.enzyme/auth.json"

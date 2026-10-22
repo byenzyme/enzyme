@@ -52,22 +52,23 @@ def _download_url(url: str, dest: str) -> None:
 
 
 def _verify_sha256(filepath: str, sha256_url: str) -> None:
-    """Verify file against a .sha256 checksum URL."""
+    """Verify file against a .sha256 checksum URL.
+
+    Fails closed: an unreachable or empty checksum aborts the install rather
+    than installing an unverified binary.
+    """
     try:
         with urllib.request.urlopen(sha256_url) as resp:
             expected = resp.read().decode().strip().split()[0]
-        h = hashlib.sha256()
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        actual = h.hexdigest()
-        if actual != expected:
-            raise RuntimeError(
-                f"SHA256 mismatch: expected {expected}, got {actual}"
-            )
-    except urllib.error.URLError:
-        # If checksum file unavailable, skip verification
-        pass
+    except (urllib.error.URLError, IndexError) as exc:
+        raise RuntimeError(f"Could not fetch checksum from {sha256_url}: {exc}") from exc
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
+    if actual != expected:
+        raise RuntimeError(f"SHA256 mismatch: expected {expected}, got {actual}")
 
 
 def _is_installed() -> bool:
