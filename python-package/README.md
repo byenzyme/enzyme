@@ -1,6 +1,6 @@
 # enzyme-python-package
 
-Pip-installable wrapper for the [enzyme](https://github.com/useenzyme/enzyme) binary. Auto-downloads the correct platform binary and embedding model on first run.
+Pip-installable wrapper for the [enzyme](https://github.com/byenzyme/enzyme) binary. Auto-downloads the correct platform binary and embedding model on first run.
 
 ## Install
 
@@ -24,7 +24,7 @@ All commands proxy directly to the enzyme binary.
 
 ## Release flow
 
-This package should be published alongside enzyme binary releases. When a new enzyme version is tagged in [useenzyme/enzyme](https://github.com/useenzyme/enzyme):
+This package should be published alongside enzyme binary releases. When a new enzyme version is tagged in [byenzyme/enzyme](https://github.com/byenzyme/enzyme):
 
 1. Update `VERSION` in `enzyme_python_package/__init__.py` to match the new tag
 2. Update `version` in `pyproject.toml`

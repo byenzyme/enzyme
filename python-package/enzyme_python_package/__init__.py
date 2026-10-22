@@ -17,7 +17,7 @@ import tarfile
 import tempfile
 import urllib.request
 
-REPO = "useenzyme/enzyme"
+REPO = "byenzyme/enzyme"
 VERSION = "0.4.5"
 
 # Install binary to ~/.local/bin (standard user binary location)

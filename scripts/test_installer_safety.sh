@@ -33,7 +33,7 @@ EOF
     cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
 case " $* " in
-    *"releases/latest"*) printf '%s' 'https://github.com/useenzyme/enzyme/releases/tag/v-test' ;;
+    *"releases/latest"*) printf '%s' 'https://github.com/byenzyme/enzyme/releases/tag/v-test' ;;
 esac
 exit 0
 EOF

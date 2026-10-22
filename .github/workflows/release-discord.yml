@@ -56,7 +56,7 @@ jobs:
           release_html_url: ${{ steps.release_metadata.outputs.html_url }}
           color: "8141549"
           username: "Enzyme releases"
-          footer_title: "useenzyme/enzyme"
+          footer_title: "byenzyme/enzyme"
           reduce_headings: true
           max_description: "3800"
 

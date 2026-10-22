@@ -21,7 +21,7 @@ pub const UPDATE_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1_000;
 
 pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_UPDATE_API_BASE: &str = "https://api.enzyme.garden";
-const DEFAULT_UPDATE_RELEASE_BASE: &str = "https://github.com/useenzyme/enzyme";
+const DEFAULT_UPDATE_RELEASE_BASE: &str = "https://github.com/byenzyme/enzyme";
 const DEFAULT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const OUTCOME_BUSY_TIMEOUT_MS: u64 = 2_000;
 

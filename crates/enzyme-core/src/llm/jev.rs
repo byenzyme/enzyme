@@ -212,7 +212,7 @@ impl JevClient {
             .http
             .post(&self.endpoint)
             .bearer_auth(&self.api_key)
-            .header("HTTP-Referer", "https://github.com/useenzyme/enzyme-rust")
+            .header("HTTP-Referer", "https://github.com/byenzyme/enzyme")
             .header("X-Title", "Enzyme")
             .json(request)
             .send()

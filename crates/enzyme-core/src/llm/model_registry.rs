@@ -45,7 +45,7 @@ pub const REGISTRY: &[ModelEntry] = &[ModelEntry {
     // -0.003 on the 60-example GGUF gate) at Q4_0-class speed (+48% prefill
     // via AVX-VNNI/ARM repack paths, which K-quants miss on this model's
     // 576-dim tensors) and 19% smaller. See score-report-iq4nl.json.
-    url: "https://github.com/useenzyme/enzyme/releases/download/models-catalyst-v3/enzyme-catalyst-135m-v3.gguf",
+    url: "https://github.com/byenzyme/enzyme/releases/download/models-catalyst-v3/enzyme-catalyst-135m-v3.gguf",
     sha256: "710a79eea9a84b22cc18b8626b9d893e1a5a2de61f8852fcef839099e8138eab",
     size: 91_727_072,
     context_window: 8192,
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(manifest["sha256"], entry.sha256);
         assert_eq!(manifest["size"], entry.size);
         let expected_url = format!(
-            "https://github.com/useenzyme/enzyme/releases/download/{}/{}",
+            "https://github.com/byenzyme/enzyme/releases/download/{}/{}",
             manifest["public_tag"].as_str().unwrap(),
             manifest["source_asset"].as_str().unwrap()
         );
