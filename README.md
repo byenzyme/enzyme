@@ -64,15 +64,21 @@ installed skill tells your agent to use it.
 ## How it works
 
 Setup saves a short, editable settings file (an `.enzyme` program) that says
-what to read. When the index is built, Enzyme samples excerpts across time from
-each folder, tag, or link you chose and writes search questions from them,
-called **catalysts**. When your agent searches, its query is matched against
-those questions, which lead back to the passages they came from.
+what to read. When the index is built, Enzyme does two things:
 
-The questions are search handles for your agent rather than reading material.
-They name the people, projects, and phrases in your notes so a search lands on
-the right passages. Judge setup by the notes your agent brings back, not by the
-questions themselves.
+1. **Maps what matters.** It samples excerpts across time from each folder,
+   tag, or link you chose and writes questions from them, called
+   **catalysts**, about what you decided, changed, or left open there. `enzyme
+   petri` shows this map.
+2. **Indexes every note for search.** `enzyme catalyze` ranks notes by wording
+   and meaning together, so a search finds the passage whether your agent names
+   something exactly or only describes it. Each result carries the catalyst that
+   best connects it to the query. Search runs entirely on your machine.
+
+Your agent orients on the map, searches from several angles, and answers from
+your own passages, so it can tell you how your thinking moved, not just what one
+note says. Catalysts are generated, so they're hints, never evidence: judge setup
+by the notes your agent brings back.
 
 A small settings file looks like this. Your agent writes and edits it with you
 during setup:
@@ -133,41 +139,64 @@ alias).
 
 ### Retrieval commands
 
-`enzyme catalyze` searches by idea and returns passages with their sources:
+`enzyme petri` shows what Enzyme found worth asking about: for each recurring tag, link, or folder, questions about what you decided, changed, or left open, sampled across time. In a terminal it renders a tree; piped, it emits JSON.
 
 ```bash
-enzyme catalyze "why we keep rewriting the auth layer"
+enzyme petri -n 2
+```
+
+```text
+Petri
+├─ #working-with-others · tag · active · 11 mentions
+│  └─ catalysts
+│     ├─ Why did every auth change still route through me after I kept promising to write it down?
+│     ├─ Why did the third auth extraction attempt stall when nobody wanted to own the session model?
+│     ├─ Which reasons for handing the session model to Maya had I stopped believing by then?
+│     ├─ Did extraction stay paused once Maya's team owned the session model?
+│     └─ …
+└─ #system-design · tag · active · 10 mentions
+   └─ catalysts
+      ├─ Why did I pick a monolith with inner module boundaries over splitting services yet?
+      ├─ Did I ever settle who owns the session model once auth moves out?
+      ├─ Which part of auth extraction kept adding layers instead of removing one?
+      ├─ Does my view that independence means who can change what still hold?
+      └─ …
+```
+
+An agent reads this map first, then searches. `enzyme catalyze` ranks notes by wording and meaning together, and each result carries the catalyst that best connects it to the query:
+
+```bash
+enzyme catalyze -n 3 "why we keep rewriting the auth layer" \
+  | jq '{search_strategy, results: [.results[] | {file_path, similarity, via_catalyst_text, content}]}'
 ```
 
 ```json
 {
-  "query": "why we keep rewriting the auth layer",
+  "search_strategy": "hybrid",
   "results": [
     {
-      "file_path": "retros/2024-q3-platform-retro.md",
-      "content": "scoped auth extraction as a two-week project for the third time. real blocker wasn't the token service — nobody wanted to own the session model. every proposal added a layer instead of removing one.",
-      "similarity": 1.46
+      "file_path": "retros/2025-q3-platform-retro.md",
+      "similarity": 0.817,
+      "via_catalyst_text": "Why did I keep scoping auth extraction as a two-week project, and what kept stalling it?",
+      "content": "# Q3 platform retro\n#system-design #working-with-others\n\nScoped auth extraction as a two-week project for the third time. The real blocker was not the token service; nobody wanted to own the session model. Every proposal added a layer instead of removing one. Action: decide ownership before touching code again."
     },
     {
-      "file_path": "adrs/007-auth-service-extraction.md",
-      "content": "the monolith's session handling has become the bottleneck for every team shipping independently. chose separation of concerns over the coordination cost of a new service boundary.",
-      "similarity": 1.24
-    }
-  ],
-  "top_contributing_catalysts": [
+      "file_path": "journal/2025-05-12.md",
+      "similarity": 0.693,
+      "via_catalyst_text": "Why did every auth change still route through me after I kept promising to write it down?",
+      "content": "#working-with-others\n\nReviewed eleven PRs today and wrote none. Every auth change still routes through me because I wrote the session code and nobody else wants to touch it. I keep saying I will write it down so someone else can own it. I have not."
+    },
     {
-      "entity": "system-design",
-      "text": "After auth extraction slipped a third time, did anyone ever take ownership of the session model?",
-      "relevance_score": 0.74
+      "file_path": "1on1s/2026-01-maya.md",
+      "similarity": 0.579,
+      "via_catalyst_text": "What keeps pulling me back to rewriting when Maya's smaller version already worked?",
+      "content": "# 1:1 with Maya\n#working-with-others\n\nMaya replaced the token refresh path with something half the size of mine. She asked me twice and then stopped asking, which is the point. I want to do this with billing before I start rewriting it myself."
     }
   ]
 }
 ```
 
-*Output above is illustrative. It shows the shape of a result, not a captured run.*
-
-`enzyme petri` lists the subjects Enzyme indexed and the questions it wrote for
-each. In an interactive terminal it renders a tree; piped, it emits JSON.
+*Captured from a 17-note example vault of a team lead's ADRs, retros, 1:1s, and journal. Catalyst wording comes from model generation, so it varies between runs.*
 
 Scripts and host apps can rely on defined exit codes (0 ok, 1 runtime failure,
 2 usage, 3 configuration, 4 workspace busy, 5 `init` indexed but catalysts
