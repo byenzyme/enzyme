@@ -1140,35 +1140,42 @@ impl Database {
 
     /// Load all chunks for the given file paths.
     pub fn get_chunks_for_files(&self, file_paths: &[String]) -> Result<Vec<FileChunk>> {
-        if file_paths.is_empty() {
-            return Ok(Vec::new());
+        // SQLite caps bound parameters per statement (32,766 by default), and
+        // large vaults ask for more paths than that, so look them up in batches
+        // and restore the single query's global (path, chunk) order.
+        const PATHS_PER_QUERY: usize = 10_000;
+        let mut unique: Vec<&String> = file_paths.iter().collect();
+        unique.sort();
+        unique.dedup();
+        let mut chunks = Vec::new();
+        for batch in unique.chunks(PATHS_PER_QUERY) {
+            let placeholders = (1..=batch.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT d.source_ref, c.chunk_index, c.content, c.entry_date
+                 FROM chunks c
+                 JOIN docs d ON d.id = c.doc_id
+                 WHERE d.source_ref IN ({placeholders})
+                 ORDER BY d.source_ref, c.chunk_index"
+            );
+            let params = batch.iter().map(|p| Value::Text((*p).clone())).collect();
+            chunks.extend(self.query_read(&sql, params, |row| {
+                Ok(FileChunk {
+                    file_path: row.get::<String>(0)?,
+                    chunk_index: row.get::<i64>(1)? as u32,
+                    content: row.get::<String>(2)?,
+                    entry_date: row.get::<Option<i64>>(3)?,
+                })
+            })?);
         }
-
-        let placeholders = (1..=file_paths.len())
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "SELECT d.source_ref, c.chunk_index, c.content, c.entry_date
-             FROM chunks c
-             JOIN docs d ON d.id = c.doc_id
-             WHERE d.source_ref IN ({placeholders})
-             ORDER BY d.source_ref, c.chunk_index"
-        );
-        let params = file_paths
-            .iter()
-            .cloned()
-            .map(Value::Text)
-            .collect::<Vec<_>>();
-
-        Ok(self.query_read(&sql, params, |row| {
-            Ok(FileChunk {
-                file_path: row.get::<String>(0)?,
-                chunk_index: row.get::<i64>(1)? as u32,
-                content: row.get::<String>(2)?,
-                entry_date: row.get::<Option<i64>>(3)?,
-            })
-        })?)
+        chunks.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.chunk_index.cmp(&b.chunk_index))
+        });
+        Ok(chunks)
     }
 
     /// Get the top entities, ordered by the given column.
