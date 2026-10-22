@@ -259,6 +259,7 @@ impl Database {
                     )
                     .await?;
                 }
+                let handle = lexical_handle(&doc.source_ref, doc.title.as_deref(), &doc.links);
                 for (i, chunk_content) in doc.chunks.iter().enumerate() {
                     let word_count = chunk_content.split_whitespace().count() as i64;
                     let entry_date = doc
@@ -273,7 +274,7 @@ impl Database {
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         vec![
                             Value::Integer(doc_id),
-                            Value::Text(doc.source_ref.clone()),
+                            Value::Text(handle.clone()),
                             Value::Integer(i as i64),
                             Value::Text(chunk_content.clone()),
                             Value::Integer(word_count),
@@ -3352,3 +3353,21 @@ fn map_applied_target_row(row: libsql::Row) -> Result<AppliedTarget, libsql::Err
 
 // Blob <-> Vec<f32> encoding lives in `crate::embedding::quantize` (int8_v1,
 // with legacy f32 fallback).
+
+/// Text for the lexical index's path column, which BM25 weights twice: the
+/// vault path, the title, and the note's wikilink targets. Frontmatter is not
+/// part of chunk text, so without this a note that names a person, account,
+/// or project only in a field like `people: ["[[Sam Rivera]]"]` (or only in a
+/// frontmatter `title`) could not be found by that name.
+pub(crate) fn lexical_handle(source_ref: &str, title: Option<&str>, links: &[String]) -> String {
+    let mut handle = source_ref.to_string();
+    if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        handle.push('\n');
+        handle.push_str(title);
+    }
+    for link in links {
+        handle.push('\n');
+        handle.push_str(link);
+    }
+    handle
+}

@@ -146,3 +146,35 @@ fn old_read_only_vault_uses_bm25_then_refresh_builds_fts() {
         "signal.md"
     );
 }
+
+#[test]
+fn notes_are_found_by_frontmatter_people_and_title() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(
+        vault.join("renewal-thread.md"),
+        "---\ntitle: \"Escalation: rollback guarantees for Northwind\"\npeople:\n  - \"[[Sam Rivera]]\"\n---\nWe agreed to keep the old image for thirty days.",
+    )
+    .unwrap();
+    std::fs::write(
+        vault.join("lunch.md"),
+        "---\ntitle: \"Lunch plans\"\n---\nTacos on Friday near the office.",
+    )
+    .unwrap();
+
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    IndexingPipeline::new(&db, vault.clone())
+        .run(true, |_| {})
+        .unwrap();
+    let service = get_embedding_service(&vault).unwrap();
+    EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
+
+    let by_person = db
+        .search_chunks_fts("\"sam\" OR \"rivera\"", 10, 10)
+        .unwrap();
+    assert_eq!(by_person.len(), 1);
+    assert_eq!(by_person[0].0, "renewal-thread.md");
+    let by_title = db.search_chunks_fts("\"northwind\"", 10, 10).unwrap();
+    assert_eq!(by_title[0].0, "renewal-thread.md");
+}
