@@ -1,3 +1,4 @@
+use std::path::{Component, Path};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -79,10 +80,28 @@ fn filename_from_query(query: &str) -> String {
     }
 }
 
+/// Whether `path` stays inside the directory it is joined onto: relative, with
+/// only ordinary components. Rejects absolute paths, `..`, and drive prefixes,
+/// any of which would let a request write outside the vault.
+fn is_contained(path: &Path) -> bool {
+    path.components().all(|c| matches!(c, Component::Normal(_)))
+        && path.components().next().is_some()
+}
+
 async fn save_note(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SaveNoteRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    let filename = Path::new(&request.filename);
+    if !is_contained(filename) || filename.components().count() != 1 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if let Some(subfolder) = &request.subfolder
+        && !is_contained(Path::new(subfolder))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let mut target_dir = state.vault_path.clone();
 
     if let Some(subfolder) = &request.subfolder {
@@ -119,6 +138,17 @@ pub fn router() -> Router<Arc<AppState>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn contained_paths_stay_inside_the_vault() {
+        assert!(is_contained(Path::new("My Note.md")));
+        assert!(is_contained(Path::new("Syntheses/2026")));
+        assert!(!is_contained(Path::new("")));
+        assert!(!is_contained(Path::new("../outside.md")));
+        assert!(!is_contained(Path::new("Syntheses/../../outside")));
+        assert!(!is_contained(Path::new("/home/user/.ssh/authorized_keys")));
+        assert!(!is_contained(Path::new("./note.md")));
+    }
 
     #[test]
     fn deserializes_current_payload_shape() {

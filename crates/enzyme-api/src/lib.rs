@@ -5,10 +5,10 @@ use anyhow::Result;
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
 use tracing::{info, warn};
 
 mod explore_pipeline;
@@ -121,12 +121,38 @@ async fn serve_embedded(req: Request) -> Response {
         .into_response()
 }
 
-pub fn build_router(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+/// Whether a `Host` header names this machine's loopback interface. The UI and
+/// the Vite dev proxy both reach the server as localhost; any other name means
+/// a page on another origin resolved its own domain to 127.0.0.1 (DNS
+/// rebinding) and is trying to read or write the vault through this server.
+fn is_loopback_host(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
 
+async fn require_loopback_host(request: Request, next: Next) -> Response {
+    let allowed = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_host);
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            "enzyme serve only answers requests addressed to localhost",
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(routes::health::router())
         .merge(routes::version::router())
@@ -137,8 +163,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(routes::preview::router())
         .merge(routes::notes::router())
         .with_state(state)
-        .layer(cors)
         .fallback(serve_embedded)
+        .layer(middleware::from_fn(require_loopback_host))
 }
 
 pub async fn serve(vault_path: PathBuf, port: u16) -> Result<()> {
@@ -167,7 +193,9 @@ pub async fn serve(vault_path: PathBuf, port: u16) -> Result<()> {
 
     let app = build_router(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    // Loopback only: the server reads and writes the vault without
+    // authentication, so it must not be reachable from the network.
+    let addr = format!("127.0.0.1:{port}");
     info!("enzyme-api listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -183,4 +211,31 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("failed to install ctrl+c handler");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_host;
+
+    #[test]
+    fn accepts_only_loopback_host_headers() {
+        for host in [
+            "localhost",
+            "localhost:8765",
+            "127.0.0.1:8765",
+            "[::1]:8765",
+            "LOCALHOST:5173",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:8765",
+            "127.0.0.1.evil.example",
+            "192.168.1.5:8765",
+            "",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
 }
