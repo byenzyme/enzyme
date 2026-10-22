@@ -3,10 +3,16 @@ use std::process::{Command, Output};
 
 use rusqlite::Connection;
 
+mod support;
+use support::mock::MockEnzymeApi;
+
 struct Fixture {
     _root: tempfile::TempDir,
     enzyme_home: PathBuf,
     source_db: PathBuf,
+    // Stands in for api.enzyme.garden so hosted LLM resolution never leaves
+    // the machine; its lease points at an unroutable LLM.
+    api: MockEnzymeApi,
 }
 
 impl Fixture {
@@ -57,6 +63,7 @@ timestamp = {{ unit = "ms" }}
             _root: root,
             enzyme_home,
             source_db,
+            api: MockEnzymeApi::start(),
         }
     }
 
@@ -69,6 +76,8 @@ timestamp = {{ unit = "ms" }}
         command
             .args(args)
             .env("ENZYME_HOME", &self.enzyme_home)
+            .env("ENZYME_API_URL", self.api.base_url())
+            .env("ENZYME_FREE_CONFIG_URL", self.api.free_config_url())
             .env_remove("OPENAI_API_KEY");
         for (key, value) in env {
             command.env(key, value);
@@ -358,6 +367,7 @@ path = "{}"
     )
     .unwrap();
 
+    let api = MockEnzymeApi::start();
     let output = Command::new(env!("CARGO_BIN_EXE_enzyme"))
         .args([
             "init",
@@ -368,6 +378,8 @@ path = "{}"
             "research",
         ])
         .env("ENZYME_HOME", &enzyme_home)
+        .env("ENZYME_API_URL", api.base_url())
+        .env("ENZYME_FREE_CONFIG_URL", api.free_config_url())
         .output()
         .unwrap();
     assert_success(&output);

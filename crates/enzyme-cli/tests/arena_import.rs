@@ -52,11 +52,27 @@ async fn compiled_arena_program_indexes_through_init_and_refresh() {
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("config.toml"), "[update]\nauto = false\n").unwrap();
+    // Serve the hosted LLM lease from the same mock so init and refresh never
+    // reach api.enzyme.garden; the lease points at an unroutable LLM.
+    Mock::given(method("GET"))
+        .and(path("/llm/free-config"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "api_key": "enz-free-test",
+            "base_url": "http://127.0.0.1:1/v1",
+            "model": "test-model",
+        })))
+        .mount(&server)
+        .await;
     let command = || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_enzyme"));
         command
             .args(["--collection", "arena-test"])
             .env("ENZYME_HOME", &home)
+            .env("ENZYME_API_URL", server.uri())
+            .env(
+                "ENZYME_FREE_CONFIG_URL",
+                format!("{}/llm/free-config", server.uri()),
+            )
             .env("ENZYME_ARENA_API_BASE", format!("{}/v3/", server.uri()))
             .env_remove("ARENA_ACCESS_TOKEN");
         command
