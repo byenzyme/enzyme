@@ -64,8 +64,8 @@ Configure your vault in `~/.openclaw/openclaw.json`:
 
 | Tool | What it does |
 |---|---|
-| `enzyme_petri` | Working memory: top entities + catalyst phrases. Run on first message. |
-| `enzyme_catalyze` | Semantic search by concept. Compose queries from petri catalysts. |
+| `enzyme_petri` | Working memory: top entities and their catalyst questions. Run on first message. |
+| `enzyme_catalyze` | Keyword + semantic search; each result notes the catalyst that connects it to the query. |
 | `enzyme_status` | Vault index stats. |
 
 ## Hooks

@@ -111,7 +111,7 @@ The `pre_llm_call` hook fires on the first turn to seed the model with vault con
 | Tool | What it does |
 |------|--------------|
 | `enzyme_petri` | Vault overview — trending entities with catalysts and activity trends. Open-ended (no query) for a full picture, or pass a query to rank by relevance. |
-| `enzyme_catalyze` | Semantic search — returns note excerpts, file paths, and the catalysts that bridged the match. |
+| `enzyme_catalyze` | Keyword + semantic search — returns note excerpts, file paths, and the catalyst that best connects each result to the query. |
 | `enzyme_refresh` | Incremental re-index. Fast (~100ms) when nothing changed. |
 | `enzyme_status` | Document count, entity count, embedding coverage, API key status. |
 | `enzyme_init` | First-time vault setup. Builds the concept graph, generates catalysts, creates embeddings. The agent should run `enzyme compile` and review the generated program before this. |
@@ -200,9 +200,9 @@ The SKILL.md gives the agent instructions for the full session lifecycle:
 |-------|---------------------|
 | Session start | Runs `enzyme refresh --quiet` to catch vault changes |
 | First message | Runs `enzyme petri` — open-ended if the prompt is broad, or `--query "..."` if the user has a specific direction |
-| Deeper search | Uses `enzyme catalyze` with catalyst vocabulary from petri to reach content the user's words wouldn't match |
+| Deeper search | Runs several `enzyme catalyze` searches with varied wording; borrows catalyst phrases from petri when a turn allows only a search or two |
 | Writing notes | Near the end, writes durable markdown only when the session produced a decision, reframe, open thread, project state, or useful people/company context |
-| End refresh | Runs `enzyme refresh --quiet` after useful notes are written so catalysts can retrieve them later |
+| End refresh | Runs `enzyme refresh --quiet` after useful notes are written so later searches can find them |
 
 Default setup does not install Petri or refresh hooks. The skill decides when a markdown note deserves to exist, runs `enzyme petri` before context-dependent turns, and uses targeted `enzyme catalyze` searches when it needs to go deeper. OpenClaw hook behavior remains an explicit optional configuration, such as `autoRefresh`, not something Enzyme installs by default.
 
@@ -290,7 +290,7 @@ If you are wiring this manually, add this to your agent's system prompt:
 ```
 On session start, run `enzyme refresh --quiet`.
 On the user's first message, run `enzyme petri --query "their message"` for vault context.
-Use catalyst phrases from petri to compose `enzyme catalyze` queries.
+Search with `enzyme catalyze` in the user's own words, several times with different wording for questions about their own thinking.
 Near the end, write durable markdown only if the session produced a decision, reframe, open thread, or project/person context worth retrieving later.
 After writing notes, run `enzyme refresh --quiet`.
 ```
@@ -299,7 +299,7 @@ After writing notes, run `enzyme refresh --quiet`.
 
 ## How compile-time semantic search works
 
-Enzyme is a compile step. The expensive work happens once at init — entity extraction, catalyst generation, similarity pre-computation — and everything after that is fast lookups.
+Enzyme is a compile step. The expensive work happens once at init — entity extraction, catalyst generation, embedding — and everything after that is fast local lookups with no model call.
 
 **1. Structure reading** (~2s). Walks the corpus and extracts entities — tags, links, folders — with temporal metadata. When each entity appeared, when it was last active, whether it's accelerating or going dormant.
 
@@ -307,7 +307,9 @@ Enzyme is a compile step. The expensive work happens once at init — entity ext
 
 **3. Catalyst generation** (~10s). For each entity, the engine samples context across temporal eras and generates catalysts — thematic questions that probe what the content is actually about. A catalyst for an entity spanning 18 months doesn't ask "what happened?" It asks something like: *"The team revisited caching three times — once as a performance fix, once as a cost concern, once as a reliability question. What changed between each return?"*
 
-**4. Similarity pre-computation** (~3s). Every catalyst compared against every chunk. Top matches stored. This is what makes queries fast — at query time, there's no vector search. The similarities are already computed.
+**4. Similarity pre-computation** (~3s). Every catalyst compared against every chunk. Top matches stored, so each search result can say which catalyst connects it to the query.
+
+At query time, `enzyme catalyze` ranks notes by keyword (BM25) and meaning (the local embeddings) together. Catalysts don't rank results; they map the vault in petri and annotate results.
 
 Catalysts regenerate as the workspace grows. The same entity produces different catalysts six months from now. The questions stay alive where summaries go stale. When the agent writes a note back into the workspace, it enters the same index — the loop compounds.
 
@@ -315,7 +317,7 @@ Catalysts regenerate as the workspace grows. The same entity produces different 
 |---------|---------|
 | `enzyme petri` | Vault overview: trending entities with catalysts and activity trends |
 | `enzyme petri --query "..."` | Same, ranked by relevance to a query |
-| `enzyme catalyze "query"` | Semantic search — returns excerpts, file paths, contributing catalysts |
+| `enzyme catalyze "query"` | Keyword + semantic search — returns excerpts, file paths, and the connecting catalyst per result |
 | `enzyme init` | First-time setup (~10-30s depending on vault size) |
 | `enzyme refresh` | Incremental re-index (fast, skips if unchanged) |
 

@@ -14,7 +14,7 @@ metadata: { "openclaw": { "always": true, "os": ["darwin", "linux"], "primaryEnv
 
 # Enzyme
 
-Use Enzyme for local semantic retrieval over an initialized markdown workspace. Run all `enzyme` commands from the vault/workspace root. For Hermes, this is the directory where Hermes is launched.
+Use Enzyme for local retrieval over an initialized markdown workspace. Run all `enzyme` commands from the vault/workspace root. For Hermes, this is the directory where Hermes is launched.
 
 Vault path: `-p` flag > `ENZYME_VAULT_ROOT` env var > current directory.
 
@@ -43,9 +43,9 @@ The dedicated setup skill owns the full provider disclosure and consent flow. An
 
 Enzyme does not replace the user's memory system. It indexes the markdown structure the user already has: folders, tags, wikilinks, dates, inboxes, daily notes, people pages, and frontmatter. Preserve that structure and use it as retrieval signal. Be exact about frontmatter: literal wikilinks work in every field, while plain string/list values become generic link entities only when the active vault/workspace config names that field in `frontmatter_link_fields`; the field name does not create a typed person/project model.
 
-User-facing mental model: Enzyme does the slow interpretive pass once, then leaves behind fast search handles. During init, it reads the shape of the vault and creates a small set of source-grounded questions for the ideas that keep showing up. Those questions are not summaries; they are questions the user's notes are good at answering. Later, when an agent needs context, it can use those precomputed questions to find relevant notes immediately instead of rereading the vault or guessing keywords. Refresh folds new markdown into that compiled map so future sessions can use it.
+User-facing mental model: Enzyme compiles a workspace for agents. Init does the slow interpretive pass once. It indexes every note so search matches both the user's wording and their meaning, and it reads how the ideas that keep returning have moved over time, writing source-grounded questions about what the user decided, changed, or left open. At runtime an agent gets both halves: a map of what matters and how it has been moving, and search that finds the passages behind it whether the user names something exactly or only describes it. The agent orients on the map, searches from several angles, and answers from the user's own passages, so answers trace back to what the user actually wrote. Refresh folds new writing into both, so the map keeps up as the thinking moves.
 
-Do not expose embedding implementation details unless asked. Prefer simple language such as: "Enzyme turns your notes into questions an agent can search with," "the slow interpretive pass happens during init," and "runtime retrieval uses precomputed handles, so it is fast."
+Do not expose embedding implementation details unless asked. Prefer simple language such as: "Enzyme reads your notes once and maps what you decided, changed, and left open," "an agent orients on that map, then searches your notes by wording and meaning for the passages behind it," and "answers come back to what you actually wrote."
 
 Do not build a separate context tree. Learn from the user's folders, but prefer lightweight markdown signals: tags for recurring ideas and wikilinks for people, projects, companies, decisions, and concepts. Create new folders or people pages only when the vault already uses that convention or the user asks for it.
 
@@ -64,7 +64,7 @@ bundled `references/knowledge-practice-review.md` before issuing setup commands.
 
 ## Session Lifecycle
 
-Explain setup/refresh simply when useful: init is the slow compile step that turns the vault into source-grounded questions; refresh is how new notes join that compiled map; normal retrieval is fast because the agent uses those precomputed handles instead of starting from scratch.
+Explain setup/refresh simply when useful: init is the slow compile step that indexes the vault and writes its source-grounded questions; refresh is how new notes join the index and the map; normal retrieval is fast because search runs locally on the index without rereading the vault.
 
 `enzyme refresh --quiet` JSON includes an `update` object with a two-state contract. Check `update.status`: `ok` means nothing to do (a `note` may explain a slower call such as vault regeneration); `action_required` means perform or relay the `action` string to the user — never interpret any other keys. Use `enzyme status` when you need full binary-update diagnostics.
 
@@ -108,13 +108,13 @@ Prefer words from the user's own notes. Avoid performative meta-language such as
 
 Choose the first demo connection by vault type:
 
-- Annotated reference/import vault (for example Readwise, web clips, papers, book notes, transcript highlights): start from one user annotation, marginal note, or explicit reaction when present, quote it as source text, then place it beside the saved passage and one adjacent source until a question appears. If the user names a title or distinctive phrase, use exact search to find that obvious note before using petri/catalyze for adjacent connections.
+- Annotated reference/import vault (for example Readwise, web clips, papers, book notes, transcript highlights): start from one user annotation, marginal note, or explicit reaction when present, quote it as source text, then place it beside the saved passage and one adjacent source until a question appears. If the user names a title or distinctive phrase, search for it first to find that obvious note, then search for adjacent connections.
 - Project/work vault: place a decision, blocker, meeting note, or artifact beside a later note that changes its meaning or next step.
 - Journal/daily vault: place two entries from different dates beside each other to show how the wording, stakes, or desired action changed.
 - People/CRM vault: place context notes beside a recent interaction or commitment to reveal one concrete next step.
 - Research vault: place sources that sharpen an assumption, disagreement, missing evidence, or possible synthesis.
 
-The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, run another retrieval with sharper catalyst vocabulary and do not call setup complete yet.
+The demo succeeds only if it gives the user one specific, sourced connection they can recognize as theirs and one obvious next question to pursue. If the result feels generic, search again with the user's own wording or a sharper phrase from petri, and do not call setup complete yet.
 
 ## Existing Structure
 
@@ -142,20 +142,20 @@ defaults. Report malformed configuration rather than silently ignoring it.
 
 ## Working Memory
 
-`enzyme petri` returns current entities and catalysts, which are thematic phrases from the vault.
+`enzyme petri` is the map. It returns the entities that matter most and their catalysts: questions about what the user decided, changed, or left open there, in the user's terms.
 
 - For a specific user prompt, run `enzyme petri --query "user's question"`.
 - For a broad prompt or first orientation, run `enzyme petri`.
 - Treat nested children under a tag or folder as evidence inside that parent cluster by default.
 
-Use catalyst phrases as vocabulary for `enzyme catalyze` searches. They connect to precomputed content that the user's raw words may not find.
+Use petri to orient: which parts of the vault bear on the request, and what the user calls them. When a turn allows only a search or two, carry one or two catalyst phrases into the query; they reach notes the user's raw words may not. With more searches, the user's own wording works as well. Catalysts are generated, not written by the user: never quote one as the user's words or treat it as evidence. Answer from the passages you retrieve.
 
 ## Search
 
-- `enzyme catalyze "query"` searches by concept/theme. Compose queries from petri catalyst vocabulary.
+- `enzyme catalyze "query"` ranks notes by keywords and meaning together, so names, titles, plain words, and concepts all work. Start from the user's own wording. Each result carries the catalyst that best connects it to the query, as a hint at why it may matter to the user.
+- For questions about the user's own thinking, plan on at least four searches with different wording, then read the most promising notes. One search usually finds one corner of the arc.
+- `catalyze` returns the best matches, not every match. Use exact search when you need every occurrence of literal text: `#tags`, `[[wikilinks]]`, an exact phrase, or a complete timeline.
 - `enzyme refresh --quiet` re-indexes changed content.
-- Use exact search for names, source titles, distinctive phrases, `#tags`, `[[wikilinks]]`, and literal text.
-- For annotated reference/import vaults, if the user names a title or phrase, find that obvious note first with exact search, then use petri/catalyze to connect it to adjacent material.
 - `enzyme catalyze "query" --target ./target-dir` prepares external content using vault catalysts, then searches it.
 - Tags can appear as `- tag` in frontmatter or `#tag` inline; search without `#` when you need both.
 
@@ -224,7 +224,7 @@ After writing memory notes at the end of the session, run:
 enzyme refresh --quiet
 ```
 
-Refresh is the Enzyme equivalent of making the new memory available to retrieval. It re-indexes changed markdown and updates catalyst retrieval; no background dreaming or consolidation pass is required.
+Refresh is the Enzyme equivalent of making the new memory available to retrieval. It re-indexes changed markdown for search and updates the catalyst map; no background dreaming or consolidation pass is required.
 
 ## Presentation
 
@@ -232,7 +232,11 @@ Use Enzyme command names internally; do not expose petri, catalyze, catalyst IDs
 
 Before making observations, ground them with `enzyme catalyze` excerpts. Lead with the user's words and file attribution, then add a small observation.
 
-For broad exploration, use petri plus 1-2 catalyze searches, then open one specific connection among the user's notes. Do not present a topic list. If exact search finds an obvious named note but catalyze misses it, say so plainly and use Enzyme for adjacent connections rather than pretending semantic retrieval found the note unaided.
+For broad exploration, start from petri, run a few catalyze searches, then open one specific connection among the user's notes. Do not present a topic list.
+
+For questions about the user's own thinking (how two parts of their life connect, how a view changed, what they believe about something), map the arc before anchoring: how the thinking moved over time, its main threads, and the shape of the argument. Search to cover that breadth, read the most promising notes rather than answering from snippets, then use specific passages as evidence. Interpret rather than list threads, and do not let one heavily written project carry the answer unless the question names it.
+
+Keep sources straight. Separate what the user wrote from what they saved or quoted (highlights, clippings, other people's posts and messages), and never present someone else's idea as the user's. Skip demo, sample, or spec material in the vault unless the user asks about it.
 
 For search results, do not lead with metadata. Notice repeated words, time gaps, changed wording, adjacent ideas, practical consequences, or source disagreements across results. End with one concrete next direction, not a generic invitation.
 
