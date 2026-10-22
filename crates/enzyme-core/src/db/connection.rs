@@ -18,6 +18,7 @@ use super::migrations;
 pub struct Database {
     _db: LibsqlDb,
     pub(crate) conn: Connection,
+    pub(crate) local_path: Option<std::path::PathBuf>,
 }
 
 static SQLITE_RUNTIME_INIT: OnceLock<Result<(), String>> = OnceLock::new();
@@ -60,6 +61,12 @@ pub(crate) fn block_in_place_sync<F: Future>(f: F) -> F::Output {
 }
 
 impl Database {
+    /// Prepare the persistent lexical index before init/refresh changes notes.
+    /// Read-only query opens never run this maintenance step.
+    pub fn ensure_chunk_fts(&self) -> Result<(), DbError> {
+        block_in_place_sync(migrations::ensure_chunk_fts(&self.conn))
+    }
+
     /// Open (or create) a database at `path`, apply all pending migrations, and
     /// return a ready-to-use `Database`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
@@ -88,7 +95,11 @@ impl Database {
             let conn = db.connect().map_err(DbError::Libsql)?;
             apply_pragmas(&conn, true, busy_timeout_ms).await?;
             migrations::run_all_on_conn(&conn).await?;
-            Ok(Self { _db: db, conn })
+            Ok(Self {
+                _db: db,
+                conn,
+                local_path: Some(path),
+            })
         })
     }
 
@@ -132,7 +143,11 @@ impl Database {
                 let mut rows = conn.query(&sql, ()).await.map_err(DbError::Libsql)?;
                 while rows.next().await.map_err(DbError::Libsql)?.is_some() {}
             }
-            Ok(Self { _db: db, conn })
+            Ok(Self {
+                _db: db,
+                conn,
+                local_path: Some(path),
+            })
         })
     }
 
@@ -190,7 +205,11 @@ impl Database {
             let conn = db.connect().map_err(DbError::Libsql)?;
             apply_pragmas(&conn, false, 30_000).await?;
             migrations::run_all_on_conn(&conn).await?;
-            Ok(Self { _db: db, conn })
+            Ok(Self {
+                _db: db,
+                conn,
+                local_path: None,
+            })
         })
     }
 
@@ -208,7 +227,11 @@ impl Database {
                 .map_err(DbError::Libsql)?;
             let conn = db.connect().map_err(DbError::Libsql)?;
             // No pragmas or migrations for remote — the uploaded DB is already set up
-            Ok(Self { _db: db, conn })
+            Ok(Self {
+                _db: db,
+                conn,
+                local_path: None,
+            })
         })
     }
 

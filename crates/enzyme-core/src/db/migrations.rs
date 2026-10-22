@@ -67,6 +67,7 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         .await
         .map_err(DbError::Libsql)?;
     ensure_chunk_entry_date_column(conn).await?;
+    ensure_chunk_path_column(conn).await?;
     ensure_occurrence_weight_column(conn).await?;
     backfill_chunk_entry_dates(conn).await?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
@@ -89,12 +90,91 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Build the external-content lexical index when init/refresh starts indexing.
+/// Search opens are read-only and use the legacy BM25 path until the next
+/// indexing run prepares an older vault.
+pub(crate) async fn ensure_chunk_fts(conn: &Connection) -> Result<(), DbError> {
+    let has_path = {
+        let mut rows = conn
+            .query("PRAGMA table_info(chunks)", ())
+            .await
+            .map_err(DbError::Libsql)?;
+        let mut found = false;
+        while let Some(row) = rows.next().await.map_err(DbError::Libsql)? {
+            if row.get::<String>(1).map_err(DbError::Libsql)? == "path" {
+                found = true;
+            }
+        }
+        found
+    };
+    if !has_path {
+        conn.execute("ALTER TABLE chunks ADD COLUMN path TEXT", ())
+            .await
+            .map_err(DbError::Libsql)?;
+    }
+    conn.execute(
+        "UPDATE chunks SET path = (SELECT source_ref FROM docs WHERE docs.id = chunks.doc_id) WHERE path IS NULL",
+        (),
+    ).await.map_err(DbError::Libsql)?;
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+            (),
+        )
+        .await
+        .map_err(DbError::Libsql)?;
+    let new_index = rows.next().await.map_err(DbError::Libsql)?.is_none();
+    drop(rows);
+    conn.execute_batch(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            path, content, content='chunks', content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunks_fts(rowid, path, content) VALUES (new.id, new.path, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, path, content)
+            VALUES ('delete', old.id, old.path, old.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE OF path, content ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, path, content)
+            VALUES ('delete', old.id, old.path, old.content);
+            INSERT INTO chunks_fts(rowid, path, content) VALUES (new.id, new.path, new.content);
+        END;
+    "#,
+    )
+    .await
+    .map_err(DbError::Libsql)?;
+    if new_index {
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')", ())
+            .await
+            .map_err(DbError::Libsql)?;
+    }
+    Ok(())
+}
+
 async fn ensure_occurrence_weight_column(conn: &Connection) -> Result<(), DbError> {
     match conn
         .execute(
             "ALTER TABLE entity_occurrences ADD COLUMN weight REAL NOT NULL DEFAULT 1.0",
             (),
         )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(DbError::Libsql(e)),
+    }
+}
+
+/// Add `chunks.path` (the lexical index's path column) to databases created
+/// before it existed, so an older vault matches this binary's schema
+/// fingerprint on open instead of reading as drift and forcing a full regen.
+/// Values are backfilled when init/refresh prepares the lexical index.
+async fn ensure_chunk_path_column(conn: &Connection) -> Result<(), DbError> {
+    match conn
+        .execute("ALTER TABLE chunks ADD COLUMN path TEXT", ())
         .await
     {
         Ok(_) => Ok(()),

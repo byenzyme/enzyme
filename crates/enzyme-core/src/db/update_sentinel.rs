@@ -80,7 +80,9 @@ pub fn peek(db: &Database, binary_version: &str) -> Result<UpdateStatus> {
 /// set (name, type, notnull, default, pk), order-insensitive so a column
 /// added via `ALTER TABLE` hashes identically to one declared in `CREATE
 /// TABLE`. Indexes are excluded — `CREATE INDEX IF NOT EXISTS` self-heals on
-/// every open, so a missing index never warrants a regen.
+/// every open, so a missing index never warrants a regen. The chunk FTS5
+/// table and its shadow tables are excluded for the same reason: they are a
+/// derived index that init/refresh creates and maintains, not schema.
 pub fn live_schema_fingerprint(db: &Database) -> Result<String> {
     block_in_place_sync(fingerprint_conn(&db.conn))
 }
@@ -103,7 +105,11 @@ async fn fingerprint_conn(conn: &Connection) -> Result<String> {
         )
         .await?;
     while let Some(row) = rows.next().await? {
-        tables.push(row.get::<String>(0)?);
+        let name = row.get::<String>(0)?;
+        if name == "chunks_fts" || name.starts_with("chunks_fts_") {
+            continue;
+        }
+        tables.push(name);
     }
     drop(rows);
 
@@ -150,6 +156,14 @@ mod tests {
         let live = live_schema_fingerprint(&db).expect("live fp");
         let expected = expected_schema_fingerprint().expect("expected fp");
         assert_eq!(live, expected);
+    }
+
+    #[test]
+    fn chunk_lexical_index_is_not_schema_drift() {
+        let db = Database::open_in_memory().expect("open");
+        db.ensure_chunk_fts().expect("fts");
+        let live = live_schema_fingerprint(&db).expect("live fp");
+        assert_eq!(live, expected_schema_fingerprint().expect("expected fp"));
     }
 
     #[test]

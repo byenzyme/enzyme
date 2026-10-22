@@ -246,6 +246,7 @@ impl<'a> IndexingPipeline<'a> {
     /// messages at each major stage.
     pub fn run(&self, full: bool, on_progress: impl Fn(&str)) -> Result<IndexingStats> {
         let start = Instant::now();
+        self.db.ensure_chunk_fts()?;
 
         // Step 1: Discover files. The user's `exclude` list feeds the index gate
         // here, so excluded folders are never read. Built-in structural folders

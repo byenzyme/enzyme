@@ -39,7 +39,7 @@ pub async fn run_catalyze(
         ));
     }
 
-    let db = Database::open(&paths.vault_db)?;
+    let db = Database::open_read_only(&paths.vault_db)?;
 
     let service = get_embedding_service(&paths.home)?;
 

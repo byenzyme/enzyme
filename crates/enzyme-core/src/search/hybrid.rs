@@ -7,6 +7,7 @@
 //! the ranking made it worse, so catalysts only attach to results here.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -56,9 +57,13 @@ impl<'a> HybridSearch<'a> {
         if limit == 0 {
             return Ok(empty);
         }
+        let start = Instant::now();
         let query_vec = self.service.embed_query(query)?;
+        let embedding_ms = start.elapsed().as_secs_f64() * 1000.0;
         let dense = top_notes(dense_hits(self.db, &query_vec)?, CANDIDATES_PER_SIDE);
+        let dense_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms;
         let lexical = top_notes(lexical_hits(self.db, query)?, CANDIDATES_PER_SIDE);
+        let lexical_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms - dense_ms;
         let fused = fuse(&dense, &lexical, limit);
         if fused.is_empty() {
             return Ok(empty);
@@ -78,7 +83,16 @@ impl<'a> HybridSearch<'a> {
                 via_catalyst_text: None,
             });
         }
+        let annotation_start = Instant::now();
         let top_contributing_catalysts = self.annotate(&query_vec, &mut results)?;
+        if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
+            let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let annotation_ms = annotation_start.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "HYBRID_PROFILE embedding_ms={embedding_ms:.3} dense_ms={dense_ms:.3} lexical_ms={lexical_ms:.3} fetch_and_fuse_ms={:.3} annotation_ms={annotation_ms:.3} total_ms={total_ms:.3}",
+                total_ms - embedding_ms - dense_ms - lexical_ms - annotation_ms
+            );
+        }
         Ok(CatalyzeResponse {
             results,
             top_contributing_catalysts,
@@ -179,26 +193,42 @@ fn question_text(text: &str) -> String {
 
 /// Best dense-similarity chunk per note.
 fn dense_hits(db: &Database, query_vec: &[f32]) -> Result<HashMap<String, NoteHit>> {
-    let mut hits: HashMap<String, NoteHit> = HashMap::new();
-    for (path, chunk_index, vec) in db.get_all_chunk_embeddings()? {
-        let sim = Embedding::cosine_similarity(query_vec, &vec) as f64;
-        let slot = hits.entry(path).or_insert((chunk_index as i64, f64::MIN));
-        if sim > slot.1 {
-            *slot = (chunk_index as i64, sim);
-        }
+    let start = Instant::now();
+    let hits = db.best_chunk_embedding_hits(query_vec)?;
+    if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
+        eprintln!(
+            "HYBRID_DENSE stream_and_scan_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
     }
     Ok(hits)
 }
 
-/// Best BM25 chunk per note. Each chunk is indexed with its note path twice,
-/// so path and title words weigh about double body words.
+/// Best lexical chunk per note. New vaults use persistent FTS5; older vaults
+/// opened read-only fall back to the original in-memory BM25 path.
 fn lexical_hits(db: &Database, query: &str) -> Result<HashMap<String, NoteHit>> {
+    if db.has_chunk_fts()? {
+        let mut hits: HashMap<String, NoteHit> = HashMap::new();
+        for (path, chunk_index, score) in
+            db.search_chunks_fts(&fts_query(query), BM25_CHUNK_DEPTH, CANDIDATES_PER_SIDE)?
+        {
+            let slot = hits.entry(path).or_insert((chunk_index, f64::MIN));
+            if score > slot.1 {
+                *slot = (chunk_index, score);
+            }
+        }
+        return Ok(hits);
+    }
+    let start = Instant::now();
     let mut index = Bm25Index::new();
-    for (path, chunk_index, content) in db.get_all_chunks_with_embeddings()? {
+    let chunks = db.get_all_chunks_with_embeddings()?;
+    let load_ms = start.elapsed().as_secs_f64() * 1000.0;
+    for (path, chunk_index, content) in chunks {
         let text = format!("{path} {path} {content}");
         index.add_document(format!("{chunk_index}\t{path}"), &text);
     }
     index.build();
+    let build_ms = start.elapsed().as_secs_f64() * 1000.0 - load_ms;
     let mut hits: HashMap<String, NoteHit> = HashMap::new();
     for result in index.search(&lexical_query(query), BM25_CHUNK_DEPTH) {
         let Some((chunk, path)) = result.doc_id.split_once('\t') else {
@@ -213,7 +243,63 @@ fn lexical_hits(db: &Database, query: &str) -> Result<HashMap<String, NoteHit>> 
             *slot = (chunk_index, score);
         }
     }
+    if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
+        eprintln!(
+            "HYBRID_LEXICAL load_ms={load_ms:.3} build_ms={build_ms:.3} search_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0 - load_ms - build_ms
+        );
+    }
     Ok(hits)
+}
+
+/// Translate arbitrary user text to quoted FTS5 atoms joined by OR. Quoting
+/// every atom prevents operators, field selectors, and punctuation in the
+/// user's query from becoming FTS syntax. ID-like spans stay adjacent phrases.
+fn fts_query(query: &str) -> String {
+    let lower = query.to_lowercase();
+    let mut atoms = Vec::new();
+    let mut span = String::new();
+    let mut push_span = |span: &mut String| {
+        if span.is_empty() {
+            return;
+        }
+        let parts: Vec<&str> = span
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let id_like = parts.len() > 1
+            && parts.iter().any(|p| p.chars().any(|c| c.is_numeric()))
+            && span.chars().any(|c| c == '-' || c == '_');
+        if id_like {
+            let phrase = parts.join(" ");
+            if !atoms.contains(&phrase) {
+                atoms.push(phrase);
+            }
+        } else {
+            for part in parts {
+                if part.len() > 1
+                    && !QUERY_STOPWORDS.contains(&part)
+                    && !atoms.iter().any(|a| a == part)
+                {
+                    atoms.push(part.to_string());
+                }
+            }
+        }
+        span.clear();
+    };
+    for c in lower.chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            span.push(c);
+        } else {
+            push_span(&mut span);
+        }
+    }
+    push_span(&mut span);
+    atoms
+        .into_iter()
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// Distinct topic words of the query, in order.
@@ -299,6 +385,19 @@ mod tests {
             .iter()
             .map(|(p, c, s)| (p.to_string(), (*c, *s)))
             .collect()
+    }
+
+    #[test]
+    fn fts_query_escapes_syntax_and_keeps_ids_as_phrases() {
+        assert_eq!(
+            fts_query("What happened to ENG-4902?"),
+            "\"happened\" OR \"eng 4902\""
+        );
+        assert_eq!(
+            fts_query("title:foo OR bar* \"baz\" (qux)"),
+            "\"title\" OR \"foo\" OR \"bar\" OR \"baz\" OR \"qux\""
+        );
+        assert_eq!(fts_query("' OR NOT * : ( )"), "");
     }
 
     #[test]

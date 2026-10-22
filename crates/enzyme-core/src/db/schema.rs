@@ -42,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_links_link ON doc_links(link);
 CREATE TABLE IF NOT EXISTS chunks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     doc_id      INTEGER NOT NULL REFERENCES docs(id) ON DELETE CASCADE,
+    path        TEXT,
     chunk_index INTEGER NOT NULL,
     content     TEXT    NOT NULL,
     word_count  INTEGER NOT NULL DEFAULT 0,

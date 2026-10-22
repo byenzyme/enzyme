@@ -269,10 +269,11 @@ impl Database {
                         .map(Value::Integer)
                         .unwrap_or(Value::Null);
                     tx.execute(
-                        "INSERT INTO chunks (doc_id, chunk_index, content, word_count, created_at, entry_date)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO chunks (doc_id, path, chunk_index, content, word_count, created_at, entry_date)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         vec![
                             Value::Integer(doc_id),
+                            Value::Text(doc.source_ref.clone()),
                             Value::Integer(i as i64),
                             Value::Text(chunk_content.clone()),
                             Value::Integer(word_count),
@@ -2316,6 +2317,61 @@ impl Database {
         Ok(rows)
     }
 
+    /// FTS5 is installed by init/refresh indexing. Older read-only
+    /// vaults retain the in-memory search path until their next refresh.
+    pub fn has_chunk_fts(&self) -> Result<bool> {
+        Ok(!self
+            .query_read(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+                vec![],
+                |row| row.get::<i64>(0),
+            )?
+            .is_empty())
+    }
+
+    /// Rank matching chunks with twice the weight on vault path words.
+    pub fn search_chunks_fts(
+        &self,
+        query: &str,
+        chunk_depth: usize,
+        note_limit: usize,
+    ) -> Result<Vec<(String, i64, f64)>> {
+        if query.is_empty() || chunk_depth == 0 || note_limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self.query_read(
+            "WITH hits AS MATERIALIZED (
+                SELECT chunks_fts.rowid AS id, chunks_fts.rank AS score,
+                       d.id AS doc_id, d.source_ref AS path, c.chunk_index
+                FROM chunks_fts
+                JOIN chunks c ON c.id = chunks_fts.rowid
+                JOIN docs d ON d.id = c.doc_id
+                WHERE chunks_fts MATCH ?1
+                  AND rank MATCH 'bm25(2.0, 1.0)'
+                  AND d.embedded_at IS NOT NULL
+                ORDER BY rank LIMIT ?2
+             ), ranked AS (
+                SELECT path, chunk_index, score,
+                       ROW_NUMBER() OVER (PARTITION BY doc_id ORDER BY score, id) AS note_row
+                FROM hits
+             )
+             SELECT path, chunk_index, -score FROM ranked WHERE note_row = 1
+             ORDER BY score, path LIMIT ?3",
+            vec![
+                Value::Text(query.to_string()),
+                Value::Integer(chunk_depth as i64),
+                Value::Integer(note_limit as i64),
+            ],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<i64>(1)?,
+                    row.get::<f64>(2)?,
+                ))
+            },
+        )?)
+    }
+
     /// Get all chunks with full metadata for the explore UI.
     pub fn get_all_chunks_enriched(
         &self,
@@ -2676,6 +2732,55 @@ impl Database {
             },
         )?;
         Ok(rows)
+    }
+
+    /// Scan stored vectors directly, retaining only the best chunk per note.
+    /// This avoids materializing every decoded vector on each hybrid query.
+    pub fn best_chunk_embedding_hits(&self, query: &[f32]) -> Result<HashMap<String, (i64, f64)>> {
+        if let Some(path) = &self.local_path {
+            let conn = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let mut stmt =
+                conn.prepare("SELECT file_path, chunk_index, vector FROM chunk_embeddings")?;
+            let mut rows = stmt.query([])?;
+            let mut hits: HashMap<String, (i64, f64)> = HashMap::new();
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                let chunk_index: i64 = row.get(1)?;
+                let blob: &[u8] = row.get_ref(2)?.as_blob()?;
+                let vec = quantize::decode_vector(blob, EMBEDDING_DIMENSION);
+                let sim = Embedding::cosine_similarity(query, &vec) as f64;
+                let slot = hits.entry(path).or_insert((chunk_index, f64::MIN));
+                if sim > slot.1 {
+                    *slot = (chunk_index, sim);
+                }
+            }
+            return Ok(hits);
+        }
+        block_in_place_sync(async {
+            let mut rows = self
+                .conn
+                .query(
+                    "SELECT file_path, chunk_index, vector FROM chunk_embeddings",
+                    (),
+                )
+                .await?;
+            let mut hits: HashMap<String, (i64, f64)> = HashMap::new();
+            while let Some(row) = rows.next().await? {
+                let path: String = row.get(0)?;
+                let chunk_index: i64 = row.get(1)?;
+                let blob: Vec<u8> = row.get(2)?;
+                let vec = quantize::decode_vector(&blob, EMBEDDING_DIMENSION);
+                let sim = Embedding::cosine_similarity(query, &vec) as f64;
+                let slot = hits.entry(path).or_insert((chunk_index, f64::MIN));
+                if sim > slot.1 {
+                    *slot = (chunk_index, sim);
+                }
+            }
+            Ok(hits)
+        })
     }
 
     /// Delete chunk embeddings for a specific file (used before re-embedding).
