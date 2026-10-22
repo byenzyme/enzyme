@@ -54,3 +54,7 @@ docs/agent-plugin-test-plan.md
 # Plugin — CI-injected binaries and model files
 .release-check-artifacts/
 .claude/worktrees/
+
+# Maintainer-only agent skills and commands stay local
+.agents/skills/release/
+.claude/commands/
