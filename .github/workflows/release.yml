@@ -9,7 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_REPO: byenzyme/enzyme
+  RELEASE_REPO: ${{ github.repository }}
   HOMEBREW_TAP_REPO: byenzyme/homebrew-enzyme
 
 jobs:
@@ -34,19 +34,16 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Configure private git deps
-        run: git config --global url."https://x-access-token:${{ secrets.FLOWER_COMPUTERS_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Add target to active toolchain
         run: rustup target add ${{ matrix.target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
 
@@ -133,7 +130,7 @@ jobs:
           shasum -a 256 "$MCPB_FILE" > "$MCPB_FILE.sha256"
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: enzyme-${{ matrix.release_name }}
           path: |
@@ -141,7 +138,7 @@ jobs:
             target/${{ matrix.target }}/release/enzyme-${{ matrix.release_name }}.tar.gz.sha256
 
       - name: Upload MCPB artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: enzyme-mcpb-${{ matrix.release_name }}
           path: |
@@ -155,10 +152,10 @@ jobs:
       DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -273,7 +270,7 @@ jobs:
       - name: Publish release notes to Discord
         if: ${{ env.DISCORD_RELEASE_WEBHOOK_URL != '' }}
         continue-on-error: true
-        uses: SethCohen/github-releases-to-discord@v1.20.0
+        uses: SethCohen/github-releases-to-discord@24d166886aee4646d448c8a389ff9e1ebcab3682 # v1.20.0
         with:
           webhook_url: ${{ env.DISCORD_RELEASE_WEBHOOK_URL }}
           release_name: ${{ steps.release_metadata.outputs.name }}
@@ -294,103 +291,15 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
-  sync-plugin:
-    needs: publish
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Bundle binaries into plugin
-        run: |
-          mkdir -p plugin/plugins/enzyme/bin tmp-bin
-
-          # Extract Linux platform binaries into a temp dir to avoid overwriting
-          # the committed wrapper script (plugin/plugins/enzyme/bin/enzyme).
-          # The Claude desktop plugin runs inside a Linux VM, so only Linux
-          # binaries ship here. Host CLI users install via Homebrew / install.sh.
-          tar xzf artifacts/enzyme-linux-arm64/enzyme-linux-arm64.tar.gz -C tmp-bin
-          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64
-
-          tar xzf artifacts/enzyme-linux-x86_64/enzyme-linux-x86_64.tar.gz -C tmp-bin
-          mv tmp-bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-x86_64
-
-          # Ensure executability
-          chmod +x plugin/plugins/enzyme/bin/enzyme plugin/plugins/enzyme/bin/enzyme-linux-arm64 plugin/plugins/enzyme/bin/enzyme-linux-x86_64
-
-      - name: Download server.json from release
-        env:
-          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          gh release download "$tag" --repo "$RELEASE_REPO" \
-            --pattern 'server.json' \
-            --dir . \
-            || echo "Warning: server.json not found in release"
-
-      - name: Sync plugin files to public repo
-        env:
-          GH_TOKEN: ${{ secrets.ENZYME_PUBLIC_RELEASE_TOKEN }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${RELEASE_REPO}.git" public-repo
-          cd public-repo
-
-          rsync -av --delete \
-            --exclude '.git' \
-            --exclude 'server.json' \
-            --exclude 'agent' \
-            ../plugin/ ./
-
-          # Copy server.json to repo root for MCP Registry discovery
-          [ -f ../server.json ] && cp ../server.json ./server.json
-
-          version="${tag#v}"
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.claude-plugin/plugin.json
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" plugins/enzyme/.codex-plugin/plugin.json
-
-          if find plugins/enzyme -path '*hooks*' -print -quit | grep -q .; then
-            echo "Unexpected Claude/Codex hook files in public plugin sync" >&2
-            find plugins/enzyme -path '*hooks*' -print >&2
-            exit 1
-          fi
-          if grep -R '"hooks"' plugins/enzyme/.claude-plugin plugins/enzyme/.codex-plugin; then
-            echo "Unexpected hooks manifest entry in public plugin sync" >&2
-            exit 1
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No plugin changes to sync"
-          else
-            git commit -m "Sync plugin files from enzyme-rust ${tag}"
-            git push origin main
-          fi
-
-          # The public release is created before this sync so assets are available.
-          # Move the public tag to the synced plugin commit so plugin installs pinned
-          # with `codex plugin marketplace add byenzyme/enzyme --ref "$tag"` see the
-          # same files as public main.
-          git tag -f "$tag" HEAD
-          git push --force origin "refs/tags/${tag}"
-
   sync-skill:
     needs: publish
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -425,15 +334,15 @@ jobs:
           rm -rf tmp-bin
 
           # Sync agent plugin files (SKILL.md, Hermes adapter, install script)
-          cp ../plugin/agent/SKILL.md ./SKILL.md
-          cp ../plugin/agent/plugin.yaml ./plugin.yaml
-          cp ../plugin/agent/__init__.py ./__init__.py
-          cp ../plugin/agent/schemas.py ./schemas.py
-          cp ../plugin/agent/tools.py ./tools.py
-          cp ../plugin/agent/hooks.py ./hooks.py
-          cp ../plugin/agent/install.sh ./install.sh
-          cp ../plugin/agent/README.md ./README.md
-          cp ../plugin/agent/CLAUDE.md ./CLAUDE.md
+          cp ../agent/SKILL.md ./SKILL.md
+          cp ../agent/plugin.yaml ./plugin.yaml
+          cp ../agent/__init__.py ./__init__.py
+          cp ../agent/schemas.py ./schemas.py
+          cp ../agent/tools.py ./tools.py
+          cp ../agent/hooks.py ./hooks.py
+          cp ../agent/install.sh ./install.sh
+          cp ../agent/README.md ./README.md
+          cp ../agent/CLAUDE.md ./CLAUDE.md
 
           # Update .gitattributes for flattened layout
           printf 'bin/enzyme-* filter=lfs diff=lfs merge=lfs -text\n' > .gitattributes
@@ -458,13 +367,13 @@ jobs:
 
     steps:
       - name: Download macOS arm64 artifact for SHA256
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: enzyme-macos-arm64
           path: artifacts/macos-arm64
 
       - name: Download macOS x86_64 artifact for SHA256
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: enzyme-macos-x86_64
           path: artifacts/macos-x86_64

@@ -9,7 +9,7 @@ on:
         default: v0.5.11
 
 env:
-  RELEASE_REPO: useenzyme/enzyme
+  RELEASE_REPO: ${{ github.repository }}
   DISCORD_RELEASE_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
 
 jobs:
@@ -48,7 +48,7 @@ jobs:
 
       - name: Publish release notes to Discord
         if: ${{ env.DISCORD_RELEASE_WEBHOOK_URL != '' }}
-        uses: SethCohen/github-releases-to-discord@v1.20.0
+        uses: SethCohen/github-releases-to-discord@24d166886aee4646d448c8a389ff9e1ebcab3682 # v1.20.0
         with:
           webhook_url: ${{ env.DISCORD_RELEASE_WEBHOOK_URL }}
           release_name: ${{ steps.release_metadata.outputs.name }}
