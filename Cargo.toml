@@ -1,6 +1,5 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["scaffolding/ese-api-py"]
 resolver = "2"
 
 [workspace.package]

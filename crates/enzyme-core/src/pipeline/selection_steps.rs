@@ -164,7 +164,7 @@ fn scored(entities: &[Entity], stats: &HashMap<i64, EntitySelectionStats>) -> Ve
 /// catalyst-candidate selection -> detect expandable folders -> expand child links -> assign profiles.
 ///
 /// `folder_exclusions` is the unified structural-exclusion set threaded from the
-/// config boundary (see `docs/design/entity-exclusions-refactor.md`); it is what
+/// config boundary; it is what
 /// makes the user's `config.excluded_folders` bite on the catalyst-candidate path.
 /// `left_out` holds `leave out tags|links` as (lowercase name, type); those are
 /// never picked or expanded into.

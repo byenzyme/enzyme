@@ -1,6 +1,6 @@
 name: Release checks
 
-# Deterministic release integration checks (see docs/release-checks.md).
+# Deterministic release integration checks.
 # Linux-only by design: macOS and the agentic journeys run locally via
 # `make release-check` / `make release-check-agentic` to avoid the 10x
 # macOS-minute multiplier and agent token spend.

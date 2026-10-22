@@ -1,8 +1,6 @@
 //! Hardware-adaptive defaults for local (on-device) catalyst generation.
 //!
-//! Constants come from the 2026-08 local-inference benchmark
-//! (`docs/2026-08-08-local-llm-bundling-recommendation.md`, bench results in
-//! `benchmarks/`): on a 4-weak-core box the throughput knee is at concurrency 1
+//! Constants come from the 2026-08 local-inference benchmark: on a 4-weak-core box the throughput knee is at concurrency 1
 //! because generation is prefill-bound at roughly 25:1 prefill:decode, so extra
 //! request slots only steal threads from the prefill that dominates wall time.
 //! Apple Silicon has enough memory bandwidth and core headroom (plus Metal) to

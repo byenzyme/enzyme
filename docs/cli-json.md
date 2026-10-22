@@ -226,8 +226,7 @@ vault or workspace the file declares, without model calls or writes.
 - `selection`: `readings`, `automatic` (no readings), or `readings and automatic`
   (`learn questions automatically`). `automatic` is present only with that statement.
 - Jobs under a reading came from that reading; `other_jobs`/`other_skipped` are
-  automatic selection's. The language reference (`tools/reading-spec/README.md`)
-  describes every field.
+  automatic selection's.
 
 ### Named workspaces and the explain view
 

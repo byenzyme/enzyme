@@ -248,8 +248,7 @@ impl<'a> IndexingPipeline<'a> {
         let start = Instant::now();
 
         // Step 1: Discover files. The user's `exclude` list feeds the index gate
-        // here, so excluded folders are never read (see
-        // `docs/design/attention-and-exclusions.md`). Built-in structural folders
+        // here, so excluded folders are never read. Built-in structural folders
         // (templates, excalidraw, …) are deliberately NOT excluded here — they
         // stay indexed and are only suppressed at the surface gate.
         on_progress("Discovering files...");

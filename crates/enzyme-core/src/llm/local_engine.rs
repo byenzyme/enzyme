@@ -2,7 +2,7 @@
 //!
 //! Feature-gated behind `local-llm` — without it nothing here is compiled and
 //! the C++ toolchain (cmake + libclang) is never touched. Ported from the
-//! 2026-08-08 spike (`docs/2026-08-08-local-llm-bundling-recommendation.md`),
+//! 2026-08-08 spike,
 //! including its landmine guards:
 //!
 //! 1. `LlamaSampler::sample()` **already accepts** the token into the chain.

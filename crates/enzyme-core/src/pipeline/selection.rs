@@ -92,7 +92,7 @@ impl<'a> SelectionPipeline<'a> {
         // enzyme's built-in structural defaults merged with the user's `exclude`
         // list (`config.excluded_folders`). This is the "never a catalyst topic"
         // hard tier; it bites on every selection path (coverage + curated), not
-        // just the curated one. See `docs/design/attention-and-exclusions.md`.
+        // just the curated one.
         //
         // This enforces the *surface* gate. The same `exclude` list separately
         // feeds the *index* gate in `document::discovery` (via IndexingPipeline),

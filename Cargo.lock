@@ -1245,25 +1245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enzyme-search"
-version = "0.12.4"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "enzyme-core",
- "libsql",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "enzyme-spec"
 version = "0.4.0"
 source = "git+https://github.com/byenzyme/enzyme-spec?tag=v0.4.0#244b5df398dfa099f081c796fac005048965aba7"

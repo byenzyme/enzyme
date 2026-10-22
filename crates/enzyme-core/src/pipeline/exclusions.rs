@@ -4,9 +4,7 @@
 //!
 //! "What does enzyme pay attention to" is one question — *is this a candidate for
 //! catalyst generation?* — enforced at two ordered gates along the pipeline
-//! (`discover → index → embed → [select] → catalyze`). See
-//! [`docs/design/attention-and-exclusions.md`](../../../docs/design/attention-and-exclusions.md)
-//! for the full product narrative and user mental model.
+//! (`discover → index → embed → [select] → catalyze`).
 //!
 //! 1. **Index gate** — [`crate::document::discovery::FileDiscovery`] glob
 //!    patterns. "Never read this." A folder dropped here produces no documents
@@ -29,7 +27,7 @@
 //! question: **"is this folder structural noise that should never be a catalyst
 //! topic, anywhere — not even if the user explicitly curated it?"** This is the
 //! *hard* tier of the surface gate. It replaced four drifted hand-maintained
-//! lists (see `docs/design/entity-exclusions-refactor.md` for that history).
+//! lists.
 //!
 //! It deliberately does NOT model the *soft* tier —
 //! `entity_map::GENERIC_FOLDERS` (daily/notes/…) and `EXCLUDED_TAGS`. Those are

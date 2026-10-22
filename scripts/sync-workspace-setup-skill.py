@@ -19,7 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_DIR = ROOT / "plugin" / "skills" / "enzyme-workspace-setup"
 CANONICAL_SKILL = CANONICAL_DIR / "SKILL.md"
 CANONICAL_REVIEW = CANONICAL_DIR / "references" / "knowledge-practice-review.md"
-ONBOARDING_ROLLOUT = ROOT / ".agents" / "skills" / "onboarding-rollout" / "SKILL.md"
 
 PLUGIN_BOOTSTRAP = (
     ROOT / "plugin" / "plugins" / "enzyme" / "skills" / "enzyme-bootstrap" / "SKILL.md"
@@ -157,20 +156,6 @@ BOOTSTRAP_BANNED_TOKENS = [
     "frontmatter_link_fields",
 ]
 
-ONBOARDING_ANCHORS = [
-    "plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md",
-    "This skill tests that",
-    "Apply and test the shared knowledge-practice review contract",
-    "Unfamiliar user",
-    "Not exercised is not pass.",
-]
-
-ONBOARDING_BANNED_TOKENS = [
-    "When you <something you already do>",
-    "bring one thread like this back every Monday",
-]
-
-
 def assert_mirror(errors: list[str], canonical: Path, mirror: Path) -> None:
     if not mirror.exists():
         errors.append(f"FAIL missing mirror: {mirror}")
@@ -185,7 +170,6 @@ def check() -> None:
     errors: list[str] = []
     skill_text = CANONICAL_SKILL.read_text()
     review_text = CANONICAL_REVIEW.read_text()
-    onboarding_text = ONBOARDING_ROLLOUT.read_text()
     if not PLUGIN_BOOTSTRAP.exists():
         errors.append(f"FAIL missing marketplace bootstrap: {PLUGIN_BOOTSTRAP}")
         bootstrap_text = ""
@@ -227,13 +211,6 @@ def check() -> None:
             errors.append(f"FAIL marketplace bootstrap carries setup detail: {token!r}")
     if len(bootstrap_text.splitlines()) > 80:
         errors.append("FAIL marketplace bootstrap exceeds 80 lines")
-
-    for anchor in ONBOARDING_ANCHORS:
-        if anchor not in onboarding_text:
-            errors.append(f"FAIL onboarding contract-anchor missing: {anchor!r}")
-    for token in ONBOARDING_BANNED_TOKENS:
-        if token in onboarding_text:
-            errors.append(f"FAIL onboarding duplicates shared closing copy: {token!r}")
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

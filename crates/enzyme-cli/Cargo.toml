@@ -45,8 +45,7 @@ rusqlite = { workspace = true }
 
 [features]
 rten = ["enzyme-core/rten"]
-# Bundle llama.cpp and run catalyst generation in-process (see
-# docs/2026-08-08-local-llm-bundling-recommendation.md). Release CI only.
+# Bundle llama.cpp and run catalyst generation in-process. Release CI only.
 local-llm = ["enzyme-core/local-llm"]
 
 [target.'cfg(unix)'.dependencies]

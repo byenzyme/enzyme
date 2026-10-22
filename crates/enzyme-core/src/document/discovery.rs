@@ -37,8 +37,7 @@ fn escape_glob_meta(name: &str) -> String {
 /// Discovers markdown files within a vault directory, respecting include/exclude
 /// patterns and `.gitignore` rules.
 ///
-/// This is the **index gate** in the attention model
-/// (`docs/design/attention-and-exclusions.md`): anything excluded here is never
+/// This is the **index gate** in the attention model: anything excluded here is never
 /// read, so it produces no documents and no entities — invisible to embedding,
 /// search, and catalyst selection alike. "Never index" strictly implies "never
 /// surface," so the downstream surface gate ([`crate::pipeline::exclusions`])
@@ -106,7 +105,7 @@ impl FileDiscovery {
     ///
     /// This is what makes `config.excluded_folders` mean **don't index** (gone),
     /// rather than merely "don't surface" — the behavior the attention model
-    /// (`docs/design/attention-and-exclusions.md`) commits to. Each name becomes a
+    /// commits to. Each name becomes a
     /// vault-root-anchored `{name}/**` glob, matching how the built-in defaults are
     /// written, and is appended to (never replaces) the defaults.
     ///

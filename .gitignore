@@ -26,8 +26,6 @@ dist/
 # Environment
 .env
 .local/
-infra/.turso-config
-infra/.supabase-config
 
 # Model binaries (too large for git — tokenizer.json is tracked)
 models/*.onnx
@@ -49,7 +47,6 @@ benchmark_stderr.txt
 plugin*.zip
 pi-session-*.html
 prompts.jsonl
-examples/source-adapters/*.db
 
 # Working docs (not part of releases)
 docs/agent-plugin-test-plan.md

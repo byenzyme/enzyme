@@ -99,7 +99,7 @@ const ALL_RECENT_MIN_FREQUENCY: i64 = 10;
 /// drops everywhere), these are demoted only from *automatic* topic-picking here
 /// in `select_catalyst_candidates`; the curated path does not apply them, so a user who
 /// explicitly names `daily`/`notes` still gets it. That path-dependence *is* the
-/// "curatable middle state" — see `docs/design/attention-and-exclusions.md`.
+/// "curatable middle state".
 const GENERIC_FOLDERS: &[&str] = &["daily", "notes", "convos", "journal", "journals"];
 
 /// The soft tier of the surface gate for *tags*: tooling/system tag noise demoted
@@ -498,8 +498,7 @@ impl EntityMap {
 
     /// Coverage-aware greedy selection of catalyst-candidate entities.
     ///
-    /// This is the **surface gate** in the attention model
-    /// (`docs/design/attention-and-exclusions.md`): given every indexed entity,
+    /// This is the **surface gate** in the attention model: given every indexed entity,
     /// pick the set enzyme will generate catalysts about. (Historically named
     /// "shortlist"; it is not a preview — its output is the generation input. It
     /// superseded the recency-only "trending" path.)
