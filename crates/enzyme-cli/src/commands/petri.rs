@@ -9,7 +9,7 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 
-use enzyme_core::models::{Catalyst, Embedding, Entity, EntityType, parse_catalyst_text};
+use enzyme_core::models::{Catalyst, Entity, EntityType, parse_catalyst_text};
 use enzyme_core::pipeline::entity_map::{
     EntityDisposition, EntityKey, EntityMap, FolderGroup, FolderOrigin,
 };
@@ -396,13 +396,10 @@ fn build_recency_based(
     Ok(entities)
 }
 
-/// Select entities by query relevance blended with recency.
-///
-/// 1. Embed the query
-/// 2. Load cached catalyst embeddings and compute cosine similarity per catalyst
-/// 3. Group catalysts by entity, compute entity relevance (max catalyst sim)
-/// 4. Rank entities by: relevance × 0.7 + normalized_recency × 0.3
-/// 5. Return top N entities with top K catalysts per entity (by similarity)
+/// Select entities by query relevance: keyword plus meaning over each
+/// entity's catalyst questions, with entities the query names first and no
+/// recency term (see `enzyme_core::search::petri`). Returns the top N
+/// entities, each with its K best-matching catalysts.
 fn build_query_aware(
     paths: &EnzymePaths,
     db: &Database,
@@ -424,8 +421,6 @@ fn build_query_aware(
     if catalysts.is_empty() {
         return Ok(vec![]);
     }
-
-    // Load cached catalyst embeddings
     let cached = db.get_all_catalyst_embeddings()?;
     if cached.is_empty() {
         anyhow::bail!("no cached catalyst embeddings");
@@ -433,75 +428,31 @@ fn build_query_aware(
     let cache_map: HashMap<&str, &Vec<f32>> =
         cached.iter().map(|(id, vec)| (id.as_str(), vec)).collect();
 
-    // Compute per-catalyst cosine similarity (use indices to avoid borrow issues)
-    let cat_sims: Vec<(usize, f32)> = catalysts
-        .iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            cache_map
-                .get(c.id.as_str())
-                .map(|vec| (i, Embedding::cosine_similarity(&query_vec, vec)))
-        })
-        .collect();
-
-    // Group by entity
-    let mut entity_groups: HashMap<String, Vec<(usize, f32)>> = HashMap::new();
-    for &(idx, sim) in &cat_sims {
-        entity_groups
-            .entry(catalysts[idx].entity.clone())
-            .or_default()
-            .push((idx, sim));
-    }
-
-    // Load entity metadata for recency scores
-    let all_entities = db.get_top_entities(entity_groups.len().max(100), "recency_score")?;
-    let entity_map: HashMap<&str, &enzyme_core::models::Entity> =
-        all_entities.iter().map(|e| (e.name.as_str(), e)).collect();
-
-    let max_recency = all_entities
-        .iter()
-        .map(|e| e.trends.recency_score)
-        .fold(0.0f64, f64::max);
-
-    // Compute blended entity scores: relevance × 0.7 + normalized_recency × 0.3
-    let mut scored: Vec<(String, f64, f64)> = entity_groups
-        .iter()
-        .filter_map(|(name, sims)| {
-            let entity = entity_map.get(name.as_str())?;
-            let max_sim = sims.iter().map(|(_, s)| *s).fold(0.0f32, f32::max) as f64;
-            let norm_recency = if max_recency > 0.0 {
-                entity.trends.recency_score / max_recency
-            } else {
-                0.0
-            };
-            let blended = max_sim * 0.7 + norm_recency * 0.3;
-            Some((name.clone(), max_sim, blended))
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top);
-
-    // Build result with top K catalysts per entity
+    let entities = db.get_all_entities()?;
+    let entity_by_name: HashMap<&str, &Entity> =
+        entities.iter().map(|e| (e.name.as_str(), e)).collect();
+    let ranked = enzyme_core::search::petri::rank_entities_for_query(
+        query, &query_vec, &catalysts, &cache_map, &entities,
+    );
     let mut result = Vec::new();
-    for (name, relevance, _) in &scored {
-        if let Some(entity) = entity_map.get(name.as_str()).copied() {
-            entity_rel.insert(name.clone(), *relevance);
-
-            let mut group = entity_groups.remove(name.as_str()).unwrap_or_default();
-            group.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            group.truncate(catalyst_budget);
-
-            let cats: Vec<enzyme_core::models::Catalyst> = group
-                .iter()
-                .map(|&(idx, sim)| {
-                    catalyst_rel.insert(catalysts[idx].id.clone(), sim as f64);
-                    catalysts[idx].clone()
-                })
-                .collect();
-
-            result.push((entity.clone(), cats));
+    for ranked_entity in ranked {
+        if result.len() >= top {
+            break;
         }
+        let Some(entity) = entity_by_name.get(ranked_entity.name.as_str()).copied() else {
+            continue;
+        };
+        entity_rel.insert(ranked_entity.name.clone(), ranked_entity.relevance);
+        let cats: Vec<Catalyst> = ranked_entity
+            .catalysts
+            .iter()
+            .take(catalyst_budget)
+            .map(|&(idx, relevance)| {
+                catalyst_rel.insert(catalysts[idx].id.clone(), relevance);
+                catalysts[idx].clone()
+            })
+            .collect();
+        result.push((entity.clone(), cats));
     }
 
     Ok(result)

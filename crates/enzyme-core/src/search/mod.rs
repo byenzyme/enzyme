@@ -3,6 +3,7 @@ pub mod context;
 pub mod hnsw;
 pub mod hybrid;
 pub mod index;
+pub mod petri;
 
 pub use bm25::*;
 pub use context::*;

@@ -39,7 +39,7 @@ fn has_name_boundaries(text: &str, start: usize, end: usize) -> bool {
 
 /// Detect complete known entity names in a query, preferring longer overlapping
 /// names so a known "Will Ashby" does not degrade into a match for "Will".
-fn match_query_entity_names(query: &str, entities: &[Entity]) -> Vec<String> {
+pub(crate) fn match_query_entity_names(query: &str, entities: &[Entity]) -> Vec<String> {
     let query = query.to_lowercase();
     let mut names = entities
         .iter()

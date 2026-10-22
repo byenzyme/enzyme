@@ -18,7 +18,7 @@ use crate::search::bm25::Bm25Index;
 use crate::search::context::{CatalyzeResponse, CatalyzeResultItem, TopCatalyst};
 
 /// Weight of the dense side; the lexical side gets `1 - DENSE_WEIGHT`.
-const DENSE_WEIGHT: f64 = 0.4;
+pub(crate) const DENSE_WEIGHT: f64 = 0.4;
 /// Notes taken from each side before fusing.
 const CANDIDATES_PER_SIDE: usize = 30;
 /// Chunks pulled from BM25 before rolling up to notes.
@@ -26,7 +26,7 @@ const BM25_CHUNK_DEPTH: usize = 400;
 
 /// Question words dropped from the lexical query so they don't outvote topic
 /// words ("how does the soil plan..." should match on soil, plan).
-const QUERY_STOPWORDS: &[&str] = &[
+pub(crate) const QUERY_STOPWORDS: &[&str] = &[
     "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "about", "what", "is",
     "my", "me", "we", "our", "it", "its", "as", "at", "by", "from", "that", "this", "not", "vs",
     "over", "rather", "than", "you", "your", "how", "why", "when", "where", "who", "which", "do",

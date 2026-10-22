@@ -70,6 +70,17 @@ impl Bm25Index {
     ///
     /// Panics if called after [`build`].
     pub fn add_document(&mut self, doc_id: String, text: &str) {
+        self.add_document_terms(doc_id, &Self::tokenize(text));
+    }
+
+    /// Add a document already split into terms by the caller's tokenizer.
+    /// Query terms passed to [`scores_for_terms`](Self::scores_for_terms)
+    /// must come from the same tokenizer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after [`build`].
+    pub fn add_document_terms(&mut self, doc_id: String, tokens: &[String]) {
         assert!(
             !self.finalized,
             "cannot add documents after the index has been built"
@@ -79,13 +90,12 @@ impl Bm25Index {
         self.doc_ids.push(doc_id);
         self.n_docs += 1;
 
-        let tokens = Self::tokenize(text);
         let doc_len = tokens.len() as f32;
         self.doc_lengths.push(doc_len);
 
         // Count term frequencies within this document.
         let mut tf_map: HashMap<String, f32> = HashMap::new();
-        for token in &tokens {
+        for token in tokens {
             *tf_map.entry(token.clone()).or_insert(0.0) += 1.0;
         }
 
@@ -171,6 +181,30 @@ impl Bm25Index {
         );
 
         results
+    }
+
+    /// BM25 score of every document, in insertion order, for query terms
+    /// from the same tokenizer the documents used. Repeated query terms count
+    /// once; documents sharing no term score 0.
+    pub fn scores_for_terms(&self, query_terms: &[String]) -> Vec<f32> {
+        let mut scores = vec![0.0f32; self.n_docs];
+        if !self.finalized || self.n_docs == 0 {
+            return scores;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for term in query_terms {
+            if !seen.insert(term.as_str()) {
+                continue;
+            }
+            if let Some(postings) = self.index.get(term) {
+                let idf = Self::idf(self.n_docs as f32, postings.len() as f32);
+                for &(doc_idx, tf) in postings {
+                    scores[doc_idx] +=
+                        idf * Self::tf_score(tf, self.doc_lengths[doc_idx], self.avg_dl);
+                }
+            }
+        }
+        scores
     }
 
     /// Returns the total number of documents in the index.
@@ -493,5 +527,22 @@ mod tests {
         let results = index.search("hello", 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].doc_id, "doc");
+    }
+
+    #[test]
+    fn scores_for_terms_match_search_and_count_repeats_once() {
+        let index = build_index(&[
+            ("a", "garden soil plan"),
+            ("b", "soil soil budget"),
+            ("c", "unrelated words"),
+        ]);
+        let terms = |q: &str| q.split(' ').map(String::from).collect::<Vec<_>>();
+        let scores = index.scores_for_terms(&terms("soil budget"));
+        let searched = index.search("soil budget", 10);
+        assert_eq!(scores.len(), 3);
+        assert_eq!(scores[2], 0.0);
+        assert!((scores[1] - searched[0].score).abs() < 1e-6);
+        assert_eq!(searched[0].doc_id, "b");
+        assert_eq!(scores, index.scores_for_terms(&terms("soil budget soil")));
     }
 }
