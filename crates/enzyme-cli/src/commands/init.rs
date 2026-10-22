@@ -281,8 +281,14 @@ pub(crate) fn configured_indexing_pipeline<'a>(
         .reading_spec
         .as_ref()
         .and_then(|spec| spec.learning.as_of.clone());
+    let date_rules = config
+        .reading_spec
+        .as_ref()
+        .map(|spec| spec.date_rules.clone())
+        .unwrap_or_default();
     let pipeline = IndexingPipeline::new(db, markdown_root)
         .with_as_of(as_of)
+        .with_date_rules(&date_rules)
         .with_excluded_folders(config.excluded_folders)
         .with_configured_logs(logs)
         .with_frontmatter_link_fields(config.frontmatter_link_fields);
@@ -1568,6 +1574,7 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
             "files_updated": local.indexing.files_updated,
             "files_deleted": local.indexing.files_deleted,
             "entity_config_changed": local.indexing.entity_config_changed,
+            "files_redated": local.indexing.files_redated,
         },
         "duration_ms": duration_ms,
     });
@@ -1655,7 +1662,10 @@ fn has_index_changes(stats: &IndexingStats) -> bool {
 }
 
 fn has_document_changes(stats: &IndexingStats) -> bool {
-    stats.files_new > 0 || stats.files_updated > 0 || stats.files_deleted > 0
+    stats.files_new > 0
+        || stats.files_updated > 0
+        || stats.files_deleted > 0
+        || stats.files_redated > 0
 }
 
 /// Evidence limits from the environment. Init and `spec plan` share this so a
@@ -2523,6 +2533,7 @@ async fn run_refresh_interactive(
                 "files_updated": local.indexing.files_updated,
                 "files_deleted": local.indexing.files_deleted,
                 "entity_config_changed": local.indexing.entity_config_changed,
+                "files_redated": local.indexing.files_redated,
                 "duration_ms": local.indexing.duration_ms,
             },
             "sources": local.sources,

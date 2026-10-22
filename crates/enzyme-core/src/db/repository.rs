@@ -442,6 +442,61 @@ impl Database {
         Ok(rows.into_iter().collect())
     }
 
+    /// A per-document signature of every stored date: the document's created
+    /// and modified dates and its chunks' log-entry dates. Comparing it with
+    /// [`ProcessedDocument::date_signature`] finds documents whose dates a
+    /// changed date rule reinterprets, so only those are re-upserted.
+    pub fn get_document_date_signatures(&self) -> Result<HashMap<String, String>> {
+        let rows = self.query_read(
+            "SELECT d.source_ref, d.created_at, d.created_source, d.modified_at,
+                    d.modified_source, COUNT(c.id), COUNT(c.entry_date),
+                    COALESCE(SUM(c.entry_date), 0), COALESCE(MIN(c.entry_date), 0),
+                    COALESCE(MAX(c.entry_date), 0)
+             FROM docs d LEFT JOIN chunks c ON c.doc_id = d.id
+             GROUP BY d.id",
+            vec![],
+            |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    crate::document::date_signature(
+                        row.get::<i64>(1)?,
+                        &row.get::<String>(2)?,
+                        row.get::<i64>(3)?,
+                        &row.get::<String>(4)?,
+                        [
+                            row.get::<i64>(5)?,
+                            row.get::<i64>(6)?,
+                            row.get::<i64>(7)?,
+                            row.get::<i64>(8)?,
+                            row.get::<i64>(9)?,
+                        ],
+                    ),
+                ))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Rewrite only the stored created/modified dates of existing documents,
+    /// leaving chunks and embedding receipts intact.
+    pub fn update_document_dates(&self, docs: &[ProcessedDocument]) -> Result<()> {
+        for doc in docs {
+            self.execute_write(
+                "UPDATE docs SET created_at = ?1, created_source = ?2,
+                                 modified_at = ?3, modified_source = ?4
+                 WHERE source_ref = ?5",
+                vec![
+                    Value::Integer(doc.created_at),
+                    Value::Text(doc.created_source.as_str().to_string()),
+                    Value::Integer(doc.modified_at),
+                    Value::Text(doc.modified_source.as_str().to_string()),
+                    Value::Text(doc.source_ref.clone()),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Find documents whose embeddings are stale or missing.
     ///
     /// Returns `(doc_id, source_ref, created_at_ms, chunks)` sorted by

@@ -91,10 +91,21 @@ impl AppendLog {
 /// Month vocabulary and day/year parsing are shared with [`super::datepath`]
 /// so header dates and file-path dates agree on what counts as a date.
 fn parse_header_date(line: &str) -> Option<NaiveDate> {
+    parse_builtin_header_date(header_text(line))
+}
+
+/// A header-ish line with its Markdown markers and any leading weekday
+/// stripped, so a date can be read as its leading token. Shared with
+/// configured heading formats (`super::daterules`).
+pub(crate) fn header_text(line: &str) -> &str {
     let s = line
         .trim_start()
         .trim_start_matches(|c| matches!(c, '#' | '-' | '*' | '>' | '[' | '_' | ' ' | '\t'));
-    let s = strip_weekday_prefix(s);
+    strip_weekday_prefix(s)
+}
+
+/// The built-in header forms, read from already-stripped header text.
+pub(crate) fn parse_builtin_header_date(s: &str) -> Option<NaiveDate> {
     parse_iso_header(s)
         .or_else(|| parse_numeric_mdy(s))
         .or_else(|| parse_month_name_header(s))
@@ -205,10 +216,19 @@ fn parse_day_month_year(s: &str) -> Option<NaiveDate> {
 /// Returns `None` unless the body carries at least [`MIN_LOG_ENTRIES`] internal
 /// date headers whose sequence is dominantly monotonic in one direction.
 pub fn detect_append_log(body: &str) -> Option<AppendLog> {
+    detect_append_log_with(body, parse_header_date)
+}
+
+/// [`detect_append_log`] with a caller-supplied header-date reader, used when
+/// a source declares its own heading formats.
+pub fn detect_append_log_with(
+    body: &str,
+    header_date: impl Fn(&str) -> Option<NaiveDate>,
+) -> Option<AppendLog> {
     let mut entries: Vec<LogEntry> = Vec::new();
     let mut offset = 0usize;
     for line in body.split_inclusive('\n') {
-        if let Some(date) = parse_header_date(line) {
+        if let Some(date) = header_date(line) {
             entries.push(LogEntry {
                 date: Some(date),
                 date_inferred: false,
@@ -370,6 +390,29 @@ fn compose_heading_date(path: &[&str]) -> Option<NaiveDate> {
 /// There is no ordering threshold: the user's declaration, not structure, is
 /// what makes this a log. Returns `None` only for an empty body.
 pub fn segment_declared_log(body: &str) -> Option<AppendLog> {
+    segment_declared_log_with(body, |_| None, true)
+}
+
+/// [`segment_declared_log`] for a source that declares heading formats
+/// (`date entries … by headings as "…"`). `rule_date` reads a line's leading
+/// date with the declared formats and is tried before the built-in readers;
+/// `builtin` false (a rule marked `only`) turns the built-in readers off,
+/// including nested year/month/day heading paths and compact leading dates.
+/// Boundaries are chosen exactly as in [`segment_declared_log`].
+pub fn segment_declared_log_with(
+    body: &str,
+    rule_date: impl Fn(&str) -> Option<NaiveDate>,
+    builtin: bool,
+) -> Option<AppendLog> {
+    let declared_date = |text: &str| {
+        rule_date(text).or_else(|| {
+            if builtin {
+                parse_declared_date(text)
+            } else {
+                None
+            }
+        })
+    };
     struct Line<'a> {
         start: usize,
         text: &'a str,
@@ -412,7 +455,10 @@ pub fn segment_declared_log(body: &str) -> Option<AppendLog> {
             path.retain(|&(l, _)| l < level);
             let text = line.text[level..].trim();
             path.push((level, text));
-            parse_declared_date(text).or_else(|| {
+            declared_date(text).or_else(|| {
+                if !builtin {
+                    return None;
+                }
                 let texts: Vec<&str> = path.iter().map(|&(_, t)| t).collect();
                 compose_heading_date(&texts)
             })
@@ -429,7 +475,7 @@ pub fn segment_declared_log(body: &str) -> Option<AppendLog> {
                 })
                 .collect()
         };
-    let line_date = |i: usize| parse_declared_date(lines[i].text);
+    let line_date = |i: usize| declared_date(lines[i].text);
     let starts = |keep: &dyn Fn(usize) -> bool| -> Vec<usize> {
         (0..lines.len()).filter(|&i| keep(i)).collect()
     };
@@ -445,9 +491,13 @@ pub fn segment_declared_log(body: &str) -> Option<AppendLog> {
         let line = &lines[i];
         line.heading.is_none()
             && !line.indented
-            && (parse_header_date(line.text).is_some()
-                || parse_compact_date(line.text.trim_start_matches(['-', '*', '+', '>', ' ']))
-                    .is_some())
+            && (rule_date(line.text).is_some()
+                || builtin
+                    && (parse_header_date(line.text).is_some()
+                        || parse_compact_date(
+                            line.text.trim_start_matches(['-', '*', '+', '>', ' ']),
+                        )
+                        .is_some()))
     });
     candidates.push((1, entries_at(date_led, &line_date)));
     candidates.push((2, entries_at(starts(&|i| lines[i].item), &line_date)));

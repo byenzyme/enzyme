@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -11,13 +12,14 @@ use crate::models::DateSource;
 
 use super::DiscoveredFile;
 use super::appendlog::{
-    AppendLog, MIN_LOG_ENTRIES, chunk_append_log_dated, detect_append_log, entries_with_body,
-    segment_declared_log,
+    AppendLog, MIN_LOG_ENTRIES, chunk_append_log_dated, detect_append_log, detect_append_log_with,
+    entries_with_body, segment_declared_log, segment_declared_log_with,
 };
 use super::chunking::{DEFAULT_CHUNK_SIZE_CHARS, chunk_document};
 use super::datepath::extract_date_from_path;
+use super::daterules::{DateRules, DocumentDates};
 use super::extract::{ExtractedEntities, extract_entities};
-use super::frontmatter::{Frontmatter, parse_frontmatter, strip_frontmatter};
+use super::frontmatter::{Frontmatter, frontmatter_mapping, parse_frontmatter, strip_frontmatter};
 use super::readwise::{chunk_readwise_highlights, extract_highlights, is_readwise_content};
 
 /// Word floor for auto-flagging a body as an append-only log.
@@ -77,6 +79,44 @@ pub struct ProcessedDocument {
     pub append_log: Option<AppendLog>,
 }
 
+impl ProcessedDocument {
+    /// Signature of every date this document stores; see
+    /// `Database::get_document_date_signatures`.
+    pub fn date_signature(&self) -> String {
+        let entry_dates: Vec<i64> = self.chunk_entry_dates.iter().flatten().copied().collect();
+        date_signature(
+            self.created_at,
+            self.created_source.as_str(),
+            self.modified_at,
+            self.modified_source.as_str(),
+            [
+                self.chunks.len() as i64,
+                entry_dates.len() as i64,
+                entry_dates.iter().sum(),
+                entry_dates.iter().copied().min().unwrap_or(0),
+                entry_dates.iter().copied().max().unwrap_or(0),
+            ],
+        )
+    }
+}
+
+/// Shared signature format for stored and freshly processed document dates:
+/// created/modified dates and sources, then `#`, then chunk count,
+/// dated-chunk count, and the sum, min, and max of the chunk entry dates. The
+/// part before `#` can change without touching chunks or embeddings.
+pub fn date_signature(
+    created_at: i64,
+    created_source: &str,
+    modified_at: i64,
+    modified_source: &str,
+    chunks: [i64; 5],
+) -> String {
+    let [count, dated, sum, min, max] = chunks;
+    format!(
+        "{created_at}|{created_source}|{modified_at}|{modified_source}#{count}|{dated}|{sum}|{min}|{max}"
+    )
+}
+
 /// Orchestrates the full document-processing pipeline:
 /// read -> frontmatter -> extract entities -> chunk -> hash.
 pub struct DocumentProcessor {
@@ -84,6 +124,7 @@ pub struct DocumentProcessor {
     chunk_size: usize,
     frontmatter_link_fields: HashSet<String>,
     declared_logs: HashSet<String>,
+    date_rules: Arc<DateRules>,
 }
 
 impl DocumentProcessor {
@@ -94,7 +135,14 @@ impl DocumentProcessor {
             chunk_size: DEFAULT_CHUNK_SIZE_CHARS,
             frontmatter_link_fields: HashSet::new(),
             declared_logs: HashSet::new(),
+            date_rules: Arc::default(),
         }
+    }
+
+    /// Read dates with the source's declared rules ahead of the built-ins.
+    pub fn with_date_rules(mut self, rules: Arc<DateRules>) -> Self {
+        self.date_rules = rules;
+        self
     }
 
     /// Override the chunk size (in characters).
@@ -199,9 +247,27 @@ impl DocumentProcessor {
         let declared = !self.declared_logs.is_empty()
             && log_name(title.as_deref(), &source_ref)
                 .is_some_and(|name| self.declared_logs.contains(&name));
-        let detected = detect_append_log(body);
+        // Declared heading formats (`date entries … by headings`) read entry
+        // dates ahead of the built-ins, for detection and segmentation alike.
+        let dates = self.date_rules.for_path(path);
+        let detected = if dates.has_entry_rules() {
+            detect_append_log_with(body, |line| dates.header_date(line))
+        } else {
+            detect_append_log(body)
+        };
         let (is_log, append_log) = if declared {
-            (true, detected.or_else(|| segment_declared_log(body)))
+            let segmented = || {
+                if dates.has_entry_rules() {
+                    segment_declared_log_with(
+                        body,
+                        |line| dates.rule_header_date(line),
+                        dates.builtin_entries(),
+                    )
+                } else {
+                    segment_declared_log(body)
+                }
+            };
+            (true, detected.or_else(segmented))
         } else {
             let is_log = detected.as_ref().is_some_and(|log| {
                 entries_with_body(body, log) >= MIN_LOG_ENTRIES
@@ -235,11 +301,23 @@ impl DocumentProcessor {
             (chunks, dates)
         };
 
-        // Dates
-        let (created_at, created_source) =
-            resolve_created_date(&frontmatter, path, &abs_path, body, is_readwise)?;
-        let (modified_at, modified_source) =
-            resolve_modified_date(&frontmatter, &abs_path, body, is_readwise)?;
+        // Dates — declared rules first, then the built-in chain.
+        let raw_frontmatter = if dates.reads_fields() {
+            frontmatter_mapping(&content)
+        } else {
+            None
+        };
+        let resolution = DateResolution {
+            frontmatter: &frontmatter,
+            raw_frontmatter: raw_frontmatter.as_ref(),
+            dates: &dates,
+            rel_path: path,
+            abs_path: &abs_path,
+            body,
+            is_readwise,
+        };
+        let (created_at, created_source) = resolve_created_date(&resolution)?;
+        let (modified_at, modified_source) = resolve_modified_date(&resolution)?;
 
         Ok(ProcessedDocument {
             source_ref,
@@ -307,9 +385,21 @@ impl DocumentProcessor {
         fields: impl IntoIterator<Item = String>,
         declared_logs: &HashSet<String>,
     ) -> Result<ProcessedDocument> {
+        Self::process_discovered_with(file, fields, declared_logs, &Arc::default())
+    }
+
+    /// Process a discovered file with configured link fields, declared logs,
+    /// and the source's date rules.
+    pub fn process_discovered_with(
+        file: &DiscoveredFile,
+        fields: impl IntoIterator<Item = String>,
+        declared_logs: &HashSet<String>,
+        date_rules: &Arc<DateRules>,
+    ) -> Result<ProcessedDocument> {
         let mut document = Self::new(file.root_path.clone())
             .with_frontmatter_link_fields(fields)
             .with_declared_logs(declared_logs)
+            .with_date_rules(date_rules.clone())
             .process_file(&file.relative_path)?;
         let relative = file.relative_path.to_string_lossy().replace('\\', "/");
         if document.source_ref != file.source_ref {
@@ -356,37 +446,49 @@ fn log_name(title: Option<&str>, source_ref: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-/// Resolve the created-at timestamp.
-/// Priority: frontmatter → filename/path date → content date (Readwise) → filesystem.
-fn resolve_created_date(
-    frontmatter: &Option<Frontmatter>,
-    rel_path: &Path,
-    abs_path: &Path,
-    body: &str,
+/// Everything date resolution reads for one document.
+struct DateResolution<'a> {
+    frontmatter: &'a Option<Frontmatter>,
+    raw_frontmatter: Option<&'a HashMap<String, serde_yaml::Value>>,
+    dates: &'a DocumentDates<'a>,
+    rel_path: &'a Path,
+    abs_path: &'a Path,
+    body: &'a str,
     is_readwise: bool,
-) -> Result<(i64, DateSource)> {
-    if let Some(fm) = frontmatter {
-        if let Some(dt) = fm.created {
-            return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+}
+
+/// Resolve the created-at timestamp.
+/// Priority: declared date rules → frontmatter → filename/path date → content
+/// date (Readwise) → filesystem. A rule marked `only` skips the built-in steps.
+fn resolve_created_date(doc: &DateResolution<'_>) -> Result<(i64, DateSource)> {
+    if let Some((dt, source)) = doc.dates.created(doc.raw_frontmatter, doc.rel_path) {
+        return Ok((datetime_to_millis(dt), source));
+    }
+
+    if doc.dates.builtin_created() {
+        if let Some(fm) = doc.frontmatter {
+            if let Some(dt) = fm.created {
+                return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+            }
         }
-    }
 
-    // Try extracting a date from the file path/name.
-    if let Some(dt) = extract_date_from_path(rel_path) {
-        return Ok((datetime_to_millis(dt), DateSource::Filename));
-    }
+        // Try extracting a date from the file path/name.
+        if let Some(dt) = extract_date_from_path(doc.rel_path) {
+            return Ok((datetime_to_millis(dt), DateSource::Filename));
+        }
 
-    // For Readwise-like content, use the earliest content date as creation date
-    // rather than the filesystem timestamp (which reflects import time).
-    if is_readwise {
-        if let Some(dt) = extract_earliest_content_date(body) {
-            return Ok((datetime_to_millis(dt), DateSource::Content));
+        // For Readwise-like content, use the earliest content date as creation date
+        // rather than the filesystem timestamp (which reflects import time).
+        if doc.is_readwise {
+            if let Some(dt) = extract_earliest_content_date(doc.body) {
+                return Ok((datetime_to_millis(dt), DateSource::Content));
+            }
         }
     }
 
     // Fall back to filesystem creation time (or modified time on Linux).
-    let metadata = fs::metadata(abs_path)
-        .with_context(|| format!("failed to read metadata: {:?}", abs_path))?;
+    let metadata = fs::metadata(doc.abs_path)
+        .with_context(|| format!("failed to read metadata: {:?}", doc.abs_path))?;
 
     let system_time = metadata
         .created()
@@ -398,28 +500,30 @@ fn resolve_created_date(
 }
 
 /// Resolve the modified-at timestamp.
-/// Priority: frontmatter → content date (Readwise) → filesystem.
-fn resolve_modified_date(
-    frontmatter: &Option<Frontmatter>,
-    abs_path: &Path,
-    body: &str,
-    is_readwise: bool,
-) -> Result<(i64, DateSource)> {
-    if let Some(fm) = frontmatter {
-        if let Some(dt) = fm.modified {
-            return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+/// Priority: declared date rules → frontmatter → content date (Readwise) →
+/// filesystem. A rule marked `only` skips the built-in steps.
+fn resolve_modified_date(doc: &DateResolution<'_>) -> Result<(i64, DateSource)> {
+    if let Some(dt) = doc.dates.modified(doc.raw_frontmatter) {
+        return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+    }
+
+    if doc.dates.builtin_modified() {
+        if let Some(fm) = doc.frontmatter {
+            if let Some(dt) = fm.modified {
+                return Ok((datetime_to_millis(dt), DateSource::Frontmatter));
+            }
+        }
+
+        // For Readwise-like content, use the most recent content date.
+        if doc.is_readwise {
+            if let Some(dt) = extract_latest_content_date(doc.body) {
+                return Ok((datetime_to_millis(dt), DateSource::Content));
+            }
         }
     }
 
-    // For Readwise-like content, use the most recent content date.
-    if is_readwise {
-        if let Some(dt) = extract_latest_content_date(body) {
-            return Ok((datetime_to_millis(dt), DateSource::Content));
-        }
-    }
-
-    let metadata = fs::metadata(abs_path)
-        .with_context(|| format!("failed to read metadata: {:?}", abs_path))?;
+    let metadata = fs::metadata(doc.abs_path)
+        .with_context(|| format!("failed to read metadata: {:?}", doc.abs_path))?;
 
     let system_time = metadata
         .modified()
@@ -494,6 +598,154 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let vault = dir.path().to_path_buf();
         (dir, vault)
+    }
+
+    fn date_rules(program: &str) -> Arc<DateRules> {
+        let parsed = enzyme_spec::parse(&format!("vault \"/notes\" {{\n{program}\n}}")).unwrap();
+        Arc::new(DateRules::new(&parsed.vaults[0].date_rules))
+    }
+
+    fn millis(y: i32, m: u32, d: u32) -> i64 {
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    }
+
+    /// A journal whose entries sit under compact `## YYMMDD` headings.
+    fn compact_journal(days: &[&str]) -> String {
+        let filler = "Notes on the week's reading, open questions, and next steps. ".repeat(4);
+        days.iter()
+            .map(|d| format!("## {d}\n{filler}\n\n"))
+            .collect()
+    }
+
+    #[test]
+    fn short_frontmatter_numbers_are_not_unix_time() {
+        let (_dir, vault) = create_test_vault();
+        fs::create_dir_all(vault.join("journal")).unwrap();
+        // `created: 250314` is a compact date, not 250314 seconds after 1970.
+        fs::write(
+            vault.join("journal/2025-03-14 standup.md"),
+            "---\ncreated: 250314\n---\nStandup notes.\n",
+        )
+        .unwrap();
+        let doc = DocumentProcessor::new(vault.clone())
+            .process_file(Path::new("journal/2025-03-14 standup.md"))
+            .unwrap();
+        assert_eq!(doc.created_source, DateSource::Filename);
+        assert_eq!(doc.created_at, millis(2025, 3, 14));
+
+        fs::write(
+            vault.join("epoch.md"),
+            "---\ncreated: 1741910400\n---\nBody.\n",
+        )
+        .unwrap();
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("epoch.md"))
+            .unwrap();
+        assert_eq!(doc.created_source, DateSource::Frontmatter);
+        assert_eq!(doc.created_at, millis(2025, 3, 14));
+    }
+
+    #[test]
+    fn date_rules_read_compact_dates_ahead_of_builtins() {
+        let (_dir, vault) = create_test_vault();
+        fs::create_dir_all(vault.join("journal")).unwrap();
+        fs::write(
+            vault.join("journal/250314 standup.md"),
+            "---\ndate: 2020-01-01\nreviewed: 250402\n---\nStandup notes.\n",
+        )
+        .unwrap();
+        let rules = date_rules(
+            r#"date notes in "journal" by filename as "YYMMDD"
+               date edits by field "reviewed" as "YYMMDD""#,
+        );
+        let doc = DocumentProcessor::new(vault.clone())
+            .with_date_rules(rules)
+            .process_file(Path::new("journal/250314 standup.md"))
+            .unwrap();
+        assert_eq!(doc.created_source, DateSource::Filename);
+        assert_eq!(doc.created_at, millis(2025, 3, 14));
+        assert_eq!(doc.modified_source, DateSource::Frontmatter);
+        assert_eq!(doc.modified_at, millis(2025, 4, 2));
+
+        // Without rules the frontmatter `date` key wins, as before.
+        let doc = DocumentProcessor::new(vault)
+            .process_file(Path::new("journal/250314 standup.md"))
+            .unwrap();
+        assert_eq!(doc.created_at, millis(2020, 1, 1));
+    }
+
+    #[test]
+    fn only_skips_builtin_dates_and_falls_back_to_the_filesystem() {
+        let (_dir, vault) = create_test_vault();
+        fs::create_dir_all(vault.join("zettel")).unwrap();
+        fs::write(vault.join("zettel/2025-01-15 idea.md"), "Idea.\n").unwrap();
+        let doc = DocumentProcessor::new(vault)
+            .with_date_rules(date_rules(
+                r#"date notes in "zettel" by field "created" only"#,
+            ))
+            .process_file(Path::new("zettel/2025-01-15 idea.md"))
+            .unwrap();
+        assert_eq!(doc.created_source, DateSource::Filesystem);
+    }
+
+    #[test]
+    fn heading_rules_turn_compact_dated_journals_into_logs() {
+        let (_dir, vault) = create_test_vault();
+        let body = compact_journal(&["250301", "250308", "250314", "250322"]);
+        fs::write(vault.join("reading log.md"), &body).unwrap();
+
+        let plain = DocumentProcessor::new(vault.clone())
+            .process_file(Path::new("reading log.md"))
+            .unwrap();
+        assert!(!plain.is_log, "compact headings are not built-in dates");
+
+        let doc = DocumentProcessor::new(vault)
+            .with_date_rules(date_rules(r#"date entries by headings as "YYMMDD""#))
+            .process_file(Path::new("reading log.md"))
+            .unwrap();
+        assert!(doc.is_log);
+        let log = doc.append_log.as_ref().unwrap();
+        assert_eq!(log.entries.len(), 4);
+        assert_eq!(
+            log.entries[2].date,
+            Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap())
+        );
+        assert!(doc.chunk_entry_dates.iter().all(Option::is_some));
+    }
+
+    #[test]
+    fn heading_rules_date_declared_logs_that_do_not_auto_detect() {
+        let (_dir, vault) = create_test_vault();
+        // Out of order, so strict detection rejects it and the declared log is
+        // segmented structurally; the rule still dates every heading.
+        let body = compact_journal(&["14.03.25", "01.03.25", "22.03.25", "08.03.25"]);
+        fs::write(vault.join("reading log.md"), &body).unwrap();
+        let declared: HashSet<String> = ["reading log".to_string()].into();
+
+        let plain = DocumentProcessor::new(vault.clone())
+            .with_declared_logs(&declared)
+            .process_file(Path::new("reading log.md"))
+            .unwrap();
+        assert!(plain.is_log);
+        assert_eq!(plain.append_log.as_ref().unwrap().dated_entries(), 0);
+
+        let doc = DocumentProcessor::new(vault)
+            .with_declared_logs(&declared)
+            .with_date_rules(date_rules(r#"date entries by headings as "DD.MM.YY""#))
+            .process_file(Path::new("reading log.md"))
+            .unwrap();
+        let log = doc.append_log.as_ref().unwrap();
+        assert_eq!(log.entries.len(), 4);
+        assert_eq!(log.dated_entries(), 4);
+        assert_eq!(
+            log.entries[0].date,
+            Some(NaiveDate::from_ymd_opt(2025, 3, 14).unwrap())
+        );
     }
 
     #[test]

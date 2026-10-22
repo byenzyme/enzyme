@@ -166,3 +166,75 @@ workspace "practice" {{
         assert!(folders.iter().any(|f| f == reading), "{reading} in {folders:?}");
     }
 }
+
+#[test]
+fn markdown_source_date_rules_reach_indexing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("enzyme-home");
+    let workspace = home.join("workspaces/journal");
+    let configs = home.join("configs");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&configs).unwrap();
+    let notes = temp.path().join("notes");
+    fs::create_dir_all(notes.join("journal")).unwrap();
+    fs::write(notes.join("journal/250314.md"), "Standup notes.\n").unwrap();
+    let database = temp.path().join("ledger.db");
+    fs::write(&database, []).unwrap();
+    let notes = notes.canonicalize().unwrap();
+    fs::write(
+        configs.join("journal.enzyme"),
+        format!(
+            r#"
+workspace "journal" {{
+  source markdown "notes" {{
+    path "{notes}"
+    date notes in "journal" by filename as "YYMMDD" only
+  }}
+  source sqlite "mail" {{
+    database "{database}"
+    query "SELECT id, sent_ms, body FROM mail"
+    id "id"
+    when "sent_ms" unit ms
+    what "body"
+  }}
+  learn questions from folder "journal"
+}}
+"#,
+            notes = notes.display(),
+            database = database.display(),
+        ),
+    )
+    .unwrap();
+
+    let config = EnzymeConfig::load_at(&workspace, &home.join("config.toml"))
+        .unwrap()
+        .expect("the bound workspace has a config");
+    let rules = config.reading_spec.as_ref().unwrap().date_rules.clone();
+    assert_eq!(rules.len(), 1);
+    assert!(rules[0].only);
+
+    initialize_sqlite_runtime().unwrap();
+    let db = Database::open_in_memory().unwrap();
+    IndexingPipeline::new(&db, workspace.clone())
+        .with_notes_roots(config.notes_roots.clone())
+        .with_date_rules(&rules)
+        .run(true, |_| {})
+        .unwrap();
+    let doc = db
+        .get_document_by_path("journal/250314.md")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        doc.created_source,
+        enzyme_core::models::DateSource::Filename
+    );
+    assert_eq!(
+        doc.created_at,
+        chrono::NaiveDate::from_ymd_opt(2025, 3, 14)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+    );
+}

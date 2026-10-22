@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -10,7 +11,8 @@ use tracing::{debug, info, warn};
 use crate::config::NotesRootConfig;
 use crate::db::Database;
 use crate::document::{
-    DiscoveredFile, DocumentProcessor, FileDiscovery, ProcessedDocument, most_recent_entry,
+    DateRules, DiscoveredFile, DocumentProcessor, FileDiscovery, ProcessedDocument,
+    most_recent_entry,
 };
 use crate::models::{
     EntityOccurrence, EntityTrends, EntityType, INLINE_CONTEXT_MAX_WORDS, ROOT_FOLDER_ENTITY,
@@ -36,6 +38,9 @@ pub struct IndexingPipeline<'a> {
     /// Plain frontmatter fields promoted to generic link entities. `None`
     /// resolves the active vault/workspace config at run time.
     frontmatter_link_fields: Option<std::collections::HashSet<String>>,
+    /// The Markdown source's declared date rules. `None` resolves the vault
+    /// config's reading program at run time.
+    date_rules: Option<Arc<DateRules>>,
     notes_roots: Option<Vec<NotesRootConfig>>,
     /// The vault's `as of` clause for trend computation. `None` resolves the
     /// vault config at run time; `Some(None)` explicitly uses the wall clock.
@@ -47,6 +52,7 @@ pub struct IndexingPipeline<'a> {
 /// entries are kept, and the drop is logged.
 const MAX_LOG_OCCURRENCES: usize = 1000;
 const FRONTMATTER_LINK_FIELDS_STATE_KEY: &str = "index.frontmatter_link_fields.v1";
+const DATE_RULES_STATE_KEY: &str = "index.date_rules.v1";
 fn is_markdown_source_ref(source_ref: &str) -> bool {
     !source_ref.starts_with("sqlite:")
         && std::path::Path::new(source_ref)
@@ -65,6 +71,10 @@ pub struct IndexingStats {
     /// True when unchanged Markdown was re-read to apply a changed
     /// `frontmatter_link_fields` interpretation without rebuilding embeddings.
     pub entity_config_changed: bool,
+    /// Unchanged documents re-upserted because changed date rules gave them
+    /// different dates. Documents whose dates did not move keep their chunks
+    /// and embeddings.
+    pub files_redated: usize,
     pub duration_ms: u64,
 }
 
@@ -90,9 +100,32 @@ impl<'a> IndexingPipeline<'a> {
             excluded_folders: None,
             configured_logs: None,
             frontmatter_link_fields: None,
+            date_rules: None,
             notes_roots: None,
             as_of: None,
         }
+    }
+
+    /// Explicitly set the source's date rules, bypassing config resolution.
+    pub fn with_date_rules(mut self, rules: &[enzyme_spec::DateRule]) -> Self {
+        self.date_rules = Some(Arc::new(DateRules::new(rules)));
+        self
+    }
+
+    /// The source's declared date rules: the explicit override if set,
+    /// otherwise the vault's reading program. A missing or unreadable config
+    /// resolves to no rules, so indexing never fails on config.
+    fn resolve_date_rules(&self) -> Arc<DateRules> {
+        if let Some(rules) = &self.date_rules {
+            return rules.clone();
+        }
+        let rules = crate::config::enzyme_config::EnzymeConfig::load(&self.vault_path)
+            .ok()
+            .flatten()
+            .and_then(|config| config.reading_spec)
+            .map(|spec| spec.date_rules)
+            .unwrap_or_default();
+        Arc::new(DateRules::new(&rules))
     }
 
     /// Explicitly set the reading's `as of` clause, bypassing config resolution.
@@ -280,6 +313,7 @@ impl<'a> IndexingPipeline<'a> {
                 files_deleted: 0,
                 entities_extracted: 0,
                 entity_config_changed: false,
+                files_redated: 0,
                 duration_ms,
             });
         }
@@ -288,6 +322,14 @@ impl<'a> IndexingPipeline<'a> {
         let frontmatter_link_fields = self.resolve_frontmatter_link_fields();
         let (frontmatter_link_fields_state, entity_config_changed) =
             self.frontmatter_link_fields_state(&frontmatter_link_fields)?;
+        let date_rules = self.resolve_date_rules();
+        let date_rules_changed = self
+            .db
+            .get_config(DATE_RULES_STATE_KEY)?
+            .unwrap_or_default()
+            != date_rules.fingerprint();
+        // Either change re-reads every Markdown file; see Step 5.
+        let reinterpret = (entity_config_changed || date_rules_changed) && !full;
 
         // Step 3: Build a lookup from source_ref -> PathBuf for all discovered files
         let all_source_refs: HashMap<String, DiscoveredFile> = all_files
@@ -360,12 +402,13 @@ impl<'a> IndexingPipeline<'a> {
         // Step 5: Process new + changed files. A frontmatter field-mapping
         // change re-reads every Markdown document for entity extraction only;
         // unchanged documents are not upserted, so their chunks and embeddings
-        // stay intact.
+        // stay intact. A date-rule change also re-reads every document, but
+        // re-upserts the unchanged ones whose dates actually moved.
         let normal_source_refs: std::collections::HashSet<&str> = paths_to_process
             .iter()
             .map(|file| file.source_ref.as_str())
             .collect();
-        let entity_paths = if entity_config_changed && !full {
+        let entity_paths = if reinterpret {
             &all_files
         } else {
             &paths_to_process
@@ -375,10 +418,11 @@ impl<'a> IndexingPipeline<'a> {
         let results: Vec<_> = entity_paths
             .par_iter()
             .map(|file| {
-                DocumentProcessor::process_discovered_with_link_fields(
+                DocumentProcessor::process_discovered_with(
                     file,
                     frontmatter_link_fields.iter().cloned(),
                     &configured_logs,
+                    &date_rules,
                 )
             })
             .collect();
@@ -394,10 +438,38 @@ impl<'a> IndexingPipeline<'a> {
                 }
             }
         }
-        let docs_to_upsert: Vec<ProcessedDocument> = if entity_config_changed && !full {
+        let stored_dates = if reinterpret && date_rules_changed {
+            self.db.get_document_date_signatures()?
+        } else {
+            HashMap::new()
+        };
+        // An unchanged document whose dates moved only at the document level
+        // gets a date-only update; one whose log-entry chunks changed (it
+        // became, or stopped being, a parseable log) is re-upserted.
+        let mut files_redated = 0usize;
+        let mut docs_to_redate: Vec<ProcessedDocument> = Vec::new();
+        let docs_to_upsert: Vec<ProcessedDocument> = if reinterpret {
             processed_docs
                 .iter()
-                .filter(|doc| normal_source_refs.contains(doc.source_ref.as_str()))
+                .filter(|doc| {
+                    if normal_source_refs.contains(doc.source_ref.as_str()) {
+                        return true;
+                    }
+                    let Some(stored) = stored_dates.get(&doc.source_ref) else {
+                        return false;
+                    };
+                    let current = doc.date_signature();
+                    if *stored == current {
+                        return false;
+                    }
+                    files_redated += 1;
+                    let same_chunks = stored.split_once('#').map(|(_, c)| c)
+                        == current.split_once('#').map(|(_, c)| c);
+                    if same_chunks {
+                        docs_to_redate.push((*doc).clone());
+                    }
+                    !same_chunks
+                })
                 .cloned()
                 .collect()
         } else {
@@ -407,6 +479,7 @@ impl<'a> IndexingPipeline<'a> {
         // Step 6: Upsert processed documents into the database (single transaction)
         on_progress("Upserting documents...");
         self.db.upsert_documents_batch(&docs_to_upsert)?;
+        self.db.update_document_dates(&docs_to_redate)?;
 
         // Step 7: Delete removed files from the database
         if !deleted_paths.is_empty() {
@@ -432,7 +505,7 @@ impl<'a> IndexingPipeline<'a> {
         // Step 8b: Reconcile config-declared `log:` entities (replace
         // semantics, promotion of newly declared logs, removal of undeclared).
         on_progress("Reconciling log entities...");
-        self.reconcile_log_entities(&processed_docs, &all_files, &on_progress)?;
+        self.reconcile_log_entities(&processed_docs, &all_files, &date_rules, &on_progress)?;
 
         // Step 8c: Drop entities whose last occurrence is gone (their notes
         // were deleted, or an edit removed the tag/link). They have no
@@ -459,6 +532,10 @@ impl<'a> IndexingPipeline<'a> {
                 &frontmatter_link_fields_state,
             )?;
         }
+        if !date_rules_changed || processing_failures == 0 {
+            self.db
+                .set_config(DATE_RULES_STATE_KEY, date_rules.fingerprint())?;
+        }
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -469,6 +546,7 @@ impl<'a> IndexingPipeline<'a> {
             files_deleted,
             entities_extracted,
             entity_config_changed,
+            files_redated,
             duration_ms,
             "indexing complete"
         );
@@ -480,6 +558,7 @@ impl<'a> IndexingPipeline<'a> {
             files_deleted,
             entities_extracted,
             entity_config_changed,
+            files_redated,
             duration_ms,
         })
     }
@@ -689,6 +768,7 @@ impl<'a> IndexingPipeline<'a> {
         &self,
         processed_docs: &[ProcessedDocument],
         all_paths: &[DiscoveredFile],
+        date_rules: &Arc<DateRules>,
         on_progress: &impl Fn(&str),
     ) -> Result<()> {
         let configured = self.resolve_configured_logs();
@@ -739,7 +819,12 @@ impl<'a> IndexingPipeline<'a> {
                 );
                 continue;
             };
-            match DocumentProcessor::process_discovered(path, &configured) {
+            match DocumentProcessor::process_discovered_with(
+                path,
+                std::iter::empty(),
+                &configured,
+                date_rules,
+            ) {
                 Ok(doc) => {
                     if let Some((doc_name, occurrences)) = Self::log_occurrences_for_doc(&doc) {
                         if doc_name == *name {
@@ -1164,6 +1249,105 @@ mod tests {
                 .iter()
                 .any(|entity| entity.name == "jay vidyarthi")
         );
+    }
+
+    #[test]
+    fn date_rule_change_redates_only_documents_whose_dates_move() {
+        let db = test_db();
+        let vault = tempfile::tempdir().unwrap();
+        write_md(
+            vault.path(),
+            "journal/250314 standup.md",
+            "Standup notes.\n",
+        );
+        write_md(vault.path(), "inbox/2025-01-15 idea.md", "Idea.\n");
+        let filler = "Notes on the week's reading, open questions, and next steps. ".repeat(4);
+        let journal: String = ["250301", "250308", "250314"]
+            .iter()
+            .map(|d| format!("## {d}\n{filler}\n\n"))
+            .collect();
+        write_md(vault.path(), "reading log.md", &journal);
+
+        let no_rules: Vec<enzyme_spec::DateRule> = Vec::new();
+        IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_date_rules(&no_rules)
+            .run(true, |_| {})
+            .unwrap();
+        for path in [
+            "journal/250314 standup.md",
+            "inbox/2025-01-15 idea.md",
+            "reading log.md",
+        ] {
+            let doc = db.get_document_by_path(path).unwrap().unwrap();
+            db.mark_document_embedded(
+                doc.id.unwrap(),
+                &doc.content_hash,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
+        }
+        let standup = db
+            .get_document_by_path("journal/250314 standup.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            standup.created_source,
+            crate::models::DateSource::Filesystem
+        );
+
+        let program = enzyme_spec::parse(
+            r#"vault "/notes" {
+              date notes in "journal" by filename as "YYMMDD"
+              date entries by headings as "YYMMDD"
+            }"#,
+        )
+        .unwrap();
+        let rules = program.vaults[0].date_rules.clone();
+        let stats = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_date_rules(&rules)
+            .run(false, |_| {})
+            .unwrap();
+        assert_eq!(stats.files_new + stats.files_updated, 0);
+        assert_eq!(stats.files_redated, 2);
+
+        // A document-level date change keeps the embedding receipt.
+        let standup = db
+            .get_document_by_path("journal/250314 standup.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(standup.created_source, crate::models::DateSource::Filename);
+        assert_eq!(
+            standup.created_at,
+            chrono::NaiveDate::from_ymd_opt(2025, 3, 14)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis()
+        );
+        assert_eq!(
+            standup.embedded_content_hash.as_deref(),
+            Some(standup.content_hash.as_str())
+        );
+        // The journal became a log: its chunks changed, so it re-embeds.
+        let log = db.get_document_by_path("reading log.md").unwrap().unwrap();
+        assert_eq!(log.embedded_content_hash, None);
+        // Untouched by any rule.
+        let idea = db
+            .get_document_by_path("inbox/2025-01-15 idea.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            idea.embedded_content_hash.as_deref(),
+            Some(idea.content_hash.as_str())
+        );
+
+        // Same rules again: nothing to redo.
+        let stats = IndexingPipeline::new(&db, vault.path().to_path_buf())
+            .with_date_rules(&rules)
+            .run(false, |_| {})
+            .unwrap();
+        assert_eq!(stats.files_redated, 0);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod appendlog;
 mod chunking;
 mod datepath;
+mod daterules;
 mod discovery;
 mod extract;
 mod frontmatter;
@@ -11,6 +12,7 @@ mod structured;
 pub use appendlog::*;
 pub use chunking::*;
 pub use datepath::*;
+pub use daterules::*;
 pub use discovery::*;
 pub use extract::*;
 pub use frontmatter::*;

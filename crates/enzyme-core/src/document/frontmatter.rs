@@ -52,6 +52,17 @@ impl Frontmatter {
 ///
 /// Returns `None` if the document has no valid frontmatter block.
 pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
+    let mapping = frontmatter_mapping(content)?;
+    if mapping.is_empty() {
+        return Some(Frontmatter::default());
+    }
+    Some(frontmatter_from_mapping(mapping))
+}
+
+/// The raw YAML mapping of a document's frontmatter block, for readers that
+/// need fields the typed [`Frontmatter`] consumes (configured date fields).
+/// An empty block yields an empty mapping; no block or invalid YAML, `None`.
+pub(crate) fn frontmatter_mapping(content: &str) -> Option<HashMap<String, Value>> {
     let trimmed = content.trim_start();
 
     // Must start with `---` on its own line.
@@ -66,18 +77,20 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
 
     // Handle empty frontmatter: closing `---` is immediately after the opening.
     if after_first_newline.starts_with("---") {
-        return Some(Frontmatter::default());
+        return Some(HashMap::new());
     }
 
     let closing = after_first_newline.find("\n---")?;
     let yaml_str = &after_first_newline[..closing];
 
     if yaml_str.trim().is_empty() {
-        return Some(Frontmatter::default());
+        return Some(HashMap::new());
     }
 
-    let mapping: HashMap<String, Value> = serde_yaml::from_str(yaml_str).ok()?;
+    serde_yaml::from_str(yaml_str).ok()
+}
 
+fn frontmatter_from_mapping(mapping: HashMap<String, Value>) -> Frontmatter {
     let mut fm = Frontmatter::default();
 
     // Title
@@ -178,7 +191,7 @@ pub fn parse_frontmatter(content: &str) -> Option<Frontmatter> {
     // Extract wikilinks from all frontmatter fields (people, author, related, etc.)
     fm.links = extract_frontmatter_wikilinks(&mapping);
 
-    Some(fm)
+    fm
 }
 
 /// Extract the body of a document (everything after frontmatter).
@@ -346,7 +359,12 @@ fn value_to_string_vec(val: &Value) -> Vec<String> {
     }
 }
 
-fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
+/// Smallest magnitude read as a Unix timestamp in seconds (1973-03-03). A
+/// shorter bare number is a compact date or an ID, not epoch time: reading
+/// `created: 250314` as seconds would date the note to January 1970.
+const MIN_UNIX_SECONDS: i64 = 100_000_000;
+
+pub(crate) fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
     let s = match val {
         Value::String(s) => {
             // Strip wikilink brackets: "[[2025-08-04]]" -> "2025-08-04"
@@ -360,10 +378,14 @@ fn value_to_datetime(val: &Value) -> Option<DateTime<Utc>> {
         Value::Number(n) => {
             // Could be a unix timestamp
             if let Some(ts) = n.as_i64() {
-                return DateTime::from_timestamp(ts, 0);
+                return (ts.abs() >= MIN_UNIX_SECONDS)
+                    .then(|| DateTime::from_timestamp(ts, 0))
+                    .flatten();
             }
             if let Some(ts) = n.as_f64() {
-                return DateTime::from_timestamp(ts as i64, 0);
+                return (ts.abs() >= MIN_UNIX_SECONDS as f64)
+                    .then(|| DateTime::from_timestamp(ts as i64, 0))
+                    .flatten();
             }
             return None;
         }

@@ -480,6 +480,7 @@ fn structured_setup(
         sources: vec![Source::Markdown(MarkdownSource {
             name: "notes".into(),
             path: vault.path.clone(),
+            date_rules: vault.date_rules,
         })],
         learning: vault.learning,
         readings: vault.readings,
