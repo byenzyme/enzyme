@@ -327,6 +327,7 @@ fn build_practice_shape(entity: &Entity, now: DateTime<Utc>) -> String {
 }
 
 /// Era-aware context: samples grouped by era, with allocation info.
+#[derive(Clone)]
 pub struct EraContext {
     pub eras: Vec<Era>,
     /// Per-era minimum catalyst counts (parallel to `eras`).

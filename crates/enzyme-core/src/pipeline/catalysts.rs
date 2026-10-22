@@ -166,6 +166,62 @@ fn resolve_context_budget(configured: Option<usize>, is_local: bool) -> usize {
     budget
 }
 
+/// Questions a single hosted call is asked for. Larger jobs are split; above
+/// about 40 the hosted model returns noticeably fewer than requested and the
+/// call outlasts the timeout. Override with `ENZYME_CATALYST_MAX_QUESTIONS_PER_CALL`.
+const HOSTED_MAX_QUESTIONS_PER_CALL: usize = 30;
+/// Per-call timeout for hosted generation. Override with
+/// `ENZYME_CATALYST_CALL_TIMEOUT_SECS`.
+const HOSTED_CALL_TIMEOUT_SECS: u64 = 120;
+const LOCAL_CALL_TIMEOUT_SECS: u64 = 300;
+
+fn env_override<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+}
+
+fn catalyst_call_timeout_secs(local_model: bool) -> u64 {
+    env_override::<u64>("ENZYME_CATALYST_CALL_TIMEOUT_SECS")
+        .filter(|secs| *secs > 0)
+        .unwrap_or(if local_model {
+            LOCAL_CALL_TIMEOUT_SECS
+        } else {
+            HOSTED_CALL_TIMEOUT_SECS
+        })
+}
+
+fn max_questions_per_call() -> usize {
+    env_override::<usize>("ENZYME_CATALYST_MAX_QUESTIONS_PER_CALL")
+        .filter(|n| *n > 0)
+        .unwrap_or(HOSTED_MAX_QUESTIONS_PER_CALL)
+}
+
+/// Split per-period question allocations into calls of at most `cap`
+/// questions, keeping periods in order and splitting a period only when it
+/// alone exceeds `cap`. Each returned vector is parallel to `allocations`.
+fn split_question_allocations(allocations: &[usize], cap: usize) -> Vec<Vec<usize>> {
+    let cap = cap.max(1);
+    let mut parts = Vec::new();
+    let mut current = vec![0; allocations.len()];
+    let mut used = 0;
+    for (index, &count) in allocations.iter().enumerate() {
+        let mut remaining = count;
+        while remaining > 0 {
+            if used == cap {
+                parts.push(std::mem::replace(&mut current, vec![0; allocations.len()]));
+                used = 0;
+            }
+            let take = remaining.min(cap - used);
+            current[index] += take;
+            used += take;
+            remaining -= take;
+        }
+    }
+    if used > 0 || parts.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 /// Resolve the per-entity excerpt count from the run-level cap.
 ///
 /// Hosted generation aims for one excerpt per requested catalyst, keeps at
@@ -1099,6 +1155,9 @@ struct EntityJob {
     entity_name: String,
     entity_type: String,
     user_prompt: String,
+    /// Prompts actually sent: `[user_prompt]`, or one per call when a large
+    /// hosted job is split by [`split_question_allocations`].
+    part_prompts: Vec<String>,
     /// Fingerprint of this job's inputs; stored after the catalysts commit.
     context_hash: String,
     context_sources: Vec<GenerationContextSource>,
@@ -1657,6 +1716,7 @@ impl<'a> CatalystPipeline<'a> {
         config: &CatalystConfig<'_>,
     ) -> Result<(String, Vec<EntityJob>, Vec<SkippedEntity>)> {
         let is_local = self.llm.is_local();
+        let max_questions_per_call = max_questions_per_call();
         let as_of = config.reading_spec.and_then(|v| v.learning.as_of.as_ref());
         let as_of_ms = crate::pipeline::as_of::resolve(self.db, as_of)?;
         let reference_ms = as_of_ms.unwrap_or_else(|| Utc::now().timestamp_millis());
@@ -1952,50 +2012,86 @@ impl<'a> CatalystPipeline<'a> {
             let era_context = selected_context.era_context.as_ref();
             let context_samples = selected_context.flat_samples.as_slice();
 
-            let mut user_prompt = if is_local {
-                build_local_user_prompt(
-                    entity_name,
-                    context_samples,
-                    num_catalysts,
-                    Some(profile),
-                    era_context,
-                )
-            } else if custom_reading_mode && custom_profile.is_some() {
-                // Same set that receives the neutral custom system prompt:
-                // the profile owns the aim, so no practice shape or
-                // register/engagement steering competes with it.
-                build_custom_reading_user_prompt(
-                    entity_name,
-                    context_samples,
-                    num_catalysts,
-                    config.format_key,
-                    era_context,
-                )
-            } else {
-                build_user_prompt(
-                    entity_name,
-                    context_samples,
-                    num_catalysts,
-                    profile,
-                    config.format_key,
-                    Some(entity),
-                    era_context,
-                    reference_ms,
-                )
-            };
-            if let Some(custom) = custom_profile {
-                user_prompt = apply_reading_profile(&user_prompt, selected_profile_key, custom);
-            }
-            if let Some(temporal::Policy { preference, .. }) = temporal_policy {
-                if let Some(context) = era_context {
-                    user_prompt.push_str(&format!(
-                        "\nTemporal evidence: {} represented periods; excerpt and byte caps may omit other periods. Future/invalid dates are excluded relative to the generation clock; source timestamps are unchanged.\nRequested question allocation ({preference:?} priority; only represented periods):\n", context.eras.len()
-                    ));
-                    for (era, count) in context.eras.iter().zip(&context.era_allocations) {
-                        user_prompt.push_str(&format!("- {}: {} questions\n", era.label, count));
+            let build_prompt = |num_catalysts: usize, era_context: Option<&EraContext>| {
+                let mut user_prompt = if is_local {
+                    build_local_user_prompt(
+                        entity_name,
+                        context_samples,
+                        num_catalysts,
+                        Some(profile),
+                        era_context,
+                    )
+                } else if custom_reading_mode && custom_profile.is_some() {
+                    // Same set that receives the neutral custom system prompt:
+                    // the profile owns the aim, so no practice shape or
+                    // register/engagement steering competes with it.
+                    build_custom_reading_user_prompt(
+                        entity_name,
+                        context_samples,
+                        num_catalysts,
+                        config.format_key,
+                        era_context,
+                    )
+                } else {
+                    build_user_prompt(
+                        entity_name,
+                        context_samples,
+                        num_catalysts,
+                        profile,
+                        config.format_key,
+                        Some(entity),
+                        era_context,
+                        reference_ms,
+                    )
+                };
+                if let Some(custom) = custom_profile {
+                    user_prompt = apply_reading_profile(&user_prompt, selected_profile_key, custom);
+                }
+                if let Some(temporal::Policy { preference, .. }) = temporal_policy {
+                    if let Some(context) = era_context {
+                        user_prompt.push_str(&format!(
+                            "\nTemporal evidence: {} represented periods; excerpt and byte caps may omit other periods. Future/invalid dates are excluded relative to the generation clock; source timestamps are unchanged.\nRequested question allocation ({preference:?} priority; only represented periods):\n", context.eras.len()
+                        ));
+                        for (era, count) in context.eras.iter().zip(&context.era_allocations) {
+                            user_prompt
+                                .push_str(&format!("- {}: {} questions\n", era.label, count));
+                        }
                     }
                 }
-            }
+                user_prompt
+            };
+            let user_prompt = build_prompt(num_catalysts, era_context);
+            // Large hosted jobs are split into calls of at most
+            // `max_questions_per_call` questions. Every call sees the full
+            // excerpts but is assigned its own periods, so questions can still
+            // reach across time without the calls duplicating each other.
+            let part_prompts = match (temporal_policy, era_context) {
+                (Some(_), Some(context)) if !is_local && num_catalysts > max_questions_per_call => {
+                    let parts = split_question_allocations(
+                        &context.era_allocations,
+                        max_questions_per_call,
+                    );
+                    let total = parts.len();
+                    parts
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, allocations)| {
+                            let questions = allocations.iter().sum();
+                            let part_context = EraContext {
+                                era_allocations: allocations,
+                                ..context.clone()
+                            };
+                            let mut prompt = build_prompt(questions, Some(&part_context));
+                            prompt.push_str(&format!(
+                                "This request is part {} of {total} for this entity; the other parts ask for the remaining periods' questions. Write only the {questions} questions allocated above.\n",
+                                index + 1
+                            ));
+                            prompt
+                        })
+                        .collect()
+                }
+                _ => vec![user_prompt.clone()],
+            };
             debug!(
                 entity_name = entity_name.as_str(),
                 profile = profile.key,
@@ -2033,6 +2129,7 @@ impl<'a> CatalystPipeline<'a> {
                 entity_name: entity_name.clone(),
                 entity_type,
                 user_prompt,
+                part_prompts,
                 context_hash,
                 context_sources: selected_context.context_sources,
                 era_labels,
@@ -2240,7 +2337,7 @@ impl<'a> CatalystPipeline<'a> {
             8
         });
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let entity_timeout_secs: u64 = if local_model { 300 } else { 30 };
+        let call_timeout_secs = catalyst_call_timeout_secs(local_model);
 
         // Build the response_format once based on provider capabilities. Local
         // SmolLM2 checkpoints were trained before eraLabels were stable, so do
@@ -2289,102 +2386,140 @@ impl<'a> CatalystPipeline<'a> {
                     };
                 }
 
-                let entity_timeout = std::time::Duration::from_secs(entity_timeout_secs);
-                let result = tokio::time::timeout(entity_timeout, async {
-                    let params = GenerationParams {
-                        response_format,
-                        // Local fine-tunes have small context windows; cap output
-                        // tokens so input + output fits within the model's limit.
-                        max_tokens: if local_model { 512 } else { 8192 },
-                        ..GenerationParams::default()
-                    };
-
-                    // 3 attempts with exponential backoff + jitter
-                    let max_attempts = 3u32;
-                    let mut last_error = String::new();
-                    let name_len = entity_name.len() as u64;
-                    // Exponential backoff between attempts: 2s, 4s + jitter
-                    // (0-500ms). No sleep after the final attempt.
-                    let backoff = |attempt: u32| async move {
-                        if attempt < max_attempts - 1 {
-                            let base_ms = 2000u64 * 2u64.pow(attempt);
-                            let jitter_ms = (name_len * 37) % 500;
-                            tokio::time::sleep(std::time::Duration::from_millis(
-                                base_ms + jitter_ms,
-                            ))
-                            .await;
-                        }
-                    };
-                    for attempt in 0..max_attempts {
-                        let result = llm
-                            .chat_completion_cached(
-                                &model,
-                                &system_prompt,
-                                &job.user_prompt,
-                                params.clone(),
-                            )
-                            .await;
-
-                        let response_text = match result {
-                            Ok(text) => text,
-                            Err(e) => {
-                                last_error = e.to_string();
-                                debug!(
-                                    entity_name = entity_name.as_str(),
-                                    attempt, "LLM call failed: {}", e
-                                );
-                                // Don't retry on a provider 402 — backoff
-                                // would just delay the inevitable failure.
-                                if is_payment_required_error(&e) {
-                                    credits_exhausted.store(true, Ordering::SeqCst);
-                                    break;
-                                }
-                                backoff(attempt).await;
-                                continue;
+                let call_timeout = std::time::Duration::from_secs(call_timeout_secs);
+                let params = GenerationParams {
+                    response_format,
+                    // Local fine-tunes have small context windows; cap output
+                    // tokens so input + output fits within the model's limit.
+                    max_tokens: if local_model { 512 } else { 8192 },
+                    ..GenerationParams::default()
+                };
+                let mut catalysts: Vec<ParsedCatalyst> = Vec::new();
+                let mut part_errors: Vec<String> = Vec::new();
+                for part_prompt in &job.part_prompts {
+                    if credits_exhausted.load(Ordering::SeqCst) {
+                        part_errors.push("skipped: provider payment-required (402)".to_string());
+                        break;
+                    }
+                    let outcome = tokio::time::timeout(call_timeout, async {
+                        // 3 attempts with exponential backoff + jitter
+                        let max_attempts = 3u32;
+                        let mut last_error = String::new();
+                        let name_len = entity_name.len() as u64;
+                        // Exponential backoff between attempts: 2s, 4s + jitter
+                        // (0-500ms). No sleep after the final attempt.
+                        let backoff = |attempt: u32| async move {
+                            if attempt < max_attempts - 1 {
+                                let base_ms = 2000u64 * 2u64.pow(attempt);
+                                let jitter_ms = (name_len * 37) % 500;
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    base_ms + jitter_ms,
+                                ))
+                                .await;
                             }
                         };
+                        for attempt in 0..max_attempts {
+                            let result = llm
+                                .chat_completion_cached(
+                                    &model,
+                                    &system_prompt,
+                                    part_prompt,
+                                    params.clone(),
+                                )
+                                .await;
 
-                        // Validate the response before accepting it. An empty
-                        // catalyst array or an unparseable body is a
-                        // content-level failure the model often recovers from on
-                        // a retry — unlike a transport error or credit
-                        // exhaustion. Retrying here, rather than treating the
-                        // first bad response as terminal, is what keeps a single
-                        // flaky entity from silently landing at zero catalysts.
-                        match parse_catalyst_response(&response_text) {
-                            Ok(parsed) if !parsed.catalysts.is_empty() => {
-                                return Ok(parsed.catalysts);
+                            let response_text = match result {
+                                Ok(text) => text,
+                                Err(e) => {
+                                    last_error = e.to_string();
+                                    debug!(
+                                        entity_name = entity_name.as_str(),
+                                        attempt, "LLM call failed: {}", e
+                                    );
+                                    // Don't retry on a provider 402 — backoff
+                                    // would just delay the inevitable failure.
+                                    if is_payment_required_error(&e) {
+                                        credits_exhausted.store(true, Ordering::SeqCst);
+                                        break;
+                                    }
+                                    backoff(attempt).await;
+                                    continue;
+                                }
+                            };
+
+                            // Validate the response before accepting it. An empty
+                            // catalyst array or an unparseable body is a
+                            // content-level failure the model often recovers from on
+                            // a retry — unlike a transport error or credit
+                            // exhaustion. Retrying here, rather than treating the
+                            // first bad response as terminal, is what keeps a single
+                            // flaky entity from silently landing at zero catalysts.
+                            match parse_catalyst_response(&response_text) {
+                                Ok(parsed) if !parsed.catalysts.is_empty() => {
+                                    return Ok(parsed.catalysts);
+                                }
+                                Ok(_) => {
+                                    last_error = "LLM returned empty catalysts array".to_string();
+                                    debug!(
+                                        entity_name = entity_name.as_str(),
+                                        attempt, "empty catalysts array; retrying"
+                                    );
+                                }
+                                Err(e) => {
+                                    last_error = format!("parse error: {e}");
+                                    debug!(
+                                        entity_name = entity_name.as_str(),
+                                        attempt,
+                                        response_text = %response_text,
+                                        "failed to parse catalyst response; retrying: {}",
+                                        e
+                                    );
+                                }
                             }
-                            Ok(_) => {
-                                last_error = "LLM returned empty catalysts array".to_string();
-                                debug!(
-                                    entity_name = entity_name.as_str(),
-                                    attempt, "empty catalysts array; retrying"
-                                );
-                            }
-                            Err(e) => {
-                                last_error = format!("parse error: {e}");
-                                debug!(
-                                    entity_name = entity_name.as_str(),
-                                    attempt,
-                                    response_text = %response_text,
-                                    "failed to parse catalyst response; retrying: {}",
-                                    e
-                                );
-                            }
+                            backoff(attempt).await;
                         }
-                        backoff(attempt).await;
+                        Err(anyhow::anyhow!(
+                            "all {} retry attempts failed: {}",
+                            max_attempts,
+                            last_error
+                        ))
+                    })
+                    .await;
+                    match outcome {
+                        Ok(Ok(part)) => catalysts.extend(part),
+                        Ok(Err(e)) => part_errors.push(e.to_string()),
+                        Err(_) => {
+                            debug!(
+                                entity_name = entity_name.as_str(),
+                                timeout_secs = call_timeout_secs,
+                                "catalyst call timed out"
+                            );
+                            part_errors.push(format!("timed out after {call_timeout_secs}s"));
+                        }
                     }
-                    Err(anyhow::anyhow!(
-                        "all {} retry attempts failed: {}",
-                        max_attempts,
-                        last_error
-                    ))
-                })
-                .await;
+                }
 
-                match result {
-                    Ok(Ok(catalysts)) => EntityResult {
+                if catalysts.is_empty() {
+                    EntityResult {
+                        entity_name,
+                        entity_type,
+                        context_hash,
+                        catalysts: None,
+                        error: Some(part_errors.join("; ")),
+                        context_sources,
+                        era_labels,
+                    }
+                } else {
+                    if !part_errors.is_empty() {
+                        warn!(
+                            entity_name = entity_name.as_str(),
+                            failed_parts = part_errors.len(),
+                            parts = job.part_prompts.len(),
+                            "kept catalysts from the parts that succeeded: {}",
+                            part_errors.join("; ")
+                        );
+                    }
+                    EntityResult {
                         entity_name,
                         entity_type,
                         context_hash,
@@ -2392,31 +2527,6 @@ impl<'a> CatalystPipeline<'a> {
                         error: None,
                         context_sources,
                         era_labels,
-                    },
-                    Ok(Err(e)) => EntityResult {
-                        entity_name,
-                        entity_type,
-                        context_hash,
-                        catalysts: None,
-                        error: Some(e.to_string()),
-                        context_sources,
-                        era_labels,
-                    },
-                    Err(_) => {
-                        debug!(
-                            entity_name = entity_name.as_str(),
-                            timeout_secs = entity_timeout_secs,
-                            "entity timed out"
-                        );
-                        EntityResult {
-                            entity_name,
-                            entity_type,
-                            context_hash,
-                            catalysts: None,
-                            error: Some(format!("timed out after {}s", entity_timeout_secs)),
-                            context_sources,
-                            era_labels,
-                        }
                     }
                 }
             });
@@ -3254,6 +3364,30 @@ mod tests {
     }
 
     #[test]
+    fn split_question_allocations_caps_each_call_and_keeps_every_question() {
+        let parts = split_question_allocations(&[1, 2, 3, 4, 5, 6, 13, 26], 30);
+        assert!(parts.iter().all(|p| p.iter().sum::<usize>() <= 30));
+        assert_eq!(parts.iter().flatten().sum::<usize>(), 60);
+        assert_eq!(parts.len(), 2);
+        for era in 0..8 {
+            let total: usize = parts.iter().map(|p| p[era]).sum();
+            assert_eq!(total, [1, 2, 3, 4, 5, 6, 13, 26][era]);
+        }
+    }
+
+    #[test]
+    fn split_question_allocations_splits_one_oversized_period() {
+        let parts = split_question_allocations(&[0, 70], 30);
+        assert_eq!(parts, vec![vec![0, 30], vec![0, 30], vec![0, 10]]);
+    }
+
+    #[test]
+    fn split_question_allocations_leaves_small_jobs_whole() {
+        assert_eq!(split_question_allocations(&[2, 3], 30), vec![vec![2, 3]]);
+        assert_eq!(split_question_allocations(&[0, 0], 30), vec![vec![0, 0]]);
+    }
+
+    #[test]
     fn context_hash_is_stable_across_calls() {
         let a = hash_with("chunk one\nchunk two");
         let b = hash_with("chunk one\nchunk two");
@@ -3364,6 +3498,7 @@ mod tests {
             entity_name: entity.to_string(),
             entity_type: "tag".to_string(),
             user_prompt: "prompt".to_string(),
+            part_prompts: vec!["prompt".to_string()],
             context_hash: hash.to_string(),
             context_sources: Vec::new(),
             era_labels: Vec::new(),
