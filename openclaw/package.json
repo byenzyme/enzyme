@@ -35,7 +35,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/useenzyme/enzyme-rust.git",
-    "directory": "plugin/openclaw"
+    "directory": "openclaw"
   },
   "homepage": "https://memory.enzyme.garden",
   "license": "MIT"

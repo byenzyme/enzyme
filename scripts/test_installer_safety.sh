@@ -64,7 +64,7 @@ EOF
 
 )
 
-run_installer_test "$REPO_ROOT/plugin/install.sh"
-run_installer_test "$REPO_ROOT/plugin/agent/install.sh"
+run_installer_test "$REPO_ROOT/install.sh"
+run_installer_test "$REPO_ROOT/agent/install.sh"
 
 echo "installer-safety: both installers preserved existing ~/.enzyme data"

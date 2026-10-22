@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Sync the packaged Hermes/OpenClaw skill from the runtime skill template.
 
-`plugin/agent-runtime-skill.md` is the canonical runtime instruction body used by
-`enzyme install <runtime>`. `plugin/agent/SKILL.md` needs different frontmatter for
+`agent-runtime-skill.md` is the canonical runtime instruction body used by
+`enzyme install <runtime>`. `agent/SKILL.md` needs different frontmatter for
 the Hermes/OpenClaw skill repo, but its markdown body should stay identical to the
 runtime template to avoid drift.
 """
@@ -13,8 +13,8 @@ import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_SKILL = ROOT / "plugin" / "agent-runtime-skill.md"
-PACKAGED_SKILL = ROOT / "plugin" / "agent" / "SKILL.md"
+RUNTIME_SKILL = ROOT / "agent-runtime-skill.md"
+PACKAGED_SKILL = ROOT / "agent" / "SKILL.md"
 
 RUNTIME_BOUNDARY_ANCHORS = [
     "it is the sole\nsource of truth for scan interpretation",

@@ -19,9 +19,9 @@ use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
 use super::status::build_status_json;
 
-const SKILL_MD: &str = include_str!("../../../../plugin/skills/enzyme-workspace-setup/SKILL.md");
+const SKILL_MD: &str = include_str!("../../../../skills/enzyme-workspace-setup/SKILL.md");
 const KNOWLEDGE_PRACTICE_REVIEW: &str = include_str!(
-    "../../../../plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
+    "../../../../skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
 );
 
 /// Strip YAML frontmatter (delimited by `---`) from a string.

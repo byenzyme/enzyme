@@ -31,7 +31,7 @@ On first use, ask OpenClaw to set up Enzyme for the vault. It should inspect the
 For local development (`--link` mode), OpenClaw rejects symlinked deps that resolve outside the plugin root. Use a packed tarball of the sibling bridge package:
 
 ```bash
-cd plugin/openclaw-bridge && npm pack --pack-destination /tmp
+cd openclaw-bridge && npm pack --pack-destination /tmp
 cd ../openclaw && rm -rf node_modules package-lock.json
 npm install /tmp/enzyme-openclaw-bridge-*.tgz
 openclaw plugins install $(pwd) --link

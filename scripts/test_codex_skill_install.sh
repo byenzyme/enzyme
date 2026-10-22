@@ -108,8 +108,8 @@ grep -q 'source of truth for scan interpretation' "$skill_path"
 grep -q 'do not call `enzyme install <runtime>`' "$skill_path"
 # Installed setup must be the exact current source, not merely contain an old
 # heading or command. This also catches validation with a stale embedded binary.
-cmp "$repo_root/plugin/skills/enzyme-workspace-setup/SKILL.md" "$setup_skill_path"
-cmp "$repo_root/plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md" "$setup_reference_path"
+cmp "$repo_root/skills/enzyme-workspace-setup/SKILL.md" "$setup_skill_path"
+cmp "$repo_root/skills/enzyme-workspace-setup/references/knowledge-practice-review.md" "$setup_reference_path"
 grep -q '<!-- enzyme:start -->' "$agents_path"
 grep -q '<!-- enzyme:end -->' "$agents_path"
 grep -q 'enzyme-workspace-setup/SKILL.md' "$agents_path"

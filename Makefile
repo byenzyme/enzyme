@@ -27,7 +27,7 @@ sync-agent-skill:
 check-agent-skill:
 	python3 scripts/sync-agent-runtime-skill.py --check
 
-# Check the canonical setup skill and thin marketplace bootstrap, and mirror the
+# Check the canonical setup skill, and mirror the
 # neutral practice-review reference into Margins.
 sync-workspace-skill:
 	python3 scripts/sync-workspace-setup-skill.py

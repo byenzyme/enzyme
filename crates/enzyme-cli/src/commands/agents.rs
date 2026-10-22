@@ -15,12 +15,12 @@ const SKILL_URL: &str =
 const WORKSPACE_SETUP_SKILL_URL: &str = "https://raw.githubusercontent.com/byenzyme/enzyme/main/skills/enzyme-workspace-setup/SKILL.md";
 const KNOWLEDGE_PRACTICE_REVIEW_URL: &str = "https://raw.githubusercontent.com/byenzyme/enzyme/main/skills/enzyme-workspace-setup/references/knowledge-practice-review.md";
 
-const LOCAL_INSTRUCTIONS: &str = include_str!("../../../../plugin/agent-instructions.md");
-const LOCAL_SKILL: &str = include_str!("../../../../plugin/agent-runtime-skill.md");
+const LOCAL_INSTRUCTIONS: &str = include_str!("../../../../agent-instructions.md");
+const LOCAL_SKILL: &str = include_str!("../../../../agent-runtime-skill.md");
 const LOCAL_WORKSPACE_SETUP_SKILL: &str =
-    include_str!("../../../../plugin/skills/enzyme-workspace-setup/SKILL.md");
+    include_str!("../../../../skills/enzyme-workspace-setup/SKILL.md");
 const LOCAL_KNOWLEDGE_PRACTICE_REVIEW: &str = include_str!(
-    "../../../../plugin/skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
+    "../../../../skills/enzyme-workspace-setup/references/knowledge-practice-review.md"
 );
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

@@ -14,6 +14,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/useenzyme/enzyme-rust.git",
-    "directory": "plugin/openclaw-bridge"
+    "directory": "openclaw-bridge"
   }
 }

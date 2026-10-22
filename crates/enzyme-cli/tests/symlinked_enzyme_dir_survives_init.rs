@@ -14,7 +14,7 @@
 //! never the directory.
 //!
 //! Additionally, when the link's target has been wiped by an external actor
-//! (issue #6's actual destroyer was the pre-v0.7.0 `plugin/install.sh` running
+//! (issue #6's actual destroyer was the pre-v0.7.0 `install.sh` running
 //! `rm -rf "$HOME/.enzyme"`, leaving the vault's `.enzyme` symlink dangling),
 //! `init` must repair the layout by recreating the target directory THROUGH
 //! the link (`ensure_dir_symlink_aware` in

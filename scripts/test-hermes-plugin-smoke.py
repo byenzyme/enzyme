@@ -2,7 +2,7 @@
 """Smoke test the Hermes plugin source layout without a Hermes install.
 
 This catches the failures that made the nested plugin copy confusing:
-- plugin files must live at plugin/agent root
+- plugin files must live at agent root
 - legacy setup.py must not be imported or shipped
 - register(ctx) must wire expected tools and hooks
 
@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_DIR = ROOT / "plugin" / "agent"
+PLUGIN_DIR = ROOT / "agent"
 
 
 class FakeContext:
@@ -40,7 +40,7 @@ def load_plugin():
         submodule_search_locations=[str(PLUGIN_DIR)],
     )
     if spec is None or spec.loader is None:
-        raise AssertionError("failed to create import spec for plugin/agent")
+        raise AssertionError("failed to create import spec for agent")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
