@@ -258,8 +258,14 @@ Mechanisms to check before proposing changes:
   chronological order (ISO, numeric, prose, or weekday-prefixed dates). Verify a
   missed or false recognition; add/remove its reading rather than split the note
   or stamp legacy `type:` metadata. A page merely listing dates is not a log.
+  Recognition does not read compact or unusual headings (`## 250314`,
+  `## 14.03.25`); declare them with a source date rule such as `date entries
+  in "journal" by headings as "YYMMDD"` rather than retagging notes.
 - Missing/unreadable dates can impair time-aware retrieval; compare parsed dates
-  and date sources with filenames/metadata before proposing a stamp. Doctor
+  and date sources with filenames/metadata before proposing a stamp. When a
+  folder consistently uses one unrecognized format (`250314 standup.md`, a custom
+  frontmatter field), prefer a scoped `date notes in "folder" by filename|field
+  … as "…"` rule inside the `source markdown` block over stamping files. Doctor
   `undated_docs` means a filesystem-derived date, not an unsearchable note. File
   mtime may be the fallback date. Never invent dates from prose or infer tags/aliases.
 - A split series or true duplicate may hurt retrieval, but folder scatter alone
