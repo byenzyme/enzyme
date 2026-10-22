@@ -9,7 +9,7 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 
-use enzyme_core::models::{Catalyst, Embedding, Entity, EntityType};
+use enzyme_core::models::{Catalyst, Embedding, Entity, EntityType, parse_catalyst_text};
 use enzyme_core::pipeline::entity_map::{
     EntityDisposition, EntityKey, EntityMap, FolderGroup, FolderOrigin,
 };
@@ -324,8 +324,13 @@ fn build_entity_json(
     let catalyst_list: Vec<serde_json::Value> = catalysts
         .iter()
         .map(|c| {
+            // Stored text carries a fenced list of source notes for the engine;
+            // readers get the question alone.
+            let text = parse_catalyst_text(&c.text)
+                .map(|parsed| parsed.hypothesis)
+                .unwrap_or_else(|_| c.text.trim().to_string());
             let mut obj = json!({
-                "text": c.text,
+                "text": text,
                 "context": c.context,
             });
             if let Some(era) = c.metadata.get("era").and_then(|v| v.as_str()) {
@@ -848,6 +853,32 @@ mod tests {
             metadata: serde_json::json!({}),
         }])
         .unwrap();
+    }
+
+    #[test]
+    fn petri_shows_catalyst_questions_without_their_source_block() {
+        let entity = Entity {
+            id: None,
+            name: "#focus".to_string(),
+            entity_type: EntityType::Tag,
+            frequency: 1,
+            ranking_weight: 1.0,
+            first_seen: None,
+            last_seen: None,
+            trends: EntityTrends::default(),
+            metadata: serde_json::json!({}),
+        };
+        let catalyst = Catalyst {
+            id: "c1".to_string(),
+            text: "Why did I keep the monolith?\n\n```enzyme-context\n[\"adrs/005.md\"]\n```"
+                .to_string(),
+            entity: "#focus".to_string(),
+            context: "test".to_string(),
+            generated_at: Utc::now(),
+            metadata: serde_json::json!({}),
+        };
+        let json = build_entity_json(&entity, &[catalyst], &HashMap::new(), &HashMap::new());
+        assert_eq!(json["catalysts"][0]["text"], "Why did I keep the monolith?");
     }
 
     #[test]

@@ -170,9 +170,9 @@ fn print_catalyze_tree(
     }
 
     println!(
-        "\n{} results · {:.3} ms",
+        "\n{} results · {:.0} ms",
         response.results.len(),
-        (processing_time * 1000.0).round() / 1000.0
+        processing_time * 1000.0
     );
 }
 
