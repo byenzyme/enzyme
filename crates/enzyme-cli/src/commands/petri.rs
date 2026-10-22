@@ -173,13 +173,14 @@ pub fn build_petri_json(
     let prepared_targets = db.get_all_applied_targets()?;
     let targets_json: Vec<serde_json::Value> = prepared_targets
         .iter()
-        .map(|t| {
-            json!({
-                "path": t.target_path,
+        .filter_map(|t| {
+            let path = super::target::display_target_path(vault_path, &t.target_path)?;
+            Some(json!({
+                "path": path,
                 "doc_count": t.doc_count,
                 "catalyst_count": t.catalyst_count,
                 "prepared_at": t.applied_at.to_rfc3339(),
-            })
+            }))
         })
         .collect();
 

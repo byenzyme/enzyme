@@ -49,7 +49,8 @@ pub async fn run_catalyze(
     } else {
         "hybrid"
     };
-    let response = if let Some(target_path) = target {
+    let resolved_target = target.map(|t| super::target::resolve_target_path(vault_path, t));
+    let response = if let Some(target_path) = resolved_target.as_deref() {
         let target_db_path = paths.target_db(target_path);
         let mut response = None;
         for _ in 0..4 {

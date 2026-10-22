@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +15,36 @@ use enzyme_core::pipeline::indexing::IndexingPipeline;
 use enzyme_core::pipeline::similarity::{SimilarityPipeline, catalysts_fingerprint};
 
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
+
+/// Resolves a `--target` argument. A relative path that is not a directory from
+/// the current directory is tried against the vault root, so the vault-relative
+/// paths that `petri` lists work from anywhere.
+pub fn resolve_target_path(vault_path: &Path, target_path: &Path) -> PathBuf {
+    if target_path.is_relative() && !target_path.is_dir() {
+        let in_vault = vault_path.join(target_path);
+        if in_vault.is_dir() {
+            return in_vault;
+        }
+    }
+    target_path.to_path_buf()
+}
+
+/// How `petri` shows a prepared target: relative to the vault when it lies
+/// inside it, absolute otherwise, and not at all once its folder is gone.
+pub fn display_target_path(vault_path: &Path, stored_path: &str) -> Option<String> {
+    let target = Path::new(stored_path);
+    if !target.is_dir() {
+        return None;
+    }
+    let vault = vault_path
+        .canonicalize()
+        .unwrap_or_else(|_| vault_path.to_path_buf());
+    match target.strip_prefix(&vault) {
+        Ok(rel) if rel.as_os_str().is_empty() => Some(".".to_string()),
+        Ok(rel) => Some(rel.to_string_lossy().to_string()),
+        Err(_) => Some(stored_path.to_string()),
+    }
+}
 
 pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()> {
     for _ in 0..4 {
@@ -244,4 +274,47 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
     display.finish();
 
     Ok(source_db.get_epoch_state()?.active_epoch_id.as_deref() == Some(source_epoch.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn petri_shows_targets_inside_the_vault_relative_to_it() {
+        let vault = tempfile::tempdir().unwrap();
+        let inside = vault.path().join("Readwise");
+        fs::create_dir(&inside).unwrap();
+        let stored = inside.canonicalize().unwrap();
+        assert_eq!(
+            display_target_path(vault.path(), &stored.to_string_lossy()).as_deref(),
+            Some("Readwise")
+        );
+    }
+
+    #[test]
+    fn petri_keeps_outside_targets_absolute_and_drops_missing_ones() {
+        let vault = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let stored = outside.path().canonicalize().unwrap();
+        let stored = stored.to_string_lossy();
+        assert_eq!(
+            display_target_path(vault.path(), &stored).as_deref(),
+            Some(stored.as_ref())
+        );
+        let gone = stored.to_string() + "/missing";
+        assert_eq!(display_target_path(vault.path(), &gone), None);
+    }
+
+    #[test]
+    fn target_arguments_resolve_against_the_vault_when_not_found_locally() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::create_dir(vault.path().join("Readwise-test-target")).unwrap();
+        assert_eq!(
+            resolve_target_path(vault.path(), Path::new("Readwise-test-target")),
+            vault.path().join("Readwise-test-target")
+        );
+        let absolute = vault.path().to_path_buf();
+        assert_eq!(resolve_target_path(vault.path(), &absolute), absolute);
+    }
 }

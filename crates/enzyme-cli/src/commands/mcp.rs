@@ -235,7 +235,8 @@ impl EnzymeMcp {
             McpError::internal_error(format!("embedding service failed: {e}"), None)
         })?;
         let response = if let Some(target) = p.target.as_deref() {
-            let target_path = PathBuf::from(target);
+            let target_path =
+                super::target::resolve_target_path(&vault_path, &PathBuf::from(target));
             if !target_path.is_dir() {
                 return Err(McpError::invalid_params(
                     format!("Not a directory: {}", target_path.display()),
