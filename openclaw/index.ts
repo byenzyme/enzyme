@@ -35,7 +35,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "enzyme_petri",
       description:
-        "Vault working memory. Returns top entities and catalysts (thematic phrases) ranked by relevance to the query, or by recency if no query is given. Use the catalyst vocabulary to compose enzyme_catalyze queries.",
+        "Vault working memory. Returns top entities and their catalysts (generated questions about what the user decided, changed, or left open), ranked by relevance to the query, or by recency if no query is given. Use it to see what matters and what the user calls it; when you can only search once or twice, carry a relevant catalyst phrase into enzyme_catalyze.",
       parameters: {
         type: "object",
         properties: {
@@ -63,12 +63,12 @@ export default definePluginEntry({
     api.registerTool({
       name: "enzyme_catalyze",
       description:
-        "Semantic search over the vault by concept/theme. Compose queries with catalyst vocabulary from enzyme_petri rather than the user's raw words.",
+        "Search the vault by keyword and meaning together. Names, titles, plain words, and concepts all work; start from the user's own wording and search several times with different wording for questions about their own thinking.",
       parameters: {
         type: "object",
         required: ["query"],
         properties: {
-          query: { type: "string", description: "Concept-style query." },
+          query: { type: "string", description: "What to look for, in the user's own words or a sharper variant." },
         },
       },
       async execute(_id: string, params: { query: string }) {

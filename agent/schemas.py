@@ -9,8 +9,10 @@ ENZYME_PETRI = {
         "What is this vault about? Returns the main topics, how recently active "
         "they are, and thematic questions running through them. Use this when the "
         "user asks what's here, what they've been thinking about, or to orient "
-        "yourself in a workspace of notes. The thematic questions (catalysts) are "
-        "the vocabulary for enzyme_catalyze queries — pass them as-is or adapt them."
+        "yourself in a workspace of notes. The questions (catalysts) are generated "
+        "from the notes, not written by the user: use them to see what matters and "
+        "what the user calls it. When you can only search once or twice, carry a "
+        "relevant catalyst phrase into the enzyme_catalyze query."
     ),
     "parameters": {
         "type": "object",
@@ -37,12 +39,13 @@ ENZYME_PETRI = {
 ENZYME_CATALYZE = {
     "name": "enzyme_catalyze",
     "description": (
-        "Find notes and excerpts across the vault by concept. Searches a "
-        "pre-built index of the user's writing — finds things they forgot they "
-        "wrote, connects notes from different time periods, surfaces patterns "
-        "across hundreds of files. Returns quoted excerpts with file paths and "
-        "dates. Use this instead of grep/search_files when looking for ideas, "
-        "themes, or past thinking — it finds content that keyword search misses."
+        "Find notes and excerpts across the vault by keyword and meaning together. "
+        "Searches a local index of the user's writing, so names, titles, plain "
+        "words, and concepts all work. Returns excerpts with file paths, each with "
+        "the catalyst that best connects it to the query. Use this for ideas, "
+        "themes, or past thinking; for questions about the user's own thinking, "
+        "search several times with different wording. Use grep when you need every "
+        "occurrence of literal text."
     ),
     "parameters": {
         "type": "object",
@@ -50,9 +53,8 @@ ENZYME_CATALYZE = {
             "query": {
                 "type": "string",
                 "description": (
-                    "A conceptual query inspired by the user's intent. Use the "
-                    "petri catalysts and entity themes as context to infer a few "
-                    "different angles — don't copy catalyst phrases verbatim."
+                    "What to look for, starting from the user's own wording. "
+                    "Vary the wording across searches to cover different angles."
                 ),
             },
             "limit": {
