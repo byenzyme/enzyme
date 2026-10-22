@@ -10,12 +10,14 @@ use super::exit::{ExitKind, FailureWithSummary};
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::search::context::{CatalyzeResponse, ContextSearch, TARGET_PROJECTION_NOT_READY};
+use enzyme_core::search::hybrid::HybridSearch;
 
 pub async fn run_catalyze(
     vault_path: &Path,
     query: &str,
     limit: usize,
     target: Option<&Path>,
+    catalyst_routing: bool,
     _register_str: &str,
     json_output: bool,
 ) -> Result<()> {
@@ -42,6 +44,11 @@ pub async fn run_catalyze(
     let service = get_embedding_service(&paths.home)?;
 
     let start = Instant::now();
+    let strategy = if target.is_some() || catalyst_routing {
+        "catalyze"
+    } else {
+        "hybrid"
+    };
     let response = if let Some(target_path) = target {
         let target_db_path = paths.target_db(target_path);
         let mut response = None;
@@ -61,8 +68,10 @@ pub async fn run_catalyze(
         response.ok_or_else(|| {
             anyhow::anyhow!("target projection changed repeatedly during preparation")
         })?
-    } else {
+    } else if catalyst_routing {
         ContextSearch::new(&db, service).catalyze_search(query, limit)?
+    } else {
+        HybridSearch::new(&db, service).search(query, limit)?
     };
     let processing_time = start.elapsed().as_secs_f64();
 
@@ -70,7 +79,7 @@ pub async fn run_catalyze(
     let mut output = serde_json::to_value(&response)?;
     if let Some(obj) = output.as_object_mut() {
         obj.insert("query".into(), json!(query));
-        obj.insert("search_strategy".into(), json!("catalyze"));
+        obj.insert("search_strategy".into(), json!(strategy));
         obj.insert(
             "processing_time".into(),
             json!((processing_time * 1000.0).round() / 1000.0),
@@ -79,7 +88,7 @@ pub async fn run_catalyze(
     }
 
     if !json_output && atty::is(atty::Stream::Stdout) {
-        print_catalyze_tree(query, &response, processing_time);
+        print_catalyze_tree(query, &response, processing_time, strategy == "hybrid");
     } else {
         println!("{}", serde_json::to_string(&output)?);
     }
@@ -87,15 +96,30 @@ pub async fn run_catalyze(
     Ok(())
 }
 
-fn print_catalyze_tree(query: &str, response: &CatalyzeResponse, processing_time: f64) {
+fn print_catalyze_tree(
+    query: &str,
+    response: &CatalyzeResponse,
+    processing_time: f64,
+    hybrid: bool,
+) {
     println!("Catalyze \"{}\"", query);
 
-    if response.top_contributing_catalysts.is_empty() {
+    // Hybrid results stand on their own; catalysts only annotate them.
+    if response.top_contributing_catalysts.is_empty() && !hybrid {
         println!("└─ no activated bridges");
         return;
     }
 
-    println!("├─ activated bridges");
+    if !response.top_contributing_catalysts.is_empty() {
+        println!(
+            "├─ {}",
+            if hybrid {
+                "linked catalysts"
+            } else {
+                "activated bridges"
+            }
+        );
+    }
     for (idx, catalyst) in response.top_contributing_catalysts.iter().enumerate() {
         let bridge_no = idx + 1;
         println!(

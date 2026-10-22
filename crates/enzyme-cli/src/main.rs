@@ -141,7 +141,7 @@ enum Commands {
         lock_timeout: Option<u64>,
     },
 
-    /// Search using catalyst-based approximate matching
+    /// Search notes by keyword and meaning; results note the connecting catalyst
     Catalyze {
         /// Search query
         query: String,
@@ -153,6 +153,12 @@ enum Commands {
         /// Target directory to prepare and search instead of the vault itself
         #[arg(long)]
         target: Option<PathBuf>,
+
+        /// How notes are ranked: "hybrid" (keyword + semantic, catalysts annotate
+        /// results) or "catalysts" (route through catalyst questions). --target
+        /// always routes through catalysts.
+        #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "catalysts"])]
+        routing: String,
 
         /// Deprecated no-op: presentation is controlled by installed agent instructions
         #[arg(long, default_value = "explore", hide = true)]
@@ -712,6 +718,7 @@ async fn run(cli: Cli) -> Result<()> {
             query,
             limit,
             target,
+            routing,
             register,
             json,
         } => {
@@ -720,6 +727,7 @@ async fn run(cli: Cli) -> Result<()> {
                 &query,
                 limit,
                 target.as_deref(),
+                routing == "catalysts",
                 &register,
                 json,
             )

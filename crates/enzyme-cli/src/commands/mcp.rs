@@ -14,6 +14,7 @@ use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::search::context::{ContextSearch, TARGET_PROJECTION_NOT_READY};
+use enzyme_core::search::hybrid::HybridSearch;
 
 use super::init::{ensure_fresh_vault, run_init};
 use super::petri::build_petri_json;
@@ -134,6 +135,12 @@ struct CatalyzeParams {
     /// The source vault still supplies catalysts.
     #[schemars(description = "Optional path to a corpus to prepare and search")]
     target: Option<String>,
+
+    /// "hybrid" (default): keyword + semantic ranking, each result annotated
+    /// with the catalyst that best connects it to the query.
+    /// "catalysts": route the query through catalyst questions.
+    #[schemars(description = "Ranking: hybrid (default, keyword + semantic) or catalysts")]
+    routing: Option<String>,
 }
 
 #[tool_router]
@@ -210,7 +217,7 @@ impl EnzymeMcp {
     }
 
     #[tool(
-        description = "Search vault or a target corpus by concept using catalyst-based matching"
+        description = "Search the vault by keyword and meaning (hybrid ranking; each result notes the catalyst that connects it to the query), or a target corpus by catalyst matching"
     )]
     async fn catalyze(
         &self,
@@ -270,9 +277,13 @@ impl EnzymeMcp {
                     None,
                 )
             })?
-        } else {
+        } else if p.routing.as_deref() == Some("catalysts") {
             ContextSearch::new(&db, service)
                 .catalyze_search(&p.query, limit)
+                .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
+        } else {
+            HybridSearch::new(&db, service)
+                .search(&p.query, limit)
                 .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
         };
 

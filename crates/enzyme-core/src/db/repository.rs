@@ -353,6 +353,37 @@ impl Database {
         Ok(titles)
     }
 
+    /// Catalyst links for the given notes: `(catalyst_id, file_path, similarity)`
+    /// from the precomputed catalyst-to-chunk similarities, best chunk per
+    /// catalyst and note.
+    pub fn get_catalyst_links_for_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<(String, String, f64)>> {
+        let mut links = Vec::new();
+        for chunk in paths.chunks(500) {
+            let placeholders = (1..=chunk.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT catalyst_id, file_path, MAX(similarity) FROM catalyst_similarities
+                 WHERE file_path IN ({placeholders})
+                 GROUP BY catalyst_id, file_path"
+            );
+            let params = chunk.iter().map(|p| Value::Text(p.clone())).collect();
+            let rows = self.query_read(&sql, params, |row| {
+                Ok((
+                    row.get::<String>(0)?,
+                    row.get::<String>(1)?,
+                    row.get::<f64>(2)?,
+                ))
+            })?;
+            links.extend(rows);
+        }
+        Ok(links)
+    }
+
     /// Retrieve a single document by its `source_ref` (relative vault path).
     pub fn get_document_by_path(&self, source_ref: &str) -> Result<Option<Document>> {
         let rows = self.query_read(

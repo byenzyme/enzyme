@@ -346,8 +346,17 @@ fn init_whose_catalysts_all_fail_exits_5_with_summary() {
 fn catalyze_json_forces_the_json_envelope() {
     let (fixture, _llm) = initialized_with_catalysts();
     let out = json_stdout(&fixture.cli().args(["catalyze", "antenna", "--json"]).run());
-    assert_eq!(out["search_strategy"], "catalyze");
-    assert!(out["results"].is_array());
+    assert_eq!(out["search_strategy"], "hybrid");
+    assert!(!out["results"].as_array().unwrap().is_empty());
+
+    let legacy = json_stdout(
+        &fixture
+            .cli()
+            .args(["catalyze", "antenna", "--json", "--routing", "catalysts"])
+            .run(),
+    );
+    assert_eq!(legacy["search_strategy"], "catalyze");
+    assert!(legacy["results"].is_array());
 }
 
 // ── status ───────────────────────────────────────────────────────────────
