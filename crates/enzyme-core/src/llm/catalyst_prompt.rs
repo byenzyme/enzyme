@@ -154,6 +154,10 @@ Use this to understand how the current entity relates to the broader landscape o
 /// custom readable profile. The per-entity profile owns semantic intent, so
 /// injecting the built-in reflective catalog and its examples would create a
 /// competing instruction surface.
+/// Question format used under custom reading profiles; voice comes from the profile.
+const CUSTOM_PROFILE_QUESTION_FORMAT: &str = "Generate catalysts as single sentence questions, using vocabulary drawn \
+from the excerpts. Write them in the voice and person the selected reading profile asks for.";
+
 pub fn build_custom_reading_system_prompt(
     format_key: Option<&str>,
     prompt_context: Option<&str>,
@@ -161,6 +165,14 @@ pub fn build_custom_reading_system_prompt(
     let fmt = format_key
         .and_then(get_format)
         .unwrap_or_else(|| get_format(DEFAULT_FORMAT_KEY).unwrap());
+    // A custom reading profile owns voice and person: the built-in question
+    // format's first-person rule would contradict a profile written for, say,
+    // a company archive. Other formats keep their own wording.
+    let format_prompt = if fmt.key == DEFAULT_FORMAT_KEY {
+        CUSTOM_PROFILE_QUESTION_FORMAT
+    } else {
+        fmt.format_prompt
+    };
     let mut prompt = format!(
         "You generate source-grounded semantic retrieval handles for a knowledge base.\n\n\
 {}\n\n\
@@ -173,7 +185,7 @@ which evidence is relevant. Leave the requested relation open rather than insert
 answer. Treat interpretations as tentative, make no clinical, diagnostic, or personality claims, \n\
 and ground every catalyst in the supplied excerpts.\n\n\
 Always respond with valid JSON that includes catalysts, topic names, and era labels.",
-        fmt.format_prompt,
+        format_prompt,
     );
     if let Some(context) = prompt_context {
         prompt.push_str(&format!(
@@ -1113,6 +1125,11 @@ mod tests {
         assert!(prompt.contains("Organization and source context"));
         assert!(!prompt.contains("<catalyst_profiles>"));
         assert!(!prompt.contains("What does the commitment to craft cost"));
+        assert!(
+            !prompt.contains("first-person"),
+            "the profile owns voice: {prompt}"
+        );
+        assert!(prompt.contains("voice and person the selected reading profile asks for"));
     }
 
     #[test]
