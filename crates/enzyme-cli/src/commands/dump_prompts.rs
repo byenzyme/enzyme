@@ -76,7 +76,9 @@ pub async fn run_dump_prompts(
         epoch_id: None,
     };
 
-    let llm = LlmClient::with_base_url("dummy", "http://localhost:0");
+    // A non-local URL so excerpt limits mirror hosted runs (localhost reads as a
+    // local model, capped at 10 excerpts). No request is ever sent.
+    let llm = LlmClient::with_base_url("dummy", "https://dump-prompts.invalid");
     let cat_pipeline = CatalystPipeline::new(&db, &llm, None);
 
     let count = cat_pipeline.dump_prompts(&entities, &cat_config, output)?;
