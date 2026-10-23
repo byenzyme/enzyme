@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS docs (
     embedded_content_hash TEXT,
     metadata        TEXT    DEFAULT '{}'
 );
+-- Covers folder summaries (latest modified_at per folder) and folder listings.
+-- modified_at is stored after the document text, so reading it from the table
+-- walks every long document's text pages; on large vaults that is gigabytes.
+CREATE INDEX IF NOT EXISTS idx_docs_source_modified ON docs(source_ref, modified_at);
 
 -- Junction tables (replacing JSON blob queries from Python) -------------------
 CREATE TABLE IF NOT EXISTS doc_tags (
@@ -77,7 +81,10 @@ CREATE TABLE IF NOT EXISTS entity_occurrences (
     date_source    TEXT    DEFAULT 'filesystem',
     weight         REAL    NOT NULL DEFAULT 1.0
 );
-CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity ON entity_occurrences(entity_id);
+-- Covers per-entity weight sums, which petri and selection read for every
+-- entity; without weight in the index each sum reads whole occurrence rows.
+CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity_weight ON entity_occurrences(entity_id, weight);
+DROP INDEX IF EXISTS idx_entity_occurrences_entity;
 CREATE INDEX IF NOT EXISTS idx_entity_occurrences_file   ON entity_occurrences(file_path);
 
 -- Catalysts -------------------------------------------------------------------
@@ -289,7 +296,8 @@ pub const EXPECTED_INDEXES: &[&str] = &[
     "idx_entities_frequency",
     "idx_catalysts_entity",
     "idx_catalysts_context",
-    "idx_entity_occurrences_entity",
+    "idx_entity_occurrences_entity_weight",
+    "idx_docs_source_modified",
     "idx_entity_occurrences_file",
     "idx_catalyst_epochs_status",
     "idx_epoch_similarities_lookup",

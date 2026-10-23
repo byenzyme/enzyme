@@ -85,6 +85,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn entity_weights_and_folder_summaries_read_only_covering_indexes() {
+        let db = test_db();
+        let plan = |sql: &str| -> String {
+            db.query_read(&format!("EXPLAIN QUERY PLAN {sql}"), vec![], |row| {
+                row.get::<String>(3)
+            })
+            .unwrap()
+            .join("\n")
+        };
+        let weights = plan(
+            "SELECT e.id, (SELECT SUM(eo.weight) FROM entity_occurrences eo WHERE eo.entity_id = e.id) FROM entities e",
+        );
+        assert!(
+            weights.contains("COVERING INDEX idx_entity_occurrences_entity_weight"),
+            "{weights}"
+        );
+        let folders = plan(
+            "SELECT SUBSTR(source_ref, 1, INSTR(source_ref, '/') - 1) AS folder, COUNT(*), MAX(modified_at) FROM docs GROUP BY folder",
+        );
+        assert!(
+            folders.contains("COVERING INDEX idx_docs_source_modified"),
+            "{folders}"
+        );
+    }
+
+    #[test]
+    fn reopening_an_older_database_replaces_the_entity_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enzyme.db");
+        let db = Database::open(&path).unwrap();
+        db.execute_write("DROP INDEX idx_entity_occurrences_entity_weight", vec![])
+            .unwrap();
+        db.execute_write(
+            "CREATE INDEX idx_entity_occurrences_entity ON entity_occurrences(entity_id)",
+            vec![],
+        )
+        .unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        let names: Vec<String> = db
+            .query_read(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'entity_occurrences'",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        assert!(names.contains(&"idx_entity_occurrences_entity_weight".to_string()));
+        assert!(!names.contains(&"idx_entity_occurrences_entity".to_string()));
+    }
+
     // -- Document + junction table round-trip ----------------------------------
 
     #[test]
