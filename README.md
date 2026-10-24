@@ -9,7 +9,7 @@
 
 </div>
 
-Enzyme helps your coding agent work from your notes. It reads how your Markdown
+Enzyme orients your coding agent to your wiki. It reads how your Markdown
 notes are already organized (folders, tags, links, and dates) and builds a local
 index, so Claude Code or Codex can pull up related notes from months of writing
 and cite them.
