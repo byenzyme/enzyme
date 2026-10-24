@@ -150,6 +150,11 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "10")]
         limit: usize,
 
+        /// Also list up to this many further matches after the results, one line
+        /// each (path, date, snippet), from a deeper pool (hybrid search only)
+        #[arg(long, default_value = "0")]
+        candidates: usize,
+
         /// Target directory to prepare and search instead of the vault itself
         #[arg(long)]
         target: Option<PathBuf>,
@@ -717,6 +722,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Catalyze {
             query,
             limit,
+            candidates,
             target,
             routing,
             register,
@@ -726,6 +732,7 @@ async fn run(cli: Cli) -> Result<()> {
                 &vault_path,
                 &query,
                 limit,
+                candidates,
                 target.as_deref(),
                 routing == "catalysts",
                 &register,

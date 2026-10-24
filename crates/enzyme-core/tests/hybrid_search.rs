@@ -178,3 +178,54 @@ fn notes_are_found_by_frontmatter_people_and_title() {
     let by_title = db.search_chunks_fts("\"northwind\"", 10, 10).unwrap();
     assert_eq!(by_title[0].0, "renewal-thread.md");
 }
+
+#[test]
+fn candidates_list_further_notes_without_changing_the_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let vault = temp.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    for i in 0..8 {
+        std::fs::write(
+            vault.join(format!("rollout {i}.md")),
+            format!(
+                "---\ntitle: Rollout {i}\n---\nCanary rollout notes for region {i}. The canary held at 5% before widening."
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        vault.join("garden.md"),
+        "Planted tomatoes and basil along the south fence.",
+    )
+    .unwrap();
+
+    let db = Database::open(temp.path().join("enzyme.db")).unwrap();
+    IndexingPipeline::new(&db, vault.clone())
+        .run(true, |_| {})
+        .unwrap();
+    let service = get_embedding_service(&vault).unwrap();
+    EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
+
+    let search = HybridSearch::new(&db, service);
+    let plain = search.search("canary rollout", 3).unwrap();
+    let wide = search
+        .search_with_candidates("canary rollout", 3, 4)
+        .unwrap();
+    let paths = |r: &enzyme_core::search::context::CatalyzeResponse| {
+        r.results
+            .iter()
+            .map(|x| x.file_path.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(paths(&plain), paths(&wide));
+    assert!(plain.candidates.is_empty());
+    assert_eq!(wide.candidates.len(), 4);
+    for candidate in &wide.candidates {
+        assert!(!paths(&wide).contains(&candidate.file_path));
+        assert!(candidate.snippet.to_lowercase().contains("canary"));
+        assert!(!candidate.snippet.contains("title:"));
+        assert!(candidate.date.is_some());
+    }
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("candidates").is_none());
+}

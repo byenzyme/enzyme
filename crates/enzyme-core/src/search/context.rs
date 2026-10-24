@@ -211,6 +211,21 @@ fn prioritize_era_chunks(
 pub struct CatalyzeResponse {
     pub results: Vec<CatalyzeResultItem>,
     pub top_contributing_catalysts: Vec<TopCatalyst>,
+    /// Further matches after `results`, one line each, when the caller asks
+    /// for a candidate list (hybrid search only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<CatalyzeCandidate>,
+}
+
+/// A further match listed compactly after the full results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalyzeCandidate {
+    pub file_path: String,
+    /// Note date (YYYY-MM-DD), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Short excerpt of the best-matching passage.
+    pub snippet: String,
 }
 
 #[cfg(test)]
@@ -607,6 +622,7 @@ impl<'a> ContextSearch<'a> {
             return Ok(CatalyzeResponse {
                 results: Vec::new(),
                 top_contributing_catalysts: Vec::new(),
+                candidates: Vec::new(),
             });
         }
         let entities = self.db.get_all_entities()?;
@@ -936,6 +952,7 @@ impl<'a> ContextSearch<'a> {
         Ok(CatalyzeResponse {
             results,
             top_contributing_catalysts: top_catalysts,
+            candidates: Vec::new(),
         })
     }
 

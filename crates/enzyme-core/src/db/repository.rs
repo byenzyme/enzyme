@@ -2493,6 +2493,26 @@ impl Database {
     }
 
     /// Get the content of a specific chunk by file path and chunk index.
+    /// A chunk's text with its note's `created_at` (ms since epoch).
+    pub fn get_chunk_content_and_created(
+        &self,
+        file_path: &str,
+        chunk_index: i64,
+    ) -> Result<Option<(String, i64)>> {
+        let rows = self.query_read(
+            "SELECT c.content, d.created_at
+             FROM chunks c
+             JOIN docs d ON d.id = c.doc_id
+             WHERE d.source_ref = ?1 AND c.chunk_index = ?2",
+            vec![
+                Value::Text(file_path.to_string()),
+                Value::Integer(chunk_index),
+            ],
+            |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
+        )?;
+        Ok(rows.into_iter().next())
+    }
+
     pub fn get_chunk_content(&self, file_path: &str, chunk_index: i64) -> Result<Option<String>> {
         let rows = self.query_read(
             "SELECT c.content

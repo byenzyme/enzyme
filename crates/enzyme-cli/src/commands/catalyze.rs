@@ -16,6 +16,7 @@ pub async fn run_catalyze(
     vault_path: &Path,
     query: &str,
     limit: usize,
+    candidates: usize,
     target: Option<&Path>,
     catalyst_routing: bool,
     _register_str: &str,
@@ -72,7 +73,7 @@ pub async fn run_catalyze(
     } else if catalyst_routing {
         ContextSearch::new(&db, service).catalyze_search(query, limit)?
     } else {
-        HybridSearch::new(&db, service).search(query, limit)?
+        HybridSearch::new(&db, service).search_with_candidates(query, limit, candidates)?
     };
     let processing_time = start.elapsed().as_secs_f64();
 
@@ -167,6 +168,18 @@ fn print_catalyze_tree(
         }
         if !is_last {
             println!("   │");
+        }
+    }
+
+    if !response.candidates.is_empty() {
+        println!("\n   more candidates");
+        for candidate in &response.candidates {
+            println!(
+                "   · {} · {}",
+                candidate.file_path,
+                candidate.date.as_deref().unwrap_or("undated")
+            );
+            println!("       {}", candidate.snippet);
         }
     }
 

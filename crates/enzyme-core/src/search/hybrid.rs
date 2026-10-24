@@ -6,7 +6,7 @@
 //! (2.55 vs at most 1.3 strong links per top 10). Mixing catalyst routes into
 //! the ranking made it worse, so catalysts only attach to results here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -15,7 +15,9 @@ use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Embedding, parse_catalyst_text};
 use crate::search::bm25::Bm25Index;
-use crate::search::context::{CatalyzeResponse, CatalyzeResultItem, TopCatalyst};
+use crate::search::context::{
+    CatalyzeCandidate, CatalyzeResponse, CatalyzeResultItem, TopCatalyst,
+};
 
 /// Weight of the dense side; the lexical side gets `1 - DENSE_WEIGHT`.
 pub(crate) const DENSE_WEIGHT: f64 = 0.4;
@@ -23,6 +25,16 @@ pub(crate) const DENSE_WEIGHT: f64 = 0.4;
 const CANDIDATES_PER_SIDE: usize = 30;
 /// Chunks pulled from BM25 before rolling up to notes.
 const BM25_CHUNK_DEPTH: usize = 400;
+/// Notes taken from each side when a candidate list is requested. On large
+/// vaults the note a question needs often ranks below the top 30 on one side
+/// but within the top few hundred, and pulling deeper costs no extra time:
+/// FTS5 scores every match either way, and the dense side already scans every
+/// vector.
+const WIDE_CANDIDATES_PER_SIDE: usize = 200;
+/// Chunks pulled from BM25 when building the candidate list.
+const WIDE_BM25_CHUNK_DEPTH: usize = 3000;
+/// Characters of passage shown per candidate.
+const SNIPPET_CHARS: usize = 160;
 
 /// Question words dropped from the lexical query so they don't outvote topic
 /// words ("how does the soil plan..." should match on soil, plan).
@@ -50,9 +62,23 @@ impl<'a> HybridSearch<'a> {
     /// passage and, when catalysts exist, the catalyst that best connects it to
     /// the query.
     pub fn search(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
+        self.search_with_candidates(query, limit, 0)
+    }
+
+    /// As [`search`](Self::search), then list up to `candidates` further notes
+    /// compactly (path, date, snippet). The full results are exactly those of
+    /// `search`; the list comes from wider pools on each side, fused the same
+    /// way, so an agent can see and open notes ranked below the full results.
+    pub fn search_with_candidates(
+        &self,
+        query: &str,
+        limit: usize,
+        candidates: usize,
+    ) -> Result<CatalyzeResponse> {
         let empty = CatalyzeResponse {
             results: Vec::new(),
             top_contributing_catalysts: Vec::new(),
+            candidates: Vec::new(),
         };
         if limit == 0 {
             return Ok(empty);
@@ -60,11 +86,21 @@ impl<'a> HybridSearch<'a> {
         let start = Instant::now();
         let query_vec = self.service.embed_query(query)?;
         let embedding_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let dense = top_notes(dense_hits(self.db, &query_vec)?, CANDIDATES_PER_SIDE);
+        let (per_side, depth) = if candidates == 0 {
+            (CANDIDATES_PER_SIDE, BM25_CHUNK_DEPTH)
+        } else {
+            (
+                WIDE_CANDIDATES_PER_SIDE.max(limit + candidates),
+                WIDE_BM25_CHUNK_DEPTH,
+            )
+        };
+        let dense_pool = top_notes(dense_hits(self.db, &query_vec)?, per_side);
         let dense_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms;
-        let lexical = top_notes(lexical_hits(self.db, query)?, CANDIDATES_PER_SIDE);
+        let lexical_pool = top_notes(lexical_hits(self.db, query, depth, per_side)?, per_side);
         let lexical_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms - dense_ms;
-        let fused = fuse(&dense, &lexical, limit);
+        let head =
+            |pool: &[(String, NoteHit)]| pool[..pool.len().min(CANDIDATES_PER_SIDE)].to_vec();
+        let fused = fuse(&head(&dense_pool), &head(&lexical_pool), limit);
         if fused.is_empty() {
             return Ok(empty);
         }
@@ -83,6 +119,30 @@ impl<'a> HybridSearch<'a> {
                 via_catalyst_text: None,
             });
         }
+        let candidates = if candidates == 0 {
+            Vec::new()
+        } else {
+            let shown: HashSet<&String> = fused.iter().map(|(path, _, _)| path).collect();
+            let mut list = Vec::with_capacity(candidates);
+            for (path, _, chunk_index) in fuse(&dense_pool, &lexical_pool, usize::MAX) {
+                if list.len() == candidates {
+                    break;
+                }
+                if shown.contains(&path) {
+                    continue;
+                }
+                let (content, created) = self
+                    .db
+                    .get_chunk_content_and_created(&path, chunk_index)?
+                    .unwrap_or_default();
+                list.push(CatalyzeCandidate {
+                    date: note_date(created),
+                    snippet: snippet(&content, query, SNIPPET_CHARS),
+                    file_path: path,
+                });
+            }
+            list
+        };
         let annotation_start = Instant::now();
         let top_contributing_catalysts = self.annotate(&query_vec, &mut results)?;
         if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
@@ -96,6 +156,7 @@ impl<'a> HybridSearch<'a> {
         Ok(CatalyzeResponse {
             results,
             top_contributing_catalysts,
+            candidates,
         })
     }
 
@@ -206,11 +267,16 @@ fn dense_hits(db: &Database, query_vec: &[f32]) -> Result<HashMap<String, NoteHi
 
 /// Best lexical chunk per note. New vaults use persistent FTS5; older vaults
 /// opened read-only fall back to the original in-memory BM25 path.
-fn lexical_hits(db: &Database, query: &str) -> Result<HashMap<String, NoteHit>> {
+fn lexical_hits(
+    db: &Database,
+    query: &str,
+    chunk_depth: usize,
+    note_limit: usize,
+) -> Result<HashMap<String, NoteHit>> {
     if db.has_chunk_fts()? {
         let mut hits: HashMap<String, NoteHit> = HashMap::new();
         for (path, chunk_index, score) in
-            db.search_chunks_fts(&fts_query(query), BM25_CHUNK_DEPTH, CANDIDATES_PER_SIDE)?
+            db.search_chunks_fts(&fts_query(query), chunk_depth, note_limit)?
         {
             let slot = hits.entry(path).or_insert((chunk_index, f64::MIN));
             if score > slot.1 {
@@ -230,7 +296,7 @@ fn lexical_hits(db: &Database, query: &str) -> Result<HashMap<String, NoteHit>> 
     index.build();
     let build_ms = start.elapsed().as_secs_f64() * 1000.0 - load_ms;
     let mut hits: HashMap<String, NoteHit> = HashMap::new();
-    for result in index.search(&lexical_query(query), BM25_CHUNK_DEPTH) {
+    for result in index.search(&lexical_query(query), chunk_depth) {
         let Some((chunk, path)) = result.doc_id.split_once('\t') else {
             continue;
         };
@@ -312,6 +378,49 @@ fn lexical_query(query: &str) -> String {
         }
     }
     terms.join(" ")
+}
+
+/// A note's `created_at` (ms since epoch) as YYYY-MM-DD; `None` when unset.
+fn note_date(created_ms: i64) -> Option<String> {
+    if created_ms <= 0 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_millis(created_ms).map(|t| t.format("%Y-%m-%d").to_string())
+}
+
+/// About `chars` characters of `content` on one line, starting a little before
+/// the first query term it contains, after any frontmatter block.
+fn snippet(content: &str, query: &str, chars: usize) -> String {
+    let body = content
+        .strip_prefix("---")
+        .and_then(|rest| rest.split_once("\n---").map(|(_, after)| after))
+        .unwrap_or(content);
+    let text: Vec<char> = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .collect();
+    let lower: String = text.iter().flat_map(|c| c.to_lowercase()).collect();
+    // Character position of the earliest query term (lowercasing can change
+    // byte lengths, so positions are counted in characters of `lower`).
+    let hit = lexical_query(query)
+        .split(' ')
+        .filter(|t| t.len() > 2)
+        .filter_map(|t| lower.find(t).map(|byte| lower[..byte].chars().count()))
+        .min()
+        .unwrap_or(0)
+        .min(text.len());
+    let start = hit.saturating_sub(chars / 4);
+    let end = (start + chars).min(text.len());
+    let mut out: String = text[start..end].iter().collect();
+    if start > 0 {
+        out.insert(0, '…');
+    }
+    if end < text.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// The `k` highest-scoring notes, best first.
@@ -436,6 +545,26 @@ mod tests {
         let stored = "Why did I keep the monolith?\n\n```enzyme-context\n[\"adrs/005.md\"]\n```";
         assert_eq!(question_text(stored), "Why did I keep the monolith?");
         assert_eq!(question_text("  Plain question?  "), "Plain question?");
+    }
+
+    #[test]
+    fn snippet_starts_near_the_first_query_term_after_frontmatter() {
+        let content = "---\ntitle: Notes\n---\nIntro words here. ".to_string()
+            + &"filler ".repeat(30)
+            + "The canary held at five percent before the rollout widened.";
+        let s = snippet(&content, "when did the canary widen", 60);
+        assert!(s.starts_with('…'));
+        assert!(s.contains("canary held"));
+        assert!(!s.contains("title"));
+        assert!(s.chars().count() <= 62);
+        assert_eq!(snippet("Short note.", "nothing matches", 60), "Short note.");
+        assert_eq!(snippet("Ünïcödé façade text", "façade", 8), "…é façade…");
+    }
+
+    #[test]
+    fn note_date_formats_milliseconds_and_skips_unset() {
+        assert_eq!(note_date(1_767_225_600_000).as_deref(), Some("2026-01-01"));
+        assert_eq!(note_date(0), None);
     }
 
     #[test]

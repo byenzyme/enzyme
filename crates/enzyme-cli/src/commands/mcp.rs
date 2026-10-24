@@ -125,6 +125,12 @@ struct CatalyzeParams {
     #[schemars(description = "Maximum results")]
     limit: Option<u64>,
 
+    /// Further matches listed after the results, one line each
+    #[schemars(
+        description = "Also list up to this many further matches (path, date, snippet) after the results; hybrid ranking only"
+    )]
+    candidates: Option<u64>,
+
     /// Presentation register: "explore" (default, profile-specific guidance for wonder/exploration),
     /// "continuity" (restore what the user knew, show trajectory, enable forward motion),
     /// "reference" (surface what drew attention, capture patterns)
@@ -284,7 +290,7 @@ impl EnzymeMcp {
                 .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
         } else {
             HybridSearch::new(&db, service)
-                .search(&p.query, limit)
+                .search_with_candidates(&p.query, limit, p.candidates.unwrap_or(0) as usize)
                 .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
         };
 
