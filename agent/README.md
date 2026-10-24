@@ -370,4 +370,4 @@ The live test exercises real `hermes chat` turns, plugin hooks, and enzyme tool 
 
 ## License
 
-MIT
+Apache-2.0. See [LICENSE](../LICENSE).

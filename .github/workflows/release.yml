@@ -95,7 +95,7 @@ jobs:
               "type": "github",
               "url": "https://github.com/byenzyme/enzyme"
             },
-            "license": "MIT",
+            "license": "Apache-2.0",
             "server": {
               "type": "binary",
               "entry_point": "enzyme",
@@ -399,7 +399,7 @@ jobs:
             desc "Local-first knowledge indexing for Obsidian vaults"
             homepage "https://github.com/byenzyme/enzyme"
             version "${version}"
-            license "MIT"
+            license "Apache-2.0"
 
             depends_on :macos
 

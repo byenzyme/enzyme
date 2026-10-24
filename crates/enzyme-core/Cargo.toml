@@ -3,7 +3,7 @@ name = "enzyme-core"
 version = "0.7.2"
 edition = "2024"
 description = "Core library for Enzyme — local-first knowledge indexing and approximate search"
-license = "BUSL-1.1"
+license = "Apache-2.0"
 repository = "https://github.com/byenzyme/enzyme"
 publish = false
 
