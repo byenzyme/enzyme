@@ -56,7 +56,7 @@ Enzyme was built for knowledge bases that grow quickly:
 * Meeting notes and AI-native, Markdown CRM setups
 * Agent memory written as Markdown
 
-At setup ime, it proposes a `.enzyme` program by reading your wiki and existing agent instructions, like:
+At setup time, it proposes a `.enzyme` program by reading your wiki and existing agent instructions, like:
 
 ```
 profile relationships {
