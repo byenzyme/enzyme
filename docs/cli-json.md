@@ -104,8 +104,8 @@ opens it read-only. An uninitialized vault or workspace still exits 0:
 ```
 
 An index built by an older binary (missing tables or migrated columns) is reported
-without reading further, and without migrating it; the next `init` or `refresh`
-rebuilds it:
+without reading further, and without migrating it; the next `refresh` rebuilds the
+index and keeps its catalysts:
 
 ```json
 { "schema": "enzyme.status.v1", "initialized": true, "schema_outdated": true,
@@ -165,9 +165,16 @@ Initialized:
     }
   },
   "update": { "status": "up_to_date", "regen_required": false, "reason": null,
+              "notice": null,
               "binary": { "current": "0.11.1", "last_outcome": null } }
 }
 ```
+
+- `update.notice`: for a week after an upgrade changed this vault, one sentence
+  saying what happened, e.g. "Enzyme 0.14.0 rebuilt its search index for this
+  vault; your questions were kept." or that questions are being regenerated
+  because catalyst generation changed. `refresh --quiet` returns the same
+  sentence once as `update.note`. Relay it to the user; `null` otherwise.
 
 - `sources[]`: one entry per SQLite source. `stale`/`stale_reason` compare the
   source database with the last indexed refresh. `reachable`/`reachability_error`

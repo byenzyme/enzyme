@@ -23,13 +23,15 @@ use enzyme_core::pipeline::catalysts::{
 };
 use enzyme_core::pipeline::context::ContextBuilder;
 use enzyme_core::pipeline::embedding::{EmbeddingPipeline, EmbeddingStats};
-use enzyme_core::pipeline::epoch::{EPOCH_CADENCE_MS, EpochSchedule, GenerationContract, now_ms};
+use enzyme_core::pipeline::epoch::{
+    CATALYST_LOGIC_VERSION, EPOCH_CADENCE_MS, EpochDueReason, EpochSchedule,
+    FROZEN_ALLOCATION_SEMANTICS, FROZEN_CONTRACT_SCHEMA_VERSION, GenerationContract, now_ms,
+};
 use enzyme_core::pipeline::indexing::{IndexingPipeline, IndexingStats};
 use enzyme_core::pipeline::selection::SelectionPipeline;
 use enzyme_core::pipeline::similarity::{
     IncrementalSimilarityStats, SimilarityPipeline, catalysts_fingerprint,
 };
-use enzyme_core::pipeline::staleness::store_staleness_bookkeeping;
 use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
 use super::exit::{CliFailure, ExitKind, FailureWithSummary};
@@ -51,8 +53,23 @@ pub(crate) const BINARY_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum UpdateOutcome {
     UpToDate,
     SentinelRefreshed,
-    RegenPerformed { reason: String },
-    RegenBlocked { reason: String },
+    /// The index was rebuilt after a binary update; `notice` tells the user
+    /// what happened to their questions.
+    IndexRebuilt {
+        notice: String,
+    },
+    RegenBlocked {
+        reason: String,
+    },
+}
+
+impl UpdateOutcome {
+    pub fn notice(&self) -> Option<&str> {
+        match self {
+            UpdateOutcome::IndexRebuilt { notice } => Some(notice),
+            _ => None,
+        }
+    }
 }
 
 impl UpdateOutcome {
@@ -71,11 +88,8 @@ impl UpdateOutcome {
             });
         }
 
-        if matches!(self, UpdateOutcome::RegenPerformed { .. }) {
-            return json!({
-                "status": "ok",
-                "note": "vault regenerated after a binary update",
-            });
+        if let UpdateOutcome::IndexRebuilt { notice } = self {
+            return json!({ "status": "ok", "note": notice });
         }
 
         if let Some(binary) = &binary_outcome {
@@ -116,13 +130,14 @@ impl UpdateOutcome {
 
 /// Agent-facing update policy: read the sentinel, and when the binary changed
 /// underneath this vault decide between "advance the sentinel for free"
-/// (migrations reconciled the schema) and "regen via full init" (structural
-/// drift). Regen is preferred over authoring migrations; auth and global
-/// config live outside the vault DB and survive it. The vault DB must exist.
+/// (migrations reconciled the schema) and "rebuild the index" (structural
+/// drift). A rebuild keeps catalysts; the caller's local refresh then
+/// re-indexes, re-embeds, and repairs similarities without the model. The
+/// vault DB must exist.
 pub async fn apply_update_policy(
     vault_path: &Path,
     paths: &EnzymePaths,
-    llm: LlmMode,
+    _llm: LlmMode,
 ) -> Result<UpdateOutcome> {
     let status = {
         let db = Database::open(&paths.vault_db)?;
@@ -149,12 +164,104 @@ pub async fn apply_update_policy(
             }
             info!(
                 reason,
-                "schema drift after binary update; regenerating index via full init"
+                "schema drift after binary update; rebuilding the index"
             );
-            run_init(vault_path, false, true, false, None, llm, true).await?;
-            Ok(UpdateOutcome::RegenPerformed { reason })
+            let notice = rebuild_drifted_index(paths)?;
+            Ok(UpdateOutcome::IndexRebuilt { notice })
         }
     }
+}
+
+/// Rebuild an index whose schema drifted, keeping catalysts, and return what
+/// to tell the user. Only when the catalyst tables themselves drifted does it
+/// fall back to a clean slate, whose questions the next refresh regenerates.
+fn rebuild_drifted_index(paths: &EnzymePaths) -> Result<String> {
+    let enzyme_dir = paths.vault_db.parent().context("vault DB has no parent")?;
+    let _projection_lock = acquire_projection_lock(enzyme_dir)?;
+    let kept = {
+        let db = Database::open(&paths.vault_db)?;
+        db.reset_index_tables()?;
+        !matches!(
+            update_sentinel::check_and_mark(&db, BINARY_VERSION)?,
+            UpdateStatus::RegenRequired { .. }
+        )
+    };
+    let notice = if kept {
+        format!(
+            "Enzyme {BINARY_VERSION} rebuilt its search index for this vault; your questions were kept."
+        )
+    } else {
+        reset_vault_database(paths)?;
+        format!(
+            "Enzyme {BINARY_VERSION} rebuilt this vault from scratch; its questions will be regenerated on the next refresh."
+        )
+    };
+    let db = Database::open(&paths.vault_db)?;
+    if !kept {
+        update_sentinel::check_and_mark(&db, BINARY_VERSION)?;
+    }
+    record_upgrade_notice(&db, &notice)?;
+    Ok(notice)
+}
+
+/// Config key holding the latest upgrade notice, so `status` (and agents that
+/// call it) can show it after the refresh that produced it.
+const UPGRADE_NOTICE_KEY: &str = "upgrade.notice";
+/// How long `status` keeps showing an upgrade notice.
+const UPGRADE_NOTICE_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+fn record_upgrade_notice(db: &Database, notice: &str) -> Result<()> {
+    db.set_config(
+        UPGRADE_NOTICE_KEY,
+        &json!({ "text": notice, "at_ms": now_ms() }).to_string(),
+    )?;
+    Ok(())
+}
+
+/// The latest upgrade notice, if it is recent enough to still be news.
+pub(crate) fn recent_upgrade_notice(db: &Database, now_ms: i64) -> Option<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&db.get_config(UPGRADE_NOTICE_KEY).ok()??).ok()?;
+    let at_ms = value.get("at_ms")?.as_i64()?;
+    (now_ms.saturating_sub(at_ms) <= UPGRADE_NOTICE_TTL_MS)
+        .then(|| value.get("text")?.as_str().map(str::to_string))
+        .flatten()
+}
+
+/// Tell the user when a refresh is about to regenerate catalysts because this
+/// binary generates them differently, the one upgrade that should cost model
+/// calls. Records the notice and returns it.
+fn catalyst_logic_notice(db: &Database, schedule: &EpochSchedule) -> Result<Option<String>> {
+    if !schedule.scheduled || schedule.reason != Some(EpochDueReason::ContractChanged) {
+        return Ok(None);
+    }
+    let Some(active) = db.active_catalyst_logic_version()? else {
+        return Ok(None);
+    };
+    if active == CATALYST_LOGIC_VERSION {
+        return Ok(None);
+    }
+    let topics = db.get_catalyst_counts_by_entity()?.len();
+    let notice = format!(
+        "Enzyme {BINARY_VERSION} generates questions differently, so it is regenerating questions for {topics} topic{} in the background.",
+        if topics == 1 { "" } else { "s" }
+    );
+    record_upgrade_notice(db, &notice)?;
+    Ok(Some(notice))
+}
+
+/// Add `notice` to an agent-facing `update` object as its `note`, joining any
+/// note already there. Agents relay a present `note` to the user.
+fn with_notice(mut update: serde_json::Value, notice: Option<&str>) -> serde_json::Value {
+    let Some(notice) = notice else {
+        return update;
+    };
+    let note = match update.get("note").and_then(|n| n.as_str()) {
+        Some(existing) => format!("{existing} {notice}"),
+        None => notice.to_string(),
+    };
+    update["note"] = json!(note);
+    update
 }
 
 fn loginless_hosted_init_allowed_for_keys(current_key: &str, configured_keys: &[String]) -> bool {
@@ -533,8 +640,10 @@ pub async fn run_init_index_only(vault_path: &Path, quiet: bool) -> Result<()> {
         ensure_dir_symlink_aware(parent).context("failed to create .enzyme directory")?;
     }
 
-    if !should_preserve_db_only_corpus(&paths, vault_path)? {
-        reset_vault_database(&paths)?;
+    // Index from scratch but keep any catalysts: this stage previews what
+    // Enzyme found, and a later init reuses catalysts whose inputs match.
+    if paths.vault_db.exists() && !should_preserve_db_only_corpus(&paths, vault_path)? {
+        Database::open(&paths.vault_db)?.reset_index_tables()?;
     }
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
@@ -680,24 +789,30 @@ pub async fn run_init(
     // a routine re-run finish in seconds instead of re-asking the model about
     // every entity. `--force` restores the clean-slate rebuild.
     //
-    // Escalate to a clean-slate rebuild when the stored schema has drifted
-    // from what this binary produces (regen-over-migration policy — see
-    // `db::update_sentinel`). The sentinel is advanced here for free when
-    // migrations already reconciled the schema.
-    let force = force
-        || (paths.vault_db.exists() && {
+    // When the stored schema has drifted from what this binary produces (see
+    // `db::update_sentinel`), the index is rebuilt and catalysts are kept;
+    // generation below then only redoes entities whose inputs changed. The
+    // sentinel is advanced here for free when migrations already reconciled
+    // the schema.
+    if force {
+        if !should_preserve_db_only_corpus(&paths, vault_path)? {
+            reset_vault_database(&paths)?;
+        }
+    } else if paths.vault_db.exists() {
+        let drifted = {
             let db = Database::open(&paths.vault_db)?;
-            let escalate = matches!(
+            matches!(
                 update_sentinel::check_and_mark(&db, BINARY_VERSION)?,
                 UpdateStatus::RegenRequired { .. }
-            );
-            if escalate {
-                info!("schema drift detected; escalating init to a full clean-slate rebuild");
+            )
+        };
+        if drifted && !should_preserve_db_only_corpus(&paths, vault_path)? {
+            info!("schema drift detected; rebuilding the index and keeping catalysts");
+            let notice = rebuild_drifted_index(&paths)?;
+            if !quiet {
+                eprintln!("{notice}");
             }
-            escalate
-        });
-    if force && !should_preserve_db_only_corpus(&paths, vault_path)? {
-        reset_vault_database(&paths)?;
+        }
     }
 
     // Open database
@@ -1249,21 +1364,11 @@ pub async fn run_init(
         similarities_recomputed = true;
     }
 
-    if catalyst_gate
-        .as_ref()
-        .map_or(false, |g| g.quality == CatalystQuality::Passed)
-    {
-        let entity_names: Vec<String> =
-            sel_result.entities.iter().map(|e| e.name.clone()).collect();
-        if let Err(e) = store_staleness_bookkeeping(&db, vault_path, &entity_names) {
-            tracing::warn!("failed to store catalyst staleness bookkeeping: {}", e);
-        }
-    } else if cat_stats.is_some() {
-        tracing::warn!("init stage=staleness status=skipped reason=catalyst_quality_not_clean");
-    }
-
-    // A successful initial build becomes the first durable catalyst epoch.
-    // Legacy catalyst tables remain the active materialized view.
+    // A clean build is the durable catalyst epoch for its contract: the first
+    // one on a new vault, or a replacement when init already regenerated what
+    // a changed contract (new model, settings, or catalyst logic) required, so
+    // the next refresh does not regenerate everything a second time. Legacy
+    // catalyst tables remain the active materialized view.
     if similarities_recomputed
         && catalyst_gate
             .as_ref()
@@ -1271,7 +1376,7 @@ pub async fn run_init(
     {
         db.reconcile_corpus_generation(now_ms())?;
         let contract = generation_contract(vault_path, &paths, llm).await?;
-        db.bootstrap_legacy_epoch(&contract, now_ms(), true)?;
+        db.restamp_active_epoch(&contract, now_ms())?;
     }
 
     // ── Step 8: Refresh prepared targets ──────────────────────────────────
@@ -1430,17 +1535,16 @@ pub async fn ensure_fresh_vault(vault_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Update sentinel first: a binary update with schema drift regens the
-    // whole vault via full init, which already does everything below.
-    if let UpdateOutcome::RegenPerformed { .. } =
-        apply_update_policy(vault_path, &paths, LlmMode::Auto).await?
-    {
-        return Ok(());
-    }
+    // Update sentinel first: after a binary update with schema drift the
+    // index is rebuilt (catalysts kept) and the local work below refills it.
+    // Notices land in `status`, which MCP clients read.
+    apply_update_policy(vault_path, &paths, LlmMode::Auto).await?;
 
     let db = Database::open(&paths.vault_db)?;
     let local = run_local_refresh_work(&db, vault_path, &paths).await?;
-    schedule_refresh_epoch(&db, vault_path, &paths, LlmMode::Auto, false).await?;
+    let (schedule, _) =
+        schedule_refresh_epoch(&db, vault_path, &paths, LlmMode::Auto, false).await?;
+    catalyst_logic_notice(&db, &schedule)?;
     let _ = maybe_bump_collection_cache_epoch(&db, local.collection_changed())?;
     Ok(())
 }
@@ -1518,8 +1622,8 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
 
     // Update sentinel before any incremental work: schema drift after a
     // binary update means the incremental paths cannot be trusted, so the
-    // vault is regenerated via full init and the refresh continues against
-    // the rebuilt (already-fresh) database.
+    // index tables are rebuilt (catalysts kept) and the local work below
+    // refills them.
     let update_outcome = apply_update_policy(vault_path, &paths, llm).await?;
 
     let db = Database::open(&paths.vault_db)?;
@@ -1533,6 +1637,7 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
     let collection_change_reasons = local.change_reasons();
     let (schedule, background_spawned) =
         schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
+    let logic_notice = catalyst_logic_notice(&db, &schedule)?;
     // The update check is spawned only after the local writes above, and its
     // worker records its outcome under `workspace.lock`, so it never opens the
     // database read-write while this refresh is writing. An explicit
@@ -1563,7 +1668,7 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
         },
         "similarity": local.similarity,
         "epoch": epoch_metrics(&db, &schedule, now_ms())?,
-        "update": update_outcome.to_json(binary_update_outcome),
+        "update": with_notice(update_outcome.to_json(binary_update_outcome), logic_notice.as_deref()),
         "cache_epoch": cache_epoch,
         "collection_changed": collection_changed,
         "collection_change_reasons": collection_change_reasons,
@@ -1739,8 +1844,8 @@ pub(super) async fn generation_contract(
     let selection_config_json = serde_json::to_string(&catalyst_config)?;
     let limits = EvidenceLimits::from_env();
     Ok(GenerationContract {
-        schema_version: "catalyst-epoch.v2".to_string(),
-        prompt_version: "catalyst-prompts.2026-09-titled-excerpt-labels".to_string(),
+        schema_version: FROZEN_CONTRACT_SCHEMA_VERSION.to_string(),
+        prompt_version: CATALYST_LOGIC_VERSION.to_string(),
         catalyst_format: config
             .catalyst_format
             .clone()
@@ -1750,7 +1855,7 @@ pub(super) async fn generation_contract(
         llm_mode,
         llm_provider,
         llm_base_url,
-        allocation_semantics: "volume-floor-and-top-boost.v1".to_string(),
+        allocation_semantics: FROZEN_ALLOCATION_SEMANTICS.to_string(),
         catalysts_per_entity: 7,
         min_top_catalysts: config.trending.as_ref().and_then(|t| t.min_top_catalysts),
         embedding_backend: service.backend_name().to_string(),
@@ -2509,6 +2614,10 @@ async fn run_refresh_interactive(
         return Ok(());
     }
 
+    let update_outcome = apply_update_policy(vault_path, &paths, llm).await?;
+    if let Some(notice) = update_outcome.notice() {
+        eprintln!("{notice}");
+    }
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
     let local = run_local_refresh_work(&db, vault_path, &paths).await?;
@@ -2521,6 +2630,9 @@ async fn run_refresh_interactive(
     }
     let (schedule, spawned) =
         schedule_refresh_epoch(&db, vault_path, &paths, llm, force_full).await?;
+    if let Some(notice) = catalyst_logic_notice(&db, &schedule)? {
+        eprintln!("{notice}");
+    }
     let _ = maybe_bump_collection_cache_epoch(&db, local.collection_changed())?;
     println!(
         "{}",

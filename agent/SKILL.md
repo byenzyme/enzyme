@@ -66,7 +66,7 @@ bundled `references/knowledge-practice-review.md` before issuing setup commands.
 
 Explain setup/refresh simply when useful: init is the slow compile step that indexes the vault and writes its source-grounded questions; refresh is how new notes join the index and the map; normal retrieval is fast because search runs locally on the index without rereading the vault.
 
-`enzyme refresh --quiet` JSON includes an `update` object with a two-state contract. Check `update.status`: `ok` means nothing to do (a `note` may explain a slower call such as vault regeneration); `action_required` means perform or relay the `action` string to the user — never interpret any other keys. Use `enzyme status` when you need full binary-update diagnostics.
+`enzyme refresh --quiet` JSON includes an `update` object with a two-state contract. Check `update.status`: `ok` means nothing to do, except that a present `note` (an upgrade rebuilt the index, or questions are being regenerated) should be relayed to the user in one sentence; `action_required` means perform or relay the `action` string to the user — never interpret any other keys. Use `enzyme status` when you need full binary-update diagnostics.
 
 Claude/Codex plugin installation does not install Petri or refresh hooks by default. Do not create `.claude/hooks/enzyme-petri.sh`, mutate `.claude/settings.json`, or rely on automatic prompt injection during normal setup. Use `enzyme petri` and `enzyme catalyze` explicitly when context is needed.
 

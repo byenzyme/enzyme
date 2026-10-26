@@ -156,6 +156,12 @@ fn build_status(vault_path: &Path) -> Result<Option<(serde_json::Value, Option<D
         "last_outcome": binary_update,
     });
 
+    // What the last upgrade did to this vault's index or questions, for a week.
+    update["notice"] = json!(super::init::recent_upgrade_notice(
+        &db,
+        chrono::Utc::now().timestamp_millis()
+    ));
+
     let status = json!({
         "workspace": workspace,
         "vault": vault_path.display().to_string(),
@@ -476,7 +482,7 @@ pub async fn run_status(vault_path: &Path, json_output: bool) -> Result<()> {
             println!();
             if json["schema_outdated"].as_bool().unwrap_or(false) {
                 println!(
-                    "⚠ Index schema is outdated ({}). The next `enzyme init` or agent refresh will rebuild it.",
+                    "⚠ Index schema is outdated ({}). The next `enzyme refresh` rebuilds the index and keeps your questions.",
                     json["update"]["reason"].as_str().unwrap_or("built by an older binary")
                 );
                 return Ok(());
@@ -546,10 +552,14 @@ pub async fn run_status(vault_path: &Path, json_output: bool) -> Result<()> {
                     json["markdown"]["files_deleted"]
                 );
             }
+            if let Some(notice) = json["update"]["notice"].as_str() {
+                println!();
+                println!("{notice}");
+            }
             if json["update"]["regen_required"].as_bool().unwrap_or(false) {
                 println!();
                 println!(
-                    "⚠ Update: regen required — {}. The next `enzyme init` or agent refresh will rebuild the index automatically (auth and config are preserved).",
+                    "⚠ Update: the index needs rebuilding — {}. The next `enzyme refresh` rebuilds it and keeps your questions.",
                     json["update"]["reason"].as_str().unwrap_or("schema drift"),
                 );
             }

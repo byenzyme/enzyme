@@ -28,6 +28,7 @@ use crate::models::{
     Catalyst, Embedding, Entity, EntityOccurrence, EntityType, INLINE_CONTEXT_MAX_WORDS,
     parse_catalyst_text, render_catalyst_text,
 };
+use crate::pipeline::epoch::CATALYST_LOGIC_VERSION;
 use crate::pipeline::eras::{
     Era, allocate_catalysts_to_eras, apply_timeline_weights, assign_occurrences_to_eras,
     cluster_eras_periodic, sample_contexts_by_era,
@@ -931,11 +932,18 @@ fn scope_centroid(candidates: &[ChunkCandidate], reference_ms: i64) -> Option<Ve
     centroid.iter().any(|c| *c != 0.0).then_some(centroid)
 }
 
-/// Bumped when the meaning of the fingerprint changes (new inputs folded in,
-/// different canonicalization), so every entity is treated as dirty once after
-/// an upgrade rather than silently keeping catalysts the new inputs disagree
-/// with.
-const CONTEXT_HASH_VERSION: &str = "catalyst-context-v7-temporal-evidence";
+/// Version folded into every context hash. It follows
+/// [`CATALYST_LOGIC_VERSION`]: while that is at its baseline the hash keeps the
+/// string it had before the two were unified, so existing hashes stay valid;
+/// any bump of the logic version then dirties every entity once.
+fn context_hash_version() -> &'static str {
+    const BASELINE_LOGIC: &str = "catalyst-prompts.2026-09-titled-excerpt-labels";
+    if CATALYST_LOGIC_VERSION == BASELINE_LOGIC {
+        "catalyst-context-v7-temporal-evidence"
+    } else {
+        CATALYST_LOGIC_VERSION
+    }
+}
 
 /// Fold one labelled, length-prefixed field into the fingerprint. The label and
 /// explicit length keep concatenation unambiguous, so no combination of field
@@ -969,7 +977,7 @@ fn context_hash(
     periods: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hash_field(&mut hasher, "version", CONTEXT_HASH_VERSION.as_bytes());
+    hash_field(&mut hasher, "version", context_hash_version().as_bytes());
     hash_field(&mut hasher, "model", model.as_bytes());
     hash_field(&mut hasher, "local", &[u8::from(is_local)]);
     hash_field(&mut hasher, "entity", entity_name.as_bytes());
@@ -3421,6 +3429,15 @@ mod tests {
     fn split_question_allocations_leaves_small_jobs_whole() {
         assert_eq!(split_question_allocations(&[2, 3], 30), vec![vec![2, 3]]);
         assert_eq!(split_question_allocations(&[0, 0], 30), vec![vec![0, 0]]);
+    }
+
+    #[test]
+    fn context_hash_version_is_unchanged_at_the_baseline_logic_version() {
+        // Unifying the version strings must not dirty every existing hash.
+        assert_eq!(
+            context_hash_version(),
+            "catalyst-context-v7-temporal-evidence"
+        );
     }
 
     #[test]

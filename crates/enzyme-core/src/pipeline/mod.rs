@@ -12,4 +12,3 @@ pub mod profile_assignment;
 pub mod selection;
 pub mod selection_steps;
 pub mod similarity;
-pub mod staleness;

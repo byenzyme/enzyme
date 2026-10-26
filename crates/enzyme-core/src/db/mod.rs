@@ -15,9 +15,7 @@ pub mod update_sentinel;
 
 pub use connection::{Database, initialize_sqlite_runtime};
 pub use errors::DbError;
-pub use repository::{
-    DocumentForEmbedding, EntityRefreshStats, FileChunk, FolderChild, FolderStats, SubfolderStats,
-};
+pub use repository::{DocumentForEmbedding, FileChunk, FolderChild, FolderStats, SubfolderStats};
 
 #[cfg(test)]
 mod tests {
@@ -170,6 +168,52 @@ mod tests {
             .unwrap();
         for expected in schema::EXPECTED_INDEXES {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    /// Rebuilding the index keeps everything that cost model calls or
+    /// records history, drops what indexing recreates (plus tables this
+    /// binary no longer creates), and leaves the projection fence dirty so the
+    /// next local refresh repairs similarities in full.
+    #[test]
+    fn reset_index_tables_keeps_catalysts_and_drops_derived_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("enzyme.db")).unwrap();
+        db.execute_write(
+            "INSERT INTO docs (source_ref, title, content, content_hash, created_at, modified_at, indexed_at)
+             VALUES ('notes/a.md', 'a', 'body', 'h', 1, 1, 1)",
+            vec![],
+        )
+        .unwrap();
+        db.insert_catalysts(&[crate::models::Catalyst {
+            id: "c1".into(),
+            text: "What is still open?".into(),
+            entity: "a".into(),
+            context: "default".into(),
+            generated_at: chrono::Utc::now(),
+            metadata: serde_json::json!({}),
+        }])
+        .unwrap();
+        db.set_config("test.keep", "yes").unwrap();
+        db.execute_write("CREATE TABLE catalyst_eras (x INTEGER)", vec![])
+            .unwrap();
+
+        db.reset_index_tables().unwrap();
+
+        assert_eq!(db.get_document_count().unwrap(), 0);
+        assert_eq!(db.get_all_catalysts().unwrap()[0].id, "c1");
+        assert_eq!(db.get_config("test.keep").unwrap().as_deref(), Some("yes"));
+        assert!(db.continuous_projection_fence().unwrap().dirty);
+        let tables: Vec<String> = db
+            .query_read(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        assert!(!tables.contains(&"catalyst_eras".to_string()));
+        for expected in schema::EXPECTED_TABLES {
+            assert!(tables.contains(&expected.to_string()), "missing {expected}");
         }
     }
 

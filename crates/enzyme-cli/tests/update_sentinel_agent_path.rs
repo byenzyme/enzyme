@@ -10,7 +10,7 @@
 //! (`sentinel.binary_version` / `sentinel.schema_fingerprint`, see
 //! `enzyme_core::db::update_sentinel`). The refresh JSON `update` key uses a
 //! two-state agent contract: `{"status":"ok"}` means nothing to do (an
-//! optional `note` explains a slower regen call); `{"status":"action_required",
+//! optional `note` is relayed to the user); `{"status":"action_required",
 //! "action":…,"reason":…}` means perform or relay the action string.
 //!
 //! 1. Sentinel matches the running binary → single config read, no extra work
@@ -18,10 +18,10 @@
 //! 2. Binary changed but migrations fully reconciled the schema → sentinel
 //!    advances for free, the corpus is untouched (`update.status == "ok"`).
 //! 3. Binary changed AND the live schema structurally drifted from what this
-//!    binary's schema + migrations produce → the vault is regenerated
-//!    automatically via full `enzyme init` (regen-over-migration policy),
-//!    while auth (`$ENZYME_HOME/auth.json`) and global config survive
-//!    (`update.status == "ok"` with a regen note).
+//!    binary's schema + migrations produce → the index tables are rebuilt on
+//!    the current schema while catalysts, auth (`$ENZYME_HOME/auth.json`), and
+//!    global config survive, with no model calls (`update.status == "ok"`
+//!    with a note saying the questions were kept).
 //!
 //! Every scenario drives the real `enzyme` binary as a subprocess and asserts
 //! on durable state (vault DB, auth file) plus the JSON the agent sees.
@@ -135,6 +135,13 @@ fn doc_count(fixture: &VaultFixture) -> i64 {
     vault_db(fixture).get_document_count().expect("doc count")
 }
 
+fn catalyst_count(fixture: &VaultFixture) -> usize {
+    vault_db(fixture)
+        .get_all_catalysts()
+        .expect("catalysts")
+        .len()
+}
+
 /// Scenario 1: freshly-initialized vault → the sentinel matches and the agent
 /// path reports `ok` without touching the corpus.
 #[test]
@@ -187,45 +194,68 @@ fn version_bump_without_drift_advances_sentinel_without_regen() {
 }
 
 /// Scenario 3 (the core auto-update contract): binary version changed and the
-/// schema drifted → the agent path regenerates automatically via full init,
-/// the drifted schema is replaced by the current one, and stored auth
-/// survives untouched.
+/// schema drifted → the agent path rebuilds the index on the current schema,
+/// keeps every catalyst without calling the model, tells the user once, and
+/// leaves stored auth untouched.
 #[test]
-fn schema_drift_triggers_auto_regen_and_preserves_auth() {
+fn schema_drift_rebuilds_index_and_keeps_catalysts_and_auth() {
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());
     let fixture = init_vault(&llm);
     fixture.login("sk-test-preserved");
     let auth_path = fixture.enzyme_home().join("auth.json");
     let auth_before = std::fs::read_to_string(&auth_path).expect("read auth.json");
+    let catalysts_before = catalyst_count(&fixture);
+    assert!(catalysts_before > 0, "canary vault should have catalysts");
 
     rewind_sentinel_version(&fixture);
     drift_schema(&fixture);
     assert!(docs_has_drift_column(&fixture), "drift setup must stick");
+    let requests_before = llm.request_count();
 
     let json = refresh_quiet(&fixture, &llm);
     assert_eq!(json["update"]["status"].as_str(), Some("ok"));
     assert!(
         json["update"]["note"]
             .as_str()
-            .is_some_and(|note| note.contains("regenerat")),
-        "drift regen must explain the slow call; got update = {}",
+            .is_some_and(|note| note.contains("rebuilt its search index") && note.contains("kept")),
+        "the rebuild must be relayed to the user; got update = {}",
         json["update"]
     );
 
     assert!(
         !docs_has_drift_column(&fixture),
-        "regen must rebuild the DB on the current schema"
+        "the rebuild must recreate the index on the current schema"
     );
     assert_eq!(
         sentinel_version(&fixture).as_deref(),
         Some(CURRENT_VERSION),
-        "regen must stamp the sentinel so the next call is a fast no-op"
+        "the rebuild must stamp the sentinel so the next call is a fast no-op"
     );
-    assert!(doc_count(&fixture) > 0, "regen must re-index the vault");
+    assert!(
+        doc_count(&fixture) > 0,
+        "the rebuild must re-index the vault"
+    );
+    assert_eq!(
+        catalyst_count(&fixture),
+        catalysts_before,
+        "an index rebuild must keep catalysts"
+    );
+    assert_eq!(
+        llm.request_count(),
+        requests_before,
+        "an index rebuild must not call the model"
+    );
 
-    let auth_after = std::fs::read_to_string(&auth_path).expect("auth.json must survive regen");
-    assert_eq!(auth_before, auth_after, "auth config must survive regen");
+    let auth_after = std::fs::read_to_string(&auth_path).expect("auth.json must survive");
+    assert_eq!(
+        auth_before, auth_after,
+        "auth config must survive the rebuild"
+    );
+
+    let status = fixture.cli().arg("status").run();
+    status.assert_success();
+    status.assert_contains("rebuilt its search index");
 
     // And the very next agent call is back on the fast path.
     let json = refresh_quiet(&fixture, &llm);
@@ -246,7 +276,7 @@ fn status_reports_pending_regen_without_performing_it() {
 
     let out = fixture.cli().arg("status").run();
     out.assert_success();
-    out.assert_contains("regen required");
+    out.assert_contains("needs rebuilding");
 
     assert!(
         docs_has_drift_column(&fixture),
@@ -256,13 +286,14 @@ fn status_reports_pending_regen_without_performing_it() {
 }
 
 /// Scenario 5: an explicit `enzyme init` (no --force) on a drifted vault
-/// escalates itself to a clean-slate rebuild.
+/// rebuilds the index on the current schema and keeps its catalysts.
 #[test]
-fn plain_init_escalates_to_clean_rebuild_on_drift() {
+fn plain_init_rebuilds_index_and_keeps_catalysts_on_drift() {
     let llm = MockLlm::start();
     llm.set_ok_content(&catalyst_payload());
     let fixture = init_vault(&llm);
 
+    let catalysts_before = catalyst_count(&fixture);
     rewind_sentinel_version(&fixture);
     drift_schema(&fixture);
 
@@ -277,7 +308,54 @@ fn plain_init_escalates_to_clean_rebuild_on_drift() {
 
     assert!(
         !docs_has_drift_column(&fixture),
-        "plain init must escalate to a clean-slate rebuild when the schema drifted"
+        "plain init must rebuild the index when the schema drifted"
     );
     assert_eq!(sentinel_version(&fixture).as_deref(), Some(CURRENT_VERSION));
+    assert_eq!(catalyst_count(&fixture), catalysts_before);
+}
+
+/// Scenario 6: catalysts generated under an older catalyst-logic version → the
+/// refresh schedules their regeneration and says why, once.
+#[test]
+fn catalyst_logic_change_regenerates_in_background_and_says_so_once() {
+    let llm = MockLlm::start();
+    llm.set_ok_content(&catalyst_payload());
+    let fixture = init_vault(&llm);
+    vault_db(&fixture)
+        .execute_write(
+            "UPDATE catalyst_epochs
+             SET generation_contract_json =
+                     json_set(generation_contract_json, '$.prompt_version', 'catalyst-prompts.older'),
+                 generation_contract = 'older-contract'
+             WHERE epoch_id = (SELECT active_epoch_id FROM catalyst_epoch_state)",
+            vec![],
+        )
+        .expect("age the active epoch");
+    vault_db(&fixture)
+        .execute_write(
+            "UPDATE catalyst_epoch_state SET active_generation_contract = 'older-contract'",
+            vec![],
+        )
+        .expect("age the active contract");
+
+    let json = refresh_quiet(&fixture, &llm);
+    assert_eq!(json["update"]["status"].as_str(), Some("ok"));
+    assert!(
+        json["update"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("generates questions differently")),
+        "a catalyst-logic change must be relayed to the user; got update = {}",
+        json["update"]
+    );
+    assert_eq!(
+        json["epoch"]["due_reason"].as_str(),
+        Some("contractchanged")
+    );
+
+    let json = refresh_quiet(&fixture, &llm);
+    assert!(
+        json["update"].get("note").is_none(),
+        "the notice is relayed once; got update = {}",
+        json["update"]
+    );
 }

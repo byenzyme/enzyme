@@ -1038,11 +1038,7 @@ impl<'a> IndexingPipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Catalyst;
     use crate::models::EntityType;
-    use crate::pipeline::staleness::{
-        StaleReason, StalenessResult, check_catalyst_staleness, store_staleness_bookkeeping,
-    };
     use std::path::Path;
 
     fn test_db() -> Database {
@@ -1768,101 +1764,6 @@ mod tests {
             "alpha occurrences should increase: {} -> {}",
             occs_before,
             occs_after
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // 7. Staleness: new content triggers stale
-    // -----------------------------------------------------------------------
-    #[test]
-    fn staleness_new_content_triggers_stale() {
-        let db = test_db();
-        let vault = create_test_vault();
-
-        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
-        pipeline.run(true, |_| {}).unwrap();
-
-        // Insert a fake catalyst so staleness check doesn't short-circuit with NoCatalysts
-        let fake_catalyst = Catalyst {
-            id: uuid::Uuid::new_v4().to_string(),
-            text: "test catalyst".to_string(),
-            entity: "alpha".to_string(),
-            context: "test".to_string(),
-            generated_at: chrono::Utc::now(),
-            metadata: serde_json::json!({}),
-        };
-        db.insert_catalysts(&[fake_catalyst]).unwrap();
-
-        // Store bookkeeping with current entity doc counts
-        let entity_names = vec!["alpha".to_string()];
-        store_staleness_bookkeeping(&db, vault.path(), &entity_names).unwrap();
-
-        // Add 3+ files that mention alpha (the threshold is 3 new mentions)
-        for i in 0..4 {
-            write_md(
-                vault.path(),
-                &format!("stale-{}.md", i),
-                &format!("# Stale {}\nContent with #alpha.\n", i),
-            );
-        }
-
-        // Re-index so the DB counts update
-        pipeline.run(false, |_| {}).unwrap();
-
-        let result = check_catalyst_staleness(&db, vault.path()).unwrap();
-        assert!(
-            result.is_stale(),
-            "should be stale after adding 4 new files mentioning alpha"
-        );
-        match result {
-            StalenessResult::Stale(StaleReason::EntitiesStale { stale_entities }) => {
-                assert!(
-                    stale_entities.iter().any(|e| e.name == "alpha"),
-                    "alpha should be stale"
-                );
-                let alpha = stale_entities.iter().find(|e| e.name == "alpha").unwrap();
-                assert!(
-                    alpha.delta >= 3,
-                    "delta should be >= 3, got {}",
-                    alpha.delta
-                );
-            }
-            other => panic!("expected EntitiesStale, got {:?}", other),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 8. Staleness: fresh when nothing changed
-    // -----------------------------------------------------------------------
-    #[test]
-    fn staleness_fresh_when_nothing_changed() {
-        let db = test_db();
-        let vault = create_test_vault();
-
-        let pipeline = IndexingPipeline::new(&db, vault.path().to_path_buf());
-        pipeline.run(true, |_| {}).unwrap();
-
-        // Insert a fake catalyst
-        let fake_catalyst = Catalyst {
-            id: uuid::Uuid::new_v4().to_string(),
-            text: "test catalyst".to_string(),
-            entity: "alpha".to_string(),
-            context: "test".to_string(),
-            generated_at: chrono::Utc::now(),
-            metadata: serde_json::json!({}),
-        };
-        db.insert_catalysts(&[fake_catalyst]).unwrap();
-
-        // Store bookkeeping
-        let entity_names = vec!["alpha".to_string()];
-        store_staleness_bookkeeping(&db, vault.path(), &entity_names).unwrap();
-
-        // Check staleness without making any changes
-        let result = check_catalyst_staleness(&db, vault.path()).unwrap();
-        assert!(
-            !result.is_stale(),
-            "should be fresh when nothing changed, got {:?}",
-            result
         );
     }
 

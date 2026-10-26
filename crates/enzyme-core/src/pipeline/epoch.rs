@@ -14,6 +14,20 @@ use uuid::Uuid;
 use crate::db::Database;
 use crate::db::connection::block_in_place_sync;
 
+/// The one version to bump when catalyst generation changes enough that
+/// existing catalysts should be regenerated: prompts, parsing, allocation, or
+/// how evidence is chosen. A bump changes every vault's generation contract,
+/// so its next refresh regenerates catalysts in the background and tells the
+/// user why; it also invalidates every per-entity context hash. Nothing else
+/// needs bumping, and nothing else should regenerate catalysts on upgrade.
+pub const CATALYST_LOGIC_VERSION: &str = "catalyst-prompts.2026-09-titled-excerpt-labels";
+
+/// Contract fields frozen at their last values. Bump
+/// [`CATALYST_LOGIC_VERSION`] instead; changing these would regenerate every
+/// vault's catalysts without saying why.
+pub const FROZEN_CONTRACT_SCHEMA_VERSION: &str = "catalyst-epoch.v2";
+pub const FROZEN_ALLOCATION_SEMANTICS: &str = "volume-floor-and-top-boost.v1";
+
 pub const EPOCH_CADENCE_MS: i64 = 72 * 60 * 60 * 1000;
 const RETRY_BASE_MS: i64 = 15 * 60 * 1000;
 const RETRY_MAX_MS: i64 = 24 * 60 * 60 * 1000;
@@ -586,10 +600,55 @@ impl Database {
         now_ms: i64,
         covers_current_corpus: bool,
     ) -> Result<()> {
-        let state = self.get_epoch_state()?;
-        if state.active_epoch_id.is_some() {
+        if self.get_epoch_state()?.active_epoch_id.is_some() {
             return Ok(());
         }
+        self.stamp_active_epoch(contract, now_ms, covers_current_corpus, None)
+    }
+
+    /// Record that the current catalyst tables already satisfy `contract`,
+    /// after a foreground init brought every selected entity up to date.
+    /// Without this, a contract change that init already handled would read
+    /// as due on the next refresh and regenerate every entity a second time.
+    pub fn restamp_active_epoch(&self, contract: &GenerationContract, now_ms: i64) -> Result<()> {
+        let state = self.get_epoch_state()?;
+        if state.active_epoch_id.is_none() {
+            return self.bootstrap_legacy_epoch(contract, now_ms, true);
+        }
+        if state.active_generation_contract.as_deref() == Some(contract.fingerprint()?.as_str()) {
+            return Ok(());
+        }
+        self.stamp_active_epoch(contract, now_ms, true, Some(now_ms))
+    }
+
+    /// The catalyst-logic version the active catalysts were generated under,
+    /// or `None` when no epoch is active yet.
+    pub fn active_catalyst_logic_version(&self) -> Result<Option<String>> {
+        let rows = self.query_read(
+            "SELECT e.generation_contract_json FROM catalyst_epochs e
+             JOIN catalyst_epoch_state s ON s.active_epoch_id = e.epoch_id
+             WHERE s.singleton = 1",
+            vec![],
+            |row| row.get::<Option<String>>(0),
+        )?;
+        Ok(rows
+            .into_iter()
+            .flatten()
+            .next()
+            .and_then(|json| serde_json::from_str::<GenerationContract>(&json).ok())
+            .map(|contract| contract.prompt_version))
+    }
+
+    /// Insert an epoch row for the current catalyst tables and make it active.
+    /// `completed_at_ms` defaults to the newest catalyst's timestamp.
+    fn stamp_active_epoch(
+        &self,
+        contract: &GenerationContract,
+        now_ms: i64,
+        covers_current_corpus: bool,
+        completed_at_ms: Option<i64>,
+    ) -> Result<()> {
+        let state = self.get_epoch_state()?;
         let catalyst_count = self
             .query_read("SELECT COUNT(*) FROM catalysts", vec![], |row| {
                 row.get::<i64>(0)
@@ -600,13 +659,23 @@ impl Database {
         if catalyst_count == 0 {
             return Ok(());
         }
-        let generated_ms = self
-            .get_latest_catalyst_timestamp()?
-            .map(|dt| dt.timestamp_millis())
-            .unwrap_or(now_ms);
+        let generated_ms = match completed_at_ms {
+            Some(ms) => ms,
+            None => self
+                .get_latest_catalyst_timestamp()?
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(now_ms),
+        };
         let fingerprint = contract.fingerprint()?;
         let contract_json = serde_json::to_string(contract)?;
         let epoch_id = format!("legacy-{}", Uuid::new_v4());
+        let replace = completed_at_ms.is_some();
+        if replace {
+            self.execute_write(
+                "UPDATE catalyst_epochs SET status = 'superseded' WHERE status = 'active'",
+                vec![],
+            )?;
+        }
         self.execute_write(
             "INSERT INTO catalyst_epochs
                 (epoch_id, status, corpus_generation, corpus_fingerprint,
@@ -622,12 +691,21 @@ impl Database {
                 Value::Integer(generated_ms),
             ],
         )?;
+        // A bootstrap never displaces an epoch activated concurrently; an
+        // explicit restamp replaces whatever is active.
+        let guard = if replace {
+            ""
+        } else {
+            " AND active_epoch_id IS NULL"
+        };
         self.execute_write(
-            "UPDATE catalyst_epoch_state SET active_epoch_id = ?1,
+            &format!(
+                "UPDATE catalyst_epoch_state SET active_epoch_id = ?1,
                     active_epoch_corpus_generation = CASE WHEN ?5 THEN corpus_generation ELSE NULL END,
                     active_epoch_completed_at_ms = ?2,
                     active_generation_contract = ?3, updated_at_ms = ?4
-             WHERE singleton = 1 AND active_epoch_id IS NULL",
+             WHERE singleton = 1{guard}"
+            ),
             vec![
                 Value::Text(epoch_id),
                 Value::Integer(generated_ms),
@@ -942,6 +1020,55 @@ mod tests {
                 .is_some_and(|id| id.starts_with("legacy-"))
         );
         assert_eq!(db.get_all_catalysts().unwrap()[0].id, "legacy");
+    }
+
+    #[test]
+    fn restamp_replaces_the_active_contract_and_reports_its_logic_version() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_catalysts(&[catalyst("kept")]).unwrap();
+        db.reconcile_corpus_generation(10).unwrap();
+        let old = contract();
+        db.bootstrap_legacy_epoch(&old, 11, true).unwrap();
+        assert_eq!(
+            db.active_catalyst_logic_version().unwrap().as_deref(),
+            Some("prompt.v1")
+        );
+
+        // A bootstrap never displaces an active epoch...
+        let mut new = contract();
+        new.prompt_version = "prompt.v2".into();
+        db.bootstrap_legacy_epoch(&new, 12, true).unwrap();
+        assert_eq!(
+            db.get_epoch_state().unwrap().active_generation_contract,
+            Some(old.fingerprint().unwrap())
+        );
+
+        // ...but a restamp after a clean foreground init does, so the next
+        // refresh does not regenerate what init already brought up to date.
+        db.restamp_active_epoch(&new, 13).unwrap();
+        let state = db.get_epoch_state().unwrap();
+        assert_eq!(
+            state.active_generation_contract,
+            Some(new.fingerprint().unwrap())
+        );
+        assert_eq!(state.active_epoch_completed_at_ms, Some(13));
+        assert_eq!(
+            db.active_catalyst_logic_version().unwrap().as_deref(),
+            Some("prompt.v2")
+        );
+        assert!(
+            !db.schedule_catalyst_epoch(14, &new, false).unwrap().due,
+            "the restamped contract is current"
+        );
+        assert_eq!(db.get_all_catalysts().unwrap()[0].id, "kept");
+        let active = db
+            .query_read(
+                "SELECT COUNT(*) FROM catalyst_epochs WHERE status = 'active'",
+                vec![],
+                |row| row.get::<i64>(0),
+            )
+            .unwrap();
+        assert_eq!(active, vec![1], "exactly one epoch stays active");
     }
 
     #[test]

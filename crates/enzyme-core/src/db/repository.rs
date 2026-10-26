@@ -10,6 +10,27 @@ use crate::models::*;
 
 use super::connection::{Database, block_in_place_sync};
 
+/// Tables rebuilt from the notes by [`Database::reset_index_tables`], children
+/// before parents so foreign keys never block a drop. `chunks_fts` goes with
+/// `chunks`: its triggers drop with the table and it is rebuilt on the next
+/// indexing run.
+const INDEX_TABLES: &[&str] = &[
+    "catalyst_similarities",
+    "catalyst_embeddings_packed",
+    "chunk_embeddings",
+    "context_cache",
+    "chunks_fts",
+    "chunks",
+    "doc_tags",
+    "doc_links",
+    "entity_occurrences",
+    "entities",
+    "docs",
+    "source_refreshes",
+    "source_filter_cache",
+    "source_cursors",
+];
+
 // ---------------------------------------------------------------------------
 // Context query types
 // ---------------------------------------------------------------------------
@@ -85,13 +106,6 @@ pub struct DocumentForEmbedding {
     pub content_hash: String,
     pub created_at: i64,
     pub chunks: Vec<String>,
-}
-
-/// Per-entity evidence used by catalyst refresh staleness checks.
-#[derive(Debug, Clone)]
-pub struct EntityRefreshStats {
-    pub doc_count: usize,
-    pub latest_effective_date: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,28 +1949,6 @@ impl Database {
         Ok(rows.into_iter().next().unwrap_or(0) as usize)
     }
 
-    /// Summarize the current document evidence for one entity.
-    pub fn get_entity_refresh_stats(&self, entity_name: &str) -> Result<EntityRefreshStats> {
-        let rows = self.query_read(
-            "SELECT COUNT(DISTINCT eo.file_path),
-                    MAX(COALESCE(eo.effective_date, eo.created_at))
-             FROM entity_occurrences eo
-             JOIN entities e ON e.id = eo.entity_id
-             WHERE e.name = ?1",
-            vec![Value::Text(entity_name.to_string())],
-            |row| {
-                Ok(EntityRefreshStats {
-                    doc_count: row.get::<i64>(0)? as usize,
-                    latest_effective_date: row.get::<Option<i64>>(1)?,
-                })
-            },
-        )?;
-        Ok(rows.into_iter().next().unwrap_or(EntityRefreshStats {
-            doc_count: 0,
-            latest_effective_date: None,
-        }))
-    }
-
     /// Delete all catalysts for a given entity, keyed by (name, type).
     ///
     /// Entity names are not unique across types (a `#projects` tag and a
@@ -2595,6 +2587,49 @@ impl Database {
                 Value::Integer(refreshed_at_ms),
             ],
         )?;
+        Ok(())
+    }
+
+    /// Rebuild the index from scratch while keeping catalysts.
+    ///
+    /// Drops every table derived from the notes (documents, chunks, the
+    /// lexical index, entities, embeddings, similarities, source caches) and
+    /// any table this binary no longer creates, then recreates the current
+    /// schema. Catalysts, their per-entity hashes, epochs, applied targets, and
+    /// config survive. The continuous-projection fence is left dirty, so the
+    /// next local refresh re-indexes, re-embeds, and fully repairs similarities
+    /// without asking the model for anything.
+    pub fn reset_index_tables(&self) -> Result<()> {
+        let mut drop: Vec<String> = INDEX_TABLES.iter().map(|t| t.to_string()).collect();
+        let existing = self.query_read(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            vec![],
+            |row| row.get::<String>(0),
+        )?;
+        for name in existing {
+            let ours = super::schema::EXPECTED_TABLES.contains(&name.as_str());
+            let fts = name == "chunks_fts" || name.starts_with("chunks_fts_");
+            if !ours && !fts && !drop.contains(&name) {
+                drop.push(name);
+            }
+        }
+        block_in_place_sync(async move {
+            let tx = self
+                .conn
+                .transaction()
+                .await
+                .context("failed to begin index reset")?;
+            for table in &drop {
+                tx.execute(&format!("DROP TABLE IF EXISTS \"{table}\""), ())
+                    .await
+                    .with_context(|| format!("failed to drop {table}"))?;
+            }
+            tx.commit().await.context("failed to commit index reset")?;
+            super::migrations::run_all_on_conn(&self.conn)
+                .await
+                .context("failed to recreate index schema")
+        })?;
+        self.begin_continuous_projection()?;
         Ok(())
     }
 
