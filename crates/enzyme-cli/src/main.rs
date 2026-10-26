@@ -67,7 +67,7 @@ enum Commands {
         #[arg(long, hide = true, default_value = "https://api.are.na/v3/")]
         arena_api_base: String,
     },
-    /// Compile, migrate, or preview readable .enzyme configuration
+    /// Check, inspect, or preview readable .enzyme configuration
     Spec {
         #[command(subcommand)]
         command: commands::spec::SpecCommand,
