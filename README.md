@@ -9,10 +9,8 @@
 
 </div>
 
-Enzyme orients your coding agent to your wiki. It reads how your Markdown
-notes are already organized (folders, tags, links, and dates) and builds a local
-index, so Claude Code or Codex can pull up related notes from months of writing
-and cite them.
+Enzyme orients your coding agent to your wiki. It finds temporal structure in your Markdown (folders, tags, links, and dates) and builds a local
+index, so Claude Code or Codex can pull up related notes from months of writing and cite them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/enzyme-loop-dark.gif">
@@ -21,29 +19,19 @@ and cite them.
 
 ## Get started
 
-Open your Markdown notes folder in Claude Code, Codex, or another agent that can
-run terminal commands, and paste this prompt. If your agent is open elsewhere,
-give it the path to your notes.
+Open your Markdown notes folder with your agent and paste this prompt.
 
 ```text
 Set up Enzyme for the Markdown notes folder I have open. If you cannot identify it, ask me for its path.
 
 Install Enzyme if needed using https://raw.githubusercontent.com/byenzyme/enzyme/main/install.sh, and install the instructions for this agent. Read and follow the installed enzyme-workspace-setup skill.
 
-You may use Enzyme's online service to suggest settings from my notes and prepare search. Show me what you propose to include or exclude, and let me correct it before building the local search index.
+Use it to suggest settings from my notes and prepare search. Show me what you propose to include or exclude, and let me correct it before building the local search index.
 
 Then answer one useful question using my notes, with links to the sources, and suggest a question I can ask next. Keep my existing notes in place and unchanged. Ask separately before any cleanup, model download, or recurring task.
 ```
 
-Your agent installs Enzyme and follows its setup skill. It proposes which
-folders, tags, and links to read, shows you the settings so you can correct
-them, builds the index, and answers one real question with links to the notes
-behind it. Your notes stay where they are, and you don't need to clean them up
-first.
-
-After setup, keep working with your agent as usual. The installed skill tells it
-when to search with Enzyme, when plain search is better, and when to run
-`enzyme refresh` so new notes are included.
+After setup, keep working with your agent as usual. The new guidance tells your agent how to use Enzyme and when to refresh it.
 
 Prefer to install it yourself first? Run this, then paste the same prompt:
 
