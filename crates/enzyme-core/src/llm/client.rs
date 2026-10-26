@@ -22,6 +22,28 @@ const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// over HTTP. `local://<model-name>`.
 const LOCAL_BASE_URL_SCHEME: &str = "local://";
 
+/// Whether `base_url` gets the compact local-model treatment: the short prompt,
+/// at most 10 excerpts per entity, one call per entity, a 512-token output cap,
+/// and local concurrency and timeouts.
+///
+/// `override_value` is `ENZYME_LOCAL_MODEL`. `1`/`true` forces local (a small
+/// fine-tune hosted remotely); `0`/`false` forces hosted-size prompts for a
+/// larger model served on localhost (LM Studio, Ollama, llama.cpp server). Any
+/// other value keeps the localhost heuristic. The in-process engine is always
+/// local: its 8k window cannot hold hosted-size prompts.
+fn local_model_mode(base_url: &str, override_value: Option<&str>) -> bool {
+    if base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
+        return true;
+    }
+    match override_value {
+        Some("1" | "true") => return true,
+        Some("0" | "false") => return false,
+        _ => {}
+    }
+    let url = base_url.to_lowercase();
+    url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
+}
+
 /// Translate an OpenAI `response_format` into a GBNF grammar for local
 /// decoding. `json_object` has no schema to constrain, so it decodes freely.
 #[cfg(feature = "local-llm")]
@@ -686,20 +708,13 @@ impl LlmClient {
     ///
     /// True for localhost URLs, or when `ENZYME_LOCAL_MODEL=1` is set
     /// (e.g. a fine-tuned model hosted remotely that uses the compact prompt format).
+    /// `ENZYME_LOCAL_MODEL=0` does the reverse for a larger model served on
+    /// localhost, so it gets hosted-size prompts. See [`local_model_mode`].
     pub fn is_local(&self) -> bool {
-        let active_base_url = self.active_base_url();
-        if active_base_url.starts_with(LOCAL_BASE_URL_SCHEME) {
-            return true;
-        }
-        if std::env::var("ENZYME_LOCAL_MODEL")
-            .ok()
-            .filter(|v| v == "1" || v == "true")
-            .is_some()
-        {
-            return true;
-        }
-        let url = active_base_url.to_lowercase();
-        url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
+        local_model_mode(
+            &self.active_base_url(),
+            std::env::var("ENZYME_LOCAL_MODEL").ok().as_deref(),
+        )
     }
 
     /// Detect structured output support for this client's provider.
@@ -1066,6 +1081,35 @@ mod tests {
             chat_completions_url("https://api.anthropic.com/v1///").unwrap(),
             "https://api.anthropic.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn local_model_mode_detects_localhost_without_override() {
+        assert!(local_model_mode("http://localhost:1234/v1", None));
+        assert!(local_model_mode("http://127.0.0.1:11434/v1", None));
+        assert!(local_model_mode("http://0.0.0.0:8080/v1", None));
+        assert!(!local_model_mode("https://openrouter.ai/api/v1", None));
+    }
+
+    #[test]
+    fn local_model_mode_override_forces_either_way() {
+        assert!(local_model_mode("https://example.test/v1", Some("1")));
+        assert!(local_model_mode("https://example.test/v1", Some("true")));
+        assert!(!local_model_mode("http://localhost:1234/v1", Some("0")));
+        assert!(!local_model_mode(
+            "http://127.0.0.1:11434/v1",
+            Some("false")
+        ));
+        // Unrecognized values keep the URL heuristic, as before.
+        assert!(local_model_mode("http://localhost:1234/v1", Some("yes")));
+        assert!(!local_model_mode("https://example.test/v1", Some("")));
+    }
+
+    #[test]
+    fn local_model_mode_keeps_in_process_engine_local() {
+        // The in-process engine's 8k window cannot take hosted-size prompts.
+        assert!(local_model_mode("local://catalyst-135m-v3", Some("0")));
+        assert!(local_model_mode("local://catalyst-135m-v3", None));
     }
 
     #[test]
