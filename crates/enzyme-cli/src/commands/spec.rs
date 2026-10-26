@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use enzyme_core::config::{EnzymeConfig, EnzymePaths};
+use enzyme_core::config::EnzymeConfig;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Subcommand)]
@@ -18,13 +18,6 @@ pub enum SpecCommand {
         /// Emit the versioned `enzyme.profiles.v1` JSON envelope
         #[arg(long)]
         json: bool,
-    },
-    /// Migrate config.toml to configs/*.enzyme, retaining a timestamped backup
-    Migrate {
-        #[arg(long)]
-        home: Option<PathBuf>,
-        #[arg(long)]
-        embed_profiles_in: Option<PathBuf>,
     },
     /// Print the effective runtime config, or its compiled agent policy
     Inspect {
@@ -108,18 +101,6 @@ pub async fn run(
                     print!("{}", enzyme_spec::render_profile(&name, &p));
                 }
             }
-        }
-        SpecCommand::Migrate {
-            home,
-            embed_profiles_in,
-        } => {
-            let home = home
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(EnzymePaths::enzyme_home)?;
-            let paths =
-                enzyme_core::config::migrate_readable_configs(&home, embed_profiles_in.as_deref())?;
-            println!("{}", serde_json::to_string_pretty(&paths)?);
         }
         SpecCommand::Inspect {
             vault,

@@ -96,8 +96,9 @@ local model, so do not assume it means hosted.
 - Hosted generation sends selected excerpts to Enzyme's service; the index,
   embeddings, and search remain local. If the effective mode is not hosted and
   the user has not asked for local, run `"$ENZYME_BIN" model disable` once
-  generation is authorized. It writes `configs/settings.enzyme` in Enzyme home;
-  include that file in the recovery record.
+  generation is authorized. It writes `configs/settings.enzyme` in Enzyme home,
+  or the legacy `config.toml` there when one exists; include the file it
+  changed in the recovery record.
 - Use local generation only when the user asks for it, for example to keep notes
   off the network. It needs no network once its model is installed. Use
   `model list` to show the current download size if offering installation.
@@ -144,6 +145,14 @@ what matters and the packet wins for what exists. Open notes when two excerpts
 cannot settle a question. Check `evidence.folders` for everything that will be
 indexed and leave out archives, imports, demos, or generated material the map
 treats as inactive. A candidate you skip is not an exclusion.
+
+A legacy `config.toml` in Enzyme home is evidence too. Find this vault's
+`[vaults."..."]` section by real path; the key may go through a symlink or `~`.
+The packet already carries its exclusions, targets, and limits, but not its
+`entities` list or their profiles. Those entities are what the user or an
+earlier setup once chose to read: keep the ones the map and packet still
+support, and say which you dropped and why. Leave `config.toml` in place; the
+saved program takes priority for this vault, and other settings still live there.
 
 Aim for roughly 8 to 15 readings, up to about 20 when the user's map names more
 folders or tags that matter. Prefer broad folders and the tags the map names
