@@ -136,6 +136,43 @@ mod tests {
         assert!(!names.contains(&"idx_entity_occurrences_entity".to_string()));
     }
 
+    /// An index from before `entity_occurrences.weight` must open: the
+    /// covering index on `weight` waits for the column migration, and every
+    /// schema statement after it still runs.
+    #[test]
+    fn reopening_a_database_without_occurrence_weight_adds_column_and_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enzyme.db");
+        let db = Database::open(&path).unwrap();
+        db.execute_write("DROP INDEX idx_entity_occurrences_entity_weight", vec![])
+            .unwrap();
+        db.execute_write("DROP INDEX idx_entity_occurrences_file", vec![])
+            .unwrap();
+        db.execute_write("ALTER TABLE entity_occurrences DROP COLUMN weight", vec![])
+            .unwrap();
+        drop(db);
+
+        let db = Database::open(&path).unwrap();
+        let columns: Vec<String> = db
+            .query_read(
+                "SELECT name FROM pragma_table_info('entity_occurrences')",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        assert!(columns.contains(&"weight".to_string()));
+        let names: Vec<String> = db
+            .query_read(
+                "SELECT name FROM sqlite_master WHERE type = 'index'",
+                vec![],
+                |row| row.get::<String>(0),
+            )
+            .unwrap();
+        for expected in schema::EXPECTED_INDEXES {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
     // -- Document + junction table round-trip ----------------------------------
 
     #[test]

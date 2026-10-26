@@ -69,6 +69,9 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
     ensure_chunk_entry_date_column(conn).await?;
     ensure_chunk_path_column(conn).await?;
     ensure_occurrence_weight_column(conn).await?;
+    conn.execute_batch(schema::POST_MIGRATION_SQL)
+        .await
+        .map_err(DbError::Libsql)?;
     backfill_chunk_entry_dates(conn).await?;
     let slim_hint = slim_oversized_occurrence_contexts(conn).await?;
     backfill_excerpts_for_slimmed_contexts(conn).await?;

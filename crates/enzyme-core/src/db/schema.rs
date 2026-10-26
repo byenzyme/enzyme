@@ -81,9 +81,8 @@ CREATE TABLE IF NOT EXISTS entity_occurrences (
     date_source    TEXT    DEFAULT 'filesystem',
     weight         REAL    NOT NULL DEFAULT 1.0
 );
--- Covers per-entity weight sums, which petri and selection read for every
--- entity; without weight in the index each sum reads whole occurrence rows.
-CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity_weight ON entity_occurrences(entity_id, weight);
+-- idx_entity_occurrences_entity_weight lives in POST_MIGRATION_SQL: an older
+-- table gains `weight` only after this batch runs.
 DROP INDEX IF EXISTS idx_entity_occurrences_entity;
 CREATE INDEX IF NOT EXISTS idx_entity_occurrences_file   ON entity_occurrences(file_path);
 
@@ -256,6 +255,16 @@ CREATE TABLE IF NOT EXISTS catalyst_epoch_embeddings_packed (
     ids      TEXT NOT NULL,
     vectors  BLOB NOT NULL
 );
+"#;
+
+/// Indexes over columns that migrations add to existing tables. `SCHEMA_SQL`
+/// cannot create them: on an older database its `CREATE TABLE IF NOT EXISTS`
+/// keeps the old table, so the index would name a missing column and stop the
+/// batch. Run after the columns are ensured.
+pub const POST_MIGRATION_SQL: &str = r#"
+-- Covers per-entity weight sums, which petri and selection read for every
+-- entity; without weight in the index each sum reads whole occurrence rows.
+CREATE INDEX IF NOT EXISTS idx_entity_occurrences_entity_weight ON entity_occurrences(entity_id, weight);
 "#;
 
 /// All tables expected in a fully-migrated database (used for validation).
