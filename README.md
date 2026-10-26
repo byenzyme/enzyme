@@ -56,9 +56,42 @@ Enzyme was built for knowledge bases that grow quickly:
 * Meeting notes and AI-native, Markdown CRM setups
 * Agent memory written as Markdown
 
-It helps most when a question spans many notes written over time: context for a decision on a project, or a broader theme arising from conversations with one person.
+At setup ime, it proposes a `.enzyme` program by reading your wiki and existing agent instructions, like:
 
-It's designed to support knowledge captures that might be later be important, even if they don't serve a current task. Enzyme is focused on doing one thing well: **giving agents the tools to make ideas compound**. And it ships with a set of `profiles` designed around a personal knowledge base
+```
+profile relationships {
+  seek "what matters between people"
+  notice ["meaningful exchanges", "shared interests", "unfinished conversations"]
+}
+
+workspace "notes" {
+  source markdown "notes" { path "~/notes" }
+
+  question budget 40
+  sample across time
+  favor recent periods
+
+  learn questions from folder "people"
+    including linked pages
+    about relationships
+  learn questions from folder "meetings" about operational
+  learn questions from tags ["startup", "design"] about decisions
+  learn questions from folder "inbox"
+
+  project questions into "~/notes/Readwise"
+
+  // Guidance compiled for your agent, not an enforced hook.
+  when asked {
+    "Use grep for names, titles, and exact phrases."
+    retrieve passages through learned questions
+    answer with sources
+  }
+}
+```
+
+And you can give feedback to modify the program.
+
+Enzyme helps most when a question spans many notes written over time: context for a decision on a project, or a broader theme arising from conversations with one person. It's designed to support knowledge captures that might be later be important, even if they don't serve a current task. Enzyme is focused on doing one thing well: **giving agents the tools to make ideas compound**. And it ships with a set of `profiles` designed around a personal knowledge base
 were refined over [2 years of personal use](https://joshpham.com/kit/how-i-use-enzyme):
 
 | Read...                  | For...                                          | Profile               |
