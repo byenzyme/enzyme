@@ -9,13 +9,20 @@
 
 </div>
 
-Enzyme orients your coding agent to your wiki. It finds temporal structure in your Markdown (folders, tags, links, and dates) and builds a local
-index, so Claude Code or Codex can pull up related notes from months of writing and cite them.
+Enzyme compiles your notes and other knowledge sources into a local index that:
+
+1. Uses temporally grounded context sampling that captures the contextual use of tags and wikilinks, or natural accumulation in folders (i.e. pseudo-[Zettelkasten](https://zettelkasten.de/introduction/))
+2. With this context, it "dreams" questions (called **catalysts**), embeds them, and finds nearest docs, so it doesn't have to generate full summaries. (see note)
+3. Keeps refreshing, but separates new doc ingestion (local, fast) from catalyst evolution (cheap, periodic)
+
+The catalysts help orient the agent to the wiki. Enzyme saves up to 50% tokens vs. plain agentic search with grep.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/enzyme-loop-dark.gif">
   <img src="docs/assets/enzyme-loop.gif" width="880" alt="Notes and agent-written memories that mention a person arrive over time. Enzyme writes one question from them once, and later notes attach to it without rewriting it. When a query comes in, the agent reads the relevant questions, aims two searches at the periods they point to, and gets back passages from across those years.">
 </picture>
+
+*(Note: your system may already generate lots of memories in different buckets; Enzyme catalysts help thread them together)*
 
 ## Get started
 
@@ -49,44 +56,9 @@ Enzyme was built for knowledge bases that grow quickly:
 * Meeting notes and AI-native, Markdown CRM setups
 * Agent memory written as Markdown
 
-It helps most when a question spans many notes written over time: what changed
-in a project, what keeps coming up with a person, why a decision went the way
-it did. For a name, title, or exact phrase, plain search is faster, and the
-installed skill tells your agent to use it.
+It helps most when a question spans many notes written over time: context for a decision on a project, or a broader theme arising from conversations with one person.
 
-## How it works
-
-Setup saves a short, editable settings file (an `.enzyme` program) that says
-what to read. When the index is built, Enzyme does two things:
-
-1. **Maps what matters.** It samples excerpts across time from each folder,
-   tag, or link you chose and writes questions from them, called
-   **catalysts**, about what you decided, changed, or left open there. `enzyme
-   petri` shows this map.
-2. **Indexes every note for search.** `enzyme catalyze` ranks notes by wording
-   and meaning together, so a search finds the passage whether your agent names
-   something exactly or only describes it. Each result carries the catalyst that
-   best connects it to the query. Search runs entirely on your machine.
-
-Your agent orients on the map, searches from several angles, and answers from
-your own passages, so it can tell you how your thinking moved, not just what one
-note says. Catalysts are generated, so they're hints, never evidence: judge setup
-by the notes your agent brings back.
-
-A small settings file looks like this. Your agent writes and edits it with you
-during setup:
-
-```
-workspace "notes" {
-  source markdown "notes" { path "~/notes" }
-
-  learn questions from folder "people" including linked pages about relational
-  learn questions from folder "meetings" about operational
-  learn questions from tags ["startup", "design"] about decision_trace
-}
-```
-
-Each reading uses a profile that sets what to look for. The built-in profiles
+It's designed to support knowledge captures that might be later be important, even if they don't serve a current task. Enzyme is focused on doing one thing well: **giving agents the tools to make ideas compound**. And it ships with a set of `profiles` designed around a personal knowledge base
 were refined over [2 years of personal use](https://joshpham.com/kit/how-i-use-enzyme):
 
 | Read...                  | For...                                          | Profile               |
@@ -132,7 +104,7 @@ alias).
 
 ### Retrieval commands
 
-`enzyme petri` shows what Enzyme found worth asking about: for each recurring tag, link, or folder, questions about what you decided, changed, or left open, sampled across time. In a terminal it renders a tree; piped, it emits JSON.
+`enzyme petri` shows what Enzyme found worth asking about. In a terminal it renders a tree; piped, it emits JSON.
 
 ```bash
 enzyme petri -n 2
@@ -188,13 +160,6 @@ enzyme catalyze -n 3 "why we keep rewriting the auth layer" \
   ]
 }
 ```
-
-*Captured from a 17-note example vault of a team lead's ADRs, retros, 1:1s, and journal. Catalyst wording comes from model generation, so it varies between runs.*
-
-Scripts and host apps can rely on defined exit codes (0 ok, 1 runtime failure,
-2 usage, 3 configuration, 4 workspace busy, 5 `init` indexed but catalysts
-failed their quality gate). Concurrent `init`/`refresh` calls
-on one workspace wait for each other, bounded by `--lock-timeout`.
 
 ### Message archives (_experimental_)
 
