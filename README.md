@@ -12,7 +12,7 @@
 Enzyme compiles your notes and other knowledge sources into a local index that:
 
 1. Uses temporally grounded context sampling that captures the contextual use of tags and wikilinks, or natural accumulation in folders (i.e. pseudo-[Zettelkasten](https://zettelkasten.de/introduction/))
-2. With this context, it "dreams" questions (called **catalysts**), embeds them, and finds nearest docs, so it doesn't have to generate full summaries. (see note)
+2. With this context, it "dreams" questions in the background (called **catalysts**) and embeds them. At query time, each question finds its nearest docs, so it avoid needing to "dream" full summaries. (see note)
 3. Keeps refreshing, but separates new doc ingestion (local, fast) from catalyst evolution (cheap, periodic)
 
 The catalysts help orient the agent to the wiki. Enzyme saves up to 50% tokens vs. plain agentic search with grep.
