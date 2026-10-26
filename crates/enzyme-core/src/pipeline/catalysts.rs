@@ -1061,8 +1061,9 @@ pub struct CatalystConfig<'a> {
     pub prompt_context: Option<&'a str>,
     /// LLM model to use for catalyst generation.
     pub model: &'a str,
-    /// Per-entity catalyst count overrides from volume-based allocation.
-    pub per_entity_allocations: Option<&'a HashMap<String, usize>>,
+    /// Per-entity catalyst count overrides from volume-based allocation, keyed
+    /// by name and type: a folder, tag, and link can share a name.
+    pub per_entity_allocations: Option<&'a HashMap<(String, EntityType), usize>>,
     /// Maximum total UTF-8 bytes across labelled context samples per entity.
     /// Legacy sampling uses lasso truncation; explicit temporal sampling reserves
     /// provenance labels and clips content prefixes without exceeding this cap.
@@ -1887,7 +1888,10 @@ impl<'a> CatalystPipeline<'a> {
 
             let mut num_catalysts = config
                 .per_entity_allocations
-                .and_then(|a| a.get(entity_name).copied())
+                .and_then(|a| {
+                    a.get(&(entity_name.clone(), entity.entity_type.clone()))
+                        .copied()
+                })
                 .unwrap_or(config.catalysts_per_entity);
             let policy = reading
                 .map(|r| &r.learning)
@@ -2737,7 +2741,7 @@ const ALLOCATION_ANCHOR_PERCENTILE: usize = 90;
 pub fn calculate_allocations(
     entities: &[Entity],
     min_top_catalysts: Option<usize>,
-) -> HashMap<String, usize> {
+) -> HashMap<(String, EntityType), usize> {
     let top_target = min_top_catalysts
         .unwrap_or(DEFAULT_TOP_CATALYSTS)
         .max(HARD_MIN_CATALYSTS);
@@ -2773,7 +2777,7 @@ pub fn calculate_allocations(
                 let scaled = (top_target as f64 * docs / anchor).round() as usize;
                 scaled.clamp(HARD_MIN_CATALYSTS, top_target)
             };
-            (e.name.clone(), alloc)
+            ((e.name.clone(), e.entity_type.clone()), alloc)
         })
         .collect()
 }
@@ -2985,19 +2989,40 @@ mod tests {
         );
     }
 
+    fn tag(name: &str) -> (String, EntityType) {
+        (name.to_string(), EntityType::Tag)
+    }
+
+    #[test]
+    fn test_allocation_keeps_same_named_entities_of_different_types_apart() {
+        // A large folder and a small link that share a name each keep their
+        // own budget; keyed by name alone, the link's floor overwrote the folder.
+        let mut folder = make_entity("writing", 30);
+        folder.entity_type = EntityType::Folder;
+        let mut link = make_entity("writing", 1);
+        link.entity_type = EntityType::Link;
+        let allocs = calculate_allocations(&[folder, link], Some(20));
+        assert_eq!(allocs.len(), 2);
+        assert_eq!(allocs[&("writing".to_string(), EntityType::Folder)], 20);
+        assert_eq!(
+            allocs[&("writing".to_string(), EntityType::Link)],
+            HARD_MIN_CATALYSTS
+        );
+    }
+
     #[test]
     fn test_allocation_empty_vault_gets_floor() {
         // No entity has any material → everyone falls back to the safety floor.
         let entities = vec![make_entity("empty", 0)];
         let allocs = calculate_allocations(&entities, None);
-        assert_eq!(allocs["empty"], HARD_MIN_CATALYSTS);
+        assert_eq!(allocs[&tag("empty")], HARD_MIN_CATALYSTS);
     }
 
     #[test]
     fn test_allocation_single_entity_gets_default_top() {
         // A lone entity is the largest, so it receives the default top budget.
         let allocs = calculate_allocations(&[make_entity("solo", 5)], None);
-        assert_eq!(allocs["solo"], DEFAULT_TOP_CATALYSTS);
+        assert_eq!(allocs[&tag("solo")], DEFAULT_TOP_CATALYSTS);
     }
 
     #[test]
@@ -3010,9 +3035,9 @@ mod tests {
             make_entity("org", 1),
         ];
         let allocs = calculate_allocations(&entities, Some(20));
-        assert_eq!(allocs["theo"], 20); // docs_max → top_target
-        assert_eq!(allocs["rel"], 10); // round(20 * 2/4)
-        assert_eq!(allocs["org"], 5); // round(20 * 1/4)
+        assert_eq!(allocs[&tag("theo")], 20); // docs_max → top_target
+        assert_eq!(allocs[&tag("rel")], 10); // round(20 * 2/4)
+        assert_eq!(allocs[&tag("org")], 5); // round(20 * 1/4)
     }
 
     #[test]
@@ -3026,9 +3051,9 @@ mod tests {
         }
         entities.push(make_entity("small", 40));
         let allocs = calculate_allocations(&entities, None); // top_target = 15
-        assert_eq!(allocs["inbox"], 15); // outlier clamps to the ceiling
-        assert_eq!(allocs["topic0"], 15); // at the anchor → full coverage, not floored
-        assert_eq!(allocs["small"], 3); // genuinely tiny relative to the anchor
+        assert_eq!(allocs[&tag("inbox")], 15); // outlier clamps to the ceiling
+        assert_eq!(allocs[&tag("topic0")], 15); // at the anchor → full coverage, not floored
+        assert_eq!(allocs[&tag("small")], 3); // genuinely tiny relative to the anchor
     }
 
     #[test]
@@ -3036,8 +3061,8 @@ mod tests {
         // 1 doc against a 200-doc leader rounds to 0 → clamped up to the floor.
         let entities = vec![make_entity("giant", 200), make_entity("tiny", 1)];
         let allocs = calculate_allocations(&entities, Some(20));
-        assert_eq!(allocs["giant"], 20);
-        assert_eq!(allocs["tiny"], HARD_MIN_CATALYSTS);
+        assert_eq!(allocs[&tag("giant")], 20);
+        assert_eq!(allocs[&tag("tiny")], HARD_MIN_CATALYSTS);
     }
 
     #[test]
@@ -3045,8 +3070,8 @@ mod tests {
         // Equally sized entities all reach min_top; none exceed it.
         let entities = vec![make_entity("a", 10), make_entity("b", 10)];
         let allocs = calculate_allocations(&entities, Some(12));
-        assert_eq!(allocs["a"], 12);
-        assert_eq!(allocs["b"], 12);
+        assert_eq!(allocs[&tag("a")], 12);
+        assert_eq!(allocs[&tag("b")], 12);
     }
 
     #[test]
@@ -3055,9 +3080,9 @@ mod tests {
         // rest scale from there.
         let entities = vec![make_entity("big", 10), make_entity("half", 5)];
         let allocs = calculate_allocations(&entities, None);
-        assert_eq!(allocs["big"], DEFAULT_TOP_CATALYSTS);
+        assert_eq!(allocs[&tag("big")], DEFAULT_TOP_CATALYSTS);
         // round(15 * 5/10) = round(7.5) = 8.
-        assert_eq!(allocs["half"], 8);
+        assert_eq!(allocs[&tag("half")], 8);
     }
 
     #[test]

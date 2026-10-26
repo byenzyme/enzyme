@@ -7,6 +7,7 @@ use tracing::{debug, info};
 use crate::config::enzyme_config::EnzymeConfig;
 use crate::db::Database;
 use crate::models::EntityType;
+use crate::pipeline::entity_map::EntityMap;
 use crate::pipeline::exclusions::FolderExclusions;
 use crate::pipeline::selection_steps;
 
@@ -136,11 +137,15 @@ impl<'a> SelectionPipeline<'a> {
 
         let mut found = self.db.get_entities_by_names(&lookup_pairs)?;
 
-        let excluded: std::collections::HashSet<String> = prefs
+        // Keyed by name and type: `leave out links ["writing"]` must not drop a
+        // `writing` folder or `#writing` tag.
+        let excluded: HashSet<(String, EntityType)> = prefs
             .excluded_names
             .iter()
-            .map(|e| e.name.clone())
+            .map(|e| (e.name.to_lowercase(), e.entity_type.clone()))
             .collect();
+        let is_excluded =
+            |name: &str, kind: &EntityType| excluded.contains(&(name.to_lowercase(), kind.clone()));
 
         // Drop entities the user explicitly excluded, and — via the unified
         // structural set — any folder that should never be surfaced even if the
@@ -150,18 +155,20 @@ impl<'a> SelectionPipeline<'a> {
             .map(|e| (e.name.clone(), e.entity_type.clone()))
             .collect();
         found.retain(|e| {
-            !excluded.contains(&e.name)
+            !is_excluded(&e.name, &e.entity_type)
                 && !(e.entity_type == crate::models::EntityType::Folder
                     && exclusions.is_excluded(&e.name))
         });
 
-        let found_names: std::collections::HashSet<String> =
-            found.iter().map(|e| e.name.clone()).collect();
+        let found_keys: HashSet<(String, EntityType)> = found
+            .iter()
+            .map(|e| (e.name.clone(), e.entity_type.clone()))
+            .collect();
 
         let mut missing = Vec::new();
         let mut left_out = Vec::new();
         for parsed in &prefs.entities {
-            if found_names.contains(&parsed.name) {
+            if found_keys.contains(&(parsed.name.clone(), parsed.entity_type.clone())) {
                 continue;
             }
             let kind = match parsed.entity_type {
@@ -172,7 +179,7 @@ impl<'a> SelectionPipeline<'a> {
             if indexed.contains(&(parsed.name.clone(), parsed.entity_type.clone())) {
                 left_out.push(selector);
             } else {
-                if !excluded.contains(&parsed.name) {
+                if !is_excluded(&parsed.name, &parsed.entity_type) {
                     debug!(
                         name = parsed.name.as_str(),
                         "config entity not found in DB, skipping"
@@ -187,6 +194,23 @@ impl<'a> SelectionPipeline<'a> {
         } else {
             selection_steps::build_curated_selection(self.db, found, &prefs.entity_profiles)?
         };
+
+        // Folder expansion and patterns add links after the leave-outs above;
+        // a left-out link stays out however it was reached.
+        let before = materialized.final_entities.len();
+        materialized
+            .final_entities
+            .retain(|e| !is_excluded(&e.name, &e.entity_type));
+        if materialized.final_entities.len() != before {
+            for children in materialized.expandable_folders.values_mut() {
+                children.retain(|child| !is_excluded(child, &EntityType::Link));
+            }
+            materialized
+                .expandable_folders
+                .retain(|_, children| !children.is_empty());
+            materialized.entity_map =
+                EntityMap::from_entities(self.db, &materialized.final_entities)?;
+        }
 
         info!(
             count = materialized.final_entities.len(),
@@ -595,6 +619,46 @@ mod tests {
         assert!(names.contains(&"enzyme"));
         assert!(!names.contains(&"todo"), "excluded tag should be filtered");
         assert!(names.contains(&"inbox"));
+
+        restore_env(old);
+    }
+
+    /// `leave out links` names a link, not every entity with that name: a
+    /// same-named folder stays, and folder expansion cannot re-add the link.
+    #[test]
+    fn left_out_link_spares_same_named_folder_and_blocks_expansion() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old = std::env::var("ENZYME_HOME").ok();
+        let (vault, _home) = setup_test_env();
+        let db = open_db(vault.path());
+
+        insert_entity(&db, "writing", EntityType::Folder, 20);
+        insert_entity(&db, "writing", EntityType::Link, 30);
+        insert_entity(&db, "alice", EntityType::Link, 25);
+        insert_doc(&db, "writing/Writing.md");
+        insert_doc(&db, "writing/Alice.md");
+
+        let config_path = EnzymeConfig::config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let vault_key = vault.path().canonicalize().unwrap();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[vaults.\"{}\"]\nentities = [\"folder:writing\"]\nexcluded_links = [\"writing\"]\n",
+                vault_key.display()
+            ),
+        )
+        .unwrap();
+
+        let result = SelectionPipeline::new(&db, vault.path()).run().unwrap();
+        let keys: Vec<(&str, &EntityType)> = result
+            .entities
+            .iter()
+            .map(|e| (e.name.as_str(), &e.entity_type))
+            .collect();
+        assert!(keys.contains(&("writing", &EntityType::Folder)), "{keys:?}");
+        assert!(!keys.contains(&("writing", &EntityType::Link)), "{keys:?}");
+        assert!(keys.contains(&("alice", &EntityType::Link)), "{keys:?}");
 
         restore_env(old);
     }
