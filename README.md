@@ -14,6 +14,11 @@ notes are already organized (folders, tags, links, and dates) and builds a local
 index, so Claude Code or Codex can pull up related notes from months of writing
 and cite them.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/enzyme-loop-dark.gif">
+  <img src="docs/assets/enzyme-loop.gif" width="880" alt="Notes and agent-written memories that mention a person arrive over time. Enzyme writes one question from them once, and later notes attach to it without rewriting it. When a query comes in, the agent reads the relevant questions, aims two searches at the periods they point to, and gets back passages from across those years.">
+</picture>
+
 ## Get started
 
 Open your Markdown notes folder in Claude Code, Codex, or another agent that can
