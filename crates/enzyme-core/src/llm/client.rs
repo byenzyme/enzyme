@@ -76,6 +76,18 @@ pub struct LlmApiError {
     pub body: String,
 }
 
+/// A completion that stopped at its output-token cap before writing any
+/// answer (`finish_reason: length`, empty content). Retrying with the same cap
+/// rarely helps, so callers can stop early on it.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the model reached the {max_tokens}-token output cap before writing an answer \
+     (finish_reason: length); reasoning models can spend the whole cap on reasoning"
+)]
+pub struct OutputCapError {
+    pub max_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
@@ -369,6 +381,17 @@ enum CompletionTokenLimit {
     MaxCompletionTokens { max_completion_tokens: u32 },
 }
 
+impl CompletionTokenLimit {
+    fn tokens(&self) -> u32 {
+        match self {
+            Self::MaxTokens { max_tokens } => *max_tokens,
+            Self::MaxCompletionTokens {
+                max_completion_tokens,
+            } => *max_completion_tokens,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProviderKind {
     OpenAi,
@@ -623,7 +646,27 @@ struct Choice {
 
 #[derive(Deserialize)]
 struct ChoiceMessage {
-    content: String,
+    /// `null` when the model wrote no visible answer, e.g. a reasoning model
+    /// that spent the whole output cap on reasoning.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// The visible answer of a non-streaming completion. A reply cut off at the
+/// output cap before any answer is an error that names the cap, rather than an
+/// empty string that fails later as unparseable output.
+fn completion_content(choice: Choice, max_tokens: u32) -> Result<String> {
+    let content = choice.message.content.unwrap_or_default();
+    match choice.finish_reason.as_deref() {
+        Some("length") if content.trim().is_empty() => {
+            return Err(OutputCapError { max_tokens }.into());
+        }
+        Some("stop") | None => {}
+        Some(reason) => {
+            warn!(finish_reason = %reason, "LLM response did not finish normally — output may be truncated");
+        }
+    }
+    Ok(content)
 }
 
 /// SSE streaming response chunk.
@@ -766,13 +809,7 @@ impl LlmClient {
             .next()
             .context("LLM API response contained no choices")?;
 
-        if let Some(ref reason) = choice.finish_reason {
-            if reason != "stop" {
-                debug!(finish_reason = %reason, "LLM response did not finish normally — output may be truncated");
-            }
-        }
-
-        let content = choice.message.content;
+        let content = completion_content(choice, request_body.token_limit.tokens())?;
         info!(
             "Received chat completion response ({} chars)",
             content.len()
@@ -1080,6 +1117,50 @@ mod tests {
         assert_eq!(
             chat_completions_url("https://api.anthropic.com/v1///").unwrap(),
             "https://api.anthropic.com/v1/chat/completions"
+        );
+    }
+
+    fn choice(json: &str) -> Choice {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn null_content_cut_off_at_the_cap_names_the_cap() {
+        let err = completion_content(
+            choice(r#"{"message":{"content":null},"finish_reason":"length"}"#),
+            512,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<OutputCapError>().unwrap().max_tokens,
+            512
+        );
+        assert!(err.to_string().contains("512-token output cap"), "{err}");
+    }
+
+    #[test]
+    fn partial_answer_at_the_cap_is_kept_for_the_parser() {
+        let content = completion_content(
+            choice(r#"{"message":{"content":"{\"catalysts\": [\"a\"]"},"finish_reason":"length"}"#),
+            512,
+        )
+        .unwrap();
+        assert_eq!(content, r#"{"catalysts": ["a"]"#);
+    }
+
+    #[test]
+    fn missing_or_null_content_on_stop_is_empty() {
+        assert_eq!(
+            completion_content(
+                choice(r#"{"message":{"content":null},"finish_reason":"stop"}"#),
+                8192
+            )
+            .unwrap(),
+            ""
+        );
+        assert_eq!(
+            completion_content(choice(r#"{"message":{}}"#), 8192).unwrap(),
+            ""
         );
     }
 

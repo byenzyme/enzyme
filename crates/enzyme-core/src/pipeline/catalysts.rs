@@ -18,8 +18,8 @@ use crate::db::{Database, FileChunk};
 use crate::embedding::{EmbeddingService, l2_normalize};
 use crate::llm::{
     CUSTOM_READING_QUESTION_INSTRUCTION, CatalystProfile, DEFAULT_FORMAT_KEY, DEFAULT_MODEL,
-    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient, ParsedCatalyst,
-    QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
+    DEFAULT_PROFILE_KEY, EraContext, GenerationParams, LlmApiError, LlmClient, OutputCapError,
+    ParsedCatalyst, QUESTION_PERIPHERY_INSTRUCTION, build_custom_reading_system_prompt,
     build_custom_reading_user_prompt, build_local_user_prompt, build_system_prompt,
     build_user_prompt, catalyst_json_schema, get_profile, hardware, is_synthetic_body_cluster,
     parse_catalyst_response,
@@ -2445,6 +2445,17 @@ impl<'a> CatalystPipeline<'a> {
                                     if is_payment_required_error(&e) {
                                         credits_exhausted.store(true, Ordering::SeqCst);
                                         break;
+                                    }
+                                    // The same cap would cut the retry off too.
+                                    if e.downcast_ref::<OutputCapError>().is_some() {
+                                        return Err(if local_model {
+                                            anyhow::anyhow!(
+                                                "{e}; this endpoint gets the compact local-model \
+                                                 path, so for a larger model set ENZYME_LOCAL_MODEL=0"
+                                            )
+                                        } else {
+                                            e
+                                        });
                                     }
                                     backoff(attempt).await;
                                     continue;
