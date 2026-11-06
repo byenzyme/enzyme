@@ -15,7 +15,7 @@ serde_yaml = "0.9"
 libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
 rusqlite = { workspace = true }
 flate2 = "1"
-ese = { path = "vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
+encoders = { version = "2", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
 instant-distance = "0.6"
 pulldown-cmark = "0.12"
 rayon = "1"
@@ -42,7 +42,7 @@ default = []
 account = ["libsql/tls"]
 # Benchmarks/examples and the vendored ESE test/benchmark harnesses are opt-in
 # so embedders receive a lean default build without downstream pruning.
-scaffolding = ["ese/scaffolding"]
+scaffolding = ["encoders/tests"]
 rten = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
 # In-process llama.cpp inference. OFF by default: enabling it pulls in
 # llama-cpp-sys-2, which needs cmake + a C/C++ toolchain + libclang.
