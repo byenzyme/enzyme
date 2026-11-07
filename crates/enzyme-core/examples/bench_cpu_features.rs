@@ -20,14 +20,14 @@ fn main() {
 
     // Warm up allocator/threadpool/cache.
     let warm: Vec<&str> = texts.iter().take(64).map(String::as_str).collect();
-    black_box(ese::encode(warm));
+    black_box(encoders::encode(warm));
 
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let start = Instant::now();
-    let embeddings = black_box(ese::encode(refs));
+    let embeddings = black_box(encoders::encode(refs));
     let encode_elapsed = start.elapsed();
 
-    let query = black_box(ese::encode_single(
+    let query = black_box(encoders::encode_single(
         "semantic search catalyst memory benchmark",
     ));
     let start = Instant::now();
@@ -43,7 +43,7 @@ fn main() {
     let cosine_ms = cosine_elapsed.as_secs_f64() * 1000.0;
     let sims = n * reps;
 
-    println!("dims: {}", ese::DIMENSIONS);
+    println!("dims: {}", encoders::DIMENSIONS);
     println!("docs: {n}");
     println!("cosine_reps: {reps}");
     println!("encode_ms: {encode_ms:.3}");
@@ -60,7 +60,7 @@ fn main() {
 }
 
 #[inline(never)]
-fn cosine(a: &[f32; ese::DIMENSIONS], b: &[f32; ese::DIMENSIONS]) -> f32 {
+fn cosine(a: &[f32; encoders::DIMENSIONS], b: &[f32; encoders::DIMENSIONS]) -> f32 {
     let mut dot = 0.0f32;
     let mut na = 0.0f32;
     let mut nb = 0.0f32;

@@ -23,7 +23,7 @@ impl EmbeddingBackend for EseBackend {
         }
 
         let encode_start = Instant::now();
-        let embeddings = ese::encode(texts.iter().copied());
+        let embeddings = encoders::encode(texts.iter().copied());
         let raw_encode = encode_start.elapsed();
 
         let convert_start = Instant::now();
@@ -41,11 +41,11 @@ impl EmbeddingBackend for EseBackend {
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        Ok(ese::encode_single(text).to_vec())
+        Ok(encoders::encode_single(text).to_vec())
     }
 
     fn dimension(&self) -> usize {
-        ese::DIMENSIONS
+        encoders::DIMENSIONS
     }
 
     fn name(&self) -> &str {

@@ -32,7 +32,7 @@ rust-embed = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Embedding inference
-ese = { path = "crates/enzyme-core/vendor/ese", features = ["dim-512", "rayon", "quant-8"], default-features = false }
+encoders = { version = "2", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
 
 # HNSW
 instant-distance = "0.6"

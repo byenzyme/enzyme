@@ -14,4 +14,4 @@ pub use entity::*;
 pub type Timestamp = i64;
 
 /// Embedding vector dimensionality.
-pub const EMBEDDING_DIMENSION: usize = ese::DIMENSIONS;
+pub const EMBEDDING_DIMENSION: usize = encoders::DIMENSIONS;
