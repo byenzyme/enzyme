@@ -21,13 +21,13 @@ fn checksum_vecs(vecs: &[Vec<f32>]) -> f32 {
         .sum()
 }
 
-fn checksum_arrays(vecs: &[[f32; ese::DIMENSIONS]]) -> f32 {
+fn checksum_arrays(vecs: &[[f32; encoders::DIMENSIONS]]) -> f32 {
     vecs.iter().map(|v| v[0]).sum()
 }
 
 fn time_arrays<F>(iters: usize, mut f: F) -> (Duration, f32)
 where
-    F: FnMut() -> Vec<[f32; ese::DIMENSIONS]>,
+    F: FnMut() -> Vec<[f32; encoders::DIMENSIONS]>,
 {
     let mut elapsed = Duration::ZERO;
     let mut checksum = 0.0f32;
@@ -74,22 +74,27 @@ fn main() -> Result<()> {
     println!("ESE batching microbenchmark: count={count}, iters={iters}, batch_size={batch_size}");
 
     // Warm up Rayon and instruction/data caches before measuring.
-    black_box(ese::encode(refs.iter().copied()));
+    black_box(encoders::encode(refs.iter().copied()));
 
-    let (elapsed, checksum) = time_arrays(iters, || ese::encode(refs.iter().copied()));
-    print_result("ese::encode(all) raw", elapsed, total_chunks, checksum);
+    let (elapsed, checksum) = time_arrays(iters, || encoders::encode(refs.iter().copied()));
+    print_result("encoders::encode(all) raw", elapsed, total_chunks, checksum);
 
     let (elapsed, checksum) = time_arrays(iters, || {
         let mut out = Vec::with_capacity(refs.len());
         for batch in refs.chunks(batch_size) {
-            out.extend(ese::encode(batch.iter().copied()));
+            out.extend(encoders::encode(batch.iter().copied()));
         }
         out
     });
-    print_result("ese::encode(chunked) raw", elapsed, total_chunks, checksum);
+    print_result(
+        "encoders::encode(chunked) raw",
+        elapsed,
+        total_chunks,
+        checksum,
+    );
 
     let (elapsed, checksum) = time_vecs(iters, || {
-        ese::encode(refs.iter().copied())
+        encoders::encode(refs.iter().copied())
             .into_iter()
             .map(|arr| arr.to_vec())
             .collect()
@@ -100,7 +105,7 @@ fn main() -> Result<()> {
         let mut out = Vec::with_capacity(refs.len());
         for batch in refs.chunks(batch_size) {
             out.extend(
-                ese::encode(batch.iter().copied())
+                encoders::encode(batch.iter().copied())
                     .into_iter()
                     .map(|arr| arr.to_vec()),
             );
