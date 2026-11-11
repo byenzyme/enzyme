@@ -206,6 +206,13 @@ enum Commands {
         catalyst_budget: Option<usize>,
     },
 
+    /// Return free space inside the index file to disk (rewrites the file)
+    Compact {
+        /// Emit a JSON result
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show vault status and configuration
     Status {
         /// Emit the versioned `enzyme.status.v1` JSON envelope
@@ -464,6 +471,7 @@ fn foreground_workspace_lock(
                 WaitNotice::Text
             },
         ),
+        Commands::Compact { .. } => (DEFAULT_LOCK_TIMEOUT_SECS, WaitNotice::Text),
         _ => return Ok(None),
     };
     configure_lock_wait(std::time::Duration::from_secs(timeout), notice);
@@ -806,6 +814,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Doctor { json } => {
             commands::doctor::run_doctor(&vault_path, json).await?;
+        }
+        Commands::Compact { json } => {
+            commands::compact::run_compact(&vault_path, json)?;
         }
         Commands::Login { .. } | Commands::Logout => unreachable!(),
         Commands::Mcp

@@ -2,6 +2,7 @@ pub mod agents;
 pub mod arena;
 pub mod benchmark;
 pub mod catalyze;
+pub mod compact;
 pub mod compile;
 pub mod compile_preset;
 pub mod doctor;
