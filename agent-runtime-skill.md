@@ -144,7 +144,7 @@ defaults. Report malformed configuration rather than silently ignoring it.
 - For a broad prompt or first orientation, run `enzyme petri`.
 - Treat nested children under a tag or folder as evidence inside that parent cluster by default.
 
-Use petri to orient: which parts of the vault bear on the request, and what the user calls them. When a turn allows only a search or two, carry one or two catalyst phrases into the query; they reach notes the user's raw words may not. With more searches, the user's own wording works as well. Catalysts are generated, not written by the user: never quote one as the user's words or treat it as evidence. Answer from the passages you retrieve.
+Use petri to orient: which parts of the vault bear on the request, and what the user calls them. Those tag, folder, and people names are the user's own vocabulary and make good search terms. When a turn allows only a search or two, carry one or two catalyst phrases into the query; they reach notes the user's raw words may not. With more searches, the user's own wording works as well. Catalysts are generated, not written by the user: never quote one as the user's words or treat it as evidence. Answer from the passages you retrieve.
 
 ## Search
 

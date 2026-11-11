@@ -100,18 +100,18 @@ _FIRST_SESSION_INSTRUCTIONS = """\
 This is a personal knowledge vault indexed by enzyme.
 
 Start by calling the enzyme_petri tool to see what's in the vault — it returns \
-the main topics, activity trends, and thematic questions (catalysts). Use those \
-catalysts to compose enzyme_catalyze queries for semantic search.
+the main topics, activity trends, and generated questions (catalysts) about what \
+the user decided, changed, or left open. Catalysts are hints, not the user's words.
 
 Workflow:
-1. enzyme_petri (with --query if the user's message is specific) → get entities and catalysts
-2. enzyme_catalyze using catalyst-inspired queries → get excerpts with file paths and dates
+1. enzyme_petri (with query if the user's message is specific) → see which topics bear on it and what the user calls them
+2. enzyme_catalyze several times with different wording, starting from the user's own words and topic names; borrow catalyst wording only when you can search once or twice → excerpts with file paths and dates
 3. Present findings using the user's own words and file attribution. Never expose tool names.
 
 Presentation: for exploration, open one specific connection rather than a topic list; for continuity, restore prior conclusions and stopping points; for imported references, lead with what the user chose to save and bridge to their own notes when possible.
 
-Use enzyme tools instead of grep/search_files for vault content — they find \
-content by concept, not keyword."""
+enzyme_catalyze matches names, titles, plain words, and meaning together. Use \
+grep when you need every occurrence of literal text."""
 
 
 def pre_llm_call(**kwargs) -> dict:

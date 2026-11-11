@@ -27,8 +27,7 @@ ENZYME_PETRI = {
             "top": {
                 "type": "integer",
                 "description": (
-                    "Number of top entities to return. Defaults to the CLI behavior: "
-                    "all entities by recency, or 15 when query is set."
+                    "Number of top entities to return. Default: 15."
                 ),
             },
         },
