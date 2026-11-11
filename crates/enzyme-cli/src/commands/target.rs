@@ -12,7 +12,6 @@ use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::models::AppliedTarget;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::pipeline::similarity::{SimilarityPipeline, catalysts_fingerprint};
 
 use crate::display::{CompletionStatus, DisplayEvent, InitDisplay};
 
@@ -46,17 +45,14 @@ pub fn display_target_path(vault_path: &Path, stored_path: &str) -> Option<Strin
     }
 }
 
+/// Index and embed a target directory into its own database under the vault's
+/// `.enzyme/targets/`, and record it as a target of the vault.
+///
+/// A target holds only notes: `catalyze --target` routes the vault's current
+/// catalysts, with the vault's catalyst vectors, onto the target's chunk
+/// vectors at query time, so nothing here depends on the vault's catalysts
+/// beyond requiring that some exist.
 pub async fn prepare_target(source_path: &Path, target_path: &Path) -> Result<()> {
-    for _ in 0..4 {
-        if prepare_target_once(source_path, target_path).await? {
-            return Ok(());
-        }
-        info!("source epoch changed during target preparation; restaging latest epoch");
-    }
-    bail!("source catalyst epoch changed repeatedly during target preparation")
-}
-
-async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<bool> {
     let start = Instant::now();
     info!(?source_path, ?target_path, "preparing catalyze target");
 
@@ -68,7 +64,6 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
     let source_paths = EnzymePaths::new(source_path)?;
     let service = get_embedding_service(&source_paths.home)?;
 
-    // Load catalysts from source vault
     if !source_paths.vault_db.exists() {
         bail!(
             "source vault has no enzyme database — run `enzyme init` on {} first",
@@ -76,12 +71,8 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
         );
     }
     let source_db = Database::open(&source_paths.vault_db)?;
-    let source_epoch = source_db
-        .get_epoch_state()?
-        .active_epoch_id
-        .context("source has no active catalyst epoch")?;
-    let catalysts = source_db.get_all_catalysts()?;
-    if catalysts.is_empty() {
+    let catalyst_count = source_db.get_all_catalysts()?.len();
+    if catalyst_count == 0 {
         bail!(
             "source vault has no catalysts — run `enzyme init` on {} first",
             source_path.display()
@@ -106,9 +97,7 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
 
     tx.send(DisplayEvent::IndexingStart).ok();
     let target_db = Database::open(&target_db_path)?;
-    let recovery_required = target_db.continuous_projection_fence()?.dirty;
     let projection_token = target_db.begin_continuous_projection()?;
-    let before_embeddings = target_db.get_all_chunk_embeddings()?;
     let indexing = IndexingPipeline::new(&target_db, target_path.to_path_buf());
     let tx_idx = tx.clone();
     let idx_stats = indexing.run(false, |msg| {
@@ -125,7 +114,7 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
     })
     .ok();
 
-    // ── Phase 3: Embed target (spawn_blocking — CPU-bound ONNX) ────────────
+    // ── Phase 3: Embed target (spawn_blocking — CPU-bound encoding) ────────
     tx.send(DisplayEvent::EmbeddingStart).ok();
     let emb_stats = tokio::task::spawn_blocking({
         let target_db_path = target_db_path.clone();
@@ -154,101 +143,12 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
         encode_ms: emb_stats.encode_ms,
     })
     .ok();
-
-    // ── Phase 4: Similarity (spawn_blocking — CPU-bound vector math) ───────
-    //
-    // Warm-path skip: if nothing changed in the target (indexing + embedding
-    // both reported no mutations) AND the catalyst set is identical to the last
-    // run (fingerprint stored in the target DB matches), skip the expensive
-    // delete + recompute cycle entirely.
-    const CATALYST_FINGERPRINT_KEY: &str = "catalyst_fingerprint";
-
-    let idx_unchanged =
-        idx_stats.files_new == 0 && idx_stats.files_updated == 0 && idx_stats.files_deleted == 0;
-    let emb_unchanged = emb_stats.chunks_embedded == 0 && emb_stats.documents_pruned == 0;
-
-    let current_fingerprint = catalysts_fingerprint(&catalysts);
-    let stored_fingerprint = {
-        let tdb = Database::open(&target_db_path)?;
-        tdb.get_config(CATALYST_FINGERPRINT_KEY)?
-    };
-    let fingerprint_matches = stored_fingerprint.as_deref() == Some(current_fingerprint.as_str());
-
-    let skip_similarity =
-        !recovery_required && idx_unchanged && emb_unchanged && fingerprint_matches;
-
-    let catalyst_count = catalysts.len();
-
-    let _sim_stats = if skip_similarity {
-        info!("catalyst similarities up to date; skipping recompute");
-        // Still emit display events so callers see consistent output.
-        tx.send(DisplayEvent::SimilarityStart).ok();
-        tx.send(DisplayEvent::SimilarityComplete {
-            catalysts: catalyst_count,
-            documents: 0,
-        })
-        .ok();
-        // Return a zero-work stats struct.
-        enzyme_core::pipeline::similarity::SimilarityStats {
-            catalysts_processed: catalyst_count,
-            similarities_computed: 0,
-            documents_compared: 0,
-            duration_ms: 0,
-        }
-    } else if fingerprint_matches && !recovery_required {
-        tx.send(DisplayEvent::SimilarityStart).ok();
-        let after_embeddings = target_db.get_all_chunk_embeddings()?;
-        let incremental = SimilarityPipeline::new(&target_db, service)
-            .maintain_incremental(&before_embeddings, &after_embeddings)?;
-        tx.send(DisplayEvent::SimilarityComplete {
-            catalysts: catalyst_count,
-            documents: idx_stats.files_discovered,
-        })
-        .ok();
-        enzyme_core::pipeline::similarity::SimilarityStats {
-            catalysts_processed: catalyst_count,
-            similarities_computed: incremental.rows_upserted,
-            documents_compared: idx_stats.files_discovered,
-            duration_ms: incremental.duration_ms,
-        }
-    } else {
-        tx.send(DisplayEvent::SimilarityStart).ok();
-        let sim_stats = tokio::task::spawn_blocking({
-            let tx_sim = tx.clone();
-            let target_db_path = target_db_path.clone();
-            move || {
-                let db = Database::open(&target_db_path)?;
-                let pipeline = SimilarityPipeline::new(&db, service);
-                pipeline.run_with_catalysts(&catalysts, |done, total| {
-                    tx_sim
-                        .send(DisplayEvent::SimilarityProgress { done, total })
-                        .ok();
-                })
-            }
-        })
-        .await
-        .context("similarity task panicked")??;
-
-        tx.send(DisplayEvent::SimilarityComplete {
-            catalysts: sim_stats.catalysts_processed,
-            documents: sim_stats.documents_compared,
-        })
-        .ok();
-
-        // Persist fingerprint so the next warm run can skip.
-        let tdb = Database::open(&target_db_path)?;
-        tdb.set_config(CATALYST_FINGERPRINT_KEY, &current_fingerprint)?;
-
-        sim_stats
-    };
+    target_db.finish_continuous_projection(&projection_token)?;
 
     // ── Record target in source vault for future refreshes ────────────────
     let canonical_target = target_path
         .canonicalize()
         .unwrap_or_else(|_| target_path.to_path_buf());
-    let source_db = Database::open(&source_paths.vault_db)?;
-    target_db.stage_epoch_projection_from_shadow(&target_db, &source_epoch)?;
-    target_db.finish_continuous_projection(&projection_token)?;
     source_db.upsert_applied_target(&AppliedTarget {
         id: None,
         target_path: canonical_target.to_string_lossy().to_string(),
@@ -272,8 +172,7 @@ async fn prepare_target_once(source_path: &Path, target_path: &Path) -> Result<b
     .ok();
 
     display.finish();
-
-    Ok(source_db.get_epoch_state()?.active_epoch_id.as_deref() == Some(source_epoch.as_str()))
+    Ok(())
 }
 
 #[cfg(test)]

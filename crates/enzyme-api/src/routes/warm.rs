@@ -94,7 +94,7 @@ async fn warm(
         pool_guard.as_ref().map(|p| {
             json!({
                 "catalysts": p.catalyst_metadata.len(),
-                "similarities": p.similarities.len(),
+                "chunks": p.chunk_vectors.len(),
             })
         })
     };

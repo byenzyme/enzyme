@@ -10,10 +10,10 @@ use enzyme_core::document::{
 };
 use enzyme_core::embedding::{EmbeddingService, get_embedding_service};
 use enzyme_core::models::EntityType;
+use enzyme_core::pipeline::catalyst_vectors::ensure_catalyst_vectors;
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::epoch::now_ms as epoch_now_ms;
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::pipeline::similarity::{IncrementalSimilarityStats, SimilarityPipeline};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -89,11 +89,10 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
     let db = Database::open(&paths.vault_db)?;
     let _sync_guard = paths.sync_on_drop();
     // Ingest is a document-write surface, so it participates in the same
-    // serialized, crash-recoverable continuous projection as refresh. Mark
-    // dirty before the document commit and clear only after exact top-K is
-    // durable.
+    // serialized continuous projection as refresh: dirty before the document
+    // commit, clean once embeddings are durable.
     let service = get_embedding_service(&paths.home)?;
-    let (emb_stats, similarity) = project_ingest_batch(&db, &paths, &processed, service)?;
+    let (emb_stats, catalysts_embedded) = project_ingest_batch(&db, &paths, &processed, service)?;
     db.reconcile_corpus_generation(epoch_now_ms())?;
     let contract =
         super::init::generation_contract(vault_path, &paths, super::generator::LlmMode::Auto)
@@ -127,7 +126,7 @@ pub async fn run_ingest(vault_path: &Path, quiet: bool) -> Result<()> {
                     "duration_ms": emb_stats.duration_ms,
                     "encode_ms": emb_stats.encode_ms,
                 },
-                "similarity": similarity,
+                "catalysts_embedded": catalysts_embedded,
                 "epoch": {
                     "active_epoch_id": epoch_state.active_epoch_id,
                     "age_ms": epoch_age_ms,
@@ -157,16 +156,11 @@ pub(crate) fn project_ingest_batch(
     paths: &EnzymePaths,
     processed: &[ProcessedDocument],
     service: &EmbeddingService,
-) -> Result<(
-    enzyme_core::pipeline::embedding::EmbeddingStats,
-    IncrementalSimilarityStats,
-)> {
+) -> Result<(enzyme_core::pipeline::embedding::EmbeddingStats, usize)> {
     let _projection_lock = super::lock::acquire_projection_lock(
         paths.vault_db.parent().context("vault DB has no parent")?,
     )?;
-    let recovery_required = db.continuous_projection_fence()?.dirty;
     let projection_token = db.begin_continuous_projection()?;
-    let before_embeddings = db.get_all_chunk_embeddings()?;
     db.upsert_documents_batch(processed)?;
 
     let entity_entries = IndexingPipeline::collect_entity_entries(processed);
@@ -179,24 +173,11 @@ pub(crate) fn project_ingest_batch(
     }
 
     let emb_stats = EmbeddingPipeline::new(db, service).run_all(|_| {})?;
-    let after_embeddings = db.get_all_chunk_embeddings()?;
-    let similarity = if db.get_all_catalysts()?.is_empty() {
-        IncrementalSimilarityStats::default()
-    } else if recovery_required {
-        let full = SimilarityPipeline::new(db, service).run(|_, _| {})?;
-        IncrementalSimilarityStats {
-            candidate_scores: full.similarities_computed,
-            rows_upserted: full.similarities_computed,
-            full_repair: true,
-            duration_ms: full.duration_ms,
-            ..Default::default()
-        }
-    } else {
-        SimilarityPipeline::new(db, service)
-            .maintain_incremental(&before_embeddings, &after_embeddings)?
-    };
+    // Catalyst links are scored at query time; only the catalyst vectors
+    // themselves must exist, and they go missing when the index is rebuilt.
+    let catalysts_embedded = ensure_catalyst_vectors(db, service)?;
     db.finish_continuous_projection(&projection_token)?;
-    Ok((emb_stats, similarity))
+    Ok((emb_stats, catalysts_embedded))
 }
 
 fn entry_to_processed_document(entry: IngestEntry, now_ms: i64) -> Result<ProcessedDocument> {
@@ -362,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_projects_embeddings_and_recovers_interrupted_similarity_commit() {
+    fn ingest_embeds_notes_and_restores_missing_catalyst_vectors() {
         let temp = tempfile::TempDir::new().unwrap();
         let paths = EnzymePaths::with_overrides(
             temp.path(),
@@ -385,28 +366,24 @@ mod tests {
         let service = EmbeddingService::new(Box::new(AxisBackend));
         let doc = entry_to_processed_document(entry("Projected"), 1_700_000_000_000).unwrap();
 
-        let (embedding, similarity) =
+        // The first embedding run records the backend and clears vectors made
+        // in any other space, so the catalyst is re-embedded once...
+        let (embedding, catalysts_embedded) =
             project_ingest_batch(&db, &paths, &[doc.clone()], &service).unwrap();
         assert!(embedding.chunks_embedded > 0);
-        assert!(similarity.rows_upserted > 0);
-        assert_eq!(
-            db.get_similarities_for_catalyst("cat", 50).unwrap().len(),
-            1
-        );
-
-        // Simulate a process dying after embedding committed but before its
-        // similarity phase. The next ingest has no embedding delta, yet the
-        // durable marker forces a complete exact repair.
-        db.execute_write("DELETE FROM catalyst_similarities", vec![])
-            .unwrap();
-        db.set_config("continuous_projection_fence", "dirty:crashed")
-            .unwrap();
-        let (_, recovered) = project_ingest_batch(&db, &paths, &[doc], &service).unwrap();
-        assert!(recovered.full_repair);
-        assert_eq!(
-            db.get_similarities_for_catalyst("cat", 50).unwrap().len(),
-            1
-        );
+        assert_eq!(catalysts_embedded, 1);
         assert!(!db.continuous_projection_fence().unwrap().dirty);
+        // ...and later ingests leave current vectors alone.
+        let (_, catalysts_embedded) =
+            project_ingest_batch(&db, &paths, &[doc.clone()], &service).unwrap();
+        assert_eq!(catalysts_embedded, 0);
+
+        // A rebuilt index keeps catalysts but drops their vectors; the next
+        // ingest restores them so search can link catalysts again.
+        db.execute_write("DELETE FROM catalyst_embeddings_packed", vec![])
+            .unwrap();
+        let (_, restored) = project_ingest_batch(&db, &paths, &[doc], &service).unwrap();
+        assert_eq!(restored, 1);
+        assert_eq!(db.get_all_catalyst_embeddings().unwrap()[0].0, "cat");
     }
 }

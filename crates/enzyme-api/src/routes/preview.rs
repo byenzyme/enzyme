@@ -69,9 +69,11 @@ async fn preview(
 
     // Aggregate results
     let mut doc_scores: HashMap<String, (f64, usize)> = HashMap::new();
+    let catalyst_ids: Vec<&str> = top_catalysts.iter().map(|(id, _)| id.as_str()).collect();
+    let similar = pool.similar_docs(&catalyst_ids);
 
     for (catalyst_id, _) in &top_catalysts {
-        if let Some(sims) = pool.get_similarities(catalyst_id) {
+        if let Some(sims) = similar.get(catalyst_id) {
             for sd in sims {
                 let entry = doc_scores.entry(sd.file_path.clone()).or_insert((0.0, 0));
                 if sd.similarity > entry.0 {

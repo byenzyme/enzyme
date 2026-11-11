@@ -1,4 +1,5 @@
 pub mod as_of;
+pub mod catalyst_vectors;
 pub mod catalysts;
 pub mod context;
 pub mod embedding;
@@ -11,4 +12,3 @@ pub mod jev_selection;
 pub mod profile_assignment;
 pub mod selection;
 pub mod selection_steps;
-pub mod similarity;

@@ -176,8 +176,8 @@ impl Database {
         Ok(epoch_id)
     }
 
-    /// Activate a successfully generated in-process epoch after similarities
-    /// have also been committed to the active materialized view.
+    /// Activate a successfully generated in-process epoch after its catalyst
+    /// vectors have also been committed to the active materialized view.
     pub fn activate_inline_catalyst_epoch(&self, epoch_id: &str, now_ms: i64) -> Result<()> {
         block_in_place_sync(async {
             let tx = self
@@ -553,7 +553,7 @@ impl Database {
     }
 
     /// Record a successful activation. The caller must invoke this in the same
-    /// transaction that switches catalysts, embeddings, and similarities.
+    /// transaction that switches catalysts and their embeddings.
     pub(crate) async fn mark_epoch_activated_on_tx(
         tx: &libsql::Transaction,
         epoch_id: &str,
@@ -725,7 +725,7 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Catalyst, CatalystSimilarity};
+    use crate::models::Catalyst;
 
     fn contract() -> GenerationContract {
         GenerationContract {
@@ -997,10 +997,6 @@ mod tests {
         assert_eq!(db.get_all_catalysts().unwrap()[0].id, "new");
         assert_eq!(db.get_all_catalyst_embeddings().unwrap()[0].0, "new");
         assert_eq!(
-            db.get_similarities_for_catalyst("new", 10).unwrap()[0].file_path,
-            "live.md"
-        );
-        assert_eq!(
             db.get_epoch_state().unwrap().active_epoch_id.as_deref(),
             Some(epoch_id.as_str())
         );
@@ -1094,87 +1090,5 @@ mod tests {
             .unwrap();
         assert_eq!(due.reason, Some(EpochDueReason::Cadence));
         assert!(due.scheduled);
-    }
-
-    #[test]
-    fn target_projection_epoch_matches_source_after_switch() {
-        let source = Database::open_in_memory().unwrap();
-        let target = Database::open_in_memory().unwrap();
-        let source_shadow = Database::open_in_memory().unwrap();
-        let old_target_shadow = Database::open_in_memory().unwrap();
-        let target_shadow = Database::open_in_memory().unwrap();
-        let c = contract();
-        source.insert_catalysts(&[catalyst("old")]).unwrap();
-        source.reconcile_corpus_generation(1).unwrap();
-        source.bootstrap_legacy_epoch(&c, 1, true).unwrap();
-        let old_epoch = source.get_epoch_state().unwrap().active_epoch_id.unwrap();
-        old_target_shadow
-            .upsert_catalyst_embeddings(&[("old", &[0.0f32, 1.0][..])])
-            .unwrap();
-        target
-            .upsert_catalyst_embeddings(&[("old", &[0.0f32, 1.0][..])])
-            .unwrap();
-        target
-            .stage_epoch_projection_from_shadow(&old_target_shadow, &old_epoch)
-            .unwrap();
-
-        source_shadow.insert_catalysts(&[catalyst("new")]).unwrap();
-        source_shadow
-            .upsert_catalyst_embeddings(&[("new", &[1.0f32, 0.0][..])])
-            .unwrap();
-        target_shadow
-            .upsert_catalyst_embeddings(&[("new", &[1.0f32, 0.0][..])])
-            .unwrap();
-        target_shadow
-            .upsert_catalyst_similarities(&[CatalystSimilarity {
-                id: None,
-                catalyst_id: "new".into(),
-                catalyst_text: "new text".into(),
-                file_path: "target.md".into(),
-                chunk_index: 0,
-                similarity: 0.9,
-                chunk_metadata: serde_json::json!({}),
-                timeline_data: serde_json::json!({}),
-                created_at: Utc::now(),
-            }])
-            .unwrap();
-        let scheduled = source.schedule_catalyst_epoch(2, &c, true).unwrap();
-        let claim = source.claim_scheduled_epoch(3).unwrap().unwrap();
-        target
-            .stage_epoch_projection_from_shadow(&target_shadow, &claim.epoch_id)
-            .unwrap();
-        // A failed source activation can discard the staged namespace without
-        // poisoning the target's unkeyed old-epoch retry cache.
-        assert_eq!(target.get_all_catalyst_embeddings().unwrap()[0].0, "old");
-        // Staging cannot affect reads selected by the still-active source ID.
-        assert_eq!(
-            target.get_epoch_catalyst_embeddings(&old_epoch).unwrap()[0].0,
-            "old"
-        );
-        source
-            .activate_epoch_from_shadow(&source_shadow, &claim.epoch_id, 5)
-            .unwrap();
-        assert_eq!(
-            target
-                .get_epoch_catalyst_embeddings(
-                    source
-                        .get_epoch_state()
-                        .unwrap()
-                        .active_epoch_id
-                        .as_deref()
-                        .unwrap()
-                )
-                .unwrap()[0]
-                .0,
-            "new"
-        );
-        assert_eq!(
-            target
-                .get_epoch_similarities_for_catalysts(&claim.epoch_id, &["new"], 10)
-                .unwrap()[0]
-                .file_path,
-            "target.md"
-        );
-        assert_eq!(scheduled.epoch_id.as_deref(), Some(claim.epoch_id.as_str()));
     }
 }

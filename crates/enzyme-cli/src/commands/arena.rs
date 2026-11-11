@@ -499,7 +499,7 @@ pub async fn run(
         })
         .count();
     let service = get_embedding_service(&paths.home)?;
-    let (embedding, _similarity) =
+    let (embedding, _catalysts_embedded) =
         super::ingest::project_ingest_batch(&db, &paths, &documents, service)?;
     let mut merged_occurrences = BTreeMap::new();
     for (name, occurrence) in preserved {

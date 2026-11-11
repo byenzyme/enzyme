@@ -482,7 +482,7 @@ pub async fn run_fast_pipeline(
         }
     };
 
-    // 3. Lookup pre-computed similarities, aggregate, and fetch content (sync DB — scoped)
+    // 3. Score each catalyst's closest documents, aggregate, and fetch content (sync DB — scoped)
     let (final_results, doc_index_map, search_events, total_queries) = {
         let db = match Database::open(&paths.vault_db) {
             Ok(d) => d,
@@ -496,9 +496,11 @@ pub async fn run_fast_pipeline(
         let mut doc_scores: HashMap<String, (f64, usize, String)> = HashMap::new();
         let top_catalyst_count = top_catalysts.len().min(4);
         let mut search_events = Vec::new();
+        let catalyst_ids: Vec<&str> = top_catalysts.iter().map(|(id, _)| id.as_str()).collect();
+        let similar = pool.similar_docs(&catalyst_ids);
 
         for (i, (catalyst_id, _relevance)) in top_catalysts.iter().enumerate() {
-            if let Some(sims) = pool.get_similarities(catalyst_id) {
+            if let Some(sims) = similar.get(catalyst_id) {
                 let results: Vec<SearchResultItem> = sims
                     .iter()
                     .take(request.results_per_query)

@@ -121,15 +121,10 @@ pub enum DisplayEvent {
     EmbeddingSkipped(String),
     EmbeddingFailed(String),
 
-    // Similarity
-    SimilarityStart,
-    SimilarityProgress {
-        done: usize,
-        total: usize,
-    },
-    SimilarityComplete {
+    // Catalyst vectors
+    CatalystVectorsStart,
+    CatalystVectorsComplete {
         catalysts: usize,
-        documents: usize,
     },
 
     // API
@@ -166,7 +161,7 @@ enum DisplayStage {
     Selecting,
     Discovery,
     Embedding,
-    Similarity,
+    CatalystVectors,
     Complete,
 }
 
@@ -321,7 +316,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         discovery_completed: &mut usize,
                         discovery_total: &mut usize,
                         lines_written: &mut u16,
-                        spinner: &mut HelixSpinner,
                         catalysts_generated: &mut Option<usize>,
                         catalyst_errors: &mut Option<(usize, usize)>,
                         embedding_status: &mut Option<String>,
@@ -557,37 +551,17 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     reason,
                 );
             }
-            DisplayEvent::SimilarityStart => {
-                *stage = DisplayStage::Similarity;
+            DisplayEvent::CatalystVectorsStart => {
+                *stage = DisplayStage::CatalystVectors;
             }
-            DisplayEvent::SimilarityProgress { done, total } => {
-                if total > 0 && done % 10 == 0 {
-                    clear_animated_region(out, lines_written, discovery_anchor_active);
-                    let frame = spinner.tick();
-                    let _ = writeln!(
-                        out,
-                        "  {}{}{} Similarities [{}/{}]",
-                        crossterm::style::SetForegroundColor(colors::ENZYME_PURPLE),
-                        frame,
-                        crossterm::style::ResetColor,
-                        done,
-                        total,
-                    );
-                    *lines_written = 1;
-                }
-            }
-            DisplayEvent::SimilarityComplete {
-                catalysts,
-                documents,
-            } => {
+            DisplayEvent::CatalystVectorsComplete { catalysts } => {
                 clear_animated_region(out, lines_written, discovery_anchor_active);
                 let _ = writeln!(
                     out,
-                    "  {}Similarities:{} {} catalysts \u{00d7} {} documents",
+                    "  {}Catalyst vectors:{} {} catalysts",
                     crossterm::style::SetForegroundColor(colors::FOREST_GREEN),
                     crossterm::style::ResetColor,
                     catalysts,
-                    documents,
                 );
             }
             DisplayEvent::Done {
@@ -635,7 +609,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                     &mut discovery_completed,
                     &mut discovery_total,
                     &mut lines_written,
-                    &mut spinner,
                     &mut catalysts_generated,
                     &mut catalyst_errors,
                     &mut embedding_status,
@@ -654,7 +627,6 @@ fn run_animated_display(rx: mpsc::Receiver<DisplayEvent>) {
                         &mut discovery_completed,
                         &mut discovery_total,
                         &mut lines_written,
-                        &mut spinner,
                         &mut catalysts_generated,
                         &mut catalyst_errors,
                         &mut embedding_status,
@@ -913,22 +885,11 @@ fn run_plain_display(rx: mpsc::Receiver<DisplayEvent>) {
                 DisplayEvent::ApiSkipped(reason) => {
                     println!("  {}", reason);
                 }
-                DisplayEvent::SimilarityStart => {
-                    println!("Computing similarities...");
+                DisplayEvent::CatalystVectorsStart => {
+                    println!("Embedding catalysts...");
                 }
-                DisplayEvent::SimilarityProgress { done, total } => {
-                    if total > 0 && done % 10 == 0 {
-                        println!("  [{}/{}] catalysts processed", done, total);
-                    }
-                }
-                DisplayEvent::SimilarityComplete {
-                    catalysts,
-                    documents,
-                } => {
-                    println!(
-                        "  Similarities: {} catalysts \u{00d7} {} documents",
-                        catalysts, documents
-                    );
+                DisplayEvent::CatalystVectorsComplete { catalysts } => {
+                    println!("  Catalyst vectors: {} catalysts", catalysts);
                 }
                 DisplayEvent::Done {
                     duration_ms,
@@ -1062,17 +1023,11 @@ fn run_json_display(rx: mpsc::Receiver<DisplayEvent>) {
                     DisplayEvent::ApiSkipped(reason) => {
                         json!({"stage": "api", "status": "skipped", "reason": reason})
                     }
-                    DisplayEvent::SimilarityStart => {
-                        json!({"stage": "similarity", "status": "start"})
+                    DisplayEvent::CatalystVectorsStart => {
+                        json!({"stage": "catalyst_vectors", "status": "start"})
                     }
-                    DisplayEvent::SimilarityProgress { done, total } => {
-                        json!({"stage": "similarity", "status": "progress", "done": done, "total": total})
-                    }
-                    DisplayEvent::SimilarityComplete {
-                        catalysts,
-                        documents,
-                    } => {
-                        json!({"stage": "similarity", "status": "complete", "catalysts": catalysts, "documents": documents})
+                    DisplayEvent::CatalystVectorsComplete { catalysts } => {
+                        json!({"stage": "catalyst_vectors", "status": "complete", "catalysts": catalysts})
                     }
                     DisplayEvent::Done {
                         duration_ms,

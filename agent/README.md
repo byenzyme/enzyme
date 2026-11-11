@@ -4,7 +4,7 @@ Enzyme is a Hermes plugin and OpenClaw skill that gives agents structural memory
 
 Every agent session starts from scratch. RAG embeds and retrieves per query. Memory tools store conversation facts and run LLM inference to reason over them. Both cost tokens at query time. Both require tool calls the model has to decide to make, frame correctly, and wait for. Both start empty on day one.
 
-Enzyme is a compile step. It reads your workspace's tags, links, folders, and timestamps, generates thematic questions (catalysts) from the full timeline, and pre-computes every relationship. At query time: a database lookup. No LLM call. No API call. ~8ms on device.
+Enzyme is a compile step. It reads your workspace's tags, links, folders, and timestamps, generates thematic questions (catalysts) from the full timeline, and embeds notes and catalysts locally. At query time: a local index lookup. No LLM call. No API call. ~8ms on device.
 
 ```
 > "Why do we keep rewriting the auth layer?"
@@ -307,7 +307,7 @@ Enzyme is a compile step. The expensive work happens once at init — entity ext
 
 **3. Catalyst generation** (~10s). For each entity, the engine samples context across temporal eras and generates catalysts — thematic questions that probe what the content is actually about. A catalyst for an entity spanning 18 months doesn't ask "what happened?" It asks something like: *"The team revisited caching three times — once as a performance fix, once as a cost concern, once as a reliability question. What changed between each return?"*
 
-**4. Similarity pre-computation** (~3s). Every catalyst compared against every chunk. Top matches stored, so each search result can say which catalyst connects it to the query.
+**4. Catalyst embedding** (<1s). Each catalyst is embedded with the same local model. At query time each result is compared with the catalysts, so it can say which catalyst connects it to the query.
 
 At query time, `enzyme catalyze` ranks notes by keyword (BM25) and meaning (the local embeddings) together. Catalysts don't rank results; they map the vault in petri and annotate results.
 

@@ -9,7 +9,7 @@ use enzyme_core::config::paths::EnzymePaths;
 use super::exit::{ExitKind, FailureWithSummary};
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::search::context::{CatalyzeResponse, ContextSearch, TARGET_PROJECTION_NOT_READY};
+use enzyme_core::search::context::{CatalyzeResponse, ContextSearch};
 use enzyme_core::search::hybrid::HybridSearch;
 
 pub async fn run_catalyze(
@@ -52,24 +52,9 @@ pub async fn run_catalyze(
     };
     let resolved_target = target.map(|t| super::target::resolve_target_path(vault_path, t));
     let response = if let Some(target_path) = resolved_target.as_deref() {
-        let target_db_path = paths.target_db(target_path);
-        let mut response = None;
-        for _ in 0..4 {
-            super::target::prepare_target(vault_path, target_path).await?;
-            let target_db = Database::open(&target_db_path)?;
-            match ContextSearch::with_target(&db, &target_db, service).catalyze_search(query, limit)
-            {
-                Ok(result) => {
-                    response = Some(result);
-                    break;
-                }
-                Err(error) if error.to_string().contains(TARGET_PROJECTION_NOT_READY) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        response.ok_or_else(|| {
-            anyhow::anyhow!("target projection changed repeatedly during preparation")
-        })?
+        super::target::prepare_target(vault_path, target_path).await?;
+        let target_db = Database::open_read_only(paths.target_db(target_path))?;
+        ContextSearch::with_target(&db, &target_db, service).catalyze_search(query, limit)?
     } else if catalyst_routing {
         ContextSearch::new(&db, service).catalyze_search(query, limit)?
     } else {

@@ -90,6 +90,28 @@ pub async fn run_all_on_conn(conn: &Connection) -> Result<(), DbError> {
         )
         .await?;
     }
+    drop_retired_tables(conn).await?;
+    Ok(())
+}
+
+/// Tables earlier binaries maintained and this one no longer reads. Catalyst
+/// links used to be precomputed into the similarity tables (top chunks per
+/// catalyst, per epoch for targets); search now scores them on demand from the
+/// stored vectors. Dropping frees their pages for reuse but does not shrink the
+/// file: no VACUUM runs here, since rewriting a large index on an ordinary
+/// open would stall whichever command happened to open it first.
+const RETIRED_TABLES: &[&str] = &[
+    "catalyst_similarities",
+    "catalyst_epoch_similarities",
+    "catalyst_epoch_embeddings_packed",
+];
+
+async fn drop_retired_tables(conn: &Connection) -> Result<(), DbError> {
+    for table in RETIRED_TABLES {
+        conn.execute(&format!("DROP TABLE IF EXISTS {table}"), ())
+            .await
+            .map_err(DbError::Libsql)?;
+    }
     Ok(())
 }
 

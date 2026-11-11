@@ -174,7 +174,7 @@ mod tests {
     /// Rebuilding the index keeps everything that cost model calls or
     /// records history, drops what indexing recreates (plus tables this
     /// binary no longer creates), and leaves the projection fence dirty so the
-    /// next local refresh repairs similarities in full.
+    /// next local refresh re-indexes and re-embeds in full.
     #[test]
     fn reset_index_tables_keeps_catalysts_and_drops_derived_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -965,13 +965,6 @@ mod tests {
             .unwrap();
         db.upsert_catalyst_embeddings(&[("cat-1", &[0.3_f32, 0.4_f32])])
             .unwrap();
-        db.execute_write(
-            "INSERT INTO catalyst_similarities
-                (catalyst_id, catalyst_text, file_path, chunk_index, similarity)
-             VALUES ('cat-1', 'topic', 'a.md', 0, 0.9)",
-            vec![],
-        )
-        .unwrap();
 
         let changed = db
             .reset_generated_vector_state_if_backend_changed("embedding.backend", "ese:384")
@@ -1006,15 +999,6 @@ mod tests {
         assert_eq!(doc.embedded_content_hash, None);
         assert!(db.get_all_chunk_embeddings().unwrap().is_empty());
         assert!(db.get_all_catalyst_embeddings().unwrap().is_empty());
-        assert_eq!(
-            db.query_read(
-                "SELECT COUNT(*) FROM catalyst_similarities",
-                vec![],
-                |row| { row.get::<i64>(0) }
-            )
-            .unwrap()[0],
-            0
-        );
     }
 
     #[test]
@@ -1088,47 +1072,44 @@ mod tests {
         assert_eq!(occurrences[0].0, "notes/rust.md");
     }
 
-    // -- Catalysts + similarities ---------------------------------------------
+    // -- Retired tables ---------------------------------------------------------
 
+    /// Catalyst links are scored on demand, so an index written by an older
+    /// binary loses its precomputed link tables the next time it is opened for
+    /// writing, and keeps everything else.
     #[test]
-    fn test_catalysts_and_similarities() {
-        let db = test_db();
-
-        db.execute_write(
-            "INSERT INTO catalysts (id, text, entity, context) VALUES (?1, ?2, ?3, ?4)",
-            vec![
-                Value::Text("cat-001".into()),
-                Value::Text("What patterns exist in systems programming?".into()),
-                Value::Text("rust".into()),
-                Value::Text("default".into()),
-            ],
-        )
-        .unwrap();
-
-        db.execute_write(
-            "INSERT INTO catalyst_similarities (catalyst_id, catalyst_text, file_path, chunk_index, similarity)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            vec![
-                Value::Text("cat-001".into()),
-                Value::Text("What patterns exist in systems programming?".into()),
-                Value::Text("notes/rust.md".into()),
-                Value::Integer(0),
-                Value::Real(0.87),
-            ],
-        )
-        .unwrap();
-
-        let sims: Vec<(String, f64)> = db
+    fn open_drops_retired_catalyst_link_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enzyme.db");
+        {
+            let db = Database::open(&path).unwrap();
+            for sql in [
+                "CREATE TABLE catalyst_similarities (catalyst_id TEXT, file_path TEXT, similarity REAL)",
+                "CREATE TABLE catalyst_epoch_similarities (epoch_id TEXT, catalyst_id TEXT)",
+                "CREATE TABLE catalyst_epoch_embeddings_packed (epoch_id TEXT PRIMARY KEY)",
+                "INSERT INTO catalyst_similarities VALUES ('c', 'a.md', 0.5)",
+                "INSERT INTO catalysts (id, text, entity) VALUES ('c', 'Why?', 'a')",
+            ] {
+                db.execute_write(sql, vec![]).unwrap();
+            }
+        }
+        let db = Database::open(&path).unwrap();
+        let tables: Vec<String> = db
             .query_read(
-                "SELECT file_path, similarity FROM catalyst_similarities WHERE catalyst_id = 'cat-001'",
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
                 vec![],
-                |row| Ok((row.get::<String>(0)?, row.get::<f64>(1)?)),
+                |row| row.get::<String>(0),
             )
             .unwrap();
-
-        assert_eq!(sims.len(), 1);
-        assert_eq!(sims[0].0, "notes/rust.md");
-        assert!((sims[0].1 - 0.87).abs() < 1e-6);
+        for retired in [
+            "catalyst_similarities",
+            "catalyst_epoch_similarities",
+            "catalyst_epoch_embeddings_packed",
+        ] {
+            assert!(!tables.contains(&retired.to_string()), "{retired} kept");
+        }
+        assert_eq!(db.get_all_catalysts().unwrap()[0].id, "c");
+        db.validate_expected_schema().unwrap();
     }
 
     #[test]

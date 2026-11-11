@@ -8,13 +8,13 @@ use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
 use enzyme_core::llm::{DEFAULT_FORMAT_KEY, DEFAULT_PROFILE_KEY, LlmClient};
 use enzyme_core::models::{catalyst_embedding_text, parse_catalyst_text};
+use enzyme_core::pipeline::catalyst_vectors::ensure_catalyst_vectors;
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystPipeline, DEFAULT_MIN_CONTEXT_DOCUMENTS, DEFAULT_MIN_CONTEXT_TOKENS,
 };
 use enzyme_core::pipeline::embedding::EmbeddingPipeline;
 use enzyme_core::pipeline::epoch::{GenerationContract, now_ms};
 use enzyme_core::pipeline::indexing::IndexingPipeline;
-use enzyme_core::pipeline::similarity::SimilarityPipeline;
 use enzyme_core::search::ContextSearch;
 use enzyme_core::sqlite_source::run_sqlite_source;
 use rusqlite::{Connection, params};
@@ -135,9 +135,7 @@ async fn stub_generation_persists_engine_selected_source_refs() {
     assert!(!catalyst_embedding_text(&catalyst.text).contains(&source_refs[0]));
 
     EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
-    SimilarityPipeline::new(&db, service)
-        .run(|_, _| {})
-        .unwrap();
+    ensure_catalyst_vectors(&db, service).unwrap();
     db.activate_inline_catalyst_epoch(&epoch_id, now_ms())
         .unwrap();
     let response = ContextSearch::new(&db, service)
@@ -518,9 +516,7 @@ async fn shared_document_link_entities_each_see_full_conversation() {
 
     let service = get_embedding_service(temp.path()).unwrap();
     EmbeddingPipeline::new(&db, service).run(|_| {}).unwrap();
-    SimilarityPipeline::new(&db, service)
-        .run(|_, _| {})
-        .unwrap();
+    ensure_catalyst_vectors(&db, service).unwrap();
     for (name, _) in [participants[0], participants[1]] {
         let response = ContextSearch::new(&db, service)
             .catalyze_search(&format!("What should I recall about {name}?"), 8)

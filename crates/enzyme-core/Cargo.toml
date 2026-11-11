@@ -104,7 +104,3 @@ required-features = ["scaffolding"]
 [[example]]
 name = "era_diagnostic"
 required-features = ["scaffolding"]
-
-[[example]]
-name = "recompute_sim"
-required-features = ["scaffolding"]

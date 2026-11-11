@@ -8,9 +8,7 @@ use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Catalyst, Embedding, Entity, catalyst_embedding_text};
 use crate::pipeline::eras::{Era, apply_timeline_weights, cluster_eras_periodic};
-use crate::pipeline::similarity::CATALYST_TOP_K;
-
-pub const TARGET_PROJECTION_NOT_READY: &str = "target projection is not ready for active epoch";
+use crate::search::catalyst_links::{CATALYST_TOP_K, ChunkVectors};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct EraKey {
@@ -299,7 +297,8 @@ mod tests {
         ContextSearch::new(&db, &service)
             .catalyze_search("query", 5)
             .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Two attempts, each embedding the query and the routed catalyst.
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -333,16 +332,17 @@ mod tests {
         ContextSearch::new(&db, &service)
             .catalyze_search("query", 5)
             .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Two attempts, each embedding the query and the routed catalyst.
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
-    fn target_search_reports_missing_active_epoch_projection_as_retriable() {
+    fn target_search_routes_vault_catalysts_onto_target_chunks() {
         let temp = tempfile::TempDir::new().unwrap();
-        let db_path = temp.path().join("source.db");
-        let source = Database::open(&db_path).unwrap();
+        let db_path = temp.path().join("vault.db");
+        let vault = Database::open(&db_path).unwrap();
         let target = Database::open(temp.path().join("target.db")).unwrap();
-        source
+        vault
             .insert_catalysts(&[Catalyst {
                 id: "cat".into(),
                 text: "question".into(),
@@ -352,9 +352,18 @@ mod tests {
                 metadata: serde_json::json!({}),
             }])
             .unwrap();
-        source
-            .execute_write(
-                "UPDATE catalyst_epoch_state SET active_epoch_id='new-epoch' WHERE singleton=1",
+        vault
+            .upsert_catalyst_embeddings(&[("cat", &[1.0_f32, 0.0][..])])
+            .unwrap();
+        // The vault has no chunks of its own; only the target does, and the
+        // target holds no catalyst state at all.
+        target
+            .replace_chunk_embeddings_for_documents(
+                vec![],
+                vec![
+                    ("far.md".into(), 0, vec![0.0, 1.0]),
+                    ("near.md".into(), 0, vec![1.0, 0.1]),
+                ],
                 vec![],
             )
             .unwrap();
@@ -364,10 +373,12 @@ mod tests {
             change_epoch: false,
         }));
 
-        let error = ContextSearch::with_target(&source, &target, &service)
-            .catalyze_search("query", 5)
-            .unwrap_err();
-        assert!(error.to_string().contains(TARGET_PROJECTION_NOT_READY));
+        let response = ContextSearch::with_target(&vault, &target, &service)
+            .catalyze_search("query", 1)
+            .unwrap();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].file_path, "near.md");
+        assert_eq!(response.results[0].via_catalyst_id.as_deref(), Some("cat"));
     }
 
     fn entity(name: &str) -> Entity {
@@ -538,15 +549,16 @@ pub struct DirectSearchResult {
     pub similarity: f64,
 }
 
-/// Catalyst-based search over pre-computed similarities.
+/// Catalyst-based search: route the query through its closest catalysts to
+/// the chunks closest to them, scored on demand from stored vectors.
 ///
 /// Supports an optional **target** database for split-DB mode (`enzyme catalyze --target`):
-/// - Catalysts come from the **source** DB
-/// - Catalyst embeddings, similarities, and chunk content come from the **target** DB
+/// - Catalysts and their vectors come from the **source** DB
+/// - Chunk vectors and chunk content come from the **target** DB
 pub struct ContextSearch<'a> {
     /// Source vault: catalysts live here.
     db: &'a Database,
-    /// Target DB for embeddings/similarities/content. Falls back to `db` when `None`.
+    /// Target DB for chunk vectors and content. Falls back to `db` when `None`.
     target_db: Option<&'a Database>,
     service: &'a EmbeddingService,
 }
@@ -577,7 +589,7 @@ impl<'a> ContextSearch<'a> {
     ///
     /// 1. Embed query
     /// 2. Find top relevant catalysts (from cached embeddings)
-    /// 3. For each relevant catalyst, get pre-computed chunk similarities
+    /// 3. For each relevant catalyst, score its closest chunks from stored vectors
     /// 4. Aggregate, boost by multi-catalyst and recency, deduplicate, sort
     /// 5. Compute top contributing catalysts with contribution counts
     pub fn catalyze_search(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
@@ -595,7 +607,7 @@ impl<'a> ContextSearch<'a> {
                 continue;
             }
             let source_epoch = self.db.get_epoch_state()?.active_epoch_id;
-            let response = self.catalyze_search_at_epoch(query, limit, source_epoch.as_deref())?;
+            let response = self.catalyze_search_at_epoch(query, limit)?;
             if self.db.get_epoch_state()?.active_epoch_id == source_epoch
                 && self.db.continuous_projection_fence()? == source_projection_fence
                 && result_db.continuous_projection_fence()? == result_projection_fence
@@ -608,12 +620,7 @@ impl<'a> ContextSearch<'a> {
         )
     }
 
-    fn catalyze_search_at_epoch(
-        &self,
-        query: &str,
-        limit: usize,
-        source_epoch: Option<&str>,
-    ) -> Result<CatalyzeResponse> {
+    fn catalyze_search_at_epoch(&self, query: &str, limit: usize) -> Result<CatalyzeResponse> {
         let query_vec = self.service.embed_query(query)?;
 
         // Get all catalysts
@@ -643,20 +650,10 @@ impl<'a> ContextSearch<'a> {
             .collect::<HashSet<_>>();
         let anchored = !matched_entity_name_set.is_empty();
 
-        // Load cached catalyst embeddings from DB, falling back to re-embedding
-        let emb_db = self.target_db.unwrap_or(self.db);
-        let cached = if self.target_db.is_some() {
-            let epoch_id = source_epoch
-                .ok_or_else(|| anyhow::anyhow!("source has no active catalyst epoch"))?;
-            let cached = emb_db.get_epoch_catalyst_embeddings(epoch_id)?;
-            anyhow::ensure!(
-                !cached.is_empty(),
-                "{TARGET_PROJECTION_NOT_READY}: {epoch_id}"
-            );
-            cached
-        } else {
-            emb_db.get_all_catalyst_embeddings()?
-        };
+        // Catalyst vectors come from the vault that owns the catalysts, even
+        // for a target: an epoch activation replaces catalysts and their
+        // vectors together. Missing or stale vectors are re-embedded here.
+        let cached = self.db.get_all_catalyst_embeddings()?;
         let cat_embeddings = if !cached.is_empty() {
             let cache_map: HashMap<&str, &Vec<f32>> =
                 cached.iter().map(|(id, vec)| (id.as_str(), vec)).collect();
@@ -725,7 +722,7 @@ impl<'a> ContextSearch<'a> {
             })
             .collect();
 
-        // For each relevant catalyst, get pre-computed chunk similarities.
+        // For each relevant catalyst, score its closest chunks on demand.
         // Weight each chunk's similarity by how relevant its catalyst is to the query.
         // Track per-chunk: (max weighted score, catalyst_count, best_catalyst_id)
         struct ChunkScore {
@@ -742,36 +739,29 @@ impl<'a> ContextSearch<'a> {
         };
 
         let sim_repo = self.target_db.unwrap_or(self.db);
-
-        // Batch-load similarities for all top catalysts in one query
-        let top_catalyst_ids: Vec<&str> = cat_sims
+        // Score chunks with freshly embedded vectors for the few routed
+        // catalysts. Stored catalyst vectors are int8, which is plenty to pick
+        // the catalysts but reorders near-tied chunks at each catalyst's cut;
+        // embedding a handful of questions takes well under a millisecond.
+        let routed_texts: Vec<String> = cat_sims
             .iter()
-            .map(|(idx, _)| catalysts[*idx].id.as_str())
+            .map(|(idx, _)| catalyst_embedding_text(&catalysts[*idx].text))
             .collect();
-        let all_sims = if self.target_db.is_some() {
-            sim_repo.get_epoch_similarities_for_catalysts(
-                source_epoch.expect("checked active source epoch"),
-                &top_catalyst_ids,
-                context_per_catalyst,
-            )?
-        } else {
-            sim_repo.get_similarities_for_catalysts(&top_catalyst_ids, context_per_catalyst)?
-        };
-
-        let mut sims_by_catalyst: HashMap<&str, Vec<&crate::models::CatalystSimilarity>> =
-            HashMap::new();
-        for sim in &all_sims {
-            sims_by_catalyst
-                .entry(sim.catalyst_id.as_str())
-                .or_default()
-                .push(sim);
-        }
+        let routed_refs: Vec<&str> = routed_texts.iter().map(String::as_str).collect();
+        let routed_vectors = self.service.embed_documents(&routed_refs)?;
+        let top_catalysts: Vec<(&str, &[f32])> = cat_sims
+            .iter()
+            .zip(&routed_vectors)
+            .map(|((idx, _), vector)| (catalysts[*idx].id.as_str(), vector.as_slice()))
+            .collect();
+        let links_by_catalyst =
+            ChunkVectors::load_all(sim_repo)?.top_chunks(&top_catalysts, context_per_catalyst);
 
         for (cat_idx, cat_sim) in &cat_sims {
             let catalyst = &catalysts[*cat_idx];
             let relevance = *cat_sim as f64;
 
-            if let Some(sims) = sims_by_catalyst.get(catalyst.id.as_str()) {
+            if let Some(sims) = links_by_catalyst.get(catalyst.id.as_str()) {
                 for sim in sims {
                     let key = format!("{}:{}", sim.file_path, sim.chunk_index);
                     let weighted_score = sim.similarity * relevance;

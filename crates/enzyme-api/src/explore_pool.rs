@@ -1,7 +1,8 @@
 //! In-memory pool for fast explore queries.
 //!
 //! Holds the HNSW index over catalyst embeddings, pre-loaded catalyst metadata,
-//! and pre-computed similarities for rapid KNN + aggregation without DB I/O.
+//! and the vault's chunk vectors, so a query finds its closest catalysts and
+//! scores their closest documents without DB I/O.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use tracing::info;
 
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
+use enzyme_core::search::catalyst_links::{CATALYST_TOP_K, ChunkVectors};
 use enzyme_core::search::hnsw::HnswIndex;
 
 /// Metadata about a single catalyst in the pool.
@@ -23,7 +25,7 @@ pub struct CatalystMeta {
     pub topic_name: Option<String>,
 }
 
-/// A document similar to a catalyst (pre-computed).
+/// A document chunk close to a catalyst.
 #[derive(Debug, Clone)]
 pub struct SimilarDoc {
     pub file_path: String,
@@ -35,7 +37,8 @@ pub struct ExplorePool {
     pub vault_path: PathBuf,
     pub hnsw_index: HnswIndex,
     pub catalyst_metadata: Vec<CatalystMeta>,
-    pub similarities: HashMap<String, Vec<SimilarDoc>>,
+    catalyst_vectors: HashMap<String, Vec<f32>>,
+    pub chunk_vectors: ChunkVectors,
     pub pool_context: String,
     pub warmed_prefix: Option<String>,
     pub warmed_catalyst_ids: Option<Vec<String>>,
@@ -44,12 +47,13 @@ pub struct ExplorePool {
 }
 
 impl ExplorePool {
-    /// Load the pool from disk: read catalyst embeddings, build HNSW, load metadata + similarities.
+    /// Load the pool from disk: read catalyst embeddings, build HNSW, load
+    /// metadata and chunk vectors.
     pub fn load(vault_path: &Path) -> Result<Self> {
         let start = Instant::now();
         let paths = EnzymePaths::new(vault_path)?;
 
-        // Load catalyst metadata and similarities from DB
+        // Load catalyst metadata and vectors from DB
         let db = Database::open(&paths.vault_db)?;
 
         // Load catalyst embeddings from DB
@@ -67,29 +71,17 @@ impl ExplorePool {
         hnsw_index.build(points)?;
 
         let all_catalysts = db.get_all_catalysts()?;
-        let mut catalyst_metadata = Vec::with_capacity(all_catalysts.len());
-        let mut similarities: HashMap<String, Vec<SimilarDoc>> = HashMap::new();
-
-        for cat in &all_catalysts {
-            catalyst_metadata.push(CatalystMeta {
+        let catalyst_metadata: Vec<CatalystMeta> = all_catalysts
+            .iter()
+            .map(|cat| CatalystMeta {
                 id: cat.id.clone(),
                 text: cat.text.clone(),
                 entity: cat.entity.clone(),
                 topic_name: None, // Could be enriched later
-            });
-
-            // Load pre-computed similarities for this catalyst
-            let sims = db.get_similarities_for_catalyst(&cat.id, 50)?;
-            let sim_docs: Vec<SimilarDoc> = sims
-                .into_iter()
-                .map(|s| SimilarDoc {
-                    file_path: s.file_path,
-                    chunk_index: s.chunk_index,
-                    similarity: s.similarity,
-                })
-                .collect();
-            similarities.insert(cat.id.clone(), sim_docs);
-        }
+            })
+            .collect();
+        let catalyst_vectors: HashMap<String, Vec<f32>> = cached.into_iter().collect();
+        let chunk_vectors = ChunkVectors::load_all(&db)?;
 
         // Pre-render pool context markdown
         let pool_context = Self::render_pool_context(&catalyst_metadata);
@@ -97,7 +89,7 @@ impl ExplorePool {
         let elapsed = start.elapsed();
         info!(
             catalysts = catalyst_metadata.len(),
-            similarities = similarities.len(),
+            chunks = chunk_vectors.len(),
             elapsed_ms = elapsed.as_millis(),
             "ExplorePool loaded"
         );
@@ -106,7 +98,8 @@ impl ExplorePool {
             vault_path: vault_path.to_path_buf(),
             hnsw_index,
             catalyst_metadata,
-            similarities,
+            catalyst_vectors,
+            chunk_vectors,
             pool_context,
             warmed_prefix: None,
             warmed_catalyst_ids: None,
@@ -130,9 +123,29 @@ impl ExplorePool {
         Ok(results.into_iter().map(|r| (r.id, r.similarity)).collect())
     }
 
-    /// Get similarities for a catalyst ID.
-    pub fn get_similarities(&self, catalyst_id: &str) -> Option<&Vec<SimilarDoc>> {
-        self.similarities.get(catalyst_id)
+    /// The documents closest to each of the given catalysts, best first,
+    /// scored now from the pool's vectors. Catalysts without a stored vector
+    /// are absent.
+    pub fn similar_docs(&self, catalyst_ids: &[&str]) -> HashMap<String, Vec<SimilarDoc>> {
+        let catalysts: Vec<(&str, &[f32])> = catalyst_ids
+            .iter()
+            .filter_map(|id| self.catalyst_vectors.get(*id).map(|v| (*id, v.as_slice())))
+            .collect();
+        self.chunk_vectors
+            .top_chunks(&catalysts, CATALYST_TOP_K)
+            .into_iter()
+            .map(|(id, links)| {
+                let docs = links
+                    .into_iter()
+                    .map(|link| SimilarDoc {
+                        file_path: link.file_path,
+                        chunk_index: link.chunk_index,
+                        similarity: link.similarity,
+                    })
+                    .collect();
+                (id, docs)
+            })
+            .collect()
     }
 
     /// Get catalyst metadata by ID.

@@ -13,7 +13,7 @@ use rmcp::{tool, tool_handler, tool_router};
 use enzyme_core::config::paths::EnzymePaths;
 use enzyme_core::db::Database;
 use enzyme_core::embedding::get_embedding_service;
-use enzyme_core::search::context::{ContextSearch, TARGET_PROJECTION_NOT_READY};
+use enzyme_core::search::context::ContextSearch;
 use enzyme_core::search::hybrid::HybridSearch;
 
 use super::init::{ensure_fresh_vault, run_init};
@@ -249,41 +249,17 @@ impl EnzymeMcp {
                     None,
                 ));
             }
-            let target_db_path = paths.target_db(&target_path);
-            let mut response = None;
-            for _ in 0..4 {
-                super::target::prepare_target(&vault_path, &target_path)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("target preparation failed: {e}"), None)
-                    })?;
-                let target_db = Database::open(&target_db_path).map_err(|e| {
-                    McpError::internal_error(format!("target db open failed: {e}"), None)
+            super::target::prepare_target(&vault_path, &target_path)
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("target preparation failed: {e}"), None)
                 })?;
-                match ContextSearch::with_target(&db, &target_db, service)
-                    .catalyze_search(&p.query, limit)
-                {
-                    Ok(result) => {
-                        response = Some(result);
-                        break;
-                    }
-                    Err(error) if error.to_string().contains(TARGET_PROJECTION_NOT_READY) => {
-                        continue;
-                    }
-                    Err(error) => {
-                        return Err(McpError::internal_error(
-                            format!("search failed: {error}"),
-                            None,
-                        ));
-                    }
-                }
-            }
-            response.ok_or_else(|| {
-                McpError::internal_error(
-                    "target projection changed repeatedly during preparation",
-                    None,
-                )
-            })?
+            let target_db = Database::open(paths.target_db(&target_path)).map_err(|e| {
+                McpError::internal_error(format!("target db open failed: {e}"), None)
+            })?;
+            ContextSearch::with_target(&db, &target_db, service)
+                .catalyze_search(&p.query, limit)
+                .map_err(|e| McpError::internal_error(format!("search failed: {e}"), None))?
         } else if p.routing.as_deref() == Some("catalysts") {
             ContextSearch::new(&db, service)
                 .catalyze_search(&p.query, limit)

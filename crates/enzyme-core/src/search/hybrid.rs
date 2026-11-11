@@ -15,6 +15,7 @@ use crate::db::Database;
 use crate::embedding::EmbeddingService;
 use crate::models::{Embedding, parse_catalyst_text};
 use crate::search::bm25::Bm25Index;
+use crate::search::catalyst_links::{self, ChunkVectors};
 use crate::search::context::{
     CatalyzeCandidate, CatalyzeResponse, CatalyzeResultItem, TopCatalyst,
 };
@@ -94,7 +95,10 @@ impl<'a> HybridSearch<'a> {
                 WIDE_BM25_CHUNK_DEPTH,
             )
         };
-        let dense_pool = top_notes(dense_hits(self.db, &query_vec)?, per_side);
+        // Every chunk vector is loaded once: the dense side scores them all,
+        // and catalyst annotation reads them again for its link floors.
+        let corpus = ChunkVectors::load_all(self.db)?;
+        let dense_pool = top_notes(dense_hits(&corpus, &query_vec), per_side);
         let dense_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms;
         let lexical_pool = top_notes(lexical_hits(self.db, query, depth, per_side)?, per_side);
         let lexical_ms = start.elapsed().as_secs_f64() * 1000.0 - embedding_ms - dense_ms;
@@ -144,7 +148,7 @@ impl<'a> HybridSearch<'a> {
             list
         };
         let annotation_start = Instant::now();
-        let top_contributing_catalysts = self.annotate(&query_vec, &mut results)?;
+        let top_contributing_catalysts = self.annotate(&corpus, &query_vec, &mut results)?;
         if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
             let total_ms = start.elapsed().as_secs_f64() * 1000.0;
             let annotation_ms = annotation_start.elapsed().as_secs_f64() * 1000.0;
@@ -161,11 +165,14 @@ impl<'a> HybridSearch<'a> {
     }
 
     /// Attach to each result the linked catalyst that is closest to both the
-    /// query and that note, and summarize which catalysts were attached.
+    /// query and that note, and summarize which catalysts were attached. A
+    /// catalyst links to a note when the note is among the catalyst's closest
+    /// chunks across the corpus (see [`catalyst_links::best_linked_catalysts`]).
     /// Scoring by the query alone gives every note the same catalyst whenever
     /// one catalyst links to them all, as it does in small vaults.
     fn annotate(
         &self,
+        corpus: &ChunkVectors,
         query_vec: &[f32],
         results: &mut [CatalyzeResultItem],
     ) -> Result<Vec<TopCatalyst>> {
@@ -178,49 +185,37 @@ impl<'a> HybridSearch<'a> {
         if catalysts.is_empty() {
             return Ok(Vec::new());
         }
-        // Only current catalysts may annotate; stale embeddings or links from
-        // an earlier generation are skipped.
-        let query_sims: HashMap<String, f64> = self
+        // Only current catalysts may annotate; stale vectors from an earlier
+        // generation are skipped.
+        let vectors: Vec<(String, Vec<f32>)> = self
             .db
             .get_all_catalyst_embeddings()?
-            .iter()
+            .into_iter()
             .filter(|(id, _)| catalysts.contains_key(id))
-            .map(|(id, vec)| {
-                (
-                    id.clone(),
-                    Embedding::cosine_similarity(query_vec, vec) as f64,
-                )
-            })
+            .collect();
+        let refs = catalyst_links::as_refs(&vectors);
+        let query_sims: Vec<f64> = refs
+            .iter()
+            .map(|(_, vec)| Embedding::cosine_similarity(query_vec, vec) as f64)
             .collect();
         let paths: Vec<String> = results.iter().map(|r| r.file_path.clone()).collect();
-        // path -> (catalyst id, fit to query and note, query similarity)
-        let mut best: HashMap<String, (String, f64, f64)> = HashMap::new();
-        for (catalyst_id, path, link_sim) in self.db.get_catalyst_links_for_paths(&paths)? {
-            let Some(&query_sim) = query_sims.get(&catalyst_id) else {
-                continue;
-            };
-            let fit = query_sim + link_sim;
-            let slot = best
-                .entry(path)
-                .or_insert((catalyst_id.clone(), f64::MIN, query_sim));
-            if fit > slot.1 {
-                *slot = (catalyst_id, fit, query_sim);
-            }
-        }
+        let best = catalyst_links::best_linked_catalysts(corpus, &refs, &query_sims, &paths);
         if best.is_empty() {
             return Ok(Vec::new());
         }
         let mut counts: HashMap<String, (usize, f64)> = HashMap::new();
         for result in results.iter_mut() {
-            let Some((id, _, sim)) = best.get(&result.file_path) else {
+            let Some(&pos) = best.get(&result.file_path) else {
                 continue;
             };
+            let sim = &query_sims[pos];
+            let id = refs[pos].0;
             let Some(catalyst) = catalysts.get(id) else {
                 continue;
             };
-            result.via_catalyst_id = Some(id.clone());
+            result.via_catalyst_id = Some(id.to_string());
             result.via_catalyst_text = Some(question_text(&catalyst.text));
-            let entry = counts.entry(id.clone()).or_insert((0, *sim));
+            let entry = counts.entry(id.to_string()).or_insert((0, *sim));
             entry.0 += 1;
         }
         let mut top: Vec<TopCatalyst> = counts
@@ -253,16 +248,16 @@ fn question_text(text: &str) -> String {
 }
 
 /// Best dense-similarity chunk per note.
-fn dense_hits(db: &Database, query_vec: &[f32]) -> Result<HashMap<String, NoteHit>> {
+fn dense_hits(corpus: &ChunkVectors, query_vec: &[f32]) -> HashMap<String, NoteHit> {
     let start = Instant::now();
-    let hits = db.best_chunk_embedding_hits(query_vec)?;
+    let hits = corpus.best_chunk_per_note(query_vec);
     if std::env::var_os("ENZYME_HYBRID_PROFILE").is_some() {
         eprintln!(
-            "HYBRID_DENSE stream_and_scan_ms={:.3}",
+            "HYBRID_DENSE scan_ms={:.3}",
             start.elapsed().as_secs_f64() * 1000.0
         );
     }
-    Ok(hits)
+    hits
 }
 
 /// Best lexical chunk per note. New vaults use persistent FTS5; older vaults

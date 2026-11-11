@@ -17,6 +17,7 @@ use enzyme_core::llm::{
     resolve_api_config_for_mode, resolve_llm_client_for_mode,
 };
 use enzyme_core::models::Entity;
+use enzyme_core::pipeline::catalyst_vectors::{embed_catalysts, ensure_catalyst_vectors};
 use enzyme_core::pipeline::catalysts::{
     CatalystConfig, CatalystEvent, CatalystPipeline, CatalystStats, DEFAULT_MAX_CONTEXT_SAMPLES,
     calculate_allocations,
@@ -29,9 +30,6 @@ use enzyme_core::pipeline::epoch::{
 };
 use enzyme_core::pipeline::indexing::{IndexingPipeline, IndexingStats};
 use enzyme_core::pipeline::selection::SelectionPipeline;
-use enzyme_core::pipeline::similarity::{
-    IncrementalSimilarityStats, SimilarityPipeline, catalysts_fingerprint,
-};
 use enzyme_core::sqlite_source::{SqliteSourceIndexingStats, run_configured_sqlite_sources};
 
 use super::exit::{CliFailure, ExitKind, FailureWithSummary};
@@ -132,8 +130,8 @@ impl UpdateOutcome {
 /// underneath this vault decide between "advance the sentinel for free"
 /// (migrations reconciled the schema) and "rebuild the index" (structural
 /// drift). A rebuild keeps catalysts; the caller's local refresh then
-/// re-indexes, re-embeds, and repairs similarities without the model. The
-/// vault DB must exist.
+/// re-indexes, re-embeds notes, and re-embeds the kept catalysts without the
+/// model. The vault DB must exist.
 pub async fn apply_update_policy(
     vault_path: &Path,
     paths: &EnzymePaths,
@@ -419,7 +417,9 @@ struct LocalRefreshResult {
     sources: SqliteSourceIndexingStats,
     arena_changed: bool,
     embedding: EmbeddingStats,
-    similarity: IncrementalSimilarityStats,
+    /// Catalyst vectors re-embedded because the stored set no longer matched
+    /// the catalysts (after an index rebuild or an embedding backend change).
+    catalysts_embedded: usize,
 }
 
 impl LocalRefreshResult {
@@ -429,7 +429,7 @@ impl LocalRefreshResult {
             || self.arena_changed
             || self.embedding.documents_embedded > 0
             || self.embedding.documents_pruned > 0
-            || self.similarity.rows_upserted > 0
+            || self.catalysts_embedded > 0
     }
 
     fn change_reasons(&self) -> Vec<&'static str> {
@@ -443,8 +443,8 @@ impl LocalRefreshResult {
         if self.embedding.documents_embedded > 0 || self.embedding.documents_pruned > 0 {
             reasons.push("embeddings_changed");
         }
-        if self.similarity.rows_upserted > 0 || self.similarity.obsolete_rows_removed > 0 {
-            reasons.push("similarities_incrementally_maintained");
+        if self.catalysts_embedded > 0 {
+            reasons.push("catalyst_vectors_embedded");
         }
         reasons
     }
@@ -1333,8 +1333,9 @@ pub async fn run_init(
     };
     let emb_completed = emb_stats.is_some();
 
-    // ── Step 7: Similarity computation ────────────────────────────────────
-    let mut similarities_recomputed = false;
+    // ── Step 7: Catalyst vectors ──────────────────────────────────────────
+    // Search links catalysts to notes from these vectors at query time.
+    let mut catalysts_embedded = false;
     if emb_completed
         && cat_stats
             .as_ref()
@@ -1343,25 +1344,13 @@ pub async fn run_init(
             .as_ref()
             .map_or(false, |g| g.quality != CatalystQuality::Failed)
     {
-        tx.send(DisplayEvent::SimilarityStart).ok();
+        tx.send(DisplayEvent::CatalystVectorsStart).ok();
         let svc = service.unwrap(); // safe: emb_completed implies service was Some
-        // Reopen after the background embedding connection commits so similarity
-        // reads the complete current embedding set.
-        let sim_db = Database::open(&paths.vault_db)?;
-        let sim_pipeline = SimilarityPipeline::new(&sim_db, svc);
-        let tx_sim = tx.clone();
-        let sim_stats = sim_pipeline.run(|done, total| {
-            tx_sim
-                .send(DisplayEvent::SimilarityProgress { done, total })
-                .ok();
-        })?;
-
-        tx.send(DisplayEvent::SimilarityComplete {
-            catalysts: sim_stats.catalysts_processed,
-            documents: sim_stats.documents_compared,
-        })
-        .ok();
-        similarities_recomputed = true;
+        let vector_db = Database::open(&paths.vault_db)?;
+        let catalysts = embed_catalysts(&vector_db, svc, &vector_db.get_all_catalysts()?)?;
+        tx.send(DisplayEvent::CatalystVectorsComplete { catalysts })
+            .ok();
+        catalysts_embedded = true;
     }
 
     // A clean build is the durable catalyst epoch for its contract: the first
@@ -1369,7 +1358,7 @@ pub async fn run_init(
     // a changed contract (new model, settings, or catalyst logic) required, so
     // the next refresh does not regenerate everything a second time. Legacy
     // catalyst tables remain the active materialized view.
-    if similarities_recomputed
+    if catalysts_embedded
         && catalyst_gate
             .as_ref()
             .is_some_and(|gate| gate.quality == CatalystQuality::Passed)
@@ -1379,20 +1368,9 @@ pub async fn run_init(
         db.restamp_active_epoch(&contract, now_ms())?;
     }
 
-    // ── Step 8: Refresh prepared targets ──────────────────────────────────
-    if cat_stats
-        .as_ref()
-        .map_or(false, |s| s.catalysts_generated > 0)
-        && catalyst_gate
-            .as_ref()
-            .map_or(false, |g| g.quality != CatalystQuality::Failed)
-    {
-        refresh_targets(vault_path).await;
-    }
-
     let retrieval_changed = has_index_changes(&idx_stats)
         || emb_completed
-        || similarities_recomputed
+        || catalysts_embedded
         || catalyst_gate
             .as_ref()
             .map_or(false, |g| g.quality != CatalystQuality::Failed);
@@ -1608,7 +1586,7 @@ pub async fn run_refresh(
 
 /// Fast sync path — the hook hot path for `enzyme refresh --quiet`.
 ///
-/// Runs only cheap local work (indexing, embedding, similarity) synchronously,
+/// Runs only cheap local work (indexing, embedding) synchronously,
 /// then spawns a background process for expensive LLM catalyst generation if
 /// the vault is stale.
 async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> Result<()> {
@@ -1657,7 +1635,6 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
         "fresh": true,
         "background_spawned": background_spawned,
         "embedding_changed": local.embedding.documents_embedded > 0 || local.embedding.documents_pruned > 0,
-        "similarities_recomputed": false,
         "embedding": {
             "documents_embedded": local.embedding.documents_embedded,
             "chunks_embedded": local.embedding.chunks_embedded,
@@ -1666,7 +1643,7 @@ async fn run_refresh_fast(vault_path: &Path, llm: LlmMode, force_full: bool) -> 
             "duration_ms": local.embedding.duration_ms,
             "encode_ms": local.embedding.encode_ms,
         },
-        "similarity": local.similarity,
+        "catalysts_embedded": local.catalysts_embedded,
         "epoch": epoch_metrics(&db, &schedule, now_ms())?,
         "update": with_notice(update_outcome.to_json(binary_update_outcome), logic_notice.as_deref()),
         "cache_epoch": cache_epoch,
@@ -1698,12 +1675,10 @@ async fn run_local_refresh_work(
     let arena_changed = db.get_epoch_state()?.corpus_generation != before_arena;
     let _projection_lock =
         acquire_projection_lock(paths.vault_db.parent().context("vault DB has no parent")?)?;
-    let recovery_required = db.continuous_projection_fence()?.dirty;
-    // This marker is committed before any document/embedding mutation. If the
-    // process exits between the independently committed pipeline phases, the
-    // next invocation repairs the complete active top-K materialization.
+    // This marker is committed before any document/embedding mutation and
+    // cleared once the run's phases are all durable, so readers and epoch
+    // builds can tell a refresh is in flight (or died partway).
     let projection_token = db.begin_continuous_projection()?;
-    let before_embeddings = db.get_all_chunk_embeddings()?;
     let index_start_ms = chrono::Utc::now().timestamp_millis();
     let source_stats = index_configured_sqlite_sources(db, vault_path)?;
     debug!(
@@ -1732,24 +1707,11 @@ async fn run_local_refresh_work(
         has_document_changes(&idx_stats) || source_stats.changed(),
     )?;
 
-    let after_embeddings = db.get_all_chunk_embeddings()?;
-    let similarity = if recovery_required && database_has_catalysts(db) {
-        let service = service.context("embedding service unavailable for similarity recovery")?;
-        let repaired = SimilarityPipeline::new(db, service).run(|_, _| {})?;
-        IncrementalSimilarityStats {
-            candidate_scores: repaired.similarities_computed,
-            rows_upserted: repaired.similarities_computed,
-            full_repair: true,
-            duration_ms: repaired.duration_ms,
-            ..Default::default()
-        }
-    } else if before_embeddings != after_embeddings && database_has_catalysts(db) {
-        let service =
-            service.context("embedding service unavailable for similarity maintenance")?;
-        SimilarityPipeline::new(db, service)
-            .maintain_incremental(&before_embeddings, &after_embeddings)?
-    } else {
-        IncrementalSimilarityStats::default()
+    // Catalyst links are scored at query time from stored vectors, so the
+    // only catalyst state a refresh maintains is the vectors themselves.
+    let catalysts_embedded = match service {
+        Some(service) if database_has_catalysts(db) => ensure_catalyst_vectors(db, service)?,
+        _ => 0,
     };
 
     db.finish_continuous_projection(&projection_token)?;
@@ -1758,7 +1720,7 @@ async fn run_local_refresh_work(
         sources: source_stats,
         arena_changed,
         embedding,
-        similarity,
+        catalysts_embedded,
     })
 }
 
@@ -2111,7 +2073,6 @@ async fn build_and_activate_epoch(
     // The snapshot freezes docs, chunks, entities, embeddings, and config
     // contract. Remove only the old active catalyst view before constructing a
     // complete replacement.
-    db.execute_write("DELETE FROM catalyst_similarities", vec![])?;
     db.execute_write("DELETE FROM catalyst_embeddings_packed", vec![])?;
     db.execute_write("DELETE FROM catalysts", vec![])?;
 
@@ -2239,8 +2200,8 @@ async fn build_and_activate_epoch(
     // this epoch. The shadow began from the frozen snapshot with catalysts wiped,
     // so we re-populate only the per-entity gaps from the currently-active epoch.
     // This keeps one flaky entity from either blocking the whole refresh or
-    // dropping that entity to zero coverage. Similarity re-embeds every shadow
-    // catalyst below, so carried-forward rows become first-class members of the
+    // dropping that entity to zero coverage. Every shadow catalyst is embedded
+    // below, so carried-forward rows become first-class members of the
     // new epoch (their stale `generated_at` marks the provenance).
     let mut covered: std::collections::HashSet<String> = db
         .get_all_catalysts()?
@@ -2307,106 +2268,20 @@ async fn build_and_activate_epoch(
         );
     }
 
-    let sim_pipeline = SimilarityPipeline::new(&db, svc);
-    let sim_stats = sim_pipeline.run(|_, _| {})?;
-    let shadow_catalyst_count = db.get_all_catalysts()?.len();
+    let shadow_catalysts = db.get_all_catalysts()?;
+    let embedded = embed_catalysts(&db, svc, &shadow_catalysts)?;
     anyhow::ensure!(
-        sim_stats.catalysts_processed == shadow_catalyst_count,
-        "shadow epoch similarity set is incomplete"
+        embedded == shadow_catalysts.len(),
+        "shadow epoch catalyst vector set is incomplete"
     );
 
-    // Target epoch projections are built from frozen target DB snapshots before
-    // source activation. The active source remains untouched if any target
-    // component fails.
-    let catalysts = db.get_all_catalysts()?;
-    let source_old_epoch = active_db.get_epoch_state()?.active_epoch_id;
-    let old_catalysts = active_db.get_all_catalysts()?;
-    let mut target_shadows = Vec::new();
-    for (target_index, target) in contract.targets.iter().enumerate() {
-        let target_path = std::path::PathBuf::from(target);
-        if !target_path.exists() {
-            anyhow::bail!("configured epoch target does not exist: {target}");
-        }
-        let target_db_path = paths.target_db(&target_path);
-        if !target_db_path.exists() {
-            anyhow::bail!("configured target is not prepared: {target}");
-        }
-        let target_shadow_path =
-            epoch_dir.join(format!("{}-target-{}.db", claim.epoch_id, target_index));
-        {
-            let _target_snapshot_lock = acquire_projection_lock(
-                target_db_path
-                    .parent()
-                    .context("target DB has no parent directory")?,
-            )?;
-            let target_active = Database::open(&target_db_path)?;
-            if let Some(old_epoch) = &source_old_epoch {
-                if target_active
-                    .get_epoch_catalyst_embeddings(old_epoch)?
-                    .is_empty()
-                {
-                    target_active.stage_epoch_projection_from_shadow(&target_active, old_epoch)?;
-                }
-            }
-            target_active.snapshot_to(&target_shadow_path)?;
-        }
-        let target_shadow = Database::open(&target_shadow_path)?;
-        IndexingPipeline::new(&target_shadow, target_path.clone()).run(false, |_| {})?;
-        EmbeddingPipeline::new(&target_shadow, svc).run_all(|_| {})?;
-        SimilarityPipeline::new(&target_shadow, svc).run_with_catalysts(&catalysts, |_, _| {})?;
-        target_shadows.push((target_db_path, target_shadow_path));
-    }
-
-    // Close the snapshot-to-activation race. Target preparation and source
-    // continuous projection use these same locks. Once held, refresh each live
-    // target against the completed catalyst set and stage that exact live view;
-    // source activation remains the single logical commit point across DBs.
-    let _target_projection_lock = if target_shadows.is_empty() {
-        None
-    } else {
-        Some(acquire_projection_lock(
-            paths
-                .vault_db
-                .parent()
-                .unwrap_or(vault_path)
-                .join("targets")
-                .as_path(),
-        )?)
-    };
+    // Activation waits out any refresh that is mid-write on the live index.
     let _source_projection_lock =
         acquire_projection_lock(paths.vault_db.parent().context("vault DB has no parent")?)?;
     anyhow::ensure!(
         !active_db.continuous_projection_fence()?.dirty,
         "continuous projection needs recovery before catalyst activation"
     );
-    for ((target_db_path, shadow_path), target) in
-        target_shadows.iter().zip(contract.targets.iter())
-    {
-        let target_db = Database::open(target_db_path)?;
-        let target_projection_token = target_db.begin_continuous_projection()?;
-        IndexingPipeline::new(&target_db, std::path::PathBuf::from(target)).run(false, |_| {})?;
-        EmbeddingPipeline::new(&target_db, svc).run_all(|_| {})?;
-        if let Some(old_epoch) = &source_old_epoch {
-            // Keep the still-active target epoch exact against any target docs
-            // caught up here. This also leaves a fully usable rollback view if
-            // a later target or source activation fails.
-            SimilarityPipeline::new(&target_db, svc)
-                .run_with_catalysts(&old_catalysts, |_, _| {})?;
-            target_db.stage_epoch_projection_from_shadow(&target_db, old_epoch)?;
-            target_db.set_config(
-                "catalyst_fingerprint",
-                &catalysts_fingerprint(&old_catalysts),
-            )?;
-        }
-        // Compute the not-yet-active catalyst projection in a shadow copy.
-        // Never replace the target's unkeyed old-epoch catalyst cache before
-        // source activation: a later target failure must leave it retryable.
-        target_db.snapshot_to(shadow_path)?;
-        let target_shadow = Database::open(shadow_path)?;
-        SimilarityPipeline::new(&target_shadow, svc).run_with_catalysts(&catalysts, |_, _| {})?;
-        target_db.stage_epoch_projection_from_shadow(&target_shadow, &claim.epoch_id)?;
-        target_db.finish_continuous_projection(&target_projection_token)?;
-    }
     active_db.activate_epoch_from_shadow(&db, &claim.epoch_id, now_ms())?;
     let _ = bump_collection_cache_epoch(active_db)?;
     info!(epoch_id = %claim.epoch_id, "catalyst shadow epoch activated");
@@ -2415,52 +2290,6 @@ async fn build_and_activate_epoch(
         catalysts_generated: stats.catalysts_generated,
         carried_forward_catalysts: carried_catalysts,
     })
-}
-
-/// Refresh all previously prepared targets using the vault's current catalysts.
-///
-/// Merges targets from config.toml (declarative, survives DB resets) and the
-/// `applied_targets` DB table (runtime record). Config is the source of truth;
-/// DB targets that aren't in config are also refreshed for backward compat.
-///
-/// Called after catalyst regeneration so that target similarity mappings stay
-/// in sync. Errors are logged but don't fail the parent operation.
-async fn refresh_targets(vault_path: &Path) {
-    let paths = match EnzymePaths::new(vault_path) {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    // Collect target paths from both sources, deduplicated
-    let mut target_paths = std::collections::HashSet::new();
-
-    // Config targets (source of truth)
-    if let Ok(Some(config)) = EnzymeConfig::load(vault_path) {
-        for t in &config.targets {
-            target_paths.insert(t.clone());
-        }
-    }
-
-    // DB targets (backward compat — catches targets added before config persistence)
-    if let Ok(db) = Database::open(&paths.vault_db) {
-        if let Ok(db_targets) = db.get_all_applied_targets() {
-            for t in &db_targets {
-                target_paths.insert(t.target_path.clone());
-            }
-        }
-    }
-
-    for target in &target_paths {
-        let target_path = std::path::PathBuf::from(target);
-        if !target_path.exists() {
-            info!(path = %target, "skipping target refresh: target path no longer exists");
-            continue;
-        }
-        info!(path = %target, "refreshing target after catalyst regeneration");
-        if let Err(e) = super::target::prepare_target(vault_path, &target_path).await {
-            info!(path = %target, err = %e, "target refresh failed");
-        }
-    }
 }
 
 /// Spawn a background refresh process (detached child).
@@ -2647,7 +2476,7 @@ async fn run_refresh_interactive(
                 "documents_pruned": local.embedding.documents_pruned,
                 "duration_ms": local.embedding.duration_ms,
             },
-            "similarity": local.similarity,
+            "catalysts_embedded": local.catalysts_embedded,
             "epoch": epoch_metrics(&db, &schedule, now_ms())?,
             "duration_ms": start.elapsed().as_millis() as u64,
         }))?

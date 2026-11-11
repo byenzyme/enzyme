@@ -86,7 +86,7 @@ ENZYME_CATALYZE = {
 
 ENZYME_REFRESH = {
     "name": "enzyme_refresh",
-    "description": "Incrementally refresh vault content and catalyst-derived similarities.",
+    "description": "Incrementally refresh vault content, embeddings, and catalyst vectors.",
     "parameters": {
         "type": "object",
         "properties": {},

@@ -1,4 +1,5 @@
 pub mod bm25;
+pub mod catalyst_links;
 pub mod context;
 pub mod hnsw;
 pub mod hybrid;

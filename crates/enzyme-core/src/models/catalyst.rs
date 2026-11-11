@@ -88,18 +88,3 @@ pub struct Catalyst {
     pub generated_at: DateTime<Utc>,
     pub metadata: serde_json::Value,
 }
-
-/// Pre-computed similarity between a catalyst and a document chunk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CatalystSimilarity {
-    pub id: Option<i64>,
-    pub catalyst_id: String,
-    pub catalyst_text: String,
-    pub file_path: String,
-    pub chunk_index: i64,
-    /// Cosine similarity score in [0.0, 1.0].
-    pub similarity: f64,
-    pub chunk_metadata: serde_json::Value,
-    pub timeline_data: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}
