@@ -99,6 +99,12 @@ impl EmbeddingService {
     pub fn backend_name(&self) -> &str {
         self.backend.name()
     }
+
+    /// Identity of the stored vectors; see
+    /// [`EmbeddingBackend::vector_fingerprint`].
+    pub fn vector_fingerprint(&self) -> String {
+        self.backend.vector_fingerprint()
+    }
 }
 
 #[cfg(test)]

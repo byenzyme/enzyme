@@ -5,7 +5,15 @@ use tracing::debug;
 
 use super::backend::EmbeddingBackend;
 
-/// Embedding backend using ESE (Extremely Static Embeddings).
+/// The encoders model, width, and quantization this binary is built with.
+/// Must match the `encoders` features in `crates/enzyme-core/Cargo.toml`
+/// (a test checks). Stored vectors carry it, so changing the model re-embeds
+/// every vault once, locally, without touching catalysts.
+pub const ENCODERS_MODEL: &str = "static-retrieval-mrl-en-v1";
+pub const ENCODERS_WIDTH: &str = "mrl-512";
+pub const ENCODERS_QUANTIZATION: &str = "int8";
+
+/// Embedding backend using the `encoders` crate (static embeddings).
 ///
 /// Weights are compiled into the binary at build time — no model files needed.
 pub struct EseBackend;
@@ -49,7 +57,16 @@ impl EmbeddingBackend for EseBackend {
     }
 
     fn name(&self) -> &str {
+        // Recorded in catalyst generation contracts; keep it stable so a model
+        // change re-embeds without regenerating catalysts.
         "ese"
+    }
+
+    fn vector_fingerprint(&self) -> String {
+        format!(
+            "encoders:{ENCODERS_MODEL}:{ENCODERS_WIDTH}:{ENCODERS_QUANTIZATION}:{}",
+            encoders::DIMENSIONS
+        )
     }
 }
 
@@ -57,6 +74,28 @@ impl EmbeddingBackend for EseBackend {
 mod tests {
     use super::*;
     use crate::models::Embedding;
+
+    #[test]
+    fn fingerprint_constants_match_cargo_features() {
+        let manifest = include_str!("../../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("encoders ="))
+            .expect("encoders dependency line");
+        for feature in [ENCODERS_MODEL, ENCODERS_WIDTH, ENCODERS_QUANTIZATION] {
+            assert!(
+                line.contains(&format!("\"{feature}\"")),
+                "encoders features {line:?} do not include {feature:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_names_model_not_just_dimension() {
+        let fp = EseBackend::new().vector_fingerprint();
+        assert!(fp.contains(ENCODERS_MODEL), "{fp}");
+        assert_ne!(fp, format!("ese:{}", encoders::DIMENSIONS));
+    }
 
     #[test]
     fn dimension_matches_constant() {

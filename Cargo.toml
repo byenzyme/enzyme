@@ -32,7 +32,7 @@ rust-embed = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Embedding inference
-encoders = { version = "2", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
+encoders = { version = "3", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
 
 # HNSW
 instant-distance = "0.6"

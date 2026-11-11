@@ -34,7 +34,11 @@ static EMBEDDING_SERVICE: OnceLock<EmbeddingService> = OnceLock::new();
 
 /// Human-readable description of the active embedding backend for status display.
 pub fn model_description(_enzyme_home: &std::path::Path) -> Option<String> {
-    Some(format!("ese (compiled-in, dim={})", encoders::DIMENSIONS))
+    Some(format!(
+        "encoders {} (compiled-in, dim={})",
+        ese_backend::ENCODERS_MODEL,
+        encoders::DIMENSIONS
+    ))
 }
 
 /// Return a cached [`EmbeddingService`] backed by ESE (weights compiled in).

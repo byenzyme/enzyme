@@ -15,7 +15,7 @@ serde_yaml = "0.9"
 libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
 rusqlite = { workspace = true }
 flate2 = "1"
-encoders = { version = "2", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
+encoders = { version = "3", features = ["static-retrieval-mrl-en-v1", "mrl-512", "int8", "rayon"] }
 instant-distance = "0.6"
 pulldown-cmark = "0.12"
 rayon = "1"

@@ -923,9 +923,9 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoders"
-version = "2.0.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5062cf96531258671ea930914506b1c2cf9318f42bde90bba0b1030021f11c"
+checksum = "7186cda7c474786bd9925fc7e3c926452d98813a765198a1efb4625e159fc49e"
 dependencies = [
  "ese",
  "ese-build",
@@ -1103,9 +1103,9 @@ dependencies = [
 
 [[package]]
 name = "ese"
-version = "0.1.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12c1cf824dbda4d2292487e00d5527516e26d62a07d8c6fdbcee82bb314c9f59"
+checksum = "1faffc89af515d0e89c11891311f59d88c6c225e7d4ec390050c04ecf4a96557"
 dependencies = [
  "ese-unicode",
  "rayon",
@@ -1113,9 +1113,9 @@ dependencies = [
 
 [[package]]
 name = "ese-build"
-version = "0.1.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2077bd0cba7a5d50ee3da16397b492eac713ed3aa45309045e9c1d0877d58f6"
+checksum = "6564f78d9ff41087eb3231b4120c9b70464c82d7c351539b210abee79a9a9531"
 dependencies = [
  "ese",
  "minreq",

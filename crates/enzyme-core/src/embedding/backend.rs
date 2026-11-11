@@ -24,6 +24,14 @@ pub trait EmbeddingBackend: Send + Sync {
 
     /// Human-readable name for this backend.
     fn name(&self) -> &str;
+
+    /// Identity of the vectors this backend produces, stored beside them.
+    /// When it changes, stored vectors are discarded and rebuilt. It must
+    /// change whenever the model, width, or quantization changes, even if the
+    /// dimension stays the same.
+    fn vector_fingerprint(&self) -> String {
+        format!("{}:{}", self.name(), self.dimension())
+    }
 }
 
 #[cfg(test)]
