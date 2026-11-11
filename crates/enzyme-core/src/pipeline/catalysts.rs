@@ -2722,9 +2722,19 @@ fn is_payment_required_error(err: &anyhow::Error) -> bool {
 /// default outcome — most entities scale above this by document count.
 const HARD_MIN_CATALYSTS: usize = 3;
 
-/// Default catalyst budget for the reference entity when a vault does not set
-/// `min_top_catalysts`. Every other entity scales down from here.
+/// Relative budget for the reference entity when a vault does not set
+/// `min_top_catalysts`. On small vaults this is what the largest topics get;
+/// larger topics earn more through [`NOTES_PER_CATALYST`].
 const DEFAULT_TOP_CATALYSTS: usize = 15;
+
+/// Ceiling on any entity's budget when a vault does not set
+/// `min_top_catalysts`.
+const DEFAULT_CATALYST_CAP: usize = 80;
+
+/// Absolute rate: an entity earns one catalyst per this much occurrence weight
+/// (roughly one per five notes), so a topic's budget grows with how much the
+/// user has written there rather than only with its rank in the vault.
+const NOTES_PER_CATALYST: f64 = 5.0;
 
 /// Percentile of entity document counts used as the scaling reference. Entities
 /// at or above this percentile all receive the full `top_target`; smaller
@@ -2738,31 +2748,34 @@ const ALLOCATION_ANCHOR_PERCENTILE: usize = 90;
 
 /// Calculate per-entity catalyst allocation from document volume.
 ///
-/// Coverage tracks how much material each entity holds (its total occurrence
-/// count, `Entity::frequency`), so entities of similar size receive similar
-/// catalyst budgets. A reference document count is taken at the
-/// [`ALLOCATION_ANCHOR_PERCENTILE`]th percentile; entities at or above it receive
-/// `top_target` (the vault's `min_top_catalysts`, or [`DEFAULT_TOP_CATALYSTS`]
-/// when unset), and every smaller entity scales down linearly by its share of
-/// documents:
+/// Each entity gets the larger of two budgets, capped:
 ///
 /// ```text
-/// alloc_i = clamp(round(top_target * docs_i / anchor), HARD_MIN, top_target)
+/// relative_i = round(top_target * docs_i / anchor)
+/// absolute_i = round(docs_i / NOTES_PER_CATALYST)
+/// alloc_i    = clamp(max(relative_i, absolute_i), HARD_MIN, cap)
 /// ```
 ///
-/// This deliberately keys off total document count rather than recent activity:
-/// an entity with half the material of the reference gets roughly half the
-/// catalysts, not a near-floor allocation, so coverage does not fall off a cliff
-/// when entities are comparably sized. The percentile anchor keeps that property
-/// intact on skewed vaults, where scaling against the single largest entity would
-/// otherwise floor every mid-size entity. [`HARD_MIN_CATALYSTS`] only takes effect
-/// for entities that are tiny relative to the reference (or for empty vaults).
+/// `docs_i` is the entity's additive occurrence weight. The relative term keeps
+/// small vaults covered: entities at or above the
+/// [`ALLOCATION_ANCHOR_PERCENTILE`]th percentile get `top_target` and smaller
+/// ones scale down by their share, so an outlier like a catch-all `inbox` does
+/// not floor every mid-size topic. The absolute term makes large topics grow
+/// with their material, about one catalyst per five notes.
+///
+/// A vault's `min_top_catalysts` (`question budget N`) sets both `top_target`
+/// and `cap` to N. Unset, `top_target` is [`DEFAULT_TOP_CATALYSTS`] and `cap` is
+/// [`DEFAULT_CATALYST_CAP`]. [`HARD_MIN_CATALYSTS`] only takes effect for
+/// entities that are tiny relative to the reference (or for empty vaults).
 pub fn calculate_allocations(
     entities: &[Entity],
     min_top_catalysts: Option<usize>,
 ) -> HashMap<(String, EntityType), usize> {
     let top_target = min_top_catalysts
         .unwrap_or(DEFAULT_TOP_CATALYSTS)
+        .max(HARD_MIN_CATALYSTS);
+    let cap = min_top_catalysts
+        .unwrap_or(DEFAULT_CATALYST_CAP)
         .max(HARD_MIN_CATALYSTS);
 
     // Reference evidence weight: the value at the configured percentile (entities
@@ -2793,8 +2806,9 @@ pub fn calculate_allocations(
             } else {
                 // Scale linearly against additive evidence, rounded to the
                 // nearest whole catalyst budget.
-                let scaled = (top_target as f64 * docs / anchor).round() as usize;
-                scaled.clamp(HARD_MIN_CATALYSTS, top_target)
+                let relative = (top_target as f64 * docs / anchor).round() as usize;
+                let absolute = (docs / NOTES_PER_CATALYST).round() as usize;
+                relative.max(absolute).clamp(HARD_MIN_CATALYSTS, cap)
             };
             ((e.name.clone(), e.entity_type.clone()), alloc)
         })
@@ -3069,10 +3083,29 @@ mod tests {
             entities.push(make_entity(&format!("topic{i}"), 400));
         }
         entities.push(make_entity("small", 40));
-        let allocs = calculate_allocations(&entities, None); // top_target = 15
+        let allocs = calculate_allocations(&entities, Some(15));
         assert_eq!(allocs[&tag("inbox")], 15); // outlier clamps to the ceiling
         assert_eq!(allocs[&tag("topic0")], 15); // at the anchor → full coverage, not floored
-        assert_eq!(allocs[&tag("small")], 3); // genuinely tiny relative to the anchor
+        assert_eq!(allocs[&tag("small")], 8); // round(40 / 5) beats round(15 * 40/400) = 2
+    }
+
+    #[test]
+    fn test_allocation_default_grows_with_material_up_to_cap() {
+        // Unset budget: large topics earn one catalyst per five notes, up to 80;
+        // topics too small for the rate keep the relative share of 15.
+        let entities = vec![
+            make_entity("inbox", 2500),
+            make_entity("journal", 400),
+            make_entity("project", 200),
+            make_entity("side", 40),
+        ];
+        let allocs = calculate_allocations(&entities, None);
+        assert_eq!(allocs[&tag("inbox")], DEFAULT_CATALYST_CAP);
+        assert_eq!(allocs[&tag("journal")], 80); // round(400 / 5)
+        assert_eq!(allocs[&tag("project")], 40); // round(200 / 5)
+        // Anchor is inbox (4 entities → index 0): relative round(15 * 40/2500) = 0,
+        // absolute round(40 / 5) = 8.
+        assert_eq!(allocs[&tag("side")], 8);
     }
 
     #[test]
@@ -3432,9 +3465,10 @@ mod tests {
     }
 
     #[test]
-    fn context_hash_version_is_unchanged_at_the_baseline_logic_version() {
-        // Unifying the version strings must not dirty every existing hash.
-        assert_eq!(
+    fn context_hash_version_follows_a_bumped_logic_version() {
+        // Past the baseline, a logic bump dirties every entity's context hash.
+        assert_eq!(context_hash_version(), CATALYST_LOGIC_VERSION);
+        assert_ne!(
             context_hash_version(),
             "catalyst-context-v7-temporal-evidence"
         );

@@ -20,7 +20,7 @@ use crate::db::connection::block_in_place_sync;
 /// so its next refresh regenerates catalysts in the background and tells the
 /// user why; it also invalidates every per-entity context hash. Nothing else
 /// needs bumping, and nothing else should regenerate catalysts on upgrade.
-pub const CATALYST_LOGIC_VERSION: &str = "catalyst-prompts.2026-09-titled-excerpt-labels";
+pub const CATALYST_LOGIC_VERSION: &str = "catalyst-prompts.2026-11-per-note-allocation";
 
 /// Contract fields frozen at their last values. Bump
 /// [`CATALYST_LOGIC_VERSION`] instead; changing these would regenerate every

@@ -60,16 +60,15 @@ const CONFIG_HEADER: &str = "\
 # # Flat vault fallback: if notes live directly at the vault root, Enzyme may use \"folder:.\"
 # excluded_tags = [\"todo\", \"template\"]         # skip these from trending selection
 # targets = [\"/Users/you/code/my-app\"]         # project catalysts onto external directories
-# min_top_catalysts = 13                       # catalyst budget for the largest entity (default 15)
+# min_top_catalysts = 13                       # budget for the largest entities and cap for all (default: 15 relative, 1 per 5 notes, cap 80)
 # max_embedding_files = 0                      # override: embed all docs in this vault
 #
-# min_top_catalysts sets how many catalysts the largest entity (by document
-# count) receives. Every other entity scales down linearly by its share of
-# documents — an entity with half as many docs gets about half as many
-# catalysts — down to a floor of 3 for entities that are tiny relative to the
-# largest. Coverage tracks how much material each entity holds, so similarly
-# sized entities get similar budgets. Raise it for broader coverage of the top
-# entity (at higher indexing cost); the default when unset is 15.
+# Each entity gets the larger of two budgets: a share of the largest entities'
+# budget by document count (an entity with half the docs gets about half), or
+# one catalyst per five notes. Unset, the largest entities' share is 15 and no
+# entity exceeds 80, so big topics grow with how much you have written. Setting
+# min_top_catalysts = N makes N both the largest entities' share and the cap.
+# The floor is 3 for entities that are tiny relative to the largest.
 #
 
 ";

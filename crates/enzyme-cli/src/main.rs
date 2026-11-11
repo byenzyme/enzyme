@@ -91,8 +91,7 @@ enum Commands {
         #[arg(long)]
         json_progress: bool,
 
-        /// Minimum catalysts for the largest entity (by volume).
-        /// Raises the ceiling and boosts the top entity to at least this many.
+        /// Catalyst budget for the largest entities and cap for all (default: 15, growing one per five notes up to 80).
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
@@ -123,7 +122,7 @@ enum Commands {
         #[arg(short, long)]
         quiet: bool,
 
-        /// Minimum catalysts for the largest entity (by volume).
+        /// Catalyst budget for the largest entities and cap for all (default: 15, growing one per five notes up to 80).
         #[arg(long)]
         min_top_catalysts: Option<usize>,
 
@@ -320,7 +319,7 @@ enum Commands {
         #[arg(short, long, default_value = "prompts.jsonl")]
         output: PathBuf,
 
-        /// Minimum catalysts for the largest entity (by volume)
+        /// Catalyst budget for the largest entities and cap for all (default: 15, growing one per five notes up to 80)
         #[arg(long)]
         min_top_catalysts: Option<usize>,
     },
