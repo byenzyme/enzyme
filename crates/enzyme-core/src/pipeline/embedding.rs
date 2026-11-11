@@ -13,29 +13,9 @@ use crate::models::Timestamp;
 
 const EMBEDDING_BACKEND_CONFIG_KEY: &str = "embedding.backend";
 
-/// Default number of documents to embed per run (most recent by `created_at`)
-/// when no limit is configured; `adaptive_embedding_limit` may raise it.
-pub const MAX_EMBEDDING_FILES: usize = 2048;
 /// The limit older versions wrote into configs as their default rather than as
 /// a user's choice, so loading treats it as unset.
 pub const LEGACY_DEFAULT_EMBEDDING_FILES: usize = 1024;
-/// Ceiling for the adaptive default; an explicit limit may go higher.
-pub const MAX_ADAPTIVE_EMBEDDING_FILES: usize = 8192;
-/// How far back the adaptive default looks for dated notes.
-pub const ADAPTIVE_EMBEDDING_WINDOW_MS: i64 = 730 * 24 * 60 * 60 * 1000;
-
-/// The default limit for a vault: enough to embed every note dated within the
-/// last two years, between `MAX_EMBEDDING_FILES` and the adaptive ceiling.
-/// `recent_dated` counts notes whose date comes from the note itself, not the
-/// filesystem, so copied or imported files do not inflate it.
-pub fn adaptive_limit_for(recent_dated: usize) -> usize {
-    recent_dated.clamp(MAX_EMBEDDING_FILES, MAX_ADAPTIVE_EMBEDDING_FILES)
-}
-
-pub fn adaptive_embedding_limit(db: &Database, now_ms: i64) -> Result<usize> {
-    let recent = db.count_dated_documents_since(now_ms - ADAPTIVE_EMBEDDING_WINDOW_MS, now_ms)?;
-    Ok(adaptive_limit_for(recent))
-}
 
 // ---------------------------------------------------------------------------
 // Pipeline
@@ -78,9 +58,10 @@ impl<'a> EmbeddingPipeline<'a> {
         Self { db, service }
     }
 
-    /// Run embedding (capped to most recent N documents).
+    /// Run embedding over every document that needs it. Static embeddings
+    /// encode a vault in about a second, so there is no default cap.
     pub fn run(&self, on_progress: impl Fn(EmbeddingProgress)) -> Result<EmbeddingStats> {
-        self.run_inner(Some(MAX_EMBEDDING_FILES), None, on_progress)
+        self.run_inner(None, None, on_progress)
     }
 
     /// Run embedding with a caller-specified cap.
@@ -120,11 +101,7 @@ impl<'a> EmbeddingPipeline<'a> {
         let start = Instant::now();
         let mut indexed_since = indexed_since;
 
-        let backend_id = format!(
-            "{}:{}",
-            self.service.backend_name(),
-            self.service.dimension()
-        );
+        let backend_id = self.service.vector_fingerprint();
         let backend_reset = self.db.reset_generated_vector_state_if_backend_changed(
             EMBEDDING_BACKEND_CONFIG_KEY,
             &backend_id,

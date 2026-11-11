@@ -250,7 +250,7 @@ support and try a narrower question. Do not write a new note just to have a demo
 Ground truth is Enzyme's view, checked against the affected source. A doctor count
 is a lead, not a mandate to clean. Tie each proposed repair to the question it
 would help answer. Keep healthy dated folders and raw exports where they are.
-The embedding cap is a product limit, not a vault defect or a reason to reorganize.
+A configured embedding cap is a setting, not a vault defect or a reason to reorganize.
 
 Mechanisms to check before proposing changes:
 
